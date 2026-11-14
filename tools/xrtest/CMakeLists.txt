@@ -1,0 +1,3 @@
+add_executable(xrtest main.cpp)
+target_link_libraries(xrtest PRIVATE OpenXR::openxr_loader d3d12 dxgi)
+target_compile_definitions(xrtest PRIVATE XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D12 NOMINMAX WIN32_LEAN_AND_MEAN)
