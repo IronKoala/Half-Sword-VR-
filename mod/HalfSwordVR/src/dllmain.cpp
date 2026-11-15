@@ -394,24 +394,34 @@ namespace
         }
     }
 
-    // Unreal 5.4 can hand menu materials a copy of the window picture taken just before the menus
-    // are drawn ("Slate post buffers", Slate.CopyBackbufferToSlatePostRenderTargets). On a monitor
-    // that copy is the 3D scene, and a see-through part of a menu (the doorway of Half Sword's
-    // equipment screen) shows the scene through it. In the headset the scene is not in the window,
-    // and the copy turned out to hold earlier finished window pictures, mouse pointer included:
-    // every frame added one more pointer to the doorway. Without the copy that part stays empty.
-    void keep_menu_copy_off(const hsvr::Config& cfg)
+    // Half Sword runs the engine's bounce lighting (Lumen global illumination) with one light
+    // sample per 64 pixels. On a monitor that is about 30 samples across the picture; in the
+    // headset each eye is drawn only about 1000 pixels wide, which leaves about 16. Far thin
+    // things against the sky (a steeple, leaves) then catch a different sample from frame to frame
+    // and flicker, and plants are lit in blotches. The player found this with the picture tests:
+    // lighting off stopped the flicker, twice as dense samples stopped most of it and made the
+    // plants look better. The game sets its value again when a map loads, so it is checked
+    // every frame.
+    void keep_light_samples(const hsvr::Config& cfg)
     {
-        if (!cfg.fix_menu_copy) return;
-        float value = console_variable(STR("Slate.CopyBackbufferToSlatePostRenderTargets"));
-        if (value == 0.0f || value < -900.0f) return;
-        run_console_command(STR("Slate.CopyBackbufferToSlatePostRenderTargets 0"));
+        if (cfg.light_samples <= 0) return;
+        float target = (float)cfg.light_samples;
+        static float last_set = -1.0f;
+        float value = console_variable(STR("r.Lumen.ScreenProbeGather.DownsampleFactor"));
+        if (value < -900.0f || value == target) return;
+        // Lower a coarser value; leave a finer one the game chose alone, but follow the setting
+        // when it is changed while the game runs.
+        if (value < target && value != last_set) return;
+        char command[96];
+        snprintf(command, sizeof(command), "r.Lumen.ScreenProbeGather.DownsampleFactor %d", cfg.light_samples);
+        run_console_command(std::string(command));
+        last_set = target;
         static int lines_left = 20;
         if (lines_left > 0)
         {
             --lines_left;
-            HSVR_LOG("Menus: the game copies the window picture for its menu materials (setting was %g); switched off, in the headset it holds old pictures (now reads %g)",
-                     (double)value, (double)console_variable(STR("Slate.CopyBackbufferToSlatePostRenderTargets")));
+            HSVR_LOG("Lighting: one bounce light sample per %g pixels, set to %g so that far thin things do not flicker in the headset (now reads %g)",
+                     (double)value, (double)target, (double)console_variable(STR("r.Lumen.ScreenProbeGather.DownsampleFactor")));
         }
     }
 
@@ -859,7 +869,7 @@ namespace
         {
             apply_picture_settings(cfg);
             keep_clouds_correct(cfg);
-            keep_menu_copy_off(cfg);
+            keep_light_samples(cfg);
             run_dev_script(cfg);
         }
         // The mod's keys count only while the game has the keyboard, so that Home or End typed in
