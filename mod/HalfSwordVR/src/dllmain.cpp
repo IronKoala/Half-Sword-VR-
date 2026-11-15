@@ -463,6 +463,61 @@ namespace
                  (double)console_variable(step.variable));
     }
 
+    // ---- unattended tests (ini dev_script) -------------------------------------------------------
+    // Runs console commands and picture tests at set times, so that a test needs no key or click.
+    struct ScriptEntry
+    {
+        double at = 0.0;
+        std::string command;
+        bool done = false;
+    };
+
+    void run_dev_script(const hsvr::Config& cfg)
+    {
+        static bool parsed = false;
+        static std::vector<ScriptEntry> entries;
+        static ULONGLONG start = 0;
+        if (!parsed)
+        {
+            parsed = true;
+            start = GetTickCount64();
+            size_t pos = 0;
+            const std::string& text = cfg.dev_script;
+            while (pos < text.size())
+            {
+                size_t end = text.find(';', pos);
+                if (end == std::string::npos) end = text.size();
+                std::string one = text.substr(pos, end - pos);
+                pos = end + 1;
+                size_t colon = one.find(':');
+                if (colon == std::string::npos) continue;
+                ScriptEntry entry;
+                entry.at = atof(one.substr(0, colon).c_str());
+                entry.command = one.substr(colon + 1);
+                size_t first = entry.command.find_first_not_of(" \t");
+                size_t last = entry.command.find_last_not_of(" \t\r\n");
+                if (first == std::string::npos) continue;
+                entry.command = entry.command.substr(first, last - first + 1);
+                entries.push_back(entry);
+            }
+            if (!entries.empty()) HSVR_LOG("Script: %d timed step(s) from the settings file (dev_script)", (int)entries.size());
+        }
+        if (entries.empty()) return;
+        double now = (double)(GetTickCount64() - start) / 1000.0;
+        for (ScriptEntry& entry : entries)
+        {
+            if (entry.done || now < entry.at) continue;
+            entry.done = true;
+            SYSTEMTIME utc{};
+            GetSystemTime(&utc);
+            HSVR_LOG("Script: %.0f s: %s (%02d:%02d:%02d.%03d UTC)", entry.at, entry.command.c_str(), (int)utc.wHour, (int)utc.wMinute, (int)utc.wSecond,
+                     (int)utc.wMilliseconds);
+            if (entry.command == "test") run_test_step();
+            else run_console_command(entry.command);
+            return; // one a tick
+        }
+    }
+
     // ---- installing the stereo device ------------------------------------------------------------
     // UEngine keeps `TSharedPtr<IStereoRendering> StereoRenderingDevice` followed directly by
     // `TSharedPtr<IXRTrackingSystem> XRSystem`. Neither is a reflected property, so their offset is
@@ -780,6 +835,7 @@ namespace
             apply_picture_settings(cfg);
             keep_clouds_correct(cfg);
             keep_menu_copy_off(cfg);
+            run_dev_script(cfg);
         }
         // The mod's keys count only while the game has the keyboard, so that Home or End typed in
         // another program does not move the view or hide the panel.

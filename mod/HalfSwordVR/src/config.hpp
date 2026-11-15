@@ -100,6 +100,16 @@ namespace hsvr
         // Test without a headset: a pretend headset that slowly looks left and right. The two
         // eye views show side by side in the game window.
         bool dev_fake_headset = false;
+        // The pretend headset holds still, looking dev_fake_yaw degrees to the left and
+        // dev_fake_pitch degrees up of where it looked when the game started.
+        bool dev_fake_still = false;
+        double dev_fake_yaw = 0.0;
+        double dev_fake_pitch = 0.0;
+        // Unattended tests: "seconds:command" entries separated by semicolons, counted from the
+        // moment the mod is ready. A command is an engine console command, or the word `test`
+        // for the next picture test (the same as the test key). Read once at the start.
+        // Example: 20:open /Game/Maps/Arenas/Map_Arena_Slums;50:test;56:test
+        std::string dev_script;
         int stereo_slot_offset = 0; // 0 = find automatically
     };
 

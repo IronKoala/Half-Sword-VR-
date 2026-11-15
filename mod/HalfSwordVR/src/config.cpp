@@ -203,6 +203,10 @@ namespace hsvr
         flag("capture_menus_only", c.capture_menus_only);
         integer("stereo_slot_offset", c.stereo_slot_offset);
         flag("dev_fake_headset", c.dev_fake_headset);
+        flag("dev_fake_still", c.dev_fake_still);
+        num("dev_fake_yaw", c.dev_fake_yaw);
+        num("dev_fake_pitch", c.dev_fake_pitch);
+        text("dev_script", c.dev_script);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;

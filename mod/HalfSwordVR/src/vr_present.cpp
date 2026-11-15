@@ -184,6 +184,14 @@ namespace hsvr
             double t = now_seconds();
             float yaw = (float)(std::sin(t * 1.0) * 0.35);   // radians, positive = left
             float pitch = (float)(std::sin(t * 0.6) * 0.15); // radians, positive = up
+            Config cfg = config();
+            if (cfg.dev_fake_still)
+            {
+                // Held still at a chosen direction, for comparing pictures frame against frame.
+                t = 0.0;
+                yaw = (float)(cfg.dev_fake_yaw * 3.14159265358979 / 180.0);
+                pitch = (float)(cfg.dev_fake_pitch * 3.14159265358979 / 180.0);
+            }
             // OpenXR orientation: yaw about +Y, then pitch about the head's +X.
             float cy = std::cos(yaw * 0.5f), sy = std::sin(yaw * 0.5f);
             float cp = std::cos(pitch * 0.5f), sp = std::sin(pitch * 0.5f);
