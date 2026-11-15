@@ -355,7 +355,7 @@ namespace hsvr
             Com<ID3D12PipelineState> window_pipeline, window_blend_pipeline;
             DXGI_FORMAT window_format = DXGI_FORMAT_UNKNOWN;
             bool window_pipeline_failed = false;
-            Com<ID3D12DescriptorHeap> window_rtv_heap; // slot 0: monitor picture, slot 1: clear
+            Com<ID3D12DescriptorHeap> window_rtv_heap; // slot 0: monitor picture, slot 1: clear, slot 2: clear of a stand-in
             Com<ID3D12DescriptorHeap> srv_heap;
             UINT srv_size = 0, rtv_size = 0;
             DXGI_FORMAT xr_format = DXGI_FORMAT_UNKNOWN;
@@ -738,6 +738,120 @@ float4 PSMain(VSOut i) : SV_Target
         void idle_pump_thread();
 
         // First Present from the game: find its D3D12 queue and create the OpenXR session on it.
+        // ---- stand-in window pictures ----------------------------------------------------------
+        // Half Sword has AMD's frame generation built in, and that add-on gives the game its own
+        // "stand-in" pictures to draw on in place of the window's buffers; at each Present it
+        // copies the finished stand-in into the real window buffer. The game's menu pass never
+        // clears what it draws on, so wiping the real buffer (below) is not enough: old menus and
+        // old mouse pointers stay on the stand-ins wherever nothing new covers them. The stand-ins
+        // cannot be asked for, so they are recognised by that copy: any whole-picture copy into a
+        // window buffer names its source as a stand-in. They are used in turn, so once the order
+        // is known the one that comes next is wiped as well.
+        struct StandIn
+        {
+            Com<ID3D12Resource> resource;
+            uint64_t last_seen = 0;
+        };
+        std::mutex g_standin_mutex;
+        std::vector<StandIn> g_standins;              // in the order first seen, which is the order of use
+        bool g_standin_cycle_known = false;           // a source has come round again
+        ID3D12Resource* g_standin_latest = nullptr;   // source of the newest copy (identity only)
+        uint64_t g_standin_copies = 0, g_standin_wipes = 0, g_standin_restarts = 0;
+        std::atomic<ID3D12Resource*> g_window_buffers[8]; // the real window buffers (identity only)
+        std::atomic<bool> g_standin_watch{false};
+
+        using CopyResourceFn = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*);
+        using CopyTextureRegionFn = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, const D3D12_TEXTURE_COPY_LOCATION*, UINT, UINT, UINT,
+                                                              const D3D12_TEXTURE_COPY_LOCATION*, const D3D12_BOX*);
+        CopyResourceFn g_original_copy_resource = nullptr;
+        CopyTextureRegionFn g_original_copy_region = nullptr;
+
+        void note_copy_into_window(ID3D12Resource* dst, ID3D12Resource* src)
+        {
+            if (!dst || !src || dst == src || !g_standin_watch.load(std::memory_order_relaxed)) return;
+            bool into_window = false, from_window = false;
+            for (auto& buffer : g_window_buffers)
+            {
+                ID3D12Resource* b = buffer.load(std::memory_order_relaxed);
+                into_window = into_window || b == dst;
+                from_window = from_window || b == src;
+            }
+            if (!into_window || from_window) return;
+            std::lock_guard<std::mutex> lock(g_standin_mutex);
+            uint64_t now = g_presents_done.load();
+            ++g_standin_copies;
+            for (StandIn& one : g_standins)
+            {
+                if (one.resource.get() != src) continue;
+                one.last_seen = now;
+                g_standin_cycle_known = true;
+                g_standin_latest = src;
+                return;
+            }
+            // A new source. Only a picture of the window's own size counts.
+            D3D12_RESOURCE_DESC a = dst->GetDesc(), b = src->GetDesc();
+            if (b.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || a.Width != b.Width || a.Height != b.Height) return;
+            // One that turns up after the round was complete means the window was rebuilt: start again.
+            if (g_standin_cycle_known || g_standins.size() >= 8)
+            {
+                g_standins.clear();
+                g_standin_cycle_known = false;
+                ++g_standin_restarts;
+            }
+            StandIn one;
+            one.resource.assign(src);
+            one.last_seen = now;
+            g_standins.push_back(std::move(one));
+            g_standin_latest = src;
+        }
+
+        void STDMETHODCALLTYPE hooked_copy_resource(ID3D12GraphicsCommandList* self, ID3D12Resource* dst, ID3D12Resource* src)
+        {
+            note_copy_into_window(dst, src);
+            g_original_copy_resource(self, dst, src);
+        }
+
+        void STDMETHODCALLTYPE hooked_copy_region(ID3D12GraphicsCommandList* self, const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x, UINT y, UINT z,
+                                                  const D3D12_TEXTURE_COPY_LOCATION* src, const D3D12_BOX* box)
+        {
+            if (dst && src && x == 0 && y == 0 && dst->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX && src->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX)
+            {
+                note_copy_into_window(dst->pResource, src->pResource);
+            }
+            g_original_copy_region(self, dst, x, y, z, src, box);
+        }
+
+        // The stand-in the game draws on next, if the round is known; also forgets stand-ins that
+        // are no longer used (the window was rebuilt), so that they can be freed.
+        Com<ID3D12Resource> next_standin()
+        {
+            Com<ID3D12Resource> next;
+            std::lock_guard<std::mutex> lock(g_standin_mutex);
+            uint64_t now = g_presents_done.load();
+            for (size_t i = 0; i < g_standins.size();)
+            {
+                if (g_standins[i].last_seen + 64 < now)
+                {
+                    g_standins.erase(g_standins.begin() + (std::ptrdiff_t)i);
+                    g_standin_cycle_known = false;
+                }
+                else ++i;
+            }
+            ID3D12Resource* latest = g_standin_latest;
+            g_standin_latest = nullptr; // one wipe per copy
+            if (!latest || !g_standin_cycle_known || g_standins.size() < 2) return next;
+            for (size_t i = 0; i < g_standins.size(); ++i)
+            {
+                if (g_standins[i].resource.get() != latest) continue;
+                next.assign(g_standins[(i + 1) % g_standins.size()].resource.get());
+                break;
+            }
+            return next;
+        }
+
+        template <typename Fn>
+        bool patch_vtable_slot(void** vtable, int index, void* replacement, Fn& original);
+
         bool init_graphics(IDXGISwapChain* swapchain)
         {
             Com<ID3D12Device> device;
@@ -832,6 +946,23 @@ float4 PSMain(VSOut i) : SV_Target
             }
             if (FAILED(g.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g.ring[0].allocator.get(), nullptr, IID_PPV_ARGS(g.cmd.put())))) return false;
             g.cmd->Close();
+            if (config().wipe_standins && !g_original_copy_resource)
+            {
+                // Watch picture copies, to recognise stand-in window pictures (see note_copy_into_window).
+                void** list_vtable = *reinterpret_cast<void***>(g.cmd.get());
+                HMODULE module = nullptr;
+                wchar_t path[MAX_PATH] = L"?";
+                if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)list_vtable[17], &module) && module)
+                {
+                    GetModuleFileNameW(module, path, MAX_PATH);
+                }
+                const wchar_t* name = wcsrchr(path, L'\\');
+                name = name ? name + 1 : path;
+                bool whole = patch_vtable_slot(list_vtable, 17, reinterpret_cast<void*>(&hooked_copy_resource), g_original_copy_resource);
+                bool region = patch_vtable_slot(list_vtable, 16, reinterpret_cast<void*>(&hooked_copy_region), g_original_copy_region);
+                g_standin_watch.store(whole || region);
+                HSVR_LOG("Hook: picture copies %s (command list functions are in %ls)", whole && region ? "watched" : "could not be watched", name);
+            }
             if (FAILED(g.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(g.fence.put())))) return false;
             g.fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
             D3D12_DESCRIPTOR_HEAP_DESC hd{};
@@ -1111,7 +1242,7 @@ float4 PSMain(VSOut i) : SV_Target
             {
                 D3D12_DESCRIPTOR_HEAP_DESC hd{};
                 hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-                hd.NumDescriptors = 2;
+                hd.NumDescriptors = 3;
                 if (FAILED(g.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(g.window_rtv_heap.put())))) return rtv;
             }
             rtv = g.window_rtv_heap->GetCPUDescriptorHandleForHeapStart();
@@ -1514,7 +1645,36 @@ float4 PSMain(VSOut i) : SV_Target
                              d.BufferDesc.Height, (int)d.BufferDesc.Format, (int)d.SwapEffect, d.Flags, (int)d.Windowed);
                 }
             }
+            // Which pictures are the window's own, for recognising copies into them.
+            {
+                DXGI_SWAP_CHAIN_DESC d{};
+                UINT count = SUCCEEDED(swapchain->GetDesc(&d)) ? d.BufferCount : 0;
+                for (UINT i = 0; i < 8; ++i)
+                {
+                    Com<ID3D12Resource> one;
+                    if (i < count) sc3->GetBuffer(i, IID_PPV_ARGS(one.put()));
+                    g_window_buffers[i].store(one.get(), std::memory_order_relaxed);
+                }
+            }
+            Com<ID3D12Resource> standin = next_standin();
             begin_commands();
+            if (standin)
+            {
+                D3D12_CPU_DESCRIPTOR_HANDLE standin_rtv = window_rtv(2, standin.get());
+                if (standin_rtv.ptr)
+                {
+                    transition(standin.get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                    const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                    g.cmd->ClearRenderTargetView(standin_rtv, clear, 0, nullptr);
+                    transition(standin.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+                    std::lock_guard<std::mutex> standin_lock(g_standin_mutex);
+                    if (g_standin_wipes++ == 0)
+                    {
+                        HSVR_LOG("Window: the game draws its menus on %zu stand-in pictures that an add-on copies into the window; the next one is now wiped each frame as well",
+                                 g_standins.size());
+                    }
+                }
+            }
             D3D12_CPU_DESCRIPTOR_HANDLE rtv = window_rtv(1, back.get());
             bool shot = false;
             if (rtv.ptr)
@@ -1840,6 +2000,12 @@ float4 PSMain(VSOut i) : SV_Target
                      (double)g_lead_ns.load() / 1e6);
             HSVR_LOG("Window: wiped %llu, checked %llu, the game drew into a different buffer than the wiped one %llu time(s)", (unsigned long long)g.wipes,
                      (unsigned long long)g.wipe_checks, (unsigned long long)g.wipe_mismatches);
+            {
+                std::lock_guard<std::mutex> standin_lock(g_standin_mutex);
+                HSVR_LOG("Window: stand-in pictures %zu (order %s), copies into the window seen %llu, stand-ins wiped %llu, started over %llu time(s)", g_standins.size(),
+                         g_standin_cycle_known ? "known" : "not known yet", (unsigned long long)g_standin_copies, (unsigned long long)g_standin_wipes,
+                         (unsigned long long)g_standin_restarts);
+            }
             HSVR_LOG("Pairing: poses waiting at a Present %zu to %zu, too old and dropped %llu (all session), Presents between pose and picture 0:%llu 1:%llu 2:%llu 3:%llu 4+:%llu",
                      depth_min, depth_max, (unsigned long long)stale, (unsigned long long)age[0], (unsigned long long)age[1],
                      (unsigned long long)age[2], (unsigned long long)age[3], (unsigned long long)age[4]);

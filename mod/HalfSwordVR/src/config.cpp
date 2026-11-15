@@ -199,6 +199,7 @@ namespace hsvr
         flag("fix_clouds", c.fix_clouds);
         integer("cloud_mode", c.cloud_mode);
         integer("light_samples", c.light_samples);
+        flag("wipe_standins", c.wipe_standins);
         flag("idle_helper", c.idle_helper);
         flag("log_poses", c.log_poses);
         flag("log_input", c.log_input);
