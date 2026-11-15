@@ -206,6 +206,7 @@ namespace hsvr
         flag("dev_fake_still", c.dev_fake_still);
         num("dev_fake_yaw", c.dev_fake_yaw);
         num("dev_fake_pitch", c.dev_fake_pitch);
+        num("dev_fake_scale", c.dev_fake_scale);
         text("dev_script", c.dev_script);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;

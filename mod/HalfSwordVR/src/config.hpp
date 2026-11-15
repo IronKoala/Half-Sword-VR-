@@ -105,6 +105,10 @@ namespace hsvr
         bool dev_fake_still = false;
         double dev_fake_yaw = 0.0;
         double dev_fake_pitch = 0.0;
+        // How much the pretend headset moves when it is not held still: 1 = the full slow look
+        // left and right, 0.04 = about as much as a head that is trying to keep still. The
+        // movement is added to dev_fake_yaw and dev_fake_pitch.
+        double dev_fake_scale = 1.0;
         // Unattended tests: "seconds:command" entries separated by semicolons, counted from the
         // moment the mod is ready. A command is an engine console command, or the word `test`
         // for the next picture test (the same as the test key). Read once at the start.

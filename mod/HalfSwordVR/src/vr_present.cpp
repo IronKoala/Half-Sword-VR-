@@ -182,21 +182,18 @@ namespace hsvr
         void fake_pose(FramePose& pose)
         {
             double t = now_seconds();
-            float yaw = (float)(std::sin(t * 1.0) * 0.35);   // radians, positive = left
-            float pitch = (float)(std::sin(t * 0.6) * 0.15); // radians, positive = up
             Config cfg = config();
-            if (cfg.dev_fake_still)
-            {
-                // Held still at a chosen direction, for comparing pictures frame against frame.
-                t = 0.0;
-                yaw = (float)(cfg.dev_fake_yaw * 3.14159265358979 / 180.0);
-                pitch = (float)(cfg.dev_fake_pitch * 3.14159265358979 / 180.0);
-            }
+            // Held still at a chosen direction (for comparing pictures frame against frame), or
+            // moving around that direction by the chosen amount.
+            float amount = cfg.dev_fake_still ? 0.0f : (float)cfg.dev_fake_scale;
+            const float to_radians = 3.14159265f / 180.0f;
+            float yaw = (float)cfg.dev_fake_yaw * to_radians + (float)std::sin(t * 1.0) * 0.35f * amount;     // positive = left
+            float pitch = (float)cfg.dev_fake_pitch * to_radians + (float)std::sin(t * 0.6) * 0.15f * amount; // positive = up
             // OpenXR orientation: yaw about +Y, then pitch about the head's +X.
             float cy = std::cos(yaw * 0.5f), sy = std::sin(yaw * 0.5f);
             float cp = std::cos(pitch * 0.5f), sp = std::sin(pitch * 0.5f);
             float qx = cy * sp, qy = sy * cp, qz = -sy * sp, qw = cy * cp;
-            float sway = (float)(std::sin(t * 0.4) * 0.10); // metres, side to side
+            float sway = (float)std::sin(t * 0.4) * 0.10f * amount; // metres, side to side
             for (int e = 0; e < 2; ++e)
             {
                 float side = e == 0 ? -0.032f : 0.032f;
