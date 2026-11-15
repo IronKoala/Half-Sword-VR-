@@ -180,6 +180,7 @@ namespace hsvr
         integer("toggle_ui_key", c.toggle_ui_key);
         integer("toggle_view_key", c.toggle_view_key);
         integer("toggle_mode_key", c.toggle_mode_key);
+        integer("test_key", c.test_key);
         num("predict_frames", c.predict_frames);
         flag("separate_render_target", c.separate_render_target);
         num("sharpen", c.sharpen);

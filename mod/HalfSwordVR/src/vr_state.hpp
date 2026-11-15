@@ -57,6 +57,9 @@ namespace hsvr
         std::atomic<bool> third_person{false};
         // Set by a key to flip between full-resolution mode and the fallback while playing:
         // -1 = follow the settings file, 0 = fallback, 1 = full resolution.
+        // Test aid: both views use the left eye's position and lens, to tell a fault of the
+        // second view apart from a fault of the right eye's own position.
+        std::atomic<bool> test_same_eye{false};
         std::atomic<int> separate_override{-1};
         // Diagnostics.
         std::atomic<uint64_t> frames_submitted{0};

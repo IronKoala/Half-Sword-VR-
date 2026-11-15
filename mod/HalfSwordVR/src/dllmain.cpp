@@ -318,6 +318,98 @@ namespace
         }
     }
 
+    // ---- picture tests (temporary aid) -----------------------------------------------------------
+    // Each press of the test key undoes the previous test and switches on the next one, so that
+    // the player can watch for the moment a missing object comes back. The log says which test is
+    // on. After the last test one more press puts everything back.
+    struct TestStep
+    {
+        const char* what;      // for the log
+        const TCHAR* variable; // an engine setting, or nullptr for one of the mod's own tests
+        const char* value;     // the value to try
+        int own;               // the mod's own tests: 1 same eye for both views, 2 fallback mode, 3 game camera
+    };
+
+    const TestStep g_test_steps[] = {
+            {"no occlusion culling", STR("r.AllowOcclusionQueries"), "0", 0},
+            {"depth-pyramid occlusion culling", STR("r.HZBOcclusion"), "1", 0},
+            {"no merged far-away models (HLOD)", STR("r.HLOD"), "0", 0},
+            {"most detailed models everywhere", STR("r.ForceLOD"), "0", 0},
+            {"ten times the view distance", STR("r.ViewDistanceScale"), "10", 0},
+            {"no culling of instanced models", STR("foliage.DisableCull"), "1", 0},
+            {"Nanite: no occlusion culling", STR("r.Nanite.Culling.HZB"), "0", 0},
+            {"Nanite: no frustum culling", STR("r.Nanite.Culling.Frustum"), "0", 0},
+            {"no volumetric clouds", STR("r.VolumetricCloud"), "0", 0},
+            {"no fog", STR("r.Fog"), "0", 0},
+            {"no volumetric fog", STR("r.VolumetricFog"), "0", 0},
+            {"no sky atmosphere", STR("r.SkyAtmosphere"), "0", 0},
+            {"older anti-aliasing instead of TSR", STR("r.AntiAliasingMethod"), "2", 0},
+            {"full internal resolution", STR("r.ScreenPercentage"), "100", 0},
+            {"no Lumen lighting", STR("r.Lumen.DiffuseIndirect.Allow"), "0", 0},
+            {"no Lumen reflections", STR("r.Lumen.Reflections.Allow"), "0", 0},
+            {"both views from the left eye's position", nullptr, "", 1},
+            {"fallback mode through the game window", nullptr, "", 2},
+            {"the game's own camera", nullptr, "", 3},
+            {"no Nanite", STR("r.Nanite"), "0", 0},
+    };
+    const int g_test_count = (int)(sizeof(g_test_steps) / sizeof(g_test_steps[0]));
+
+    void set_test_variable(const TCHAR* variable, const char* value)
+    {
+        std::wstring command(variable);
+        command += L" ";
+        for (const char* c = value; *c; ++c) command += (wchar_t)*c;
+        run_console_command(command.c_str());
+    }
+
+    void set_own_test(int own, bool on)
+    {
+        auto& shared = hsvr::shared();
+        if (own == 1) shared.test_same_eye.store(on);
+        if (own == 2) shared.separate_override.store(on ? 0 : -1);
+        if (own == 3) shared.third_person.store(on);
+    }
+
+    void run_test_step()
+    {
+        static int current = -1; // the test that is on, -1 = none
+        static float saved = 0.0f;
+        if (current >= 0)
+        {
+            const TestStep& old = g_test_steps[current];
+            if (old.variable)
+            {
+                char text[32];
+                snprintf(text, sizeof(text), "%g", (double)saved);
+                set_test_variable(old.variable, text);
+            }
+            else
+            {
+                set_own_test(old.own, false);
+            }
+        }
+        ++current;
+        if (current >= g_test_count)
+        {
+            current = -1;
+            HSVR_LOG("Test: all %d tests done, everything is back to normal", g_test_count);
+            return;
+        }
+        const TestStep& step = g_test_steps[current];
+        if (step.variable)
+        {
+            saved = console_variable(step.variable);
+            set_test_variable(step.variable, step.value);
+            HSVR_LOG("Test %d of %d ON: %s (%ls %s, was %g, now reads %g)", current + 1, g_test_count, step.what, step.variable, step.value,
+                     (double)saved, (double)console_variable(step.variable));
+        }
+        else
+        {
+            set_own_test(step.own, true);
+            HSVR_LOG("Test %d of %d ON: %s", current + 1, g_test_count, step.what);
+        }
+    }
+
     // ---- installing the stereo device ------------------------------------------------------------
     // UEngine keeps `TSharedPtr<IStereoRendering> StereoRenderingDevice` followed directly by
     // `TSharedPtr<IXRTrackingSystem> XRSystem`. Neither is a reflected property, so their offset is
@@ -587,9 +679,17 @@ namespace
 
         hsvr::Config cfg = hsvr::config();
         if (g_console_done) apply_picture_settings(cfg);
-        static bool recenter_down = false, ui_down = false, view_down = false, mode_down = false;
+        static bool recenter_down = false, ui_down = false, view_down = false, mode_down = false, test_down = false;
         if (GetForegroundWindow() != nullptr)
         {
+            if (key_pressed_once(cfg.test_key, test_down) && g_console_done)
+            {
+                // Only while the game has the keyboard, so that Page Up in another program does
+                // not step the tests.
+                DWORD process = 0;
+                GetWindowThreadProcessId(GetForegroundWindow(), &process);
+                if (process == GetCurrentProcessId()) run_test_step();
+            }
             if (key_pressed_once(cfg.recenter_key, recenter_down)) shared.recenter_requested.store(true);
             if (key_pressed_once(cfg.toggle_ui_key, ui_down))
             {

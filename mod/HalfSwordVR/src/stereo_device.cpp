@@ -107,7 +107,7 @@ namespace hsvr
         // for deciding what is visible: midway between the eyes, wide enough to cover both.
         XrEyeRaw eye_for_view(int32_t view_index)
         {
-            if (view_index >= 0) return g_view.pose.eye[view_index > 0 ? 1 : 0];
+            if (view_index >= 0) return g_view.pose.eye[(view_index > 0 && !shared().test_same_eye.load()) ? 1 : 0];
             const XrEyeRaw& a = g_view.pose.eye[0];
             const XrEyeRaw& b = g_view.pose.eye[1];
             XrEyeRaw m = a;
