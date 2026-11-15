@@ -47,6 +47,9 @@ namespace hsvr
         std::atomic<bool> ui_visible{true};
         // View from the game's own (third-person) camera instead of the character's head.
         std::atomic<bool> third_person{false};
+        // Set by a key to flip between full-resolution mode and the fallback while playing:
+        // -1 = follow the settings file, 0 = fallback, 1 = full resolution.
+        std::atomic<int> separate_override{-1};
         // Diagnostics.
         std::atomic<uint64_t> frames_submitted{0};
         std::atomic<uint64_t> frames_without_image{0};

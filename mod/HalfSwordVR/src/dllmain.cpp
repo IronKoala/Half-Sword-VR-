@@ -542,11 +542,12 @@ namespace
         }
 
         hsvr::Config cfg = hsvr::config();
-        static bool recenter_down = false, ui_down = false, view_down = false;
+        static bool recenter_down = false, ui_down = false, view_down = false, mode_down = false;
         if (GetForegroundWindow() != nullptr)
         {
             if (key_pressed_once(cfg.recenter_key, recenter_down)) shared.recenter_requested.store(true);
             if (key_pressed_once(cfg.toggle_ui_key, ui_down)) shared.ui_visible.store(!shared.ui_visible.load());
+            if (key_pressed_once(cfg.toggle_mode_key, mode_down)) shared.separate_override.store(hsvr::stereo_separate_target() ? 0 : 1);
             if (key_pressed_once(cfg.toggle_view_key, view_down))
             {
                 bool third = !shared.third_person.load();

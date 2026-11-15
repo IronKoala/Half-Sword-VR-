@@ -328,7 +328,9 @@ namespace hsvr
         g_game_frame.fetch_add(1);
         if (delta_seconds > 0.0 && delta_seconds < 0.5) g_delta_seconds = delta_seconds;
 
-        bool want_separate = config().separate_render_target && shared().eye_width.load() > 0 && shared().eye_height.load() > 0 && !engine_texture_unavailable();
+        int override_mode = shared().separate_override.load();
+        bool asked = override_mode < 0 ? config().separate_render_target : override_mode != 0;
+        bool want_separate = asked && shared().eye_width.load() > 0 && shared().eye_height.load() > 0 && !engine_texture_unavailable();
         if (want_separate != g_separate.load())
         {
             g_separate.store(want_separate);

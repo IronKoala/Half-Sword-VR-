@@ -38,6 +38,8 @@ namespace hsvr
         int toggle_ui_key = 0x23;
         // Switches between the view from the character's head and the game's own camera.
         int toggle_view_key = 0x2D;
+        // Flips between full-resolution mode and the fallback while playing. 0x22 = Page Down.
+        int toggle_mode_key = 0x22;
         // Frames of prediction added when asking the headset for a pose (-1 = adapt automatically).
         double predict_frames = -1.0;
         // 1 = the eyes are drawn at the headset's own resolution and menus float on a panel.
