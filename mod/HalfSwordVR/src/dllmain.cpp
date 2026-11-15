@@ -326,9 +326,10 @@ namespace
     // Unreal 5.4 draws volumetric clouds per view in one of four modes. In mode 1 (and 3) it looks
     // up the scene's depth for a view at the wrong place when that view does not start at the
     // left edge of the picture, which is the case for our second eye: the clouds then land in
-    // front of everything in that eye. Mode 0, the engine's default, is right. Half Sword
-    // switches to mode 1 when an outdoor arena loads, so the mode is checked every frame and put
-    // back to 0.
+    // front of everything in that eye. Modes 0 and 2 are right. Half Sword switches to mode 1
+    // when an outdoor arena loads, so the mode is checked every frame and replaced. Mode 2 is the
+    // default replacement: mode 0 lays a half-size cloud picture over the scene, and cloud then
+    // lands on thin far things against the sky (a steeple, leaves), which flicker.
     void keep_clouds_correct(const hsvr::Config& cfg)
     {
         if (!cfg.fix_clouds) return;

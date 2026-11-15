@@ -86,7 +86,7 @@ namespace hsvr
                 "extra_commands=%s\n"
                 "; 1 = keep the clouds behind buildings in both eyes (works around an engine fault).\n"
                 "fix_clouds=%d\n"
-                "; Which cloud mode replaces the faulty one: 0 or 2.\n"
+                "; Which cloud mode replaces the faulty one: 2 (thin far things stay clean) or 0.\n"
                 "cloud_mode=%d\n"
                 "; 1 = keep the game at normal speed while the headset is asleep.\n"
                 "idle_helper=%d\n"
