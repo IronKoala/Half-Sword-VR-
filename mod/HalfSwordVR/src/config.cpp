@@ -75,12 +75,16 @@ namespace hsvr
                 "; 1 = keep the game at normal speed while the headset is asleep.\n"
                 "idle_helper=%d\n"
                 "log_poses=%d\n"
+                "; Record in the log what the keyboard, mouse pointer and any gamepad are doing.\n"
+                "log_input=%d\n"
+                "; Save troubleshooting pictures every this many seconds into the captures folder (0 = off).\n"
+                "capture_seconds=%.0f\n"
                 "stereo_slot_offset=%d\n"
                 "dev_fake_headset=%d\n",
                 d.enabled, d.require_steamvr_running, d.render_scale, d.world_scale, d.anchor.c_str(), d.head_bone.c_str(),
                 d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.hide_head, d.near_clip_cm, d.gamma_mode, d.ui_panel,
                 d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, d.ui_opacity_gain, d.ui_menu_backdrop, d.mirror_window, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key, (unsigned)d.toggle_view_key, (unsigned)d.toggle_mode_key,
-                d.predict_frames, d.separate_render_target, d.idle_helper, d.log_poses, d.stereo_slot_offset, d.dev_fake_headset);
+                d.predict_frames, d.separate_render_target, d.idle_helper, d.log_poses, d.log_input, d.capture_seconds, d.stereo_slot_offset, d.dev_fake_headset);
         fclose(f);
     }
 
@@ -168,6 +172,8 @@ namespace hsvr
         flag("separate_render_target", c.separate_render_target);
         flag("idle_helper", c.idle_helper);
         flag("log_poses", c.log_poses);
+        flag("log_input", c.log_input);
+        num("capture_seconds", c.capture_seconds);
         integer("stereo_slot_offset", c.stereo_slot_offset);
         flag("dev_fake_headset", c.dev_fake_headset);
         if (c.render_scale < 0.2) c.render_scale = 0.2;

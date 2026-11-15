@@ -55,6 +55,12 @@ namespace hsvr
         bool idle_helper = true;
         // Developer switches.
         bool log_poses = false;
+        // Write "Input:" lines to the log: which window has the keyboard, Esc and menu clicks,
+        // gamepad sticks, and how fast the view is turning.
+        bool log_input = true;
+        // Save troubleshooting pictures of the menu layer and the monitor every this many seconds
+        // into Mods\HalfSwordVR\captures (0 = off).
+        double capture_seconds = 0.0;
         // Test without a headset: a pretend headset that slowly looks left and right. The two
         // eye views show side by side in the game window.
         bool dev_fake_headset = false;

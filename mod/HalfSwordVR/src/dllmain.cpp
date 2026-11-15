@@ -21,6 +21,7 @@
 
 #include "config.hpp"
 #include "engine_slot.hpp"
+#include "input_watch.hpp"
 #include "log.hpp"
 #include "stereo_device.hpp"
 #include "ue_abi.hpp"
@@ -508,6 +509,35 @@ namespace
                  (unsigned long long)(reinterpret_cast<uint8_t*>(slot) - reinterpret_cast<uint8_t*>(g_engine)));
     }
 
+    struct IsPausedParams
+    {
+        UObject* WorldContextObject;
+        bool ReturnValue;
+    };
+
+    // Feeds the input record in the log (see input_watch.hpp). Reads only.
+    void watch_input()
+    {
+        hsvr::InputWatchGame game;
+        if (UObject* controller = find_player_controller())
+        {
+            game.have_player = true;
+            if (ue::FRotator* rotation = controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")))
+            {
+                game.view_yaw = rotation->Yaw;
+            }
+            static UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.GameplayStatics:IsGamePaused"));
+            static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+            if (fn && cdo)
+            {
+                IsPausedParams params{controller, false};
+                cdo->ProcessEvent(fn, &params);
+                game.paused = params.ReturnValue;
+            }
+        }
+        hsvr::input_watch_tick(game);
+    }
+
     bool key_pressed_once(int vk, bool& was_down)
     {
         bool down = vk > 0 && (GetAsyncKeyState(vk) & 0x8000) != 0;
@@ -540,6 +570,8 @@ namespace
             run_console_command(STR("Slate.DrawToVRRenderTarget 0"));
             HSVR_LOG("Applied VR console settings (vsync off, no frame cap, no motion blur, no depth of field)");
         }
+
+        watch_input();
 
         hsvr::Config cfg = hsvr::config();
         static bool recenter_down = false, ui_down = false, view_down = false, mode_down = false;

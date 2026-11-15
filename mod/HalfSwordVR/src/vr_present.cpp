@@ -9,6 +9,8 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -1237,12 +1239,218 @@ float4 PSMain(VSOut i) : SV_Target
             return f;
         }
 
+        // ---- pictures for troubleshooting ----------------------------------------------------------
+        // Every `capture_seconds` (settings file; 0 = off) the menu layer (exactly what the floating
+        // panel is made from) and the finished monitor picture are saved as half-size .bmp files in
+        // Mods\HalfSwordVR\captures. The GPU copies them into buffers we can read; a helper thread
+        // writes the files, so the game does not wait for the disk.
+        constexpr int kCaptureKinds = 2; // 0: menu layer, 1: monitor picture
+        constexpr int kCaptureFiles = 24;
+        struct CaptureBuffer
+        {
+            Com<ID3D12Resource> buffer;
+            UINT64 bytes = 0;
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+            bool filled = false;
+        };
+        struct CaptureState
+        {
+            CaptureBuffer kind[kCaptureKinds];
+            bool recorded = false; // copy commands are in the command list being built
+            bool pending = false;  // submitted, waiting for the GPU
+            UINT64 fence_value = 0;
+            std::atomic<bool> writing{false};
+            double last_time = -1000.0;
+            int index = 0;
+        };
+        CaptureState g_capture;
+
+        bool capture_format_supported(DXGI_FORMAT format)
+        {
+            switch (format)
+            {
+            case DXGI_FORMAT_R10G10B10A2_UNORM:
+            case DXGI_FORMAT_R8G8B8A8_UNORM:
+            case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            case DXGI_FORMAT_B8G8R8A8_UNORM:
+            case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        // Adds "copy this texture into a readable buffer" to the open command list.
+        void record_capture(int which, ID3D12Resource* source, D3D12_RESOURCE_STATES state)
+        {
+            CaptureBuffer& cb = g_capture.kind[which];
+            D3D12_RESOURCE_DESC desc = source->GetDesc();
+            if (desc.SampleDesc.Count != 1 || !capture_format_supported(desc.Format))
+            {
+                HSVR_LOG_EVERY(60.0, "Capture: picture format %d is not supported", (int)desc.Format);
+                return;
+            }
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+            UINT64 total = 0;
+            g.device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &total);
+            if (total == 0) return;
+            if (!cb.buffer || cb.bytes < total)
+            {
+                D3D12_HEAP_PROPERTIES heap{};
+                heap.Type = D3D12_HEAP_TYPE_READBACK;
+                D3D12_RESOURCE_DESC bd{};
+                bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                bd.Width = total;
+                bd.Height = 1;
+                bd.DepthOrArraySize = 1;
+                bd.MipLevels = 1;
+                bd.SampleDesc.Count = 1;
+                bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                cb.buffer.reset();
+                cb.bytes = 0;
+                if (FAILED(g.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(cb.buffer.put()))))
+                {
+                    HSVR_LOG_EVERY(60.0, "Capture: could not create a read-back buffer");
+                    return;
+                }
+                cb.bytes = total;
+            }
+            cb.footprint = footprint;
+            D3D12_TEXTURE_COPY_LOCATION dst{};
+            dst.pResource = cb.buffer.get();
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dst.PlacedFootprint = footprint;
+            D3D12_TEXTURE_COPY_LOCATION src{};
+            src.pResource = source;
+            src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            src.SubresourceIndex = 0;
+            transition(source, state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            g.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            transition(source, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
+            cb.filled = true;
+            g_capture.recorded = true;
+        }
+
+        bool capture_due(const Config& cfg)
+        {
+            if (cfg.capture_seconds <= 0.0) return false;
+            if (g_capture.pending || g_capture.writing.load()) return false;
+            return now_seconds() - g_capture.last_time >= cfg.capture_seconds;
+        }
+
+        // Writes one read-back buffer as a 24-bit .bmp at half size. Runs on the helper thread.
+        bool write_capture_file(const std::wstring& path, ID3D12Resource* buffer, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& fp, UINT64 bytes)
+        {
+            void* mapped = nullptr;
+            D3D12_RANGE read{0, (SIZE_T)bytes};
+            if (FAILED(buffer->Map(0, &read, &mapped)) || !mapped) return false;
+            const uint8_t* base = static_cast<const uint8_t*>(mapped) + fp.Offset;
+            const int step = 2;
+            const int width = (int)fp.Footprint.Width / step, height = (int)fp.Footprint.Height / step;
+            const int row_bytes = (width * 3 + 3) & ~3;
+            std::vector<uint8_t> out((size_t)row_bytes * (size_t)std::max(0, height));
+            const DXGI_FORMAT format = fp.Footprint.Format;
+            for (int y = 0; y < height; ++y)
+            {
+                const uint8_t* row = base + (size_t)(y * step) * fp.Footprint.RowPitch;
+                uint8_t* dst = out.data() + (size_t)(height - 1 - y) * row_bytes; // .bmp rows run bottom to top
+                for (int x = 0; x < width; ++x)
+                {
+                    const uint8_t* px = row + (size_t)(x * step) * 4;
+                    uint8_t r, gr, b;
+                    if (format == DXGI_FORMAT_R10G10B10A2_UNORM)
+                    {
+                        uint32_t v;
+                        memcpy(&v, px, 4);
+                        r = (uint8_t)((v & 0x3FF) >> 2);
+                        gr = (uint8_t)(((v >> 10) & 0x3FF) >> 2);
+                        b = (uint8_t)(((v >> 20) & 0x3FF) >> 2);
+                    }
+                    else if (format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+                    {
+                        b = px[0];
+                        gr = px[1];
+                        r = px[2];
+                    }
+                    else
+                    {
+                        r = px[0];
+                        gr = px[1];
+                        b = px[2];
+                    }
+                    dst[x * 3 + 0] = b;
+                    dst[x * 3 + 1] = gr;
+                    dst[x * 3 + 2] = r;
+                }
+            }
+            D3D12_RANGE none{0, 0};
+            buffer->Unmap(0, &none);
+            if (width <= 0 || height <= 0) return false;
+
+            BITMAPFILEHEADER file{};
+            BITMAPINFOHEADER info{};
+            file.bfType = 0x4D42;
+            file.bfOffBits = sizeof(file) + sizeof(info);
+            file.bfSize = (DWORD)(file.bfOffBits + out.size());
+            info.biSize = sizeof(info);
+            info.biWidth = width;
+            info.biHeight = height;
+            info.biPlanes = 1;
+            info.biBitCount = 24;
+            info.biSizeImage = (DWORD)out.size();
+            FILE* f = _wfopen(path.c_str(), L"wb");
+            if (!f) return false;
+            bool ok = fwrite(&file, sizeof(file), 1, f) == 1 && fwrite(&info, sizeof(info), 1, f) == 1 && fwrite(out.data(), 1, out.size(), f) == out.size();
+            fclose(f);
+            return ok;
+        }
+
+        // Called once per Present, before new commands are built.
+        void service_capture()
+        {
+            if (!g_capture.pending || g.fence->GetCompletedValue() < g_capture.fence_value) return;
+            g_capture.pending = false;
+            struct Job
+            {
+                ID3D12Resource* buffer;
+                D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
+                UINT64 bytes;
+            };
+            Job jobs[kCaptureKinds]{};
+            for (int i = 0; i < kCaptureKinds; ++i)
+            {
+                CaptureBuffer& cb = g_capture.kind[i];
+                if (cb.filled) jobs[i] = {cb.buffer.get(), cb.footprint, cb.bytes};
+                cb.filled = false;
+            }
+            int index = g_capture.index;
+            g_capture.index = (g_capture.index + 1) % kCaptureFiles;
+            g_capture.writing.store(true);
+            // The buffers are left alone until `writing` is false again (see capture_due).
+            std::thread([jobs, index]() {
+                std::wstring folder = mod_dir() + L"captures";
+                CreateDirectoryW(folder.c_str(), nullptr);
+                static const wchar_t* const names[kCaptureKinds] = {L"menu", L"monitor"};
+                int saved = 0;
+                for (int i = 0; i < kCaptureKinds; ++i)
+                {
+                    if (!jobs[i].buffer) continue;
+                    wchar_t name[64];
+                    swprintf(name, 64, L"\\capture_%02d_%ls.bmp", index, names[i]);
+                    if (write_capture_file(folder + name, jobs[i].buffer, jobs[i].footprint, jobs[i].bytes)) ++saved;
+                }
+                HSVR_LOG("Capture %02d saved (%d picture(s))", index, saved);
+                g_capture.writing.store(false);
+            }).detach();
+        }
+
         // Finishes the OpenXR frame that is open: copies the engine's eyes (and the flat UI) and submits.
         // With `submit` false nothing goes to the headset (the helper thread owns the frame loop
         // then); only the monitor picture is put together.
         void end_frame(IDXGISwapChain* swapchain, const Config& cfg, FetchedFrame& fetched, bool submit)
         {
             bool separate = fetched.separate;
+            service_capture();
             if (!submit && !separate) return;
             const bool render = submit && g.should_render;
             bool have_item = fetched.have_item;
@@ -1406,7 +1614,21 @@ float4 PSMain(VSOut i) : SV_Target
 
                 if (want_monitor && have_back_buffer) draw_monitor_picture(swapchain, have_item ? &item : nullptr, scene, scene_srv, ui_srv);
 
+                if (separate && have_back_buffer && capture_due(cfg))
+                {
+                    g_capture.last_time = now_seconds();
+                    record_capture(0, g.ui_copy.get(), g.ui_copy_state);
+                    Com<ID3D12Resource> back;
+                    if (want_monitor && current_back_buffer(swapchain, back)) record_capture(1, back.get(), D3D12_RESOURCE_STATE_PRESENT);
+                }
+
                 end_commands();
+                if (g_capture.recorded)
+                {
+                    g_capture.recorded = false;
+                    g_capture.pending = true;
+                    g_capture.fence_value = g.fence_counter;
+                }
                 for (int e = 0; e < 2; ++e)
                 {
                     if (eyes_acquired[e]) release_swapchain(g.eye[e]);
