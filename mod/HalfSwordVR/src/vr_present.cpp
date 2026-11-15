@@ -1,0 +1,1427 @@
+#include "vr_present.hpp"
+
+#include "config.hpp"
+#include "log.hpp"
+#include "xr_loader.hpp"
+
+#include <dxgi1_4.h>
+#include <tlhelp32.h>
+
+#include <algorithm>
+#include <cstring>
+#include <deque>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace hsvr
+{
+    VrShared& shared()
+    {
+        static VrShared s;
+        return s;
+    }
+
+    namespace
+    {
+        // Tiny COM smart pointer (avoids pulling in WRL so this file also builds with MinGW for checks).
+        template <typename T>
+        class Com
+        {
+          public:
+            Com() = default;
+            Com(const Com& o) : p(o.p)
+            {
+                if (p) p->AddRef();
+            }
+            Com(Com&& o) noexcept : p(o.p) { o.p = nullptr; }
+            ~Com() { reset(); }
+            Com& operator=(const Com& o)
+            {
+                if (this != &o)
+                {
+                    if (o.p) o.p->AddRef();
+                    reset();
+                    p = o.p;
+                }
+                return *this;
+            }
+            Com& operator=(Com&& o) noexcept
+            {
+                if (this != &o)
+                {
+                    reset();
+                    p = o.p;
+                    o.p = nullptr;
+                }
+                return *this;
+            }
+            void reset()
+            {
+                if (p)
+                {
+                    p->Release();
+                    p = nullptr;
+                }
+            }
+            void assign(T* raw)
+            {
+                if (raw) raw->AddRef();
+                reset();
+                p = raw;
+            }
+            T* get() const { return p; }
+            T* operator->() const { return p; }
+            T** put()
+            {
+                reset();
+                return &p;
+            }
+            explicit operator bool() const { return p != nullptr; }
+
+          private:
+            T* p = nullptr;
+        };
+
+        // ---------------------------------------------------------------- frame pose pipeline --
+        struct PresentItem
+        {
+            FramePose pose;
+            int rect[2][4]{};
+            bool rect_valid[2]{false, false};
+            Com<ID3D12Resource> scene;
+        };
+
+        struct Pipeline
+        {
+            std::mutex mutex;
+            std::deque<FramePose> game_queue; // game thread -> render thread
+            FramePose render_current;
+            bool render_took = false;
+            int rect[2][4]{};
+            bool rect_valid[2]{false, false};
+            std::deque<PresentItem> present_queue; // render thread -> present thread
+            FramePose last_latched;
+            bool separate_mode = true;
+            uint64_t sequence = 0;
+            uint64_t dropped_game = 0;
+            uint64_t dropped_present = 0;
+            uint64_t reused_render = 0;
+        };
+        Pipeline g_pipe;
+
+        // Called with g_pipe.mutex held. `allowed` is how many entries may legitimately be waiting.
+        void take_from_game_queue(FramePose& out, size_t allowed)
+        {
+            while (g_pipe.game_queue.size() > allowed)
+            {
+                g_pipe.game_queue.pop_front();
+                ++g_pipe.dropped_game;
+            }
+            if (!g_pipe.game_queue.empty())
+            {
+                out = g_pipe.game_queue.front();
+                g_pipe.game_queue.pop_front();
+            }
+            else
+            {
+                ++g_pipe.reused_render;
+            }
+        }
+
+        // ------------------------------------------------------------------------- OpenXR ----
+        XrApi xr;
+        XrInstance g_instance = XR_NULL_HANDLE;
+        XrSystemId g_system = XR_NULL_SYSTEM_ID;
+        std::atomic<XrSession> g_session{XR_NULL_HANDLE};
+        std::atomic<XrSpace> g_local_space{XR_NULL_HANDLE};
+        std::atomic<int64_t> g_frame_time{0};
+        std::atomic<int64_t> g_frame_period{11111111};
+        std::atomic<int64_t> g_lead_ns{22222222};
+        bool g_vr_available = false;
+        bool g_vr_failed = false;
+
+        std::mutex g_recenter_mutex;
+        Recenter g_recenter;
+        float g_recenter_xr_pos[3]{0, 0, 0};
+        float g_recenter_xr_yaw = 0.0f;
+
+        const char* xr_result_name(XrResult r)
+        {
+            static thread_local char buffer[XR_MAX_RESULT_STRING_SIZE];
+            if (xr.ResultToString && g_instance != XR_NULL_HANDLE && XR_SUCCEEDED(xr.ResultToString(g_instance, r, buffer))) return buffer;
+            snprintf(buffer, sizeof(buffer), "XrResult %d", (int)r);
+            return buffer;
+        }
+
+        bool process_running(const wchar_t* exe_name)
+        {
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (snap == INVALID_HANDLE_VALUE) return false;
+            PROCESSENTRY32W entry{};
+            entry.dwSize = sizeof(entry);
+            bool found = false;
+            if (Process32FirstW(snap, &entry))
+            {
+                do
+                {
+                    if (_wcsicmp(entry.szExeFile, exe_name) == 0)
+                    {
+                        found = true;
+                        break;
+                    }
+                } while (Process32NextW(snap, &entry));
+            }
+            CloseHandle(snap);
+            return found;
+        }
+
+        void copy_eye(XrEyeRaw& out, const XrView& view)
+        {
+            out.px = view.pose.position.x;
+            out.py = view.pose.position.y;
+            out.pz = view.pose.position.z;
+            out.qx = view.pose.orientation.x;
+            out.qy = view.pose.orientation.y;
+            out.qz = view.pose.orientation.z;
+            out.qw = view.pose.orientation.w;
+            out.angle_left = view.fov.angleLeft;
+            out.angle_right = view.fov.angleRight;
+            out.angle_up = view.fov.angleUp;
+            out.angle_down = view.fov.angleDown;
+        }
+
+        // Locates both eyes at `time`. Keeps the previous orientation/position where tracking is lost.
+        bool locate_views(XrTime time, FramePose& io)
+        {
+            XrSession session = g_session.load();
+            XrSpace space = g_local_space.load();
+            if (session == XR_NULL_HANDLE || space == XR_NULL_HANDLE) return false;
+            XrView views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+            XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+            info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+            info.displayTime = time;
+            info.space = space;
+            XrViewState state{XR_TYPE_VIEW_STATE};
+            uint32_t count = 0;
+            XrResult r = xr.LocateViews(session, &info, &state, 2, &count, views);
+            if (XR_FAILED(r) || count < 2)
+            {
+                HSVR_LOG_EVERY(5.0, "xrLocateViews failed: %s", xr_result_name(r));
+                return false;
+            }
+            bool orientation_ok = (state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
+            bool position_ok = (state.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
+            for (int e = 0; e < 2; ++e)
+            {
+                XrEyeRaw fresh;
+                copy_eye(fresh, views[e]);
+                XrEyeRaw& dst = io.eye[e];
+                if (!orientation_ok && io.valid)
+                {
+                    fresh.qx = dst.qx;
+                    fresh.qy = dst.qy;
+                    fresh.qz = dst.qz;
+                    fresh.qw = dst.qw;
+                }
+                if (!position_ok && io.valid)
+                {
+                    fresh.px = dst.px;
+                    fresh.py = dst.py;
+                    fresh.pz = dst.pz;
+                }
+                dst = fresh;
+            }
+            if (!orientation_ok && !io.valid) return false;
+            io.predicted_time = time;
+            io.valid = true;
+            return true;
+        }
+
+        // --------------------------------------------------------------------------- D3D12 ----
+        struct XrSwap
+        {
+            XrSwapchain handle = XR_NULL_HANDLE;
+            int width = 0, height = 0;
+            std::vector<XrSwapchainImageD3D12KHR> images;
+            Com<ID3D12DescriptorHeap> rtv_heap;
+        };
+
+        struct FrameResources
+        {
+            Com<ID3D12CommandAllocator> allocator;
+            UINT64 fence_value = 0;
+        };
+
+        constexpr int kRing = 4;
+        constexpr int kSrvPerFrame = 2;
+
+        struct Gfx
+        {
+            bool ready = false;
+            IDXGISwapChain* game_swapchain = nullptr; // not owned; identity only
+            Com<ID3D12Device> device;
+            Com<ID3D12CommandQueue> queue;
+            FrameResources ring[kRing];
+            int ring_index = 0;
+            Com<ID3D12GraphicsCommandList> cmd;
+            Com<ID3D12Fence> fence;
+            UINT64 fence_counter = 0;
+            HANDLE fence_event = nullptr;
+            Com<ID3D12RootSignature> root_signature;
+            Com<ID3D12PipelineState> pipeline;
+            Com<ID3D12DescriptorHeap> srv_heap;
+            UINT srv_size = 0, rtv_size = 0;
+            DXGI_FORMAT xr_format = DXGI_FORMAT_UNKNOWN;
+            XrSwap eye[2];
+            XrSwap ui;
+            // Copy of the window's back buffer (flat UI) that we can sample.
+            Com<ID3D12Resource> ui_copy;
+            DXGI_FORMAT ui_copy_format = DXGI_FORMAT_UNKNOWN;
+            UINT ui_copy_width = 0, ui_copy_height = 0;
+            D3D12_RESOURCE_STATES ui_copy_state = D3D12_RESOURCE_STATE_COPY_DEST;
+            // Session state.
+            bool session_running = false;
+            bool session_lost = false;
+            bool frame_begun = false;
+            bool should_render = false;
+            XrTime frame_time = 0;
+            PresentItem last_item;
+            bool have_last_item = false;
+            ID3D12Resource* logged_scene = nullptr;
+            uint64_t presents = 0;
+        };
+        Gfx g;
+        std::mutex g_present_mutex;
+
+        using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
+        using Present1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
+        PresentFn g_original_present = nullptr;
+        Present1Fn g_original_present1 = nullptr;
+        thread_local bool t_in_present = false;
+
+        const char* kShaderSource = R"(
+cbuffer Constants : register(b0)
+{
+    float4 uvRect;   // xy = offset, zw = scale
+    float4 params;   // x: decode sRGB, y: key black to transparent, z: alpha gain
+    float4 cursor;   // xy = uv (negative = none), z = aspect (w/h), w = radius (fraction of height)
+};
+Texture2D sourceTexture : register(t0);
+SamplerState linearSampler : register(s0);
+struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+VSOut VSMain(uint id : SV_VertexID)
+{
+    VSOut o;
+    float2 p = float2((id << 1) & 2, id & 2);
+    o.uv = p;
+    o.pos = float4(p * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    return o;
+}
+float3 SrgbToLinear(float3 c)
+{
+    float3 lo = c / 12.92;
+    float3 hi = pow((c + 0.055) / 1.055, 2.4);
+    return lerp(hi, lo, step(c, 0.04045));
+}
+float4 PSMain(VSOut i) : SV_Target
+{
+    float2 uv = uvRect.xy + i.uv * uvRect.zw;
+    float3 rgb = saturate(sourceTexture.SampleLevel(linearSampler, uv, 0).rgb);
+    float a = 1.0;
+    if (params.y > 0.5)
+    {
+        a = saturate(max(rgb.r, max(rgb.g, rgb.b)) * params.z);
+    }
+    if (cursor.x >= 0.0)
+    {
+        float2 d = (i.uv - cursor.xy) * float2(cursor.z, 1.0);
+        float r = length(d);
+        if (r < cursor.w)
+        {
+            rgb = r < cursor.w * 0.6 ? float3(1.0, 1.0, 1.0) : float3(0.0, 0.0, 0.0);
+            a = 1.0;
+        }
+    }
+    if (params.x > 0.5)
+    {
+        rgb = SrgbToLinear(rgb);
+    }
+    return float4(rgb, a);
+}
+)";
+
+        struct BlitConstants
+        {
+            float uv_rect[4];
+            float params[4];
+            float cursor[4];
+        };
+
+        DXGI_FORMAT sampling_format(DXGI_FORMAT f, bool& is_float)
+        {
+            is_float = false;
+            switch (f)
+            {
+            case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+            case DXGI_FORMAT_R8G8B8A8_UNORM:
+            case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+                return DXGI_FORMAT_R8G8B8A8_UNORM;
+            case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+            case DXGI_FORMAT_B8G8R8A8_UNORM:
+            case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+                return DXGI_FORMAT_B8G8R8A8_UNORM;
+            case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+            case DXGI_FORMAT_B8G8R8X8_UNORM:
+            case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+                return DXGI_FORMAT_B8G8R8X8_UNORM;
+            case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+            case DXGI_FORMAT_R10G10B10A2_UNORM:
+                return DXGI_FORMAT_R10G10B10A2_UNORM;
+            case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+            case DXGI_FORMAT_R16G16B16A16_FLOAT:
+                is_float = true;
+                return DXGI_FORMAT_R16G16B16A16_FLOAT;
+            case DXGI_FORMAT_R11G11B10_FLOAT:
+                is_float = true;
+                return f;
+            default:
+                return f;
+            }
+        }
+
+        bool is_srgb_format(DXGI_FORMAT f)
+        {
+            return f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        }
+
+        template <typename Fn>
+        Fn module_function(const wchar_t* module_name, const char* function_name)
+        {
+            HMODULE module = GetModuleHandleW(module_name);
+            if (!module) module = LoadLibraryW(module_name);
+            if (!module) return nullptr;
+            return reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(module, function_name)));
+        }
+
+        using D3DCompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
+        using SerializeRootSignatureFn = HRESULT(WINAPI*)(const D3D12_ROOT_SIGNATURE_DESC*, D3D_ROOT_SIGNATURE_VERSION, ID3DBlob**, ID3DBlob**);
+
+        bool create_blit_pipeline()
+        {
+            auto compile = module_function<D3DCompileFn>(L"d3dcompiler_47.dll", "D3DCompile");
+            auto serialize = module_function<SerializeRootSignatureFn>(L"d3d12.dll", "D3D12SerializeRootSignature");
+            if (!compile || !serialize)
+            {
+                HSVR_LOG("D3D: shader compiler or root signature serializer not available");
+                return false;
+            }
+            Com<ID3DBlob> vs, ps, errors;
+            HRESULT hr = compile(kShaderSource, strlen(kShaderSource), "hsvr_blit", nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, vs.put(), errors.put());
+            if (FAILED(hr))
+            {
+                HSVR_LOG("D3D: vertex shader failed to compile: %s", errors ? (const char*)errors->GetBufferPointer() : "?");
+                return false;
+            }
+            hr = compile(kShaderSource, strlen(kShaderSource), "hsvr_blit", nullptr, nullptr, "PSMain", "ps_5_0", 0, 0, ps.put(), errors.put());
+            if (FAILED(hr))
+            {
+                HSVR_LOG("D3D: pixel shader failed to compile: %s", errors ? (const char*)errors->GetBufferPointer() : "?");
+                return false;
+            }
+
+            D3D12_DESCRIPTOR_RANGE range{};
+            range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            range.NumDescriptors = 1;
+            range.BaseShaderRegister = 0;
+            D3D12_ROOT_PARAMETER params[2]{};
+            params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[0].DescriptorTable.NumDescriptorRanges = 1;
+            params[0].DescriptorTable.pDescriptorRanges = &range;
+            params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+            params[1].Constants.ShaderRegister = 0;
+            params[1].Constants.Num32BitValues = sizeof(BlitConstants) / 4;
+            params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_STATIC_SAMPLER_DESC sampler{};
+            sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+            sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            sampler.MaxLOD = D3D12_FLOAT32_MAX;
+            sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = 2;
+            rsd.pParameters = params;
+            rsd.NumStaticSamplers = 1;
+            rsd.pStaticSamplers = &sampler;
+            Com<ID3DBlob> rs_blob;
+            hr = serialize(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, rs_blob.put(), errors.put());
+            if (FAILED(hr))
+            {
+                HSVR_LOG("D3D: root signature serialize failed 0x%08X", (unsigned)hr);
+                return false;
+            }
+            hr = g.device->CreateRootSignature(0, rs_blob->GetBufferPointer(), rs_blob->GetBufferSize(), IID_PPV_ARGS(g.root_signature.put()));
+            if (FAILED(hr))
+            {
+                HSVR_LOG("D3D: CreateRootSignature failed 0x%08X", (unsigned)hr);
+                return false;
+            }
+
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature = g.root_signature.get();
+            pd.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+            pd.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+            pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            pd.SampleMask = 0xFFFFFFFFu;
+            pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets = 1;
+            pd.RTVFormats[0] = g.xr_format;
+            pd.SampleDesc.Count = 1;
+            hr = g.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(g.pipeline.put()));
+            if (FAILED(hr))
+            {
+                HSVR_LOG("D3D: CreateGraphicsPipelineState failed 0x%08X", (unsigned)hr);
+                return false;
+            }
+            return true;
+        }
+
+        bool create_xr_swapchain(XrSwap& swap, int width, int height, const char* label)
+        {
+            XrSession session = g_session.load();
+            XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+            info.format = g.xr_format;
+            info.sampleCount = 1;
+            info.width = (uint32_t)width;
+            info.height = (uint32_t)height;
+            info.faceCount = 1;
+            info.arraySize = 1;
+            info.mipCount = 1;
+            XrResult r = xr.CreateSwapchain(session, &info, &swap.handle);
+            if (XR_FAILED(r))
+            {
+                HSVR_LOG("OpenXR: xrCreateSwapchain(%s %dx%d) failed: %s", label, width, height, xr_result_name(r));
+                return false;
+            }
+            uint32_t count = 0;
+            xr.EnumerateSwapchainImages(swap.handle, 0, &count, nullptr);
+            swap.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+            r = xr.EnumerateSwapchainImages(swap.handle, count, &count, reinterpret_cast<XrSwapchainImageBaseHeader*>(swap.images.data()));
+            if (XR_FAILED(r) || count == 0)
+            {
+                HSVR_LOG("OpenXR: xrEnumerateSwapchainImages(%s) failed: %s", label, xr_result_name(r));
+                return false;
+            }
+            D3D12_DESCRIPTOR_HEAP_DESC hd{};
+            hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            hd.NumDescriptors = count;
+            if (FAILED(g.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(swap.rtv_heap.put())))) return false;
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                D3D12_RENDER_TARGET_VIEW_DESC rtv{};
+                rtv.Format = g.xr_format;
+                rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+                D3D12_CPU_DESCRIPTOR_HANDLE h = swap.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+                h.ptr += (SIZE_T)i * g.rtv_size;
+                g.device->CreateRenderTargetView(swap.images[i].texture, &rtv, h);
+            }
+            swap.width = width;
+            swap.height = height;
+            HSVR_LOG("OpenXR: swapchain %s %dx%d, %u images", label, width, height, count);
+            return true;
+        }
+
+        // First Present from the game: find its D3D12 queue and create the OpenXR session on it.
+        bool init_graphics(IDXGISwapChain* swapchain)
+        {
+            Com<ID3D12CommandQueue> queue;
+            if (FAILED(swapchain->GetDevice(IID_PPV_ARGS(queue.put()))) || !queue)
+            {
+                HSVR_LOG_EVERY(10.0, "Present on a swap chain that is not Direct3D 12; ignoring it");
+                return false;
+            }
+            D3D12_COMMAND_QUEUE_DESC queue_desc = queue->GetDesc();
+            if (queue_desc.Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return false;
+            Com<ID3D12Device> device;
+            if (FAILED(queue->GetDevice(IID_PPV_ARGS(device.put()))) || !device) return false;
+            g.device = device;
+            g.queue = queue;
+            g.game_swapchain = swapchain;
+            DXGI_SWAP_CHAIN_DESC sd{};
+            swapchain->GetDesc(&sd);
+            HSVR_LOG("D3D: game swap chain %ux%u format %d, buffers %u, window %p",
+                     sd.BufferDesc.Width, sd.BufferDesc.Height, (int)sd.BufferDesc.Format, sd.BufferCount, (void*)sd.OutputWindow);
+
+            XrGraphicsRequirementsD3D12KHR reqs{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D12_KHR};
+            XrResult r = xr.GetD3D12GraphicsRequirementsKHR(g_instance, g_system, &reqs);
+            if (XR_FAILED(r))
+            {
+                HSVR_LOG("OpenXR: xrGetD3D12GraphicsRequirementsKHR failed: %s", xr_result_name(r));
+                return false;
+            }
+            LUID device_luid = g.device->GetAdapterLuid();
+            if (memcmp(&device_luid, &reqs.adapterLuid, sizeof(LUID)) != 0)
+            {
+                HSVR_LOG("OpenXR: WARNING the game renders on a different GPU than the headset is attached to");
+            }
+
+            XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+            binding.device = g.device.get();
+            binding.queue = g.queue.get();
+            XrSessionCreateInfo sci{XR_TYPE_SESSION_CREATE_INFO};
+            sci.next = &binding;
+            sci.systemId = g_system;
+            XrSession session = XR_NULL_HANDLE;
+            r = xr.CreateSession(g_instance, &sci, &session);
+            if (XR_FAILED(r))
+            {
+                HSVR_LOG("OpenXR: xrCreateSession failed: %s", xr_result_name(r));
+                return false;
+            }
+            g_session.store(session);
+
+            XrReferenceSpaceCreateInfo rsci{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+            rsci.poseInReferenceSpace.orientation.w = 1.0f;
+            rsci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+            XrSpace local = XR_NULL_HANDLE;
+            r = xr.CreateReferenceSpace(session, &rsci, &local);
+            if (XR_FAILED(r))
+            {
+                HSVR_LOG("OpenXR: xrCreateReferenceSpace failed: %s", xr_result_name(r));
+                return false;
+            }
+            g_local_space.store(local);
+
+            uint32_t format_count = 0;
+            xr.EnumerateSwapchainFormats(session, 0, &format_count, nullptr);
+            std::vector<int64_t> formats(format_count);
+            xr.EnumerateSwapchainFormats(session, format_count, &format_count, formats.data());
+            for (DXGI_FORMAT wanted : {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM})
+            {
+                if (std::find(formats.begin(), formats.end(), (int64_t)wanted) != formats.end())
+                {
+                    g.xr_format = wanted;
+                    break;
+                }
+            }
+            if (g.xr_format == DXGI_FORMAT_UNKNOWN)
+            {
+                HSVR_LOG("OpenXR: no usable 8-bit swapchain format");
+                return false;
+            }
+            HSVR_LOG("OpenXR: session created, swapchain format %d", (int)g.xr_format);
+
+            g.rtv_size = g.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+            g.srv_size = g.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            for (auto& fr : g.ring)
+            {
+                if (FAILED(g.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(fr.allocator.put())))) return false;
+            }
+            if (FAILED(g.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g.ring[0].allocator.get(), nullptr, IID_PPV_ARGS(g.cmd.put())))) return false;
+            g.cmd->Close();
+            if (FAILED(g.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(g.fence.put())))) return false;
+            g.fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            D3D12_DESCRIPTOR_HEAP_DESC hd{};
+            hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            hd.NumDescriptors = kRing * kSrvPerFrame;
+            hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            if (FAILED(g.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(g.srv_heap.put())))) return false;
+            if (!create_blit_pipeline()) return false;
+
+            int w = shared().eye_width.load(), h = shared().eye_height.load();
+            if (!create_xr_swapchain(g.eye[0], w, h, "left eye")) return false;
+            if (!create_xr_swapchain(g.eye[1], w, h, "right eye")) return false;
+            if (!create_xr_swapchain(g.ui, 1920, 1080, "menu panel")) return false;
+            g.ready = true;
+            return true;
+        }
+
+        void poll_events()
+        {
+            XrEventDataBuffer ev{XR_TYPE_EVENT_DATA_BUFFER};
+            while (xr.PollEvent(g_instance, &ev) == XR_SUCCESS)
+            {
+                if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+                {
+                    auto* changed = reinterpret_cast<XrEventDataSessionStateChanged*>(&ev);
+                    HSVR_LOG("OpenXR: session state -> %d", (int)changed->state);
+                    if (changed->state == XR_SESSION_STATE_READY)
+                    {
+                        XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO};
+                        bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+                        XrResult r = xr.BeginSession(g_session.load(), &bi);
+                        if (XR_SUCCEEDED(r))
+                        {
+                            g.session_running = true;
+                            shared().xr_running.store(true);
+                            shared().recenter_requested.store(true);
+                        }
+                        else
+                        {
+                            HSVR_LOG("OpenXR: xrBeginSession failed: %s", xr_result_name(r));
+                        }
+                    }
+                    else if (changed->state == XR_SESSION_STATE_STOPPING)
+                    {
+                        xr.EndSession(g_session.load());
+                        g.session_running = false;
+                        g.frame_begun = false;
+                        shared().xr_running.store(false);
+                    }
+                    else if (changed->state == XR_SESSION_STATE_EXITING || changed->state == XR_SESSION_STATE_LOSS_PENDING)
+                    {
+                        g.session_running = false;
+                        g.session_lost = true;
+                        g.frame_begun = false;
+                        shared().xr_running.store(false);
+                    }
+                }
+                else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING)
+                {
+                    g.session_running = false;
+                    g.session_lost = true;
+                    shared().xr_running.store(false);
+                }
+                ev = {XR_TYPE_EVENT_DATA_BUFFER};
+            }
+        }
+
+        void begin_commands()
+        {
+            g.ring_index = (g.ring_index + 1) % kRing;
+            FrameResources& fr = g.ring[g.ring_index];
+            if (g.fence->GetCompletedValue() < fr.fence_value)
+            {
+                g.fence->SetEventOnCompletion(fr.fence_value, g.fence_event);
+                WaitForSingleObject(g.fence_event, 1000);
+            }
+            fr.allocator->Reset();
+            g.cmd->Reset(fr.allocator.get(), nullptr);
+        }
+
+        void end_commands()
+        {
+            g.cmd->Close();
+            ID3D12CommandList* lists[] = {g.cmd.get()};
+            g.queue->ExecuteCommandLists(1, lists);
+            g.queue->Signal(g.fence.get(), ++g.fence_counter);
+            g.ring[g.ring_index].fence_value = g.fence_counter;
+        }
+
+        void transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+        {
+            if (before == after) return;
+            D3D12_RESOURCE_BARRIER b{};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition.pResource = resource;
+            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            b.Transition.StateBefore = before;
+            b.Transition.StateAfter = after;
+            g.cmd->ResourceBarrier(1, &b);
+        }
+
+        D3D12_GPU_DESCRIPTOR_HANDLE write_srv(int slot, ID3D12Resource* resource, DXGI_FORMAT format)
+        {
+            int index = g.ring_index * kSrvPerFrame + slot;
+            D3D12_CPU_DESCRIPTOR_HANDLE cpu = g.srv_heap->GetCPUDescriptorHandleForHeapStart();
+            cpu.ptr += (SIZE_T)index * g.srv_size;
+            D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+            desc.Format = format;
+            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            desc.Texture2D.MipLevels = 1;
+            g.device->CreateShaderResourceView(resource, &desc, cpu);
+            D3D12_GPU_DESCRIPTOR_HANDLE gpu = g.srv_heap->GetGPUDescriptorHandleForHeapStart();
+            gpu.ptr += (UINT64)index * g.srv_size;
+            return gpu;
+        }
+
+        // Acquires the next image of an OpenXR swapchain and draws `source` into it.
+        bool blit_to_swapchain(XrSwap& swap, D3D12_GPU_DESCRIPTOR_HANDLE source, const BlitConstants& constants)
+        {
+            uint32_t index = 0;
+            XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+            XrResult r = xr.AcquireSwapchainImage(swap.handle, &ai, &index);
+            if (XR_FAILED(r))
+            {
+                HSVR_LOG_EVERY(5.0, "xrAcquireSwapchainImage failed: %s", xr_result_name(r));
+                return false;
+            }
+            XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            wi.timeout = 100000000; // 100 ms
+            r = xr.WaitSwapchainImage(swap.handle, &wi);
+            if (r != XR_SUCCESS)
+            {
+                HSVR_LOG_EVERY(5.0, "xrWaitSwapchainImage: %s", xr_result_name(r));
+                XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                xr.ReleaseSwapchainImage(swap.handle, &ri);
+                return false;
+            }
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = swap.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+            rtv.ptr += (SIZE_T)index * g.rtv_size;
+            D3D12_VIEWPORT vp{0.0f, 0.0f, (float)swap.width, (float)swap.height, 0.0f, 1.0f};
+            D3D12_RECT scissor{0, 0, swap.width, swap.height};
+            g.cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+            g.cmd->RSSetViewports(1, &vp);
+            g.cmd->RSSetScissorRects(1, &scissor);
+            g.cmd->SetGraphicsRootDescriptorTable(0, source);
+            g.cmd->SetGraphicsRoot32BitConstants(1, sizeof(BlitConstants) / 4, &constants, 0);
+            g.cmd->DrawInstanced(3, 1, 0, 0);
+            return true;
+        }
+
+        void release_swapchain(XrSwap& swap)
+        {
+            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            xr.ReleaseSwapchainImage(swap.handle, &ri);
+        }
+
+        // Makes sure we have a private texture matching the back buffer and copies the back buffer into it.
+        bool copy_back_buffer(IDXGISwapChain* swapchain)
+        {
+            Com<IDXGISwapChain3> sc3;
+            if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(sc3.put())))) return false;
+            Com<ID3D12Resource> back;
+            if (FAILED(sc3->GetBuffer(sc3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(back.put())))) return false;
+            D3D12_RESOURCE_DESC desc = back->GetDesc();
+            if (!g.ui_copy || g.ui_copy_width != desc.Width || g.ui_copy_height != desc.Height || g.ui_copy_format != desc.Format)
+            {
+                D3D12_HEAP_PROPERTIES heap{};
+                heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+                D3D12_RESOURCE_DESC copy_desc = desc;
+                copy_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+                copy_desc.MipLevels = 1;
+                copy_desc.Alignment = 0;
+                g.ui_copy.reset();
+                if (FAILED(g.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &copy_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(g.ui_copy.put()))))
+                {
+                    HSVR_LOG_EVERY(5.0, "D3D: could not create the back buffer copy texture");
+                    return false;
+                }
+                g.ui_copy_width = (UINT)desc.Width;
+                g.ui_copy_height = desc.Height;
+                g.ui_copy_format = desc.Format;
+                g.ui_copy_state = D3D12_RESOURCE_STATE_COPY_DEST;
+                HSVR_LOG("D3D: back buffer copy %ux%u format %d", g.ui_copy_width, g.ui_copy_height, (int)desc.Format);
+            }
+            transition(g.ui_copy.get(), g.ui_copy_state, D3D12_RESOURCE_STATE_COPY_DEST);
+            transition(back.get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            g.cmd->CopyResource(g.ui_copy.get(), back.get());
+            transition(back.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+            transition(g.ui_copy.get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            g.ui_copy_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            return true;
+        }
+
+        void adapt_prediction(const FramePose& pose, const Config& cfg)
+        {
+            int64_t period = g_frame_period.load();
+            if (cfg.predict_frames >= 0.0)
+            {
+                g_lead_ns.store((int64_t)(cfg.predict_frames * (double)period));
+                return;
+            }
+            if (!pose.valid || pose.predicted_time == 0) return;
+            int64_t error = g.frame_time - pose.predicted_time; // > 0: we should have predicted further ahead
+            int64_t lead = g_lead_ns.load() + error / 16;
+            lead = std::clamp<int64_t>(lead, 0, period * 6);
+            g_lead_ns.store(lead);
+        }
+
+        // Finishes the OpenXR frame that is open: copies the engine's eyes (and the flat UI) and submits.
+        void end_frame(IDXGISwapChain* swapchain, const Config& cfg)
+        {
+            bool separate;
+            PresentItem item;
+            bool have_item = false;
+            {
+                std::lock_guard<std::mutex> lock(g_pipe.mutex);
+                separate = g_pipe.separate_mode;
+                if (separate)
+                {
+                    while (g_pipe.present_queue.size() > 2)
+                    {
+                        g_pipe.present_queue.pop_front();
+                        ++g_pipe.dropped_present;
+                    }
+                    if (!g_pipe.present_queue.empty())
+                    {
+                        item = std::move(g_pipe.present_queue.front());
+                        g_pipe.present_queue.pop_front();
+                        have_item = true;
+                    }
+                }
+                else if (shared().stereo_installed.load())
+                {
+                    // The engine draws both eyes side by side into the window itself.
+                    take_from_game_queue(item.pose, 3);
+                    have_item = item.pose.valid;
+                }
+            }
+            if (have_item)
+            {
+                adapt_prediction(item.pose, cfg);
+                g.last_item = item;
+                g.have_last_item = true;
+            }
+            else if (g.have_last_item)
+            {
+                item = g.last_item; // nothing new from the engine: show the last image again
+                have_item = true;
+            }
+
+            XrCompositionLayerProjectionView views[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+            XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+            XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+            const XrCompositionLayerBaseHeader* layers[2]{};
+            uint32_t layer_count = 0;
+            bool eyes_acquired[2]{false, false};
+            bool ui_acquired = false;
+
+            if (g.should_render)
+            {
+                begin_commands();
+                ID3D12DescriptorHeap* heaps[] = {g.srv_heap.get()};
+                g.cmd->SetDescriptorHeaps(1, heaps);
+                g.cmd->SetGraphicsRootSignature(g.root_signature.get());
+                g.cmd->SetPipelineState(g.pipeline.get());
+                g.cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+                bool want_ui = separate && cfg.ui_panel && shared().ui_visible.load();
+                bool need_back_buffer = want_ui || (!separate && have_item);
+                bool have_back_buffer = need_back_buffer && copy_back_buffer(swapchain);
+
+                // ---- eyes ----
+                ID3D12Resource* scene = separate ? item.scene.get() : (have_back_buffer ? g.ui_copy.get() : nullptr);
+                if (have_item && item.pose.valid && scene)
+                {
+                    D3D12_RESOURCE_DESC sd = scene->GetDesc();
+                    bool is_float = false;
+                    DXGI_FORMAT srv_format = sampling_format(sd.Format, is_float);
+                    if (scene != g.logged_scene)
+                    {
+                        g.logged_scene = scene;
+                        HSVR_LOG("D3D: engine eye texture %p %llux%u format %d flags 0x%X (sampling as %d)",
+                                 (void*)scene, (unsigned long long)sd.Width, sd.Height, (int)sd.Format, (unsigned)sd.Flags, (int)srv_format);
+                    }
+                    D3D12_GPU_DESCRIPTOR_HANDLE srv = write_srv(0, scene, srv_format);
+                    bool decode = cfg.gamma_mode == 1 || (cfg.gamma_mode == 0 && !is_float);
+                    if (!is_srgb_format(g.xr_format)) decode = false;
+                    for (int e = 0; e < 2; ++e)
+                    {
+                        double x0, y0, x1, y1;
+                        if (item.rect_valid[e])
+                        {
+                            x0 = item.rect[e][0];
+                            y0 = item.rect[e][1];
+                            x1 = item.rect[e][2];
+                            y1 = item.rect[e][3];
+                        }
+                        else
+                        {
+                            double half = (double)sd.Width / 2.0;
+                            x0 = half * e;
+                            y0 = 0;
+                            x1 = half * (e + 1);
+                            y1 = (double)sd.Height;
+                        }
+                        BlitConstants c{};
+                        c.uv_rect[0] = (float)(x0 / (double)sd.Width);
+                        c.uv_rect[1] = (float)(y0 / (double)sd.Height);
+                        c.uv_rect[2] = (float)((x1 - x0) / (double)sd.Width);
+                        c.uv_rect[3] = (float)((y1 - y0) / (double)sd.Height);
+                        c.params[0] = decode ? 1.0f : 0.0f;
+                        c.cursor[0] = -1.0f;
+                        eyes_acquired[e] = blit_to_swapchain(g.eye[e], srv, c);
+                        const XrEyeRaw& eye = item.pose.eye[e];
+                        views[e].pose.position = {eye.px, eye.py, eye.pz};
+                        views[e].pose.orientation = {eye.qx, eye.qy, eye.qz, eye.qw};
+                        views[e].fov = {eye.angle_left, eye.angle_right, eye.angle_up, eye.angle_down};
+                        views[e].subImage.swapchain = g.eye[e].handle;
+                        views[e].subImage.imageRect = {{0, 0}, {g.eye[e].width, g.eye[e].height}};
+                    }
+                    if (eyes_acquired[0] && eyes_acquired[1])
+                    {
+                        projection.space = g_local_space.load();
+                        projection.viewCount = 2;
+                        projection.views = views;
+                        layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+                    }
+                }
+                else
+                {
+                    shared().frames_without_image.fetch_add(1);
+                }
+
+                // ---- flat UI panel ----
+                if (want_ui && have_back_buffer)
+                {
+                    bool is_float = false;
+                    DXGI_FORMAT srv_format = sampling_format(g.ui_copy_format, is_float);
+                    D3D12_GPU_DESCRIPTOR_HANDLE srv = write_srv(1, g.ui_copy.get(), srv_format);
+                    BlitConstants c{};
+                    c.uv_rect[2] = 1.0f;
+                    c.uv_rect[3] = 1.0f;
+                    c.params[0] = (is_srgb_format(g.xr_format) && !is_float) ? 1.0f : 0.0f;
+                    c.params[1] = 1.0f;
+                    c.params[2] = 8.0f;
+                    c.cursor[0] = -1.0f;
+                    DXGI_SWAP_CHAIN_DESC scd{};
+                    swapchain->GetDesc(&scd);
+                    CURSORINFO ci{};
+                    ci.cbSize = sizeof(ci);
+                    RECT client{};
+                    if (scd.OutputWindow && GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && GetClientRect(scd.OutputWindow, &client) &&
+                        client.right > 0 && client.bottom > 0)
+                    {
+                        POINT p = ci.ptScreenPos;
+                        ScreenToClient(scd.OutputWindow, &p);
+                        if (p.x >= 0 && p.y >= 0 && p.x < client.right && p.y < client.bottom)
+                        {
+                            c.cursor[0] = (float)p.x / (float)client.right;
+                            c.cursor[1] = (float)p.y / (float)client.bottom;
+                            c.cursor[2] = (float)g.ui_copy_width / (float)std::max<UINT>(1, g.ui_copy_height);
+                            c.cursor[3] = 0.008f;
+                        }
+                    }
+                    ui_acquired = blit_to_swapchain(g.ui, srv, c);
+                    if (ui_acquired)
+                    {
+                        float pos0[3];
+                        float yaw;
+                        {
+                            std::lock_guard<std::mutex> lock(g_recenter_mutex);
+                            memcpy(pos0, g_recenter_xr_pos, sizeof(pos0));
+                            yaw = g_recenter_xr_yaw;
+                        }
+                        float d = (float)cfg.ui_distance_m;
+                        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                        quad.space = g_local_space.load();
+                        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                        quad.subImage.swapchain = g.ui.handle;
+                        quad.subImage.imageRect = {{0, 0}, {g.ui.width, g.ui.height}};
+                        quad.pose.orientation = {0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
+                        quad.pose.position = {pos0[0] - d * std::sin(yaw), pos0[1] + (float)cfg.ui_height_offset_m, pos0[2] - d * std::cos(yaw)};
+                        float aspect = (float)g.ui_copy_height / (float)std::max<UINT>(1, g.ui_copy_width);
+                        quad.size = {(float)cfg.ui_width_m, (float)cfg.ui_width_m * aspect};
+                        layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+                    }
+                }
+
+                end_commands();
+                for (int e = 0; e < 2; ++e)
+                {
+                    if (eyes_acquired[e]) release_swapchain(g.eye[e]);
+                }
+                if (ui_acquired) release_swapchain(g.ui);
+            }
+
+            XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
+            fei.displayTime = g.frame_time;
+            fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+            fei.layerCount = layer_count;
+            fei.layers = layer_count ? layers : nullptr;
+            XrResult r = xr.EndFrame(g_session.load(), &fei);
+            if (XR_FAILED(r)) HSVR_LOG_EVERY(5.0, "xrEndFrame failed: %s", xr_result_name(r));
+            g.frame_begun = false;
+            if (layer_count) shared().frames_submitted.fetch_add(1);
+        }
+
+        void begin_frame()
+        {
+            XrSession session = g_session.load();
+            XrFrameState fs{XR_TYPE_FRAME_STATE};
+            XrResult r = xr.WaitFrame(session, nullptr, &fs);
+            if (XR_FAILED(r))
+            {
+                HSVR_LOG_EVERY(5.0, "xrWaitFrame failed: %s", xr_result_name(r));
+                return;
+            }
+            r = xr.BeginFrame(session, nullptr);
+            if (XR_FAILED(r))
+            {
+                HSVR_LOG_EVERY(5.0, "xrBeginFrame failed: %s", xr_result_name(r));
+                return;
+            }
+            g.frame_begun = true;
+            g.should_render = fs.shouldRender == XR_TRUE;
+            g.frame_time = fs.predictedDisplayTime;
+            g_frame_time.store(fs.predictedDisplayTime);
+            if (fs.predictedDisplayPeriod > 0) g_frame_period.store(fs.predictedDisplayPeriod);
+
+            if (!shared().xr_ready.load())
+            {
+                FramePose probe;
+                if (locate_views(fs.predictedDisplayTime, probe))
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(g_pipe.mutex);
+                        g_pipe.last_latched = probe;
+                    }
+                    g_lead_ns.store(g_frame_period.load() * 2);
+                    HSVR_LOG("OpenXR: first view. FOV left eye %.1f/%.1f/%.1f/%.1f deg, right eye %.1f/%.1f/%.1f/%.1f deg (left/right/up/down), period %.2f ms",
+                             probe.eye[0].angle_left * kRadToDeg, probe.eye[0].angle_right * kRadToDeg, probe.eye[0].angle_up * kRadToDeg, probe.eye[0].angle_down * kRadToDeg,
+                             probe.eye[1].angle_left * kRadToDeg, probe.eye[1].angle_right * kRadToDeg, probe.eye[1].angle_up * kRadToDeg, probe.eye[1].angle_down * kRadToDeg,
+                             (double)g_frame_period.load() / 1e6);
+                    shared().xr_ready.store(true);
+                }
+            }
+        }
+
+        void log_statistics()
+        {
+            uint64_t dropped_game, dropped_present, reused;
+            size_t game_depth, present_depth;
+            {
+                std::lock_guard<std::mutex> lock(g_pipe.mutex);
+                dropped_game = g_pipe.dropped_game;
+                dropped_present = g_pipe.dropped_present;
+                reused = g_pipe.reused_render;
+                game_depth = g_pipe.game_queue.size();
+                present_depth = g_pipe.present_queue.size();
+            }
+            HSVR_LOG("Stats: presents %llu, submitted %llu, without image %llu, pose queue %zu/%zu, dropped %llu/%llu, reused %llu, lead %.1f ms",
+                     (unsigned long long)g.presents, (unsigned long long)shared().frames_submitted.load(),
+                     (unsigned long long)shared().frames_without_image.load(), game_depth, present_depth,
+                     (unsigned long long)dropped_game, (unsigned long long)dropped_present, (unsigned long long)reused,
+                     (double)g_lead_ns.load() / 1e6);
+        }
+
+        // Runs inside the game's Present call, on whichever thread presents. Returns true while VR is driving frame timing.
+        bool on_present(IDXGISwapChain* swapchain)
+        {
+            if (!g_vr_available || g_vr_failed) return false;
+            std::lock_guard<std::mutex> lock(g_present_mutex);
+            if (g.session_lost) return false;
+            if (!g.ready)
+            {
+                if (g.game_swapchain) return false; // init was tried and failed part-way
+                if (!init_graphics(swapchain))
+                {
+                    if (g.game_swapchain)
+                    {
+                        HSVR_LOG("VR start-up failed; the game continues flat");
+                        g_vr_failed = true;
+                    }
+                    return false;
+                }
+            }
+            if (swapchain != g.game_swapchain) return false;
+            ++g.presents;
+            poll_events();
+            if (!g.session_running) return false;
+            Config cfg = config();
+            if (g.frame_begun) end_frame(swapchain, cfg);
+            begin_frame();
+            if (log_throttle("stats", 10.0)) log_statistics();
+            return true;
+        }
+
+        HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* self, UINT sync_interval, UINT flags)
+        {
+            if (t_in_present || (flags & DXGI_PRESENT_TEST)) return g_original_present(self, sync_interval, flags);
+            t_in_present = true;
+            bool vr_paced = on_present(self);
+            HRESULT hr = g_original_present(self, vr_paced ? 0 : sync_interval, flags);
+            t_in_present = false;
+            return hr;
+        }
+
+        HRESULT STDMETHODCALLTYPE hooked_present1(IDXGISwapChain1* self, UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS* params)
+        {
+            if (t_in_present || (flags & DXGI_PRESENT_TEST)) return g_original_present1(self, sync_interval, flags, params);
+            t_in_present = true;
+            bool vr_paced = on_present(self);
+            HRESULT hr = g_original_present1(self, vr_paced ? 0 : sync_interval, flags, params);
+            t_in_present = false;
+            return hr;
+        }
+
+        bool patch_vtable_slot(void** vtable, int index, void* replacement, void** original)
+        {
+            DWORD old_protect = 0;
+            if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_READWRITE, &old_protect)) return false;
+            *original = vtable[index];
+            vtable[index] = replacement;
+            VirtualProtect(&vtable[index], sizeof(void*), old_protect, &old_protect);
+            return true;
+        }
+
+        // Creates a throwaway swap chain only to learn where DXGI keeps Present, then patches those slots.
+        void install_hook_thread()
+        {
+            using CreateFactoryFn = HRESULT(WINAPI*)(REFIID, void**);
+            using CreateDeviceFn = HRESULT(WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
+            auto create_factory = module_function<CreateFactoryFn>(L"dxgi.dll", "CreateDXGIFactory1");
+            auto create_device = module_function<CreateDeviceFn>(L"d3d12.dll", "D3D12CreateDevice");
+            if (!create_factory || !create_device)
+            {
+                HSVR_LOG("Hook: DXGI or D3D12 not available");
+                return;
+            }
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = DefWindowProcW;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = L"HalfSwordVRProbeWindow";
+            RegisterClassExW(&wc);
+            HWND window = CreateWindowExW(0, wc.lpszClassName, L"", WS_OVERLAPPEDWINDOW, 0, 0, 64, 64, nullptr, nullptr, wc.hInstance, nullptr);
+            if (!window)
+            {
+                HSVR_LOG("Hook: could not create the probe window");
+                return;
+            }
+            bool ok = false;
+            {
+                Com<IDXGIFactory2> factory;
+                Com<ID3D12Device> device;
+                Com<ID3D12CommandQueue> queue;
+                Com<IDXGISwapChain1> swapchain;
+                HRESULT hr = create_factory(IID_PPV_ARGS(factory.put()));
+                if (SUCCEEDED(hr)) hr = create_device(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.put()));
+                if (SUCCEEDED(hr))
+                {
+                    D3D12_COMMAND_QUEUE_DESC qd{};
+                    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+                    hr = device->CreateCommandQueue(&qd, IID_PPV_ARGS(queue.put()));
+                }
+                if (SUCCEEDED(hr))
+                {
+                    DXGI_SWAP_CHAIN_DESC1 sd{};
+                    sd.Width = 64;
+                    sd.Height = 64;
+                    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                    sd.SampleDesc.Count = 1;
+                    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                    sd.BufferCount = 2;
+                    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+                    hr = factory->CreateSwapChainForHwnd(queue.get(), window, &sd, nullptr, nullptr, swapchain.put());
+                }
+                if (SUCCEEDED(hr) && swapchain)
+                {
+                    void** vtable = *reinterpret_cast<void***>(swapchain.get());
+                    void* original = nullptr;
+                    ok = patch_vtable_slot(vtable, 8, reinterpret_cast<void*>(&hooked_present), &original);
+                    g_original_present = reinterpret_cast<PresentFn>(original);
+                    if (ok)
+                    {
+                        void* original1 = nullptr;
+                        if (patch_vtable_slot(vtable, 22, reinterpret_cast<void*>(&hooked_present1), &original1))
+                        {
+                            g_original_present1 = reinterpret_cast<Present1Fn>(original1);
+                        }
+                    }
+                }
+                else
+                {
+                    HSVR_LOG("Hook: probe swap chain failed 0x%08X", (unsigned)hr);
+                }
+            }
+            DestroyWindow(window);
+            UnregisterClassW(wc.lpszClassName, wc.hInstance);
+            HSVR_LOG(ok ? "Hook: Present hooked" : "Hook: could not hook Present");
+        }
+    } // namespace
+
+    bool vr_start()
+    {
+        Config cfg = config();
+        if (!cfg.enabled)
+        {
+            HSVR_LOG("VR is switched off in HalfSwordVR.ini (enabled=0)");
+            return false;
+        }
+        if (cfg.require_steamvr_running && !process_running(L"vrserver.exe") && !process_running(L"vrmonitor.exe"))
+        {
+            HSVR_LOG("SteamVR is not running, so the game starts flat. Start SteamVR first to play in VR.");
+            return false;
+        }
+        if (!xr_load_runtime(xr)) return false;
+
+        if (xr.EnumerateInstanceExtensionProperties)
+        {
+            uint32_t count = 0;
+            xr.EnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr);
+            std::vector<XrExtensionProperties> exts(count, {XR_TYPE_EXTENSION_PROPERTIES});
+            xr.EnumerateInstanceExtensionProperties(nullptr, count, &count, exts.data());
+            bool has_d3d12 = false;
+            for (auto& e : exts)
+            {
+                if (strcmp(e.extensionName, XR_KHR_D3D12_ENABLE_EXTENSION_NAME) == 0) has_d3d12 = true;
+            }
+            if (!has_d3d12)
+            {
+                HSVR_LOG("OpenXR: runtime does not offer Direct3D 12 support");
+                return false;
+            }
+        }
+
+        const char* extensions[] = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
+        XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
+        strncpy(ici.applicationInfo.applicationName, "Half Sword VR", XR_MAX_APPLICATION_NAME_SIZE - 1);
+        ici.applicationInfo.applicationVersion = 1;
+        strncpy(ici.applicationInfo.engineName, "HalfSwordVR mod", XR_MAX_ENGINE_NAME_SIZE - 1);
+        ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+        ici.enabledExtensionCount = 1;
+        ici.enabledExtensionNames = extensions;
+        XrResult r = xr.CreateInstance(&ici, &g_instance);
+        if (XR_FAILED(r))
+        {
+            HSVR_LOG("OpenXR: xrCreateInstance failed (%d)", (int)r);
+            return false;
+        }
+        if (!xr_resolve_functions(xr, g_instance)) return false;
+
+        XrInstanceProperties ip{XR_TYPE_INSTANCE_PROPERTIES};
+        if (XR_SUCCEEDED(xr.GetInstanceProperties(g_instance, &ip)))
+        {
+            HSVR_LOG("OpenXR: runtime %s %u.%u.%u", ip.runtimeName, (unsigned)XR_VERSION_MAJOR(ip.runtimeVersion),
+                     (unsigned)XR_VERSION_MINOR(ip.runtimeVersion), (unsigned)XR_VERSION_PATCH(ip.runtimeVersion));
+        }
+        XrSystemGetInfo sgi{XR_TYPE_SYSTEM_GET_INFO};
+        sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+        r = xr.GetSystem(g_instance, &sgi, &g_system);
+        if (XR_FAILED(r))
+        {
+            HSVR_LOG("OpenXR: no headset found (%s). Is the headset connected to SteamVR?", xr_result_name(r));
+            return false;
+        }
+        XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
+        if (XR_SUCCEEDED(xr.GetSystemProperties(g_instance, g_system, &sp))) HSVR_LOG("OpenXR: headset %s", sp.systemName);
+
+        uint32_t view_count = 0;
+        xr.EnumerateViewConfigurationViews(g_instance, g_system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &view_count, nullptr);
+        std::vector<XrViewConfigurationView> views(view_count, {XR_TYPE_VIEW_CONFIGURATION_VIEW});
+        r = xr.EnumerateViewConfigurationViews(g_instance, g_system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, view_count, &view_count, views.data());
+        if (XR_FAILED(r) || view_count < 2)
+        {
+            HSVR_LOG("OpenXR: could not read the headset's view sizes (%s)", xr_result_name(r));
+            return false;
+        }
+        int rec_w = (int)views[0].recommendedImageRectWidth;
+        int rec_h = (int)views[0].recommendedImageRectHeight;
+        // Multiples of 8 keep the engine's scene buffers aligned with what we ask for.
+        int w = std::max(256, ((int)(rec_w * cfg.render_scale) + 4) / 8 * 8);
+        int h = std::max(256, ((int)(rec_h * cfg.render_scale) + 4) / 8 * 8);
+        w = std::min<int>(w, (int)views[0].maxImageRectWidth / 8 * 8);
+        h = std::min<int>(h, (int)views[0].maxImageRectHeight / 8 * 8);
+        shared().eye_width.store(w);
+        shared().eye_height.store(h);
+        HSVR_LOG("OpenXR: headset recommends %dx%d per eye; rendering %dx%d per eye (render_scale %.2f)", rec_w, rec_h, w, h, cfg.render_scale);
+        g_vr_available = true;
+        return true;
+    }
+
+    void vr_install_present_hook()
+    {
+        std::thread(install_hook_thread).detach();
+    }
+
+    bool vr_latch_frame_pose(FramePose& out)
+    {
+        FramePose pose;
+        {
+            std::lock_guard<std::mutex> lock(g_pipe.mutex);
+            pose = g_pipe.last_latched;
+        }
+        if (shared().xr_running.load())
+        {
+            XrTime time = g_frame_time.load() + g_lead_ns.load();
+            locate_views(time, pose);
+        }
+        if (!pose.valid) return false;
+        {
+            std::lock_guard<std::mutex> lock(g_pipe.mutex);
+            pose.sequence = ++g_pipe.sequence;
+            g_pipe.last_latched = pose;
+            g_pipe.game_queue.push_back(pose);
+            while (g_pipe.game_queue.size() > 8)
+            {
+                g_pipe.game_queue.pop_front();
+                ++g_pipe.dropped_game;
+            }
+        }
+        out = pose;
+        return true;
+    }
+
+    Recenter vr_recenter()
+    {
+        std::lock_guard<std::mutex> lock(g_recenter_mutex);
+        return g_recenter;
+    }
+
+    void vr_set_recenter_from(const FramePose& pose)
+    {
+        if (!pose.valid) return;
+        const XrEyeRaw& a = pose.eye[0];
+        const XrEyeRaw& b = pose.eye[1];
+        float cx = (a.px + b.px) * 0.5f, cy = (a.py + b.py) * 0.5f, cz = (a.pz + b.pz) * 0.5f;
+        Quat q = xr_to_ue_rotation(a.qx, a.qy, a.qz, a.qw);
+        // Heading in OpenXR terms: angle about +Y, positive to the left.
+        Vec3 fwd_ue = q.rotate({1, 0, 0}); // Unreal forward = OpenXR -Z, Unreal right = OpenXR +X
+        float xr_yaw = (float)std::atan2(-fwd_ue.y, fwd_ue.x);
+        std::lock_guard<std::mutex> lock(g_recenter_mutex);
+        g_recenter.valid = true;
+        g_recenter.position_cm = xr_to_ue_position(cx, cy, cz, 100.0);
+        g_recenter.yaw_deg = quat_yaw_deg(q);
+        g_recenter_xr_pos[0] = cx;
+        g_recenter_xr_pos[1] = cy;
+        g_recenter_xr_pos[2] = cz;
+        g_recenter_xr_yaw = xr_yaw;
+        HSVR_LOG("Recentered: head at (%.2f, %.2f, %.2f) m, heading %.0f deg", cx, cy, cz, g_recenter.yaw_deg);
+    }
+
+    void vr_render_thread_view_rect(int view_index, int min_x, int min_y, int max_x, int max_y)
+    {
+        if (view_index < 0 || view_index > 1) return;
+        std::lock_guard<std::mutex> lock(g_pipe.mutex);
+        if (!g_pipe.render_took)
+        {
+            take_from_game_queue(g_pipe.render_current, 2);
+            g_pipe.render_took = true;
+            g_pipe.rect_valid[0] = g_pipe.rect_valid[1] = false;
+        }
+        g_pipe.rect[view_index][0] = min_x;
+        g_pipe.rect[view_index][1] = min_y;
+        g_pipe.rect[view_index][2] = max_x;
+        g_pipe.rect[view_index][3] = max_y;
+        g_pipe.rect_valid[view_index] = max_x > min_x && max_y > min_y;
+    }
+
+    void vr_render_thread_frame_done(ID3D12Resource* scene)
+    {
+        std::lock_guard<std::mutex> lock(g_pipe.mutex);
+        if (!g_pipe.render_took)
+        {
+            // No per-view callback this frame (or the engine does not make one): pair by order.
+            take_from_game_queue(g_pipe.render_current, 2);
+            g_pipe.rect_valid[0] = g_pipe.rect_valid[1] = false;
+        }
+        g_pipe.render_took = false;
+        PresentItem item;
+        item.pose = g_pipe.render_current;
+        for (int e = 0; e < 2; ++e)
+        {
+            item.rect_valid[e] = g_pipe.rect_valid[e];
+            for (int k = 0; k < 4; ++k) item.rect[e][k] = g_pipe.rect[e][k];
+        }
+        item.scene.assign(scene);
+        g_pipe.present_queue.push_back(std::move(item));
+        while (g_pipe.present_queue.size() > 4)
+        {
+            g_pipe.present_queue.pop_front();
+            ++g_pipe.dropped_present;
+        }
+    }
+
+    void vr_set_separate_target_mode(bool separate)
+    {
+        std::lock_guard<std::mutex> lock(g_pipe.mutex);
+        g_pipe.separate_mode = separate;
+    }
+} // namespace hsvr
