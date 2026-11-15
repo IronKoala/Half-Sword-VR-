@@ -53,6 +53,8 @@ namespace hsvr
         int toggle_view_key = 0x2D;
         // Flips between full-resolution mode and the fallback while playing. 0x22 = Page Down.
         int toggle_mode_key = 0x22;
+        // Temporary aid: steps through picture tests (0x21 = Page Up, 0 = off). See run_test_step.
+        int test_key = 0x21;
         // Frames of prediction added when asking the headset for a pose (-1 = adapt automatically).
         double predict_frames = -1.0;
         // A head position is matched to its picture by order. One that was taken more than this

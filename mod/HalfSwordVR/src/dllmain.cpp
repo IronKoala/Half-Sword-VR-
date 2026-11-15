@@ -352,6 +352,73 @@ namespace
         }
     }
 
+    // ---- picture tests (temporary aid) -----------------------------------------------------------
+    // For a flicker on far, thin things (a steeple, tree leaves) on the Slums map. Each press of
+    // the test key undoes the previous test and switches on the next one; the player stops
+    // pressing when the flicker stops, and the last "Test ... ON" line in the log names the cause.
+    // After the last test one more press puts everything back.
+    struct TestStep
+    {
+        const char* what;      // for the log
+        const TCHAR* variable; // the engine setting
+        const char* value;     // the value to try
+    };
+
+    const TestStep g_test_steps[] = {
+            {"no sharpening", STR("r.Tonemapper.Sharpen"), "0"},
+            {"upscaler: flicker rejection on", STR("r.TSR.ShadingRejection.Flickering"), "1"},
+            {"upscaler: best history quality", STR("r.TSR.History.UpdateQuality"), "3"},
+            {"full internal resolution", STR("r.ScreenPercentage"), "100"},
+            {"older anti-aliasing instead of the upscaler", STR("r.AntiAliasingMethod"), "2"},
+            {"no anti-aliasing at all", STR("r.AntiAliasingMethod"), "0"},
+            {"no volumetric clouds", STR("r.VolumetricCloud"), "0"},
+            {"no occlusion culling", STR("r.AllowOcclusionQueries"), "0"},
+            {"no volumetric fog", STR("r.VolumetricFog"), "0"},
+            {"no fog", STR("r.Fog"), "0"},
+            {"no Lumen lighting", STR("r.Lumen.DiffuseIndirect.Allow"), "0"},
+            {"no Lumen reflections", STR("r.Lumen.Reflections.Allow"), "0"},
+            {"no dithered change of detail level", STR("foliage.DitheredLOD"), "0"},
+            {"most detailed models everywhere", STR("r.ForceLOD"), "0"},
+            {"no distance field shadows", STR("r.DistanceFieldShadowing"), "0"},
+            {"no ambient occlusion", STR("r.AmbientOcclusionLevels"), "0"},
+            {"no shadows", STR("r.ShadowQuality"), "0"},
+            {"no sky atmosphere", STR("r.SkyAtmosphere"), "0"},
+    };
+    const int g_test_count = (int)(sizeof(g_test_steps) / sizeof(g_test_steps[0]));
+
+    void set_test_variable(const TCHAR* variable, const char* value)
+    {
+        std::wstring command(variable);
+        command += L" ";
+        for (const char* c = value; *c; ++c) command += (wchar_t)*c;
+        run_console_command(command.c_str());
+    }
+
+    void run_test_step()
+    {
+        static int current = -1; // the test that is on, -1 = none
+        static float saved = 0.0f;
+        if (current >= 0)
+        {
+            const TestStep& old = g_test_steps[current];
+            char text[32];
+            snprintf(text, sizeof(text), "%g", (double)saved);
+            set_test_variable(old.variable, text);
+        }
+        ++current;
+        if (current >= g_test_count)
+        {
+            current = -1;
+            HSVR_LOG("Test: all %d tests done, everything is back to normal", g_test_count);
+            return;
+        }
+        const TestStep& step = g_test_steps[current];
+        saved = console_variable(step.variable);
+        set_test_variable(step.variable, step.value);
+        HSVR_LOG("Test %d of %d ON: %s (%ls %s, was %g, now reads %g)", current + 1, g_test_count, step.what, step.variable, step.value, (double)saved,
+                 (double)console_variable(step.variable));
+    }
+
     // ---- installing the stereo device ------------------------------------------------------------
     // UEngine keeps `TSharedPtr<IStereoRendering> StereoRenderingDevice` followed directly by
     // `TSharedPtr<IXRTrackingSystem> XRSystem`. Neither is a reflected property, so their offset is
@@ -668,9 +735,12 @@ namespace
         bool ui = key_pressed_once(cfg.toggle_ui_key, ui_down);
         bool mode = key_pressed_once(cfg.toggle_mode_key, mode_down);
         bool view = key_pressed_once(cfg.toggle_view_key, view_down);
+        static bool test_down = false;
+        bool test = cfg.test_key != 0 && key_pressed_once(cfg.test_key, test_down);
         DWORD front_process = 0;
         if (HWND front = GetForegroundWindow()) GetWindowThreadProcessId(front, &front_process);
         if (front_process != GetCurrentProcessId()) return;
+        if (test && g_console_done) run_test_step();
         if (recenter)
         {
             shared.recenter_requested.store(true);
