@@ -332,14 +332,21 @@ namespace
     void keep_clouds_correct(const hsvr::Config& cfg)
     {
         if (!cfg.fix_clouds) return;
+        // Modes 1 and 3 are the faulty ones; 0 and 2 are right in both eyes (ini cloud_mode).
+        float target = cfg.cloud_mode == 2 ? 2.0f : 0.0f;
+        static float last_set = -1.0f;
         float mode = console_variable(STR("r.VolumetricRenderTarget.Mode"));
-        if (mode == 0.0f || mode < -900.0f) return;
-        run_console_command(STR("r.VolumetricRenderTarget.Mode 0"));
+        if (mode < -900.0f || mode == target) return;
+        // Leave a good mode the game chose itself alone; replace a faulty one, and one we set
+        // ourselves when the setting has since changed.
+        if (mode != 1.0f && mode != 3.0f && mode != last_set) return;
+        run_console_command(target == 2.0f ? STR("r.VolumetricRenderTarget.Mode 2") : STR("r.VolumetricRenderTarget.Mode 0"));
+        last_set = target;
         static int lines_left = 20;
         if (lines_left > 0)
         {
             --lines_left;
-            HSVR_LOG("Clouds: the game had cloud mode %g, set to 0 so that both eyes show them behind the scenery (now reads %g)", (double)mode,
+            HSVR_LOG("Clouds: cloud mode was %g, set to %g so that both eyes show them behind the scenery (now reads %g)", (double)mode, (double)target,
                      (double)console_variable(STR("r.VolumetricRenderTarget.Mode")));
         }
     }

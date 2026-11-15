@@ -70,6 +70,8 @@ namespace hsvr
         // 1 = keep the engine's clouds in the one mode that places them correctly for the second
         // eye (see keep_clouds_correct in dllmain.cpp). 0 = leave the game's cloud mode alone.
         bool fix_clouds = true;
+        // The cloud mode used in place of a faulty one: 0 or 2 (r.VolumetricRenderTarget.Mode).
+        int cloud_mode = 0;
         // Extra engine console commands to run, separated by semicolons (for tuning; empty = none).
         std::string extra_commands;
         // 1 = while the headset is asleep or showing something else, the game keeps running at
