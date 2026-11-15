@@ -104,7 +104,7 @@ namespace hsvr
             bool rect_valid[2]{false, false};
             std::deque<PresentItem> present_queue; // render thread -> present thread
             FramePose last_latched;
-            bool separate_mode = true;
+            bool separate_mode = false;
             uint64_t sequence = 0;
             uint64_t dropped_game = 0;
             uint64_t dropped_present = 0;
@@ -288,7 +288,7 @@ namespace hsvr
             UINT64 fence_value = 0;
         };
 
-        constexpr int kRing = 4;
+        constexpr int kRing = 8;
         constexpr int kSrvPerFrame = 2;
 
         struct Gfx
@@ -305,6 +305,12 @@ namespace hsvr
             HANDLE fence_event = nullptr;
             Com<ID3D12RootSignature> root_signature;
             Com<ID3D12PipelineState> pipeline;
+            // The same shader set up for drawing into the game window (monitor picture).
+            Com<ID3DBlob> vs_blob, ps_blob;
+            Com<ID3D12PipelineState> window_pipeline, window_blend_pipeline;
+            DXGI_FORMAT window_format = DXGI_FORMAT_UNKNOWN;
+            bool window_pipeline_failed = false;
+            Com<ID3D12DescriptorHeap> window_rtv_heap; // slot 0: monitor picture, slot 1: clear
             Com<ID3D12DescriptorHeap> srv_heap;
             UINT srv_size = 0, rtv_size = 0;
             DXGI_FORMAT xr_format = DXGI_FORMAT_UNKNOWN;
@@ -526,6 +532,38 @@ float4 PSMain(VSOut i) : SV_Target
         using D3DCompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
         using SerializeRootSignatureFn = HRESULT(WINAPI*)(const D3D12_ROOT_SIGNATURE_DESC*, D3D_ROOT_SIGNATURE_VERSION, ID3DBlob**, ID3DBlob**);
 
+        // The blit shader bound to one output format; `blend` lays the source over what is there.
+        Com<ID3D12PipelineState> make_pipeline(DXGI_FORMAT target_format, bool blend)
+        {
+            Com<ID3D12PipelineState> pipeline;
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature = g.root_signature.get();
+            pd.VS = {g.vs_blob->GetBufferPointer(), g.vs_blob->GetBufferSize()};
+            pd.PS = {g.ps_blob->GetBufferPointer(), g.ps_blob->GetBufferSize()};
+            D3D12_RENDER_TARGET_BLEND_DESC& rt = pd.BlendState.RenderTarget[0];
+            rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            if (blend)
+            {
+                rt.BlendEnable = TRUE;
+                rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+                rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOp = D3D12_BLEND_OP_ADD;
+                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+                rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            }
+            pd.SampleMask = 0xFFFFFFFFu;
+            pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets = 1;
+            pd.RTVFormats[0] = target_format;
+            pd.SampleDesc.Count = 1;
+            HRESULT hr = g.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(pipeline.put()));
+            if (FAILED(hr)) HSVR_LOG("D3D: CreateGraphicsPipelineState (format %d) failed 0x%08X", (int)target_format, (unsigned)hr);
+            return pipeline;
+        }
+
         bool create_blit_pipeline()
         {
             auto compile = module_function<D3DCompileFn>(L"d3dcompiler_47.dll", "D3DCompile");
@@ -586,25 +624,10 @@ float4 PSMain(VSOut i) : SV_Target
                 return false;
             }
 
-            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
-            pd.pRootSignature = g.root_signature.get();
-            pd.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
-            pd.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
-            pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-            pd.SampleMask = 0xFFFFFFFFu;
-            pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-            pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-            pd.NumRenderTargets = 1;
-            pd.RTVFormats[0] = g.xr_format;
-            pd.SampleDesc.Count = 1;
-            hr = g.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(g.pipeline.put()));
-            if (FAILED(hr))
-            {
-                HSVR_LOG("D3D: CreateGraphicsPipelineState failed 0x%08X", (unsigned)hr);
-                return false;
-            }
-            return true;
+            g.vs_blob = vs;
+            g.ps_blob = ps;
+            g.pipeline = make_pipeline(g.xr_format, false);
+            return (bool)g.pipeline;
         }
 
         bool create_xr_swapchain(XrSwap& swap, int width, int height, const char* label)
@@ -905,13 +928,18 @@ float4 PSMain(VSOut i) : SV_Target
             xr.ReleaseSwapchainImage(swap.handle, &ri);
         }
 
-        // Makes sure we have a private texture matching the back buffer and copies the back buffer into it.
-        bool copy_back_buffer(IDXGISwapChain* swapchain)
+        bool current_back_buffer(IDXGISwapChain* swapchain, Com<ID3D12Resource>& back)
         {
             Com<IDXGISwapChain3> sc3;
             if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(sc3.put())))) return false;
+            return SUCCEEDED(sc3->GetBuffer(sc3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(back.put()))) && back;
+        }
+
+        // Makes sure we have a private texture matching the back buffer and copies the back buffer into it.
+        bool copy_back_buffer(IDXGISwapChain* swapchain)
+        {
             Com<ID3D12Resource> back;
-            if (FAILED(sc3->GetBuffer(sc3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(back.put())))) return false;
+            if (!current_back_buffer(swapchain, back)) return false;
             D3D12_RESOURCE_DESC desc = back->GetDesc();
             if (!g.ui_copy || g.ui_copy_width != desc.Width || g.ui_copy_height != desc.Height || g.ui_copy_format != desc.Format)
             {
@@ -942,6 +970,126 @@ float4 PSMain(VSOut i) : SV_Target
             return true;
         }
 
+        D3D12_CPU_DESCRIPTOR_HANDLE window_rtv(int slot, ID3D12Resource* back)
+        {
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
+            if (!g.window_rtv_heap)
+            {
+                D3D12_DESCRIPTOR_HEAP_DESC hd{};
+                hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+                hd.NumDescriptors = 2;
+                if (FAILED(g.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(g.window_rtv_heap.put())))) return rtv;
+            }
+            rtv = g.window_rtv_heap->GetCPUDescriptorHandleForHeapStart();
+            rtv.ptr += (SIZE_T)slot * g.rtv_size;
+            g.device->CreateRenderTargetView(back, nullptr, rtv);
+            return rtv;
+        }
+
+        // While the eyes have their own target, nothing but the flat menus and HUD is drawn into
+        // the game window. This puts the left eye's picture behind them so the monitor still shows
+        // the game. `scene_srv`/`ui_srv` are the already prepared source textures (ptr 0 = none).
+        void draw_monitor_picture(IDXGISwapChain* swapchain, const PresentItem* item, ID3D12Resource* scene,
+                                  D3D12_GPU_DESCRIPTOR_HANDLE scene_srv, D3D12_GPU_DESCRIPTOR_HANDLE ui_srv)
+        {
+            if (g.window_pipeline_failed) return;
+            Com<ID3D12Resource> back;
+            if (!current_back_buffer(swapchain, back)) return;
+            D3D12_RESOURCE_DESC bd = back->GetDesc();
+            if (!g.window_pipeline || g.window_format != bd.Format)
+            {
+                g.window_pipeline = make_pipeline(bd.Format, false);
+                g.window_blend_pipeline = make_pipeline(bd.Format, true);
+                g.window_format = bd.Format;
+                if (!g.window_pipeline || !g.window_blend_pipeline)
+                {
+                    g.window_pipeline_failed = true;
+                    return;
+                }
+            }
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = window_rtv(0, back.get());
+            if (!rtv.ptr) return;
+            transition(back.get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            g.cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+            const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+            g.cmd->ClearRenderTargetView(rtv, black, 0, nullptr);
+            D3D12_RECT scissor{0, 0, (LONG)bd.Width, (LONG)bd.Height};
+            g.cmd->RSSetScissorRects(1, &scissor);
+            if (scene && scene_srv.ptr && item)
+            {
+                D3D12_RESOURCE_DESC sd = scene->GetDesc();
+                double x0 = 0, y0 = 0, x1 = (double)sd.Width / 2.0, y1 = (double)sd.Height;
+                if (item->rect_valid[0])
+                {
+                    x0 = item->rect[0][0];
+                    y0 = item->rect[0][1];
+                    x1 = item->rect[0][2];
+                    y1 = item->rect[0][3];
+                }
+                // Fit the eye picture inside the window, keeping its shape.
+                double eye_aspect = (x1 - x0) / std::max(1.0, y1 - y0);
+                double out_h = (double)bd.Height, out_w = out_h * eye_aspect;
+                if (out_w > (double)bd.Width)
+                {
+                    out_w = (double)bd.Width;
+                    out_h = out_w / eye_aspect;
+                }
+                D3D12_VIEWPORT vp{(float)(((double)bd.Width - out_w) * 0.5), (float)(((double)bd.Height - out_h) * 0.5), (float)out_w, (float)out_h, 0.0f, 1.0f};
+                BlitConstants c{};
+                c.uv_rect[0] = (float)(x0 / (double)sd.Width);
+                c.uv_rect[1] = (float)(y0 / (double)sd.Height);
+                c.uv_rect[2] = (float)((x1 - x0) / (double)sd.Width);
+                c.uv_rect[3] = (float)((y1 - y0) / (double)sd.Height);
+                c.cursor[0] = -1.0f;
+                g.cmd->SetPipelineState(g.window_pipeline.get());
+                g.cmd->RSSetViewports(1, &vp);
+                g.cmd->SetGraphicsRootDescriptorTable(0, scene_srv);
+                g.cmd->SetGraphicsRoot32BitConstants(1, sizeof(BlitConstants) / 4, &c, 0);
+                g.cmd->DrawInstanced(3, 1, 0, 0);
+            }
+            if (ui_srv.ptr)
+            {
+                D3D12_VIEWPORT vp{0.0f, 0.0f, (float)bd.Width, (float)bd.Height, 0.0f, 1.0f};
+                BlitConstants c{};
+                c.uv_rect[2] = 1.0f;
+                c.uv_rect[3] = 1.0f;
+                c.params[1] = 1.0f;
+                c.params[2] = 8.0f;
+                c.cursor[0] = -1.0f;
+                g.cmd->SetPipelineState(g.window_blend_pipeline.get());
+                g.cmd->RSSetViewports(1, &vp);
+                g.cmd->SetGraphicsRootDescriptorTable(0, ui_srv);
+                g.cmd->SetGraphicsRoot32BitConstants(1, sizeof(BlitConstants) / 4, &c, 0);
+                g.cmd->DrawInstanced(3, 1, 0, 0);
+            }
+            transition(back.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        }
+
+        // Runs right after the game's Present while the eyes have their own target: wipes the
+        // window buffer the game will draw its menus and HUD into next, so that what we copy from
+        // it next frame is only that frame's menus on black.
+        void clear_next_window_buffer(IDXGISwapChain* swapchain)
+        {
+            std::lock_guard<std::mutex> lock(g_present_mutex);
+            if (!g.ready || swapchain != g.game_swapchain || g.session_lost) return;
+            {
+                std::lock_guard<std::mutex> pipe_lock(g_pipe.mutex);
+                if (!g_pipe.separate_mode || !shared().stereo_installed.load()) return;
+            }
+            Com<ID3D12Resource> back;
+            if (!current_back_buffer(swapchain, back)) return;
+            begin_commands();
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = window_rtv(1, back.get());
+            if (rtv.ptr)
+            {
+                transition(back.get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                g.cmd->ClearRenderTargetView(rtv, clear, 0, nullptr);
+                transition(back.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+            }
+            end_commands();
+        }
+
         void adapt_prediction(const FramePose& pose, const Config& cfg)
         {
             int64_t period = g_frame_period.load();
@@ -965,7 +1113,7 @@ float4 PSMain(VSOut i) : SV_Target
             bool have_item = false;
             {
                 std::lock_guard<std::mutex> lock(g_pipe.mutex);
-                separate = g_pipe.separate_mode;
+                separate = g_pipe.separate_mode && shared().stereo_installed.load();
                 if (separate)
                 {
                     while (g_pipe.present_queue.size() > 2)
@@ -1007,7 +1155,6 @@ float4 PSMain(VSOut i) : SV_Target
             bool eyes_acquired[2]{false, false};
             bool ui_acquired = false;
 
-            if (g.should_render)
             {
                 begin_commands();
                 ID3D12DescriptorHeap* heaps[] = {g.srv_heap.get()};
@@ -1016,24 +1163,40 @@ float4 PSMain(VSOut i) : SV_Target
                 g.cmd->SetPipelineState(g.pipeline.get());
                 g.cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+                // With the eyes in their own target the game window holds only the flat menus and
+                // HUD: copy it for the floating panel, then put the monitor picture together.
                 bool want_ui = separate && cfg.ui_panel && shared().ui_visible.load();
-                bool need_back_buffer = want_ui || (!separate && have_item);
+                bool want_monitor = separate && cfg.mirror_window;
+                bool need_back_buffer = separate ? (want_ui || want_monitor) : (g.should_render && have_item);
                 bool have_back_buffer = need_back_buffer && copy_back_buffer(swapchain);
 
-                // ---- eyes ----
                 ID3D12Resource* scene = separate ? item.scene.get() : (have_back_buffer ? g.ui_copy.get() : nullptr);
-                if (have_item && item.pose.valid && scene)
+                if (!have_item) scene = nullptr;
+                D3D12_GPU_DESCRIPTOR_HANDLE scene_srv{}, ui_srv{};
+                bool scene_is_float = false, ui_is_float = false;
+                if (scene)
                 {
                     D3D12_RESOURCE_DESC sd = scene->GetDesc();
-                    bool is_float = false;
-                    DXGI_FORMAT srv_format = sampling_format(sd.Format, is_float);
+                    DXGI_FORMAT srv_format = sampling_format(sd.Format, scene_is_float);
                     if (scene != g.logged_scene)
                     {
                         g.logged_scene = scene;
                         HSVR_LOG("D3D: engine eye texture %p %llux%u format %d flags 0x%X (sampling as %d)",
                                  (void*)scene, (unsigned long long)sd.Width, sd.Height, (int)sd.Format, (unsigned)sd.Flags, (int)srv_format);
                     }
-                    D3D12_GPU_DESCRIPTOR_HANDLE srv = write_srv(0, scene, srv_format);
+                    scene_srv = write_srv(0, scene, srv_format);
+                }
+                if (separate && have_back_buffer)
+                {
+                    ui_srv = write_srv(1, g.ui_copy.get(), sampling_format(g.ui_copy_format, ui_is_float));
+                }
+
+                // ---- eyes ----
+                if (g.should_render && have_item && item.pose.valid && scene)
+                {
+                    D3D12_RESOURCE_DESC sd = scene->GetDesc();
+                    D3D12_GPU_DESCRIPTOR_HANDLE srv = scene_srv;
+                    bool is_float = scene_is_float;
                     bool decode = cfg.gamma_mode == 1 || (cfg.gamma_mode == 0 && !is_float);
                     if (!is_srgb_format(g.xr_format)) decode = false;
                     for (int e = 0; e < 2; ++e)
@@ -1077,17 +1240,16 @@ float4 PSMain(VSOut i) : SV_Target
                         layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
                     }
                 }
-                else
+                else if (g.should_render)
                 {
                     shared().frames_without_image.fetch_add(1);
                 }
 
                 // ---- flat UI panel ----
-                if (want_ui && have_back_buffer)
+                if (g.should_render && want_ui && ui_srv.ptr)
                 {
-                    bool is_float = false;
-                    DXGI_FORMAT srv_format = sampling_format(g.ui_copy_format, is_float);
-                    D3D12_GPU_DESCRIPTOR_HANDLE srv = write_srv(1, g.ui_copy.get(), srv_format);
+                    bool is_float = ui_is_float;
+                    D3D12_GPU_DESCRIPTOR_HANDLE srv = ui_srv;
                     BlitConstants c{};
                     c.uv_rect[2] = 1.0f;
                     c.uv_rect[3] = 1.0f;
@@ -1136,6 +1298,8 @@ float4 PSMain(VSOut i) : SV_Target
                         layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
                     }
                 }
+
+                if (want_monitor && have_back_buffer) draw_monitor_picture(swapchain, have_item ? &item : nullptr, scene, scene_srv, ui_srv);
 
                 end_commands();
                 for (int e = 0; e < 2; ++e)
@@ -1252,6 +1416,7 @@ float4 PSMain(VSOut i) : SV_Target
             t_in_present = true;
             bool vr_paced = on_present(self);
             HRESULT hr = g_original_present(self, vr_paced ? 0 : sync_interval, flags);
+            if (SUCCEEDED(hr)) clear_next_window_buffer(self);
             t_in_present = false;
             return hr;
         }
@@ -1262,6 +1427,7 @@ float4 PSMain(VSOut i) : SV_Target
             t_in_present = true;
             bool vr_paced = on_present(self);
             HRESULT hr = g_original_present1(self, vr_paced ? 0 : sync_interval, flags, params);
+            if (SUCCEEDED(hr)) clear_next_window_buffer(self);
             t_in_present = false;
             return hr;
         }

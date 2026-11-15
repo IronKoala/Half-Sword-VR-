@@ -240,7 +240,6 @@ namespace
             HSVR_LOG("The engine already has a stereo device (%p); not replacing it. Remove -emulatestereo from the launch options.", (void*)slot->Object);
             return;
         }
-        hsvr::vr_set_separate_target_mode(hsvr::config().separate_render_target);
         slot->ReferenceController = hsvr::stereo_device_reference_controller();
         slot->Object = static_cast<ue::IStereoRendering*>(hsvr::stereo_device_object());
         hsvr::shared().stereo_installed.store(true);
@@ -274,6 +273,10 @@ namespace
             run_console_command(STR("t.MaxFPS 0"));
             run_console_command(STR("r.MotionBlurQuality 0"));
             run_console_command(STR("r.DepthOfFieldQuality 0"));
+            // Keep menus and HUD in the game window (we show that on a floating panel) instead of
+            // letting the engine smear them across both eyes. Only matters while the eyes have
+            // their own target.
+            run_console_command(STR("Slate.DrawToVRRenderTarget 0"));
             HSVR_LOG("Applied VR console settings (vsync off, no frame cap, no motion blur, no depth of field)");
         }
 

@@ -56,17 +56,20 @@ namespace hsvr
                 "ui_distance_m=%.2f\n"
                 "ui_width_m=%.2f\n"
                 "ui_height_offset_m=%.2f\n"
+                "; Show the left eye's picture in the game window on the monitor.\n"
+                "mirror_window=%d\n"
                 "; Keys are Windows virtual key codes: 0x24 = Home (recenter), 0x23 = End (show/hide menu panel).\n"
                 "recenter_key=0x%X\n"
                 "toggle_ui_key=0x%X\n"
                 "predict_frames=%.1f\n"
+                "; 1 = full headset resolution with menus on a floating panel, 0 = fallback through the game window.\n"
                 "separate_render_target=%d\n"
                 "log_poses=%d\n"
                 "stereo_slot_offset=%d\n"
                 "dev_fake_headset=%d\n",
                 d.enabled, d.require_steamvr_running, d.render_scale, d.world_scale, d.anchor.c_str(), d.head_bone.c_str(),
                 d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.hide_head, d.near_clip_cm, d.gamma_mode, d.ui_panel,
-                d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key,
+                d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, d.mirror_window, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key,
                 d.predict_frames, d.separate_render_target, d.log_poses, d.stereo_slot_offset, d.dev_fake_headset);
         fclose(f);
     }
@@ -144,6 +147,7 @@ namespace hsvr
         num("ui_distance_m", c.ui_distance_m);
         num("ui_width_m", c.ui_width_m);
         num("ui_height_offset_m", c.ui_height_offset_m);
+        flag("mirror_window", c.mirror_window);
         integer("recenter_key", c.recenter_key);
         integer("toggle_ui_key", c.toggle_ui_key);
         num("predict_frames", c.predict_frames);

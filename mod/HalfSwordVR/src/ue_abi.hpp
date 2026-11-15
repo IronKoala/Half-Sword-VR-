@@ -85,3 +85,34 @@ namespace ue
         virtual void EndFinalPostprocessSettings(FPostProcessSettings* Settings, const EStereoscopicPass Pass, const int32_t ViewIndex) = 0;
     };
 } // namespace ue
+
+namespace ue
+{
+    // Mirror of the engine's stereo render target manager interface (UE 5.4.4). It has no
+    // virtual destructor, so slot 0 is ShouldUseSeparateRenderTarget; 15 slots in all, checked
+    // against the 5.4.4 header. Arguments we never look at are declared as plain pointers or
+    // integers of the same size.
+    class IStereoRenderTargetManager
+    {
+      public:
+        virtual bool ShouldUseSeparateRenderTarget() const = 0;
+        virtual void UpdateViewport(bool bUseSeparateRenderTarget, const FViewport& Viewport, SViewport* ViewportWidget) = 0;
+        virtual void CalculateRenderTargetSize(const FViewport& Viewport, uint32_t& InOutSizeX, uint32_t& InOutSizeY) = 0;
+        virtual bool NeedReAllocateViewportRenderTarget(const FViewport& Viewport) = 0;
+        virtual bool NeedReAllocateDepthTexture(const void* DepthTarget) = 0;
+        virtual bool NeedReAllocateShadingRateTexture(const void* ShadingRateTarget) = 0;
+        virtual uint32_t GetNumberOfBufferedFrames() const = 0;
+        virtual bool AllocateRenderTargetTexture(uint32_t Index, uint32_t SizeX, uint32_t SizeY, uint8_t Format, uint32_t NumMips, uint64_t Flags,
+                                                 uint64_t TargetableTextureFlags, void* OutTargetableTexture, void* OutShaderResourceTexture, uint32_t NumSamples) = 0;
+        virtual bool AllocateRenderTargetTextures(uint32_t SizeX, uint32_t SizeY, uint8_t Format, uint32_t NumLayers, uint64_t Flags, uint64_t TargetableTextureFlags,
+                                                  void* OutTargetableTextures, void* OutShaderResourceTextures, uint32_t NumSamples) = 0;
+        virtual uint8_t GetActualColorSwapchainFormat() const = 0; // EPixelFormat, 0 = PF_Unknown
+        virtual int32_t AcquireColorTexture() = 0;
+        virtual bool AllocateDepthTexture(uint32_t Index, uint32_t SizeX, uint32_t SizeY, uint8_t Format, uint32_t NumMips, uint64_t Flags,
+                                          uint64_t TargetableTextureFlags, void* OutTargetableTexture, void* OutShaderResourceTexture, uint32_t NumSamples) = 0;
+        virtual bool AllocateShadingRateTexture(uint32_t Index, uint32_t RenderSizeX, uint32_t RenderSizeY, uint8_t Format, uint32_t NumMips, uint64_t Flags,
+                                                uint64_t TargetableTextureFlags, void* OutTexture, void* OutTextureSize) = 0;
+        virtual bool HDRGetMetaDataForStereo(void* OutDisplayOutputFormat, void* OutDisplayColorGamut, bool& OutbHDRSupported) = 0;
+        virtual bool ReconfigureForShaderPlatform(uint32_t NewShaderPlatform) = 0;
+    };
+} // namespace ue

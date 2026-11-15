@@ -31,13 +31,17 @@ namespace hsvr
         double ui_distance_m = 1.6;
         double ui_width_m = 1.8;
         double ui_height_offset_m = -0.05;
+        // Show the left eye's picture (with menus) in the game window on the monitor.
+        bool mirror_window = true;
         // Virtual key codes. 0x24 = Home, 0x23 = End.
         int recenter_key = 0x24;
         int toggle_ui_key = 0x23;
         // Frames of prediction added when asking the headset for a pose (-1 = adapt automatically).
         double predict_frames = -1.0;
-        // Developer switches.
+        // 1 = the eyes are drawn at the headset's own resolution and menus float on a panel.
+        // 0 = fallback: both eyes are squeezed through the game window (lower resolution).
         bool separate_render_target = false;
+        // Developer switches.
         bool log_poses = false;
         // Test without a headset: a pretend headset that slowly looks left and right. The two
         // eye views show side by side in the game window.

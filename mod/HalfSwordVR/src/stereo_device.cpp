@@ -1,6 +1,7 @@
 #include "stereo_device.hpp"
 
 #include "config.hpp"
+#include "engine_texture.hpp"
 #include "log.hpp"
 #include "ue_abi.hpp"
 #include "vr_present.hpp"
@@ -18,6 +19,13 @@ namespace hsvr
         AnchorProvider g_anchor_provider = nullptr;
         std::atomic<uint64_t> g_game_frame{1};
         double g_delta_seconds = 1.0 / 90.0;
+
+        // True while the engine draws the eyes into their own full-size target instead of the
+        // game window. Decided once per game frame.
+        std::atomic<bool> g_separate{false};
+        // Once the engine has been given our render target manager it must keep getting it.
+        std::atomic<bool> g_manager_exposed{false};
+        std::atomic<uint32_t> g_target_width{0}, g_target_height{0};
 
         // ---- per-frame view state (game thread only) -----------------------------------------
         struct FrameView
@@ -88,6 +96,86 @@ namespace hsvr
             }
         }
 
+        // The eye a view index stands for. Index -1 is the engine's single "both eyes" view used
+        // for deciding what is visible: midway between the eyes, wide enough to cover both.
+        XrEyeRaw eye_for_view(int32_t view_index)
+        {
+            if (view_index >= 0) return g_view.pose.eye[view_index > 0 ? 1 : 0];
+            const XrEyeRaw& a = g_view.pose.eye[0];
+            const XrEyeRaw& b = g_view.pose.eye[1];
+            XrEyeRaw m = a;
+            m.px = (a.px + b.px) * 0.5f;
+            m.py = (a.py + b.py) * 0.5f;
+            m.pz = (a.pz + b.pz) * 0.5f;
+            float dot = a.qx * b.qx + a.qy * b.qy + a.qz * b.qz + a.qw * b.qw;
+            float sign = dot < 0.0f ? -1.0f : 1.0f;
+            float qx = a.qx + sign * b.qx, qy = a.qy + sign * b.qy, qz = a.qz + sign * b.qz, qw = a.qw + sign * b.qw;
+            float n = std::sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+            if (n > 1e-6f)
+            {
+                m.qx = qx / n;
+                m.qy = qy / n;
+                m.qz = qz / n;
+                m.qw = qw / n;
+            }
+            // If the two displays are angled apart, each eye looks half that angle away from the middle.
+            float half_cant = std::acos(std::fmin(1.0f, std::fabs(dot)));
+            m.angle_left = std::fmin(a.angle_left, b.angle_left) - half_cant;
+            m.angle_right = std::fmax(a.angle_right, b.angle_right) + half_cant;
+            m.angle_up = std::fmax(a.angle_up, b.angle_up) + half_cant;
+            m.angle_down = std::fmin(a.angle_down, b.angle_down) - half_cant;
+            const float limit = 1.5f; // just under 90 degrees
+            m.angle_left = std::fmax(m.angle_left, -limit);
+            m.angle_right = std::fmin(m.angle_right, limit);
+            m.angle_up = std::fmin(m.angle_up, limit);
+            m.angle_down = std::fmax(m.angle_down, -limit);
+            return m;
+        }
+
+        // ---- the render target manager ---------------------------------------------------------
+        // Tells the engine to draw both eyes side by side into one texture of the headset's size
+        // rather than into the game window. Everything else is left to the engine's defaults.
+        class FHalfSwordRenderTargetManager final : public ue::IStereoRenderTargetManager
+        {
+          public:
+            bool ShouldUseSeparateRenderTarget() const override { return g_separate.load(); }
+            void UpdateViewport(bool, const ue::FViewport&, ue::SViewport*) override {}
+            void CalculateRenderTargetSize(const ue::FViewport&, uint32_t& InOutSizeX, uint32_t& InOutSizeY) override
+            {
+                int w = shared().eye_width.load(), h = shared().eye_height.load();
+                if (w <= 0 || h <= 0) return;
+                InOutSizeX = (uint32_t)w * 2;
+                InOutSizeY = (uint32_t)h;
+                if (g_target_width.exchange(InOutSizeX) != InOutSizeX || g_target_height.exchange(InOutSizeY) != InOutSizeY)
+                {
+                    HSVR_LOG("Engine asked for the eye target size: %ux%u (both eyes side by side)", InOutSizeX, InOutSizeY);
+                }
+            }
+            bool NeedReAllocateViewportRenderTarget(const ue::FViewport&) override
+            {
+                uint32_t w = g_target_width.load(), h = g_target_height.load();
+                if (w == 0 || h == 0) return false;
+                return w != (uint32_t)shared().eye_width.load() * 2 || h != (uint32_t)shared().eye_height.load();
+            }
+            bool NeedReAllocateDepthTexture(const void*) override { return false; }
+            bool NeedReAllocateShadingRateTexture(const void*) override { return false; }
+            uint32_t GetNumberOfBufferedFrames() const override { return 1; }
+            bool AllocateRenderTargetTexture(uint32_t, uint32_t, uint32_t, uint8_t, uint32_t, uint64_t, uint64_t, void*, void*, uint32_t) override { return false; }
+            bool AllocateRenderTargetTextures(uint32_t, uint32_t, uint8_t, uint32_t, uint64_t, uint64_t, void*, void*, uint32_t) override { return false; }
+            uint8_t GetActualColorSwapchainFormat() const override { return 0; }
+            int32_t AcquireColorTexture() override { return -1; }
+            bool AllocateDepthTexture(uint32_t, uint32_t, uint32_t, uint8_t, uint32_t, uint64_t, uint64_t, void*, void*, uint32_t) override { return false; }
+            bool AllocateShadingRateTexture(uint32_t, uint32_t, uint32_t, uint8_t, uint32_t, uint64_t, uint64_t, void*, void*) override { return false; }
+            bool HDRGetMetaDataForStereo(void*, void*, bool&) override { return false; }
+            bool ReconfigureForShaderPlatform(uint32_t) override { return false; }
+        };
+
+        FHalfSwordRenderTargetManager* render_target_manager()
+        {
+            static FHalfSwordRenderTargetManager* instance = new FHalfSwordRenderTargetManager();
+            return instance;
+        }
+
         // ---- the device ------------------------------------------------------------------------
         class FHalfSwordStereoDevice final : public ue::IStereoRendering
         {
@@ -109,7 +197,7 @@ namespace hsvr
             void AdjustViewRect(int32_t ViewIndex, int32_t& X, int32_t& Y, uint32_t& SizeX, uint32_t& SizeY) const override
             {
                 int index = ViewIndex > 0 ? 1 : 0;
-                if (config().separate_render_target)
+                if (g_separate.load())
                 {
                     int w = shared().eye_width.load(), h = shared().eye_height.load();
                     X = index * w;
@@ -136,7 +224,7 @@ namespace hsvr
                 latch_frame(ViewRotation, ViewLocation);
                 if (!g_view.valid) return;
                 Config cfg = config();
-                const XrEyeRaw& eye = g_view.pose.eye[ViewIndex > 0 ? 1 : 0];
+                const XrEyeRaw eye = eye_for_view(ViewIndex);
                 double cm_per_metre = (WorldToMeters > 1.0f ? (double)WorldToMeters : 100.0) * cfg.world_scale;
                 Quat recenter_inverse = quat_from_yaw_deg(g_view.recenter.yaw_deg).inverse();
                 Vec3 eye_real_cm = xr_to_ue_position(eye.px, eye.py, eye.pz, 100.0);
@@ -157,7 +245,7 @@ namespace hsvr
             {
                 // Off-centre perspective with reversed, infinite depth: the same form Unreal's own
                 // OpenXR plugin produces.
-                const XrEyeRaw& eye = g_view.pose.eye[ViewIndex > 0 ? 1 : 0];
+                const XrEyeRaw eye = eye_for_view(ViewIndex);
                 double left = std::tan((double)eye.angle_left);
                 double right = std::tan((double)eye.angle_right);
                 double up = std::tan((double)eye.angle_up);
@@ -183,14 +271,22 @@ namespace hsvr
 
             void InitCanvasFromView(ue::FSceneView*, ue::UCanvas*) override {}
 
-            void RenderTexture_RenderThread(ue::FRHICommandListImmediate&, ue::FRHITexture*, ue::FRHITexture*, ue::FVector2D) const override
+            void RenderTexture_RenderThread(ue::FRHICommandListImmediate&, ue::FRHITexture*, ue::FRHITexture* SrcTexture, ue::FVector2D) const override
             {
-                // Only called when the engine renders into a separate target (not used yet).
+                // Called on the render thread once per frame while the engine draws the eyes into
+                // their own target: the frame is finished, so pass its texture on to the headset.
+                if (!g_separate.load()) return;
+                ID3D12Resource* scene = engine_texture_resource(SrcTexture);
+                if (scene) vr_render_thread_frame_done(scene);
             }
 
-            // No render target manager yet: the engine draws both eyes side by side into the window
-            // and the presenter copies each half to the headset.
-            ue::IStereoRenderTargetManager* GetRenderTargetManager() override { return nullptr; }
+            // With no manager the engine draws both eyes side by side into the game window and the
+            // presenter copies each half to the headset. With it, the eyes get their own target.
+            ue::IStereoRenderTargetManager* GetRenderTargetManager() override
+            {
+                if (g_separate.load()) g_manager_exposed.store(true);
+                return g_manager_exposed.load() ? render_target_manager() : nullptr;
+            }
             ue::IStereoLayers* GetStereoLayers() override { return nullptr; }
             void StartFinalPostprocessSettings(ue::FPostProcessSettings*, const ue::EStereoscopicPass, const int32_t) override {}
             bool OverrideFinalPostprocessSettings(ue::FPostProcessSettings*, const ue::EStereoscopicPass, const int32_t, float&) override { return false; }
@@ -228,6 +324,19 @@ namespace hsvr
     {
         g_game_frame.fetch_add(1);
         if (delta_seconds > 0.0 && delta_seconds < 0.5) g_delta_seconds = delta_seconds;
+
+        bool want_separate = config().separate_render_target && shared().eye_width.load() > 0 && shared().eye_height.load() > 0 && !engine_texture_unavailable();
+        if (want_separate != g_separate.load())
+        {
+            g_separate.store(want_separate);
+            vr_set_separate_target_mode(want_separate);
+            HSVR_LOG(want_separate ? "Eyes are drawn into their own target at headset resolution" : "Eyes are drawn side by side through the game window");
+        }
+    }
+
+    bool stereo_separate_target()
+    {
+        return g_separate.load();
     }
 
     void* stereo_device_object()
