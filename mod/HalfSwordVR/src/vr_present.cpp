@@ -1105,17 +1105,26 @@ float4 PSMain(VSOut i) : SV_Target
             g_lead_ns.store(lead);
         }
 
-        // Finishes the OpenXR frame that is open: copies the engine's eyes (and the flat UI) and submits.
-        void end_frame(IDXGISwapChain* swapchain, const Config& cfg)
+        // What the engine handed over for the frame being presented right now.
+        struct FetchedFrame
         {
-            bool separate;
-            PresentItem item;
+            bool separate = false;
             bool have_item = false;
+            bool fresh = false;
+            PresentItem item;
+        };
+
+        // Called exactly once for every Present of the game's window, whether or not the headset
+        // is taking frames, so that poses stay matched to pictures by simple counting.
+        FetchedFrame fetch_frame()
+        {
+            FetchedFrame f;
             {
                 std::lock_guard<std::mutex> lock(g_pipe.mutex);
-                separate = g_pipe.separate_mode && shared().stereo_installed.load();
-                if (separate)
+                f.separate = g_pipe.separate_mode && shared().stereo_installed.load();
+                if (f.separate)
                 {
+                    // The render thread is at most one frame ahead of the presenting thread.
                     while (g_pipe.present_queue.size() > 2)
                     {
                         g_pipe.present_queue.pop_front();
@@ -1123,29 +1132,39 @@ float4 PSMain(VSOut i) : SV_Target
                     }
                     if (!g_pipe.present_queue.empty())
                     {
-                        item = std::move(g_pipe.present_queue.front());
+                        f.item = std::move(g_pipe.present_queue.front());
                         g_pipe.present_queue.pop_front();
-                        have_item = true;
+                        f.have_item = true;
                     }
                 }
                 else if (shared().stereo_installed.load())
                 {
                     // The engine draws both eyes side by side into the window itself.
-                    take_from_game_queue(item.pose, 3);
-                    have_item = item.pose.valid;
+                    take_from_game_queue(f.item.pose, 3);
+                    f.have_item = f.item.pose.valid;
                 }
             }
-            if (have_item)
+            if (f.have_item)
             {
-                adapt_prediction(item.pose, cfg);
-                g.last_item = item;
+                f.fresh = true;
+                g.last_item = f.item;
                 g.have_last_item = true;
             }
             else if (g.have_last_item)
             {
-                item = g.last_item; // nothing new from the engine: show the last image again
-                have_item = true;
+                f.item = g.last_item; // nothing new from the engine: show the last image again
+                f.have_item = true;
             }
+            return f;
+        }
+
+        // Finishes the OpenXR frame that is open: copies the engine's eyes (and the flat UI) and submits.
+        void end_frame(IDXGISwapChain* swapchain, const Config& cfg, FetchedFrame& fetched)
+        {
+            bool separate = fetched.separate;
+            bool have_item = fetched.have_item;
+            PresentItem& item = fetched.item;
+            if (fetched.fresh) adapt_prediction(item.pose, cfg);
 
             XrCompositionLayerProjectionView views[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
             XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -1401,10 +1420,11 @@ float4 PSMain(VSOut i) : SV_Target
             }
             if (swapchain != g.game_swapchain) return false;
             ++g.presents;
+            FetchedFrame fetched = fetch_frame();
             poll_events();
             if (!g.session_running) return false;
             Config cfg = config();
-            if (g.frame_begun) end_frame(swapchain, cfg);
+            if (g.frame_begun) end_frame(swapchain, cfg, fetched);
             begin_frame();
             if (log_throttle("stats", 10.0)) log_statistics();
             return true;
@@ -1689,6 +1709,9 @@ float4 PSMain(VSOut i) : SV_Target
     {
         if (view_index < 0 || view_index > 1) return;
         std::lock_guard<std::mutex> lock(g_pipe.mutex);
+        // Without a separate target the presenter pairs poses itself; taking one here would
+        // put it a frame out of step.
+        if (!g_pipe.separate_mode) return;
         if (!g_pipe.render_took)
         {
             take_from_game_queue(g_pipe.render_current, 2);
@@ -1732,5 +1755,14 @@ float4 PSMain(VSOut i) : SV_Target
     {
         std::lock_guard<std::mutex> lock(g_pipe.mutex);
         g_pipe.separate_mode = separate;
+        g_pipe.present_queue.clear();
+        g_pipe.render_took = false;
+    }
+
+    void vr_render_thread_target_reset()
+    {
+        std::lock_guard<std::mutex> lock(g_pipe.mutex);
+        g_pipe.present_queue.clear();
+        g_pipe.render_took = false;
     }
 } // namespace hsvr

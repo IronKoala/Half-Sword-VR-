@@ -164,7 +164,12 @@ namespace hsvr
             bool NeedReAllocateShadingRateTexture(const void*) override { return false; }
             uint32_t GetNumberOfBufferedFrames() const override { return 1; }
             bool AllocateRenderTargetTexture(uint32_t, uint32_t, uint32_t, uint8_t, uint32_t, uint64_t, uint64_t, void*, void*, uint32_t) override { return false; }
-            bool AllocateRenderTargetTextures(uint32_t, uint32_t, uint8_t, uint32_t, uint64_t, uint64_t, void*, void*, uint32_t) override { return false; }
+            bool AllocateRenderTargetTextures(uint32_t, uint32_t, uint8_t, uint32_t, uint64_t, uint64_t, void*, void*, uint32_t) override
+            {
+                // We let the engine make the texture itself; this call only tells us it is doing so now.
+                vr_render_thread_target_reset();
+                return false;
+            }
             uint8_t GetActualColorSwapchainFormat() const override { return 0; }
             int32_t AcquireColorTexture() override { return -1; }
             bool AllocateDepthTexture(uint32_t, uint32_t, uint32_t, uint8_t, uint32_t, uint64_t, uint64_t, void*, void*, uint32_t) override { return false; }
@@ -330,6 +335,7 @@ namespace hsvr
 
         int override_mode = shared().separate_override.load();
         bool asked = override_mode < 0 ? config().separate_render_target : override_mode != 0;
+        if (config().dev_fake_headset) asked = false; // the pretend headset shows both eyes in the window
         bool want_separate = asked && shared().eye_width.load() > 0 && shared().eye_height.load() > 0 && !engine_texture_unavailable();
         if (want_separate != g_separate.load())
         {

@@ -44,7 +44,7 @@ namespace hsvr
         double predict_frames = -1.0;
         // 1 = the eyes are drawn at the headset's own resolution and menus float on a panel.
         // 0 = fallback: both eyes are squeezed through the game window (lower resolution).
-        bool separate_render_target = false;
+        bool separate_render_target = true;
         // Developer switches.
         bool log_poses = false;
         // Test without a headset: a pretend headset that slowly looks left and right. The two

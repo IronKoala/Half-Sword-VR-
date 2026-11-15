@@ -35,6 +35,9 @@ namespace hsvr
     // The frame is complete and about to be presented; `scene` is the D3D12 texture holding both
     // eyes (nullptr when the engine draws straight into the window).
     void vr_render_thread_frame_done(ID3D12Resource* scene);
+    // The engine is (re)creating its eye target. It does that with all earlier frames fully
+    // presented, so frames in flight are forgotten here and counting starts afresh.
+    void vr_render_thread_target_reset();
     // Tells the presenter whether frames arrive through vr_render_thread_frame_done at all.
     void vr_set_separate_target_mode(bool separate);
 } // namespace hsvr
