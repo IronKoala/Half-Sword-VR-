@@ -1500,13 +1500,13 @@ float4 PSMain(VSOut i) : SV_Target
                         pointer_showing = p.x >= 0 && p.y >= 0 && p.x < client.right && p.y < client.bottom;
                     }
                 }
-                // The panel is for menus. During a fight the game window holds only full-screen
-                // effects (the game tints the edges of the picture), which would hang in front of
-                // the player as a coloured frame, so by default the panel shows only while a menu
-                // is up; the menu-panel key forces it on.
+                // The panel shows the game window: menus, and during a fight the game's own edge
+                // tints (heat, cold, pain), which tell the player things, so it is on by default.
                 bool menu_showing = shared().menu_up.load() || pointer_showing || game_pointer;
                 bool toggled = shared().ui_toggled.load();
-                bool panel_on = cfg.ui_panel_auto ? (menu_showing || toggled) : !toggled;
+                // The End key hides the panel during play only: a menu always brings it up, or a
+                // player who hid it would be left with no way to see the pause menu.
+                bool panel_on = cfg.ui_panel_auto ? (menu_showing || toggled) : (!toggled || menu_showing);
                 bool want_ui = separate && cfg.ui_panel && panel_on;
                 bool want_monitor = separate && cfg.mirror_window;
                 bool need_back_buffer = separate ? (want_ui || want_monitor) : (render && have_item);

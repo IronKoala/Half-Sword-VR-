@@ -8,7 +8,7 @@ Phase 1 goal: the game shown in the headset through SteamVR/OpenXR, the view in 
 | --- | --- |
 | VR start | Starts when SteamVR is running at game launch; otherwise the game starts flat. |
 | Rendering | The engine draws both eyes into its own texture at headset size (3728 x 1864 for two 1864 x 1864 eyes at `render_scale=0.75`). 72 fps, 0 dropped frames in every headset session on a Steam Frame (RTX 4080 SUPER). |
-| Head tracking | View sits at the character's head bone (lightly smoothed), heading follows the game camera, Home recenters. |
+| Head tracking | View sits at the character's head bone (lightly smoothed), heading follows the player's aim (`heading=aim`), Home recenters. |
 | Menus and HUD | The game window's flat picture (menus, HUD, the game's edge overlays) floats on a panel 1.1 m in front, with a dark sheet behind it while a menu is up. The monitor shows the left eye with the menus. |
 | Controls | Mouse and keyboard as in the flat game. Esc pauses and unpauses. |
 
@@ -19,7 +19,7 @@ Played by Matthew in the headset: "everything looks good" (commit 0a2e88e).
 | Key | Does |
 | --- | --- |
 | Home | Recenter the view and the menu panel |
-| End | Hide or show the menu panel |
+| End | Hide or show the menu panel during play (menus always show) |
 | Insert | Switch between the view from the head and the game's own camera |
 | Page Down | Flip between full-resolution mode and the fallback through the game window |
 
@@ -42,12 +42,15 @@ Played by Matthew in the headset: "everything looks good" (commit 0a2e88e).
 - The game hides the Windows mouse pointer in menus; `PlayerController.bShowMouseCursor` tells when a menu wants one.
 - The engine's input, pause and hit-testing code has no special case for stereo when `XRSystem` is empty, and the viewport size stays the window size.
 - A character head-hiding feature was built and removed again at Matthew's request.
+- Clouds in front of everything in the right eye: Unreal 5.4.4 has a fault in volumetric cloud mode 1 (`r.VolumetricRenderTarget.Mode 1`, also mode 3). The cloud trace adds the full-resolution view rect offset to a half-resolution depth lookup (`VolumetricCloudRendering.cpp`, where `TracingCoordToZbufferCoordScaleBias` is set), so a view that does not start at x = 0 reads no depth and its clouds cover the scene. Half Sword switches to mode 1 when the Yard arena loads. The mod checks the mode every frame and puts it back to 0 (`fix_clouds`). `r.VolumetricRenderTarget 0` is no way out: that path draws each view's clouds over the whole shared target.
+- The game sets `r.ScreenPercentage 55` with TSR and switches DLSS off when the hub loads, overriding an earlier value from the mod's `screen_percentage`.
 - One fatal error happened in a headset session (render thread, inside the game's own code, nothing of the mod on that thread's stack). The crash folder on that PC holds about twenty earlier crashes of the game going back to 2025, three with the same shape, so it is probably a crash the game already had.
 
 ## Open
 
 - Idle helper (`idle_helper`, on by default): keeps the game at normal speed while the headset sleeps. A 7-minute run with the headset asleep held 72 frames a second throughout and SteamVR stayed up (without it the game fell to about 6 fps after 5 minutes and SteamVR quit). The handoff when the headset wakes has not been tried in the headset.
-- Insert and Page Down have not been confirmed in the headset.
-- Comfort: nothing is done about the game's camera shake or about being knocked down.
-- Sharpness: `render_scale` is 0.75 of the headset's recommended size. GPU time was about 10.5 ms of the 13.9 ms budget in a fight, so there is little room to raise it without an upscaler.
+- Page Down has not been confirmed in the headset (Insert has been used).
+- Comfort: the heading follows the player's aim (it measured the same as the camera's heading except at spawn). Nothing is done about being knocked down.
+- Sharpness: `render_scale` is 0.75 of the headset's recommended size, with mild sharpening (`sharpen=0.6`). At 0.90 the GPU time rose to 13.6 ms of the 13.9 ms budget (10.5 to 12.9 ms at 0.75), so 0.75 stays.
+- A doubled mouse pointer was reported in the equipment screen; not yet looked at.
 - The aim marker and other HUD parts sit on the panel, not in the world.

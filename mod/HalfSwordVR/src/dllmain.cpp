@@ -325,17 +325,12 @@ namespace
     // Unreal 5.4 draws volumetric clouds per view in one of four modes. In mode 1 (and 3) it looks
     // up the scene's depth for a view at the wrong place when that view does not start at the
     // left edge of the picture, which is the case for our second eye: the clouds then land in
-    // front of everything in that eye. Mode 0, the engine's default, is right. A game can pick
-    // another mode at any time, so the mode is checked once a second and put back to 0.
-    int g_test_current = -1; // the picture test that is on (see run_test_step), -1 = none
-
+    // front of everything in that eye. Mode 0, the engine's default, is right. Half Sword
+    // switches to mode 1 when an outdoor arena loads, so the mode is checked every frame and put
+    // back to 0.
     void keep_clouds_correct(const hsvr::Config& cfg)
     {
-        if (!cfg.fix_clouds || g_test_current >= 0) return;
-        static double last_check = 0.0;
-        double now = hsvr::now_seconds();
-        if (now - last_check < 1.0) return;
-        last_check = now;
+        if (!cfg.fix_clouds) return;
         float mode = console_variable(STR("r.VolumetricRenderTarget.Mode"));
         if (mode == 0.0f || mode < -900.0f) return;
         run_console_command(STR("r.VolumetricRenderTarget.Mode 0"));
@@ -345,100 +340,6 @@ namespace
             --lines_left;
             HSVR_LOG("Clouds: the game had cloud mode %g, set to 0 so that both eyes show them behind the scenery (now reads %g)", (double)mode,
                      (double)console_variable(STR("r.VolumetricRenderTarget.Mode")));
-        }
-    }
-
-    // ---- picture tests (temporary aid) -----------------------------------------------------------
-    // Each press of the test key undoes the previous test and switches on the next one, so that
-    // the player can watch for the moment a missing object comes back. The log says which test is
-    // on. After the last test one more press puts everything back.
-    struct TestStep
-    {
-        const char* what;      // for the log
-        const TCHAR* variable; // an engine setting, or nullptr for one of the mod's own tests
-        const char* value;     // the value to try
-        int own;               // the mod's own tests: 1 same eye for both views, 2 fallback mode, 3 game camera
-    };
-
-    const TestStep g_test_steps[] = {
-            {"cloud mode 2", STR("r.VolumetricRenderTarget.Mode"), "2", 0},
-            {"clouds drawn without the depth-aware upsampling", STR("r.VolumetricRenderTarget.UpsamplingMode"), "2", 0},
-            {"no occlusion culling", STR("r.AllowOcclusionQueries"), "0", 0},
-            {"depth-pyramid occlusion culling", STR("r.HZBOcclusion"), "1", 0},
-            {"no merged far-away models (HLOD)", STR("r.HLOD"), "0", 0},
-            {"most detailed models everywhere", STR("r.ForceLOD"), "0", 0},
-            {"ten times the view distance", STR("r.ViewDistanceScale"), "10", 0},
-            {"no culling of instanced models", STR("foliage.DisableCull"), "1", 0},
-            {"Nanite: no occlusion culling", STR("r.Nanite.Culling.HZB"), "0", 0},
-            {"Nanite: no frustum culling", STR("r.Nanite.Culling.Frustum"), "0", 0},
-            {"no volumetric clouds", STR("r.VolumetricCloud"), "0", 0},
-            {"no fog", STR("r.Fog"), "0", 0},
-            {"no volumetric fog", STR("r.VolumetricFog"), "0", 0},
-            {"no sky atmosphere", STR("r.SkyAtmosphere"), "0", 0},
-            {"older anti-aliasing instead of TSR", STR("r.AntiAliasingMethod"), "2", 0},
-            {"full internal resolution", STR("r.ScreenPercentage"), "100", 0},
-            {"no Lumen lighting", STR("r.Lumen.DiffuseIndirect.Allow"), "0", 0},
-            {"no Lumen reflections", STR("r.Lumen.Reflections.Allow"), "0", 0},
-            {"both views from the left eye's position", nullptr, "", 1},
-            {"fallback mode through the game window", nullptr, "", 2},
-            {"the game's own camera", nullptr, "", 3},
-            {"no Nanite", STR("r.Nanite"), "0", 0},
-    };
-    const int g_test_count = (int)(sizeof(g_test_steps) / sizeof(g_test_steps[0]));
-
-    void set_test_variable(const TCHAR* variable, const char* value)
-    {
-        std::wstring command(variable);
-        command += L" ";
-        for (const char* c = value; *c; ++c) command += (wchar_t)*c;
-        run_console_command(command.c_str());
-    }
-
-    void set_own_test(int own, bool on)
-    {
-        auto& shared = hsvr::shared();
-        if (own == 1) shared.test_same_eye.store(on);
-        if (own == 2) shared.separate_override.store(on ? 0 : -1);
-        if (own == 3) shared.third_person.store(on);
-    }
-
-    void run_test_step()
-    {
-        int& current = g_test_current;
-        static float saved = 0.0f;
-        if (current >= 0)
-        {
-            const TestStep& old = g_test_steps[current];
-            if (old.variable)
-            {
-                char text[32];
-                snprintf(text, sizeof(text), "%g", (double)saved);
-                set_test_variable(old.variable, text);
-            }
-            else
-            {
-                set_own_test(old.own, false);
-            }
-        }
-        ++current;
-        if (current >= g_test_count)
-        {
-            current = -1;
-            HSVR_LOG("Test: all %d tests done, everything is back to normal", g_test_count);
-            return;
-        }
-        const TestStep& step = g_test_steps[current];
-        if (step.variable)
-        {
-            saved = console_variable(step.variable);
-            set_test_variable(step.variable, step.value);
-            HSVR_LOG("Test %d of %d ON: %s (%ls %s, was %g, now reads %g)", current + 1, g_test_count, step.what, step.variable, step.value,
-                     (double)saved, (double)console_variable(step.variable));
-        }
-        else
-        {
-            set_own_test(step.own, true);
-            HSVR_LOG("Test %d of %d ON: %s", current + 1, g_test_count, step.what);
         }
     }
 
@@ -715,38 +616,45 @@ namespace
             apply_picture_settings(cfg);
             keep_clouds_correct(cfg);
         }
-        static bool recenter_down = false, ui_down = false, view_down = false, mode_down = false, test_down = false;
-        if (GetForegroundWindow() != nullptr)
+        // The mod's keys count only while the game has the keyboard, so that Home or End typed in
+        // another program does not move the view or hide the panel.
+        static bool recenter_down = false, ui_down = false, view_down = false, mode_down = false;
+        bool recenter = key_pressed_once(cfg.recenter_key, recenter_down);
+        bool ui = key_pressed_once(cfg.toggle_ui_key, ui_down);
+        bool mode = key_pressed_once(cfg.toggle_mode_key, mode_down);
+        bool view = key_pressed_once(cfg.toggle_view_key, view_down);
+        DWORD front_process = 0;
+        if (HWND front = GetForegroundWindow()) GetWindowThreadProcessId(front, &front_process);
+        if (front_process != GetCurrentProcessId()) return;
+        if (recenter)
         {
-            if (key_pressed_once(cfg.test_key, test_down) && g_console_done)
+            shared.recenter_requested.store(true);
+            HSVR_LOG("Key: recenter");
+        }
+        if (ui)
+        {
+            bool toggled = !shared.ui_toggled.load();
+            shared.ui_toggled.store(toggled);
+            if (cfg.ui_panel_auto)
             {
-                // Only while the game has the keyboard, so that Page Up in another program does
-                // not step the tests.
-                DWORD process = 0;
-                GetWindowThreadProcessId(GetForegroundWindow(), &process);
-                if (process == GetCurrentProcessId()) run_test_step();
+                HSVR_LOG(toggled ? "Key: menu panel always shown" : "Key: menu panel shown only while a menu is up");
             }
-            if (key_pressed_once(cfg.recenter_key, recenter_down)) shared.recenter_requested.store(true);
-            if (key_pressed_once(cfg.toggle_ui_key, ui_down))
+            else
             {
-                bool toggled = !shared.ui_toggled.load();
-                shared.ui_toggled.store(toggled);
-                if (cfg.ui_panel_auto)
-                {
-                    HSVR_LOG(toggled ? "Menu panel: always shown" : "Menu panel: shown only while a menu is up");
-                }
-                else
-                {
-                    HSVR_LOG(toggled ? "Menu panel: hidden" : "Menu panel: shown");
-                }
+                HSVR_LOG(toggled ? "Key: menu panel hidden during play (menus still show)" : "Key: menu panel shown");
             }
-            if (key_pressed_once(cfg.toggle_mode_key, mode_down)) shared.separate_override.store(hsvr::stereo_separate_target() ? 0 : 1);
-            if (key_pressed_once(cfg.toggle_view_key, view_down))
-            {
-                bool third = !shared.third_person.load();
-                shared.third_person.store(third);
-                HSVR_LOG(third ? "View: the game's own camera (third person)" : "View: from the character's head (first person)");
-            }
+        }
+        if (mode)
+        {
+            bool separate = hsvr::stereo_separate_target();
+            shared.separate_override.store(separate ? 0 : 1);
+            HSVR_LOG(separate ? "Key: fallback mode through the game window" : "Key: full-resolution mode");
+        }
+        if (view)
+        {
+            bool third = !shared.third_person.load();
+            shared.third_person.store(third);
+            HSVR_LOG(third ? "Key: view from the game's own camera (third person)" : "Key: view from the character's head (first person)");
         }
     }
 } // namespace
