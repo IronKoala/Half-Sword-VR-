@@ -396,7 +396,9 @@ namespace hsvr
             double elbow_angle = 0;   // how far the elbow is swung from its natural place, degrees
             double elbow_time = 0;
             double shoulder_shift = 0, shoulder_time = 0;
-            double last_twist = 0;    // hand roll about the forearm last frame, radians (unwrapped)
+            double last_twist = 0;
+            Vec3 assist_pos, assist_rot; // hold assist, in the upper body's frame (cm, rotation vector)
+            double assist_time = 0;    // hand roll about the forearm last frame, radians (unwrapped)
         };
 
         struct State
@@ -734,7 +736,13 @@ namespace hsvr
                 side.target_valid = false;
                 const XrHandRaw& raw = s.hands[side.controller_index];
                 bool wanted = side.out_sign > 0 ? cfg.arm_right : cfg.arm_left;
-                if (!wanted || !raw.valid || !side.have_grip) continue;
+                if (!wanted || !raw.valid || !side.have_grip)
+                {
+                    side.assist_pos = {};
+                    side.assist_rot = {};
+                    side.assist_time = 0;
+                    continue;
+                }
                 Vec3 grip_pos;
                 Quat grip_rot;
                 if (!stereo_tracking_to_world(raw.px, raw.py, raw.pz, raw.qx, raw.qy, raw.qz, raw.qw, grip_pos, grip_rot)) continue;
@@ -810,7 +818,41 @@ namespace hsvr
             if (!socket_transform(s.body, side.parent_name, RTS_World, parent_world)) return;
             Xf parent_cs = pose[side.parent];
             // The target in the frame of the physical upper body, placed on the driver's upper body.
-            Xf target = compose(relative(side.target_world, parent_world), parent_cs);
+            Xf target_rel = relative(side.target_world, parent_world);
+            // Hold assist: the muscles leave the real hand short of where it is sent by a steady
+            // amount (sword weight, muscle strength). That steady part is measured in the upper
+            // body's frame and added to what is sent, slowly (assist_seconds), within assist_max_cm
+            // and assist_max_deg. Fast swings are not changed by it.
+            Xf body_hand_now;
+            if (cfg.assist_seconds > 0.0 && socket_transform(s.body, side.hand_name, RTS_World, body_hand_now))
+            {
+                Xf real_rel = relative(body_hand_now, parent_world);
+                double now = now_seconds();
+                double dt = side.assist_time > 0 ? std::min(0.1, now - side.assist_time) : 0.0;
+                side.assist_time = now;
+                double k = dt / cfg.assist_seconds;
+                Vec3 pos_err = target_rel.t - real_rel.t;
+                Quat rot_err = (target_rel.q * real_rel.q.inverse()).normalized();
+                if (rot_err.w < 0) rot_err = {-rot_err.x, -rot_err.y, -rot_err.z, -rot_err.w};
+                double half = std::acos(std::min(1.0, rot_err.w));
+                double sn = std::sin(half);
+                Vec3 rot_vec = sn > 1e-9 ? Vec3{rot_err.x, rot_err.y, rot_err.z} * (2.0 * half / sn) : Vec3{};
+                side.assist_pos = side.assist_pos + pos_err * k;
+                side.assist_rot = side.assist_rot + rot_vec * k;
+                double max_pos = cfg.assist_max_cm, max_rot = cfg.assist_max_deg * kDegToRad;
+                if (length(side.assist_pos) > max_pos) side.assist_pos = normalized(side.assist_pos) * max_pos;
+                if (length(side.assist_rot) > max_rot) side.assist_rot = normalized(side.assist_rot) * max_rot;
+                target_rel.t = target_rel.t + side.assist_pos;
+                double ang = length(side.assist_rot);
+                if (ang > 1e-6) target_rel.q = (quat_axis_angle(side.assist_rot * (1.0 / ang), ang) * target_rel.q).normalized();
+            }
+            else
+            {
+                side.assist_pos = {};
+                side.assist_rot = {};
+                side.assist_time = 0;
+            }
+            Xf target = compose(target_rel, parent_cs);
             auto to_driver = [&](const Vec3& world_dir) { return parent_cs.q.rotate(parent_world.q.inverse().rotate(world_dir)); };
 
             Xf upper0 = pose[side.upper], lower0 = pose[side.lower], hand0 = pose[side.hand];

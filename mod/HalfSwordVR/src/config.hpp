@@ -127,6 +127,11 @@ namespace hsvr
         double twist_limit = 70.0;
         double twist_clamp = 150.0;
         double elbow_swing_max = 90.0;
+        // Hold assist: the steady gap between where a hand is sent and where the muscles hold it
+        // is made up for over this many seconds (0 = off), within these limits.
+        double assist_seconds = 0.4;
+        double assist_max_cm = 15.0;
+        double assist_max_deg = 35.0;
         // Share of the hand's roll that the forearm takes (0 = all in the wrist, 1 = all in the forearm).
         double forearm_twist_share = 0.5;
         // Moves the sword's grip along the handle relative to the controller, in cm (+ = towards the blade).
