@@ -14,6 +14,8 @@
 #include <Mod/CppUserModBase.hpp>
 #include <Unreal/FProperty.hpp>
 #include <Unreal/Property/FBoolProperty.hpp>
+#include <Unreal/Property/FStructProperty.hpp>
+#include <Unreal/UScriptStruct.hpp>
 #include <Unreal/FString.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/NameTypes.hpp>
@@ -54,6 +56,23 @@ namespace
         auto* flag = static_cast<FBoolProperty*>(property);
         const uint8_t* byte = reinterpret_cast<const uint8_t*>(owner) + property->GetOffset_Internal() + flag->GetByteOffset();
         return (*byte & flag->GetFieldMask()) != 0;
+    }
+
+    // What a widget with a "Brush" (an Image) draws: a texture, a material or a render target.
+    UObject* brush_resource(UObject* widget)
+    {
+        if (!widget) return nullptr;
+        FProperty* property = widget->GetPropertyByNameInChain(STR("Brush"));
+        if (!property) return nullptr;
+        UScriptStruct* brush_struct = static_cast<FStructProperty*>(property)->GetStruct();
+        if (!brush_struct) return nullptr;
+        for (FProperty* member : brush_struct->ForEachProperty())
+        {
+            if (member->GetName() != STR("ResourceObject")) continue;
+            const uint8_t* brush = reinterpret_cast<const uint8_t*>(widget) + property->GetOffset_Internal();
+            return *reinterpret_cast<UObject* const*>(brush + member->GetOffset_Internal());
+        }
+        return nullptr;
     }
 
     struct RawArray
@@ -597,7 +616,15 @@ namespace
                 opacity = o.Value;
             }
             ++lines;
-            HSVR_LOG("  %*s%ls | visibility %d, opacity %.2f", depth * 2, "", widget->GetFullName().c_str(), visibility, opacity);
+            if (UObject* resource = brush_resource(widget))
+            {
+                HSVR_LOG("  %*s%ls | visibility %d, opacity %.2f | draws %ls", depth * 2, "", widget->GetFullName().c_str(), visibility, opacity,
+                         resource->GetFullName().c_str());
+            }
+            else
+            {
+                HSVR_LOG("  %*s%ls | visibility %d, opacity %.2f", depth * 2, "", widget->GetFullName().c_str(), visibility, opacity);
+            }
         });
         HSVR_LOG("Widgets: end of list (%d line(s), %d widgets exist)", lines, total);
     }
