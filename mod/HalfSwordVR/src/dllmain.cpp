@@ -388,17 +388,17 @@ namespace
         const char* value;     // the value to try
     };
 
+    // Already tried by the player without effect: no sharpening, upscaler flicker rejection,
+    // upscaler history quality. Full internal resolution (r.ScreenPercentage 100) overloaded the
+    // graphics card so badly that the SteamVR link driver gave up, so the resolution test is a
+    // small step now and comes last.
     const TestStep g_test_steps[] = {
-            {"no sharpening", STR("r.Tonemapper.Sharpen"), "0"},
-            {"upscaler: flicker rejection on", STR("r.TSR.ShadingRejection.Flickering"), "1"},
-            {"upscaler: best history quality", STR("r.TSR.History.UpdateQuality"), "3"},
-            {"full internal resolution", STR("r.ScreenPercentage"), "100"},
-            {"older anti-aliasing instead of the upscaler", STR("r.AntiAliasingMethod"), "2"},
-            {"no anti-aliasing at all", STR("r.AntiAliasingMethod"), "0"},
-            {"no volumetric clouds", STR("r.VolumetricCloud"), "0"},
-            {"no occlusion culling", STR("r.AllowOcclusionQueries"), "0"},
             {"no volumetric fog", STR("r.VolumetricFog"), "0"},
             {"no fog", STR("r.Fog"), "0"},
+            {"no volumetric clouds", STR("r.VolumetricCloud"), "0"},
+            {"no occlusion culling", STR("r.AllowOcclusionQueries"), "0"},
+            {"older anti-aliasing instead of the upscaler", STR("r.AntiAliasingMethod"), "2"},
+            {"no anti-aliasing at all", STR("r.AntiAliasingMethod"), "0"},
             {"no Lumen lighting", STR("r.Lumen.DiffuseIndirect.Allow"), "0"},
             {"no Lumen reflections", STR("r.Lumen.Reflections.Allow"), "0"},
             {"no dithered change of detail level", STR("foliage.DitheredLOD"), "0"},
@@ -407,6 +407,7 @@ namespace
             {"no ambient occlusion", STR("r.AmbientOcclusionLevels"), "0"},
             {"no shadows", STR("r.ShadowQuality"), "0"},
             {"no sky atmosphere", STR("r.SkyAtmosphere"), "0"},
+            {"slightly higher internal resolution", STR("r.ScreenPercentage"), "65"},
     };
     const int g_test_count = (int)(sizeof(g_test_steps) / sizeof(g_test_steps[0]));
 
