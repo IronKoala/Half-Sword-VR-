@@ -430,7 +430,7 @@ namespace hsvr
 cbuffer Constants : register(b0)
 {
     float4 uvRect;   // xy = offset, zw = scale
-    float4 params;   // x: decode sRGB, y: key black to transparent, z: alpha gain
+    float4 params;   // x: decode sRGB, y: key black to transparent, z: alpha gain, w: minimum alpha (backdrop)
     float4 cursor;   // xy = uv (negative = none), z = aspect (w/h), w = radius (fraction of height)
 };
 Texture2D sourceTexture : register(t0);
@@ -457,7 +457,10 @@ float4 PSMain(VSOut i) : SV_Target
     float a = 1.0;
     if (params.y > 0.5)
     {
-        a = saturate(max(rgb.r, max(rgb.g, rgb.b)) * params.z);
+        // The source is flat UI drawn over black, so its colour is already "colour times
+        // opacity". Brightness is the best guess at opacity; the output stays premultiplied,
+        // so faint glows stay faint instead of turning into solid colour.
+        a = max(saturate(max(rgb.r, max(rgb.g, rgb.b)) * params.z), params.w);
     }
     if (cursor.x >= 0.0)
     {
@@ -546,7 +549,7 @@ float4 PSMain(VSOut i) : SV_Target
             if (blend)
             {
                 rt.BlendEnable = TRUE;
-                rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+                rt.SrcBlend = D3D12_BLEND_ONE; // the shader's output is premultiplied
                 rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
                 rt.BlendOp = D3D12_BLEND_OP_ADD;
                 rt.SrcBlendAlpha = D3D12_BLEND_ONE;
@@ -1130,7 +1133,7 @@ float4 PSMain(VSOut i) : SV_Target
                 c.uv_rect[2] = 1.0f;
                 c.uv_rect[3] = 1.0f;
                 c.params[1] = 1.0f;
-                c.params[2] = 8.0f;
+                c.params[2] = 2.0f;
                 c.cursor[0] = -1.0f;
                 g.cmd->SetPipelineState(g.window_blend_pipeline.get());
                 g.cmd->RSSetViewports(1, &vp);
@@ -1354,7 +1357,7 @@ float4 PSMain(VSOut i) : SV_Target
                     c.uv_rect[3] = 1.0f;
                     c.params[0] = (is_srgb_format(g.xr_format) && !is_float) ? 1.0f : 0.0f;
                     c.params[1] = 1.0f;
-                    c.params[2] = 8.0f;
+                    c.params[2] = (float)cfg.ui_opacity_gain;
                     c.cursor[0] = -1.0f;
                     DXGI_SWAP_CHAIN_DESC scd{};
                     swapchain->GetDesc(&scd);
@@ -1372,6 +1375,9 @@ float4 PSMain(VSOut i) : SV_Target
                             c.cursor[1] = (float)p.y / (float)client.bottom;
                             c.cursor[2] = (float)g.ui_copy_width / (float)std::max<UINT>(1, g.ui_copy_height);
                             c.cursor[3] = 0.008f;
+                            // A mouse pointer means a menu is up: put a dark sheet behind it so
+                            // every button can be read whatever is behind the panel.
+                            c.params[3] = (float)cfg.ui_menu_backdrop;
                         }
                     }
                     ui_acquired = blit_to_swapchain(g.ui, srv, c);
@@ -1385,7 +1391,7 @@ float4 PSMain(VSOut i) : SV_Target
                             yaw = g_recenter_xr_yaw;
                         }
                         float d = (float)cfg.ui_distance_m;
-                        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT; // premultiplied
                         quad.space = g_local_space.load();
                         quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                         quad.subImage.swapchain = g.ui.handle;

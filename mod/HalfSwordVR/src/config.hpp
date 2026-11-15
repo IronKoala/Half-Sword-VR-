@@ -31,6 +31,10 @@ namespace hsvr
         double ui_distance_m = 1.6;
         double ui_width_m = 1.8;
         double ui_height_offset_m = -0.05;
+        // How solid the panel's menus and HUD are drawn: opacity = brightness x this.
+        double ui_opacity_gain = 2.0;
+        // Darkness of the sheet behind the panel while a mouse pointer is showing (0 = none, 1 = solid).
+        double ui_menu_backdrop = 0.85;
         // Show the left eye's picture (with menus) in the game window on the monitor.
         bool mirror_window = true;
         // Virtual key codes. 0x24 = Home, 0x23 = End, 0x2D = Insert.
