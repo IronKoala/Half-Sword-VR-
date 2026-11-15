@@ -45,6 +45,8 @@ namespace hsvr
         // Asked by the game thread (recenter key); consumed where the head pose is known.
         std::atomic<bool> recenter_requested{true};
         std::atomic<bool> ui_visible{true};
+        // View from the game's own (third-person) camera instead of the character's head.
+        std::atomic<bool> third_person{false};
         // Diagnostics.
         std::atomic<uint64_t> frames_submitted{0};
         std::atomic<uint64_t> frames_without_image{0};

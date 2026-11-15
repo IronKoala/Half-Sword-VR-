@@ -33,9 +33,11 @@ namespace hsvr
         double ui_height_offset_m = -0.05;
         // Show the left eye's picture (with menus) in the game window on the monitor.
         bool mirror_window = true;
-        // Virtual key codes. 0x24 = Home, 0x23 = End.
+        // Virtual key codes. 0x24 = Home, 0x23 = End, 0x2D = Insert.
         int recenter_key = 0x24;
         int toggle_ui_key = 0x23;
+        // Switches between the view from the character's head and the game's own camera.
+        int toggle_view_key = 0x2D;
         // Frames of prediction added when asking the headset for a pose (-1 = adapt automatically).
         double predict_frames = -1.0;
         // 1 = the eyes are drawn at the headset's own resolution and menus float on a panel.

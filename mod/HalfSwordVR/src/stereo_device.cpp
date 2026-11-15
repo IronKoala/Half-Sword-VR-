@@ -63,8 +63,11 @@ namespace hsvr
             g_view.base_yaw = camera_rotation.Yaw;
             Vec3 camera{camera_location.X, camera_location.Y, camera_location.Z};
             g_view.anchor = camera;
+            // The provider is asked every frame (it also shows or hides the character's head).
             PlayerAnchor player;
-            if (cfg.anchor == "head" && g_anchor_provider && g_anchor_provider(player) && player.has_head)
+            bool have_player = g_anchor_provider && g_anchor_provider(player) && player.has_head;
+            bool first_person = cfg.anchor == "head" && !shared().third_person.load();
+            if (first_person && have_player)
             {
                 Vec3 offset = player.head_position - player.actor_position;
                 if (!g_have_smoothed || cfg.anchor_smoothing <= 0.0)
@@ -90,9 +93,9 @@ namespace hsvr
 
             if (cfg.log_poses)
             {
-                HSVR_LOG_EVERY(1.0, "Pose: anchor (%.0f, %.0f, %.0f) base yaw %.0f, camera (%.0f, %.0f, %.0f), head bone %s",
+                HSVR_LOG_EVERY(1.0, "Pose: anchor (%.0f, %.0f, %.0f) base yaw %.0f, camera (%.0f, %.0f, %.0f), head bone %s, %s",
                                g_view.anchor.x, g_view.anchor.y, g_view.anchor.z, g_view.base_yaw, camera.x, camera.y, camera.z,
-                               player.has_head ? "found" : "not found");
+                               player.has_head ? "found" : "not found", first_person ? "first person" : "game camera");
             }
         }
 
