@@ -1,4 +1,4 @@
-// Motion controls: the controllers move the character's arms. See arm_control.hpp for the idea.
+﻿// Motion controls: the controllers move the character's arms. See arm_control.hpp for the idea.
 //
 // Order of events in one frame (game thread):
 //  1. arm_game_tick (before the world ticks): read both controllers, put them into the game
@@ -375,7 +375,7 @@ namespace hsvr
             int controller_index;
             // Driver bone indices.
             int32_t clavicle = -1, upper = -1, lower = -1, hand = -1, parent = -1;
-            FName parent_name, hand_name, middle_name, thumb_name;
+            FName parent_name, hand_name, middle_name, thumb_name, lower_name;
             // Learned from the game's own animation (bone-local).
             bool have_axes = false;
             Vec3 upper_axis, lower_axis; // bone direction in the bone's own frame
@@ -571,6 +571,7 @@ namespace hsvr
                 side.lower = driver_bone_index(side_name(L"lowerarm", side));
                 side.hand = driver_bone_index(side_name(L"hand", side));
                 side.hand_name = side_name(L"hand", side);
+                side.lower_name = side_name(L"lowerarm", side);
                 side.middle_name = side_name(L"middle_01", side);
                 side.thumb_name = side_name(L"thumb_01", side);
                 side.have_axes = side.have_hinge = side.have_grip = false;
@@ -874,6 +875,93 @@ namespace hsvr
             (void)anim;
         }
 
+        // ---- recorder: every frame for a few seconds, started with the right trigger ----------
+        // Writes Mods\HalfSwordVR\arms_record_<n>.csv. Per arm: how far the physical hand is from
+        // where it was sent, and the wrist (hand relative to forearm) as sent and as it really is,
+        // split into bend (swing) and roll (twist about the forearm), to see whether the wrist stops
+        // at a limit or the muscles are too slow.
+        struct Recorder
+        {
+            bool active = false;
+            double start = 0, until = 0, cooldown_until = 0;
+            int number = 0;
+            std::string text;
+            Quat last_target[2];
+            double last_time = 0;
+        };
+        Recorder g_rec;
+
+        void swing_twist_deg(const Quat& rel, const Vec3& axis, double& swing, double& twist)
+        {
+            double tw = 2.0 * std::atan2(rel.x * axis.x + rel.y * axis.y + rel.z * axis.z, rel.w);
+            if (tw > kPi) tw -= 2.0 * kPi;
+            if (tw < -kPi) tw += 2.0 * kPi;
+            twist = tw * kRadToDeg;
+            Vec3 bent = rel.rotate(axis);
+            swing = std::acos(std::max(-1.0, std::min(1.0, dot(bent, axis)))) * kRadToDeg;
+        }
+
+        void recorder_tick()
+        {
+            State& s = g_state;
+            double now = now_seconds();
+            if (!g_rec.active)
+            {
+                if (now >= g_rec.cooldown_until && s.hands[1].valid && s.hands[1].trigger > 0.7f && !s.menu_up && s.ready)
+                {
+                    g_rec.active = true;
+                    g_rec.start = now;
+                    g_rec.until = now + 8.0;
+                    g_rec.number++;
+                    g_rec.last_time = 0;
+                    g_rec.text = "t,side,err_cm,err_deg,target_speed_dps,sent_wrist_bend,sent_wrist_roll,real_wrist_bend,real_wrist_roll,sent_elbow,real_elbow\n";
+                    HSVR_LOG("Arms: recording 8 seconds (right trigger)");
+                }
+                return;
+            }
+            if (now < g_rec.until) return;
+            g_rec.active = false;
+            g_rec.cooldown_until = now + 2.0;
+            char name[64];
+            snprintf(name, sizeof(name), "arms_record_%d.csv", g_rec.number);
+            std::wstring path = mod_dir() + std::wstring(name, name + strlen(name));
+            if (FILE* f = _wfopen(path.c_str(), L"w"))
+            {
+                fputs(g_rec.text.c_str(), f);
+                fclose(f);
+            }
+            HSVR_LOG("Arms: recording saved as %s", name);
+        }
+
+        void record_frame(const std::vector<Xf>& pose)
+        {
+            State& s = g_state;
+            if (!g_rec.active) return;
+            double now = now_seconds();
+            double dt = g_rec.last_time > 0 ? now - g_rec.last_time : 0;
+            for (int k = 0; k < 2; ++k)
+            {
+                Side& side = s.side[k];
+                if (!side.target_valid || !side.have_axes) continue;
+                Xf hand, lower, upper;
+                if (!socket_transform(s.body, side.hand_name, RTS_World, hand) || !socket_transform(s.body, side.lower_name, RTS_World, lower) ||
+                    !socket_transform(s.body, side_name(L"upperarm", side), RTS_World, upper))
+                    continue;
+                double speed = dt > 0 ? quat_angle_deg(g_rec.last_target[k], side.target_world.q) / dt : 0;
+                g_rec.last_target[k] = side.target_world.q;
+                double sb, sr, rb, rr, se, re, dummy;
+                swing_twist_deg(pose[side.lower].q.inverse() * pose[side.hand].q, side.lower_axis, sb, sr);
+                swing_twist_deg(lower.q.inverse() * hand.q, side.lower_axis, rb, rr);
+                swing_twist_deg(pose[side.upper].q.inverse() * pose[side.lower].q, side.upper_axis, se, dummy);
+                swing_twist_deg(upper.q.inverse() * lower.q, side.upper_axis, re, dummy);
+                char line[256];
+                snprintf(line, sizeof(line), "%.3f,%c,%.1f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f\n", now - g_rec.start, k ? 'R' : 'L', length(hand.t - side.target_world.t),
+                         quat_angle_deg(hand.q, side.target_world.q), speed, sb, sr, rb, rr, se, re);
+                g_rec.text += line;
+            }
+            g_rec.last_time = now;
+        }
+
         bool same_raw(const RawXf& a, const RawXf& b) { return memcmp(a.q, b.q, sizeof(a.q)) == 0 && memcmp(a.t, b.t, sizeof(a.t)) == 0; }
 
         void before_body_update()
@@ -926,6 +1014,7 @@ namespace hsvr
             s.written_marker = buffer[s.marker_bone];
             s.written_frame = s.frame;
             ++s.applied_count;
+            record_frame(pose);
         }
 
         void log_status(const Config& cfg)
@@ -995,6 +1084,7 @@ namespace hsvr
             for (Side& side : s.side) learn_grip(side);
         }
         compute_targets();
+        recorder_tick();
         if (s.enabled_by_key && !menu_up && s.hands_valid) sync_aim();
         log_status(cfg);
     }
