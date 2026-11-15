@@ -80,6 +80,9 @@ namespace hsvr
         // Save troubleshooting pictures of the menu layer and the monitor every this many seconds
         // into Mods\HalfSwordVR\captures (0 = off).
         double capture_seconds = 0.0;
+        // 1 = take those pictures only while the game shows a mouse pointer (menus), and only the
+        // menu layer, so that a short visit to one menu screen is not overwritten by a fight.
+        bool capture_menus_only = false;
         // Test without a headset: a pretend headset that slowly looks left and right. The two
         // eye views show side by side in the game window.
         bool dev_fake_headset = false;

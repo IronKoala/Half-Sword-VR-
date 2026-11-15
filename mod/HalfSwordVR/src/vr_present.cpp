@@ -1250,7 +1250,7 @@ float4 PSMain(VSOut i) : SV_Target
         // Mods\HalfSwordVR\captures. The GPU copies them into buffers we can read; a helper thread
         // writes the files, so the game does not wait for the disk.
         constexpr int kCaptureKinds = 2; // 0: menu layer, 1: monitor picture
-        constexpr int kCaptureFiles = 24;
+        constexpr int kCaptureFiles = 48;
         struct CaptureBuffer
         {
             Com<ID3D12Resource> buffer;
@@ -1628,12 +1628,15 @@ float4 PSMain(VSOut i) : SV_Target
 
                 if (want_monitor && have_back_buffer) draw_monitor_picture(swapchain, have_item ? &item : nullptr, scene, scene_srv, ui_srv);
 
-                if (separate && have_back_buffer && capture_due(cfg))
+                if (separate && have_back_buffer && capture_due(cfg) && (!cfg.capture_menus_only || game_pointer))
                 {
                     g_capture.last_time = now_seconds();
                     record_capture(0, g.ui_copy.get(), g.ui_copy_state);
                     Com<ID3D12Resource> back;
-                    if (want_monitor && current_back_buffer(swapchain, back)) record_capture(1, back.get(), D3D12_RESOURCE_STATE_PRESENT);
+                    if (!cfg.capture_menus_only && want_monitor && current_back_buffer(swapchain, back))
+                    {
+                        record_capture(1, back.get(), D3D12_RESOURCE_STATE_PRESENT);
+                    }
                 }
 
                 end_commands();

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -501,6 +502,25 @@ namespace
         HSVR_LOG("Widgets: end of list (%d line(s), %d widgets exist)", lines, total);
     }
 
+    // A number that changes when a menu screen opens or closes: which widgets are on screen and
+    // which of them are visible.
+    uint64_t screen_signature()
+    {
+        uint64_t hash = 1469598103934665603ull;
+        walk_screen_widgets([&hash](UObject* widget, int) {
+            int visibility = -1;
+            if (UFunction* visibility_fn = widget->GetFunctionByNameInChain(STR("GetVisibility")))
+            {
+                ByteReturnParams v{};
+                widget->ProcessEvent(visibility_fn, &v);
+                visibility = v.ReturnValue;
+            }
+            hash = (hash ^ (uint64_t)(uintptr_t)widget) * 1099511628211ull;
+            hash = (hash ^ (uint64_t)(visibility + 1)) * 1099511628211ull;
+        });
+        return hash;
+    }
+
     // Feeds the input record in the log (see input_watch.hpp) and tells the picture side whether
     // a menu is up. Reads only.
     void watch_input()
@@ -571,6 +591,23 @@ namespace
             {
                 --graphics_left;
                 log_graphics(due_reason);
+            }
+        }
+
+        // While a menu has the mouse pointer, also write the list whenever the screen changes, so
+        // that every menu screen the player visits is on record (checked twice a second).
+        static double last_scan = 0.0;
+        static uint64_t last_signature = 0;
+        static int change_lists_left = 16;
+        if (game.wants_pointer && change_lists_left > 0 && now - last_scan >= 0.5)
+        {
+            last_scan = now;
+            uint64_t signature = screen_signature();
+            if (signature != last_signature)
+            {
+                last_signature = signature;
+                --change_lists_left;
+                log_widgets("the menu screen changed");
             }
         }
     }

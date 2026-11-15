@@ -192,6 +192,7 @@ namespace hsvr
         flag("log_poses", c.log_poses);
         flag("log_input", c.log_input);
         num("capture_seconds", c.capture_seconds);
+        flag("capture_menus_only", c.capture_menus_only);
         integer("stereo_slot_offset", c.stereo_slot_offset);
         flag("dev_fake_headset", c.dev_fake_headset);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
