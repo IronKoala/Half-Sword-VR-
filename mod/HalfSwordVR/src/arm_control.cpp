@@ -763,11 +763,27 @@ namespace hsvr
                 ok = false;
                 if (property)
                 {
+                    // Seen live as a 2-D point; a 3-D vector (X and Y used) is accepted too.
                     auto* sp = static_cast<FStructProperty*>(property);
-                    UScriptStruct* st = sp->GetStruct();
-                    ok = st && st->GetName() == STR("Vector2D") && property->GetSize() == (int32_t)sizeof(ue::FVector2D);
+                    UScriptStruct* st = property->GetClass().GetName() == STR("StructProperty") ? sp->GetStruct() : nullptr;
+                    std::wstring type = st ? std::wstring(st->GetName()) : std::wstring(property->GetClass().GetName());
+                    ok = st && ((type == L"Vector2D" && property->GetSize() == 16) || (type == L"Vector" && property->GetSize() == 24));
+                    HSVR_LOG("Arms: the game's aim (Aim Vector) is a %ls of %d bytes at 0x%X; %s", type.c_str(), property->GetSize(), property->GetOffset_Internal(),
+                             ok ? "it follows the sword" : "not a type the mod can write; aim_sync does nothing");
                 }
-                HSVR_LOG("Arms: the game's aim (Aim Vector) %s", ok ? "found; it follows the sword" : "not found or not a 2-D vector; aim_sync does nothing");
+                else
+                {
+                    std::wstring names;
+                    for (UStruct* st = cls; st; st = st->GetSuperStruct())
+                    {
+                        for (FProperty* p : st->ForEachProperty())
+                        {
+                            std::wstring n = p->GetName();
+                            if (n.find(L"Aim") != std::wstring::npos) names += n + L" (" + std::wstring(p->GetClass().GetName()) + L") ";
+                        }
+                    }
+                    HSVR_LOG("Arms: the character has no property named Aim Vector; aim_sync does nothing. Aim properties: %ls", names.c_str());
+                }
             }
             if (!ok) return;
             Vec3 b = right.blade_world;
