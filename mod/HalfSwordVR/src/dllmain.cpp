@@ -399,10 +399,10 @@ namespace
     // sample per 64 pixels. On a monitor that is about 30 samples across the picture; in the
     // headset each eye is drawn only about 1000 pixels wide, which leaves about 16. Far thin
     // things against the sky (a steeple, leaves) then catch a different sample from frame to frame
-    // and flicker, and plants are lit in blotches. The player found this with the picture tests:
-    // lighting off stopped the flicker, twice as dense samples stopped most of it and made the
-    // plants look better, and of 32, 16 and 8 he preferred 16. The game sets its value again when
-    // a map loads, so it is checked every frame.
+    // and flicker, and plants are lit in blotches. The player found this with a key that stepped
+    // through tests (since removed): lighting off stopped the flicker, twice as dense samples
+    // stopped most of it and made the plants look better, and of 32, 16 and 8 he preferred 16.
+    // The game sets its value again when a map loads, so it is checked every frame.
     void keep_light_samples(const hsvr::Config& cfg)
     {
         if (cfg.light_samples <= 0) return;
@@ -426,81 +426,8 @@ namespace
         }
     }
 
-    // ---- picture tests (temporary aid) -----------------------------------------------------------
-    // For a flicker on far, thin things (a steeple, tree leaves) on the Slums map. Each press of
-    // the test key undoes the previous test and switches on the next one; the player stops
-    // pressing when the flicker stops, and the last "Test ... ON" line in the log names the cause.
-    // After the last test one more press puts everything back.
-    struct TestStep
-    {
-        const char* what;      // for the log
-        const TCHAR* variable; // the engine setting
-        const char* value;     // the value to try
-    };
-
-    // Found so far: no sharpening, the upscaler's settings, fog, clouds, occlusion culling and the
-    // anti-aliasing method make no difference; switching the game's bounce lighting (Lumen global
-    // illumination) off stops the flicker but makes the plants look worse. These tests keep the
-    // bounce lighting on and change one part of it at a time. A value that starts with "/" divides
-    // the current value (not below 8).
-    const TestStep g_test_steps[] = {
-            {"bounce lighting without screen traces", STR("r.Lumen.ScreenProbeGather.ScreenTraces"), "0"},
-            {"no short-range shading", STR("r.Lumen.ScreenProbeGather.ShortRangeAO"), "0"},
-            {"smooth blending between light samples", STR("r.Lumen.ScreenProbeGather.StochasticInterpolation"), "0"},
-            {"light samples stay in place from frame to frame", STR("r.Lumen.ScreenProbeGather.FixedJitterIndex"), "0"},
-            {"lighting smoothed over more frames", STR("r.Lumen.ScreenProbeGather.Temporal.MaxFramesAccumulated"), "40"},
-            {"light samples filtered over time", STR("r.Lumen.ScreenProbeGather.TemporalFilterProbes"), "1"},
-            {"twice as dense light samples", STR("r.Lumen.ScreenProbeGather.DownsampleFactor"), "/2"},
-            {"four times as dense light samples", STR("r.Lumen.ScreenProbeGather.DownsampleFactor"), "/4"},
-            {"full-size depth for screen traces", STR("r.Lumen.ScreenProbeGather.ScreenTraces.HZBTraversal.FullResDepth"), "1"},
-            {"no Lumen reflections", STR("r.Lumen.Reflections.Allow"), "0"},
-    };
-    const int g_test_count = (int)(sizeof(g_test_steps) / sizeof(g_test_steps[0]));
-
-    void set_test_variable(const TCHAR* variable, const char* value)
-    {
-        std::wstring command(variable);
-        command += L" ";
-        for (const char* c = value; *c; ++c) command += (wchar_t)*c;
-        run_console_command(command.c_str());
-    }
-
-    void run_test_step()
-    {
-        static int current = -1; // the test that is on, -1 = none
-        static float saved = 0.0f;
-        if (current >= 0)
-        {
-            const TestStep& old = g_test_steps[current];
-            char text[32];
-            snprintf(text, sizeof(text), "%g", (double)saved);
-            set_test_variable(old.variable, text);
-        }
-        ++current;
-        if (current >= g_test_count)
-        {
-            current = -1;
-            HSVR_LOG("Test: all %d tests done, everything is back to normal", g_test_count);
-            return;
-        }
-        const TestStep& step = g_test_steps[current];
-        saved = console_variable(step.variable);
-        char value[32];
-        snprintf(value, sizeof(value), "%s", step.value);
-        if (step.value[0] == '/')
-        {
-            double divided = (double)saved / atof(step.value + 1);
-            if (divided < 8.0) divided = 8.0;
-            if (divided > (double)saved) divided = (double)saved;
-            snprintf(value, sizeof(value), "%g", divided);
-        }
-        set_test_variable(step.variable, value);
-        HSVR_LOG("Test %d of %d ON: %s (%ls %s, was %g, now reads %g)", current + 1, g_test_count, step.what, step.variable, value, (double)saved,
-                 (double)console_variable(step.variable));
-    }
-
     // ---- unattended tests (ini dev_script) -------------------------------------------------------
-    // Runs console commands and picture tests at set times, so that a test needs no key or click.
+    // Runs console commands at set times, so that a test needs no key or click.
     struct ScriptEntry
     {
         double at = 0.0;
@@ -548,8 +475,7 @@ namespace
             GetSystemTime(&utc);
             HSVR_LOG("Script: %.0f s: %s (%02d:%02d:%02d.%03d UTC)", entry.at, entry.command.c_str(), (int)utc.wHour, (int)utc.wMinute, (int)utc.wSecond,
                      (int)utc.wMilliseconds);
-            if (entry.command == "test") run_test_step();
-            else run_console_command(entry.command);
+            run_console_command(entry.command);
             return; // one a tick
         }
     }
@@ -934,12 +860,9 @@ namespace
         bool ui = key_pressed_once(cfg.toggle_ui_key, ui_down);
         bool mode = key_pressed_once(cfg.toggle_mode_key, mode_down);
         bool view = key_pressed_once(cfg.toggle_view_key, view_down);
-        static bool test_down = false;
-        bool test = cfg.test_key != 0 && key_pressed_once(cfg.test_key, test_down);
         DWORD front_process = 0;
         if (HWND front = GetForegroundWindow()) GetWindowThreadProcessId(front, &front_process);
         if (front_process != GetCurrentProcessId()) return;
-        if (test && g_console_done) run_test_step();
         if (recenter)
         {
             shared.recenter_requested.store(true);

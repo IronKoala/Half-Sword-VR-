@@ -53,8 +53,6 @@ namespace hsvr
         int toggle_view_key = 0x2D;
         // Flips between full-resolution mode and the fallback while playing. 0x22 = Page Down.
         int toggle_mode_key = 0x22;
-        // Temporary aid: steps through picture tests (0x21 = Page Up, 0 = off). See run_test_step.
-        int test_key = 0x21;
         // Frames of prediction added when asking the headset for a pose (-1 = adapt automatically).
         double predict_frames = -1.0;
         // A head position is matched to its picture by order. One that was taken more than this
@@ -121,9 +119,8 @@ namespace hsvr
         // movement is added to dev_fake_yaw and dev_fake_pitch.
         double dev_fake_scale = 1.0;
         // Unattended tests: "seconds:command" entries separated by semicolons, counted from the
-        // moment the mod is ready. A command is an engine console command, or the word `test`
-        // for the next picture test (the same as the test key). Read once at the start.
-        // Example: 20:open /Game/Maps/Arenas/Map_Arena_Slums;50:test;56:test
+        // moment the mod is ready. A command is an engine console command. Read once at the start.
+        // Example: 20:open /Game/Maps/Arenas/Map_Arena_Slums;50:r.Fog 0;56:r.Fog 1
         std::string dev_script;
         int stereo_slot_offset = 0; // 0 = find automatically
     };
