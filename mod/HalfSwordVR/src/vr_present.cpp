@@ -1,6 +1,7 @@
 #include "vr_present.hpp"
 
 #include "config.hpp"
+#include "engine_slot.hpp"
 #include "log.hpp"
 #include "xr_loader.hpp"
 
@@ -334,6 +335,90 @@ namespace hsvr
         Present1Fn g_original_present1 = nullptr;
         thread_local bool t_in_present = false;
 
+        // A Direct3D 12 swap chain does not tell us which command queue it presents on, so we
+        // watch the queues the game submits work to and pick the one that belongs to its device.
+        using ExecuteFn = void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
+        ExecuteFn g_original_execute = nullptr;
+        std::atomic<bool> g_queue_search_over{false};
+        std::mutex g_queue_mutex;
+        std::vector<Com<ID3D12CommandQueue>> g_seen_queues;
+
+        void STDMETHODCALLTYPE hooked_execute(ID3D12CommandQueue* self, UINT count, ID3D12CommandList* const* lists)
+        {
+            if (!g_queue_search_over.load(std::memory_order_relaxed) && self)
+            {
+                std::lock_guard<std::mutex> lock(g_queue_mutex);
+                bool known = false;
+                for (auto& q : g_seen_queues) known = known || q.get() == self;
+                if (!known && g_seen_queues.size() < 16 && !g_queue_search_over.load())
+                {
+                    D3D12_COMMAND_QUEUE_DESC desc = self->GetDesc();
+                    if (desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT)
+                    {
+                        Com<ID3D12CommandQueue> keep;
+                        keep.assign(self);
+                        g_seen_queues.push_back(std::move(keep));
+                    }
+                }
+            }
+            g_original_execute(self, count, lists);
+        }
+
+        bool same_object(IUnknown* a, IUnknown* b)
+        {
+            if (!a || !b) return false;
+            Com<IUnknown> ia, ib;
+            if (FAILED(a->QueryInterface(IID_PPV_ARGS(ia.put()))) || FAILED(b->QueryInterface(IID_PPV_ARGS(ib.put())))) return false;
+            return ia.get() == ib.get();
+        }
+
+        // True if the swap chain object holds a pointer to this queue somewhere near its start.
+        bool swapchain_refers_to(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
+        {
+            const uint8_t* base = reinterpret_cast<const uint8_t*>(swapchain);
+            for (size_t offset = 0; offset < 0x800; offset += sizeof(void*))
+            {
+                const uint8_t* p = base + offset;
+                // Check each page once before reading from it.
+                if ((offset == 0 || (reinterpret_cast<uintptr_t>(p) & 0xFFF) == 0) && !memory_readable(p, sizeof(void*))) return false;
+                void* value = nullptr;
+                memcpy(&value, p, sizeof(value));
+                if (value == queue) return true;
+            }
+            return false;
+        }
+
+        // The game's graphics queue for this swap chain, or null if it has not submitted work yet.
+        Com<ID3D12CommandQueue> find_game_queue(IDXGISwapChain* swapchain, ID3D12Device* device)
+        {
+            std::lock_guard<std::mutex> lock(g_queue_mutex);
+            std::vector<ID3D12CommandQueue*> matches;
+            for (auto& q : g_seen_queues)
+            {
+                Com<ID3D12Device> queue_device;
+                if (SUCCEEDED(q->GetDevice(IID_PPV_ARGS(queue_device.put()))) && same_object(queue_device.get(), device)) matches.push_back(q.get());
+            }
+            Com<ID3D12CommandQueue> chosen;
+            if (matches.empty()) return chosen;
+            ID3D12CommandQueue* pick = matches[0];
+            if (matches.size() > 1)
+            {
+                int referred = 0;
+                for (ID3D12CommandQueue* q : matches)
+                {
+                    if (swapchain_refers_to(swapchain, q))
+                    {
+                        if (referred++ == 0) pick = q;
+                    }
+                }
+                HSVR_LOG("D3D: the game uses %zu graphics queues; %d of them belong to the swap chain", matches.size(), referred);
+            }
+            chosen.assign(pick);
+            g_queue_search_over.store(true);
+            g_seen_queues.clear();
+            return chosen;
+        }
+
         const char* kShaderSource = R"(
 cbuffer Constants : register(b0)
 {
@@ -571,16 +656,23 @@ float4 PSMain(VSOut i) : SV_Target
         // First Present from the game: find its D3D12 queue and create the OpenXR session on it.
         bool init_graphics(IDXGISwapChain* swapchain)
         {
-            Com<ID3D12CommandQueue> queue;
-            if (FAILED(swapchain->GetDevice(IID_PPV_ARGS(queue.put()))) || !queue)
+            Com<ID3D12Device> device;
+            if (FAILED(swapchain->GetDevice(IID_PPV_ARGS(device.put()))) || !device)
             {
                 HSVR_LOG_EVERY(10.0, "Present on a swap chain that is not Direct3D 12; ignoring it");
                 return false;
             }
-            D3D12_COMMAND_QUEUE_DESC queue_desc = queue->GetDesc();
-            if (queue_desc.Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return false;
-            Com<ID3D12Device> device;
-            if (FAILED(queue->GetDevice(IID_PPV_ARGS(device.put()))) || !device) return false;
+            if (!g_original_execute)
+            {
+                HSVR_LOG_EVERY(10.0, "D3D: cannot watch the game's command queues, so VR cannot start");
+                return false;
+            }
+            Com<ID3D12CommandQueue> queue = find_game_queue(swapchain, device.get());
+            if (!queue)
+            {
+                HSVR_LOG_EVERY(10.0, "D3D: waiting to see the game's graphics queue");
+                return false;
+            }
             g.device = device;
             g.queue = queue;
             g.game_swapchain = swapchain;
@@ -1174,11 +1266,14 @@ float4 PSMain(VSOut i) : SV_Target
             return hr;
         }
 
-        bool patch_vtable_slot(void** vtable, int index, void* replacement, void** original)
+        // Swaps one entry of a function table. The original is stored first, because the game may
+        // call through the table on another thread the moment the new entry is written.
+        template <typename Fn>
+        bool patch_vtable_slot(void** vtable, int index, void* replacement, Fn& original)
         {
             DWORD old_protect = 0;
             if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_READWRITE, &old_protect)) return false;
-            *original = vtable[index];
+            original = reinterpret_cast<Fn>(vtable[index]);
             vtable[index] = replacement;
             VirtualProtect(&vtable[index], sizeof(void*), old_protect, &old_protect);
             return true;
@@ -1237,17 +1332,12 @@ float4 PSMain(VSOut i) : SV_Target
                 if (SUCCEEDED(hr) && swapchain)
                 {
                     void** vtable = *reinterpret_cast<void***>(swapchain.get());
-                    void* original = nullptr;
-                    ok = patch_vtable_slot(vtable, 8, reinterpret_cast<void*>(&hooked_present), &original);
-                    g_original_present = reinterpret_cast<PresentFn>(original);
-                    if (ok)
-                    {
-                        void* original1 = nullptr;
-                        if (patch_vtable_slot(vtable, 22, reinterpret_cast<void*>(&hooked_present1), &original1))
-                        {
-                            g_original_present1 = reinterpret_cast<Present1Fn>(original1);
-                        }
-                    }
+                    // ID3D12CommandQueue::ExecuteCommandLists is slot 10 of the queue's function table.
+                    void** queue_vtable = *reinterpret_cast<void***>(queue.get());
+                    ok = patch_vtable_slot(queue_vtable, 10, reinterpret_cast<void*>(&hooked_execute), g_original_execute);
+                    if (!ok) HSVR_LOG("Hook: could not hook the command queue");
+                    ok = ok && patch_vtable_slot(vtable, 8, reinterpret_cast<void*>(&hooked_present), g_original_present);
+                    if (ok) patch_vtable_slot(vtable, 22, reinterpret_cast<void*>(&hooked_present1), g_original_present1);
                 }
                 else
                 {
@@ -1256,7 +1346,7 @@ float4 PSMain(VSOut i) : SV_Target
             }
             DestroyWindow(window);
             UnregisterClassW(wc.lpszClassName, wc.hInstance);
-            HSVR_LOG(ok ? "Hook: Present hooked" : "Hook: could not hook Present");
+            HSVR_LOG(ok ? "Hook: Present and the command queue hooked" : "Hook: could not hook Present");
         }
     } // namespace
 
