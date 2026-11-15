@@ -2,13 +2,13 @@
 
 A from-scratch native VR mod for Half Sword (Unreal Engine 5.4.4), targeting SteamVR through OpenXR. Single-player only.
 
-Status: Phase 0 (groundwork). Nothing here changes the game yet.
+Status: Phase 1. The game shows in the headset with head tracking; controls are still mouse and keyboard. See `docs/phase1-results.md` for what works, the keys and the settings.
 
 ## What's in the repo
 
 | Path | What it is |
 | --- | --- |
-| `mod/HalfSwordVR` | The in-game mod, a UE4SS C++ mod. Phase 0 version only logs that it loaded and finds the player. |
+| `mod/HalfSwordVR` | The in-game mod, a UE4SS C++ mod: head-tracked stereo view through OpenXR. |
 | `deps/RE-UE4SS` | UE4SS source, pinned to the exact build installed in the game (commit e3ba1016). |
 | `tools/xrtest` | A standalone headset test. Shows a room-fixed grid in the headset and logs the head pose, to confirm SteamVR + OpenXR + Direct3D 12 work on your PC. |
 
