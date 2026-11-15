@@ -244,6 +244,10 @@ namespace
                 STR("r.LensFlareQuality"),
                 STR("r.MotionBlurQuality"),
                 STR("r.DepthOfFieldQuality"),
+                STR("r.VolumetricCloud"),
+                STR("r.VolumetricRenderTarget"),
+                STR("r.VolumetricRenderTarget.Mode"),
+                STR("r.VolumetricRenderTarget.UpsamplingMode"),
                 STR("r.DynamicRes.OperationMode"),
                 STR("r.NGX.DLSS.Enable"),
                 STR("r.NGX.DLAA.Enable"),
@@ -318,6 +322,32 @@ namespace
         }
     }
 
+    // Unreal 5.4 draws volumetric clouds per view in one of four modes. In mode 1 (and 3) it looks
+    // up the scene's depth for a view at the wrong place when that view does not start at the
+    // left edge of the picture, which is the case for our second eye: the clouds then land in
+    // front of everything in that eye. Mode 0, the engine's default, is right. A game can pick
+    // another mode at any time, so the mode is checked once a second and put back to 0.
+    int g_test_current = -1; // the picture test that is on (see run_test_step), -1 = none
+
+    void keep_clouds_correct(const hsvr::Config& cfg)
+    {
+        if (!cfg.fix_clouds || g_test_current >= 0) return;
+        static double last_check = 0.0;
+        double now = hsvr::now_seconds();
+        if (now - last_check < 1.0) return;
+        last_check = now;
+        float mode = console_variable(STR("r.VolumetricRenderTarget.Mode"));
+        if (mode == 0.0f || mode < -900.0f) return;
+        run_console_command(STR("r.VolumetricRenderTarget.Mode 0"));
+        static int lines_left = 20;
+        if (lines_left > 0)
+        {
+            --lines_left;
+            HSVR_LOG("Clouds: the game had cloud mode %g, set to 0 so that both eyes show them behind the scenery (now reads %g)", (double)mode,
+                     (double)console_variable(STR("r.VolumetricRenderTarget.Mode")));
+        }
+    }
+
     // ---- picture tests (temporary aid) -----------------------------------------------------------
     // Each press of the test key undoes the previous test and switches on the next one, so that
     // the player can watch for the moment a missing object comes back. The log says which test is
@@ -331,6 +361,8 @@ namespace
     };
 
     const TestStep g_test_steps[] = {
+            {"cloud mode 2", STR("r.VolumetricRenderTarget.Mode"), "2", 0},
+            {"clouds drawn without the depth-aware upsampling", STR("r.VolumetricRenderTarget.UpsamplingMode"), "2", 0},
             {"no occlusion culling", STR("r.AllowOcclusionQueries"), "0", 0},
             {"depth-pyramid occlusion culling", STR("r.HZBOcclusion"), "1", 0},
             {"no merged far-away models (HLOD)", STR("r.HLOD"), "0", 0},
@@ -372,7 +404,7 @@ namespace
 
     void run_test_step()
     {
-        static int current = -1; // the test that is on, -1 = none
+        int& current = g_test_current;
         static float saved = 0.0f;
         if (current >= 0)
         {
@@ -678,7 +710,11 @@ namespace
         watch_input();
 
         hsvr::Config cfg = hsvr::config();
-        if (g_console_done) apply_picture_settings(cfg);
+        if (g_console_done)
+        {
+            apply_picture_settings(cfg);
+            keep_clouds_correct(cfg);
+        }
         static bool recenter_down = false, ui_down = false, view_down = false, mode_down = false, test_down = false;
         if (GetForegroundWindow() != nullptr)
         {

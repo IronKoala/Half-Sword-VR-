@@ -66,6 +66,9 @@ namespace hsvr
         // engine draws before its upscaler brings it up to full size (100 = no upscaling).
         double sharpen = -1.0;
         double screen_percentage = -1.0;
+        // 1 = keep the engine's clouds in the one mode that places them correctly for the second
+        // eye (see keep_clouds_correct in dllmain.cpp). 0 = leave the game's cloud mode alone.
+        bool fix_clouds = true;
         // Extra engine console commands to run, separated by semicolons (for tuning; empty = none).
         std::string extra_commands;
         // 1 = while the headset is asleep or showing something else, the game keeps running at
