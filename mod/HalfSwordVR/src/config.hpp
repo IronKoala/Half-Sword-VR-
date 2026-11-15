@@ -1,4 +1,4 @@
-// Settings read from HalfSwordVR.ini next to the mod. The file is re-read when it changes,
+﻿// Settings read from HalfSwordVR.ini next to the mod. The file is re-read when it changes,
 // so values can be tuned while the game runs.
 #pragma once
 #include <string>
@@ -120,6 +120,11 @@ namespace hsvr
         // of moving the elbow; larger keeps it more in place.
         double wrist_bend_limit = 55.0;
         double elbow_stiffness = 0.02;
+        // Hand roll about the forearm the elbow tries to keep under (degrees), the most roll ever sent
+        // (stops the arm flipping over), and how far the elbow may swing from its natural place.
+        double twist_limit = 70.0;
+        double twist_clamp = 150.0;
+        double elbow_swing_max = 90.0;
         // Share of the hand's roll that the forearm takes (0 = all in the wrist, 1 = all in the forearm).
         double forearm_twist_share = 0.5;
         // Moves the sword's grip along the handle relative to the controller, in cm (+ = towards the blade).

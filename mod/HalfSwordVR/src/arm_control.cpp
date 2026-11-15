@@ -395,6 +395,7 @@ namespace hsvr
             double last_reach = 0;    // controller distance from the shoulder / arm length
             double elbow_angle = 0;   // how far the elbow is swung from its natural place, degrees
             double elbow_time = 0;
+            double last_twist = 0;    // hand roll about the forearm last frame, radians (unwrapped)
         };
 
         struct State
@@ -839,58 +840,91 @@ namespace hsvr
             Vec3 perp = normalized(pole, normalized(perpendicular_part({0, 0, -1}, dir)));
             double cos_a = std::max(-1.0, std::min(1.0, (a * a + d * d - b * b) / (2.0 * a * d)));
             double sin_a = std::sqrt(std::max(0.0, 1.0 - cos_a * cos_a));
-            // Swing the elbow around the shoulder-to-hand line so that the forearm points closer to
-            // where the hand points, when the wrist would otherwise have to bend past
-            // wrist_bend_limit. A small cost keeps the elbow near its natural place otherwise.
+            // The elbow's place around the shoulder-to-hand line decides which way the forearm
+            // points and how it is rolled (the elbow is a hinge). Choose it so that the wrist needs
+            // to bend less than wrist_bend_limit and roll less than twist_limit (the game's wrist
+            // stops near 78 degrees of bend and 90 of roll), keeping it near its natural place and
+            // near last frame's place otherwise.
+            Vec3 side_axis = cross(dir, perp);
+            Vec3 axis = side.lower_axis;
+            Vec3 hand_dir = target.q.rotate(axis); // the hand's own lengthwise axis
+            auto twist_of = [&](const Quat& lower_untwisted) {
+                Quat rel = lower_untwisted.inverse() * target.q;
+                double t = 2.0 * std::atan2(rel.x * axis.x + rel.y * axis.y + rel.z * axis.z, rel.w);
+                if (t > kPi) t -= 2.0 * kPi;
+                if (t < -kPi) t += 2.0 * kPi;
+                return t;
+            };
+            auto arm_for = [&](double angle_deg, Vec3& elbow, Vec3& fore, Vec3& hinge_out, Quat& lower_untwisted) {
+                double rad = angle_deg * kDegToRad;
+                Vec3 p = normalized(perp * std::cos(rad) + side_axis * std::sin(rad));
+                elbow = S + dir * (a * cos_a) + p * (a * sin_a);
+                fore = normalized(S + dir * d - elbow);
+                hinge_out = normalized(cross(p, dir));
+                lower_untwisted = side.have_hinge ? (quat_from_frame(fore, hinge_out) * quat_from_frame(side.lower_axis, side.hinge_lower).inverse()).normalized() : Quat{};
+            };
+            if (side.have_hinge)
             {
-                Vec3 hand_dir = target.q.rotate(side.lower_axis); // the hand's own lengthwise axis
-                Vec3 side_axis = cross(dir, perp);
-                double limit = cfg.wrist_bend_limit;
                 double best_cost = 1e30, best_angle = 0;
-                for (int step = -30; step <= 30; ++step)
+                double range = std::max(0.0, std::min(150.0, cfg.elbow_swing_max));
+                for (double angle = -range; angle <= range + 1e-6; angle += 5.0)
                 {
-                    double angle = step * 5.0;
-                    double rad = angle * kDegToRad;
-                    Vec3 p = perp * std::cos(rad) + side_axis * std::sin(rad);
-                    Vec3 e = S + dir * (a * cos_a) + p * (a * sin_a);
-                    Vec3 fore = normalized(S + dir * d - e);
+                    Vec3 e, fore, h;
+                    Quat lu;
+                    arm_for(angle, e, fore, h, lu);
                     double bend = std::acos(std::max(-1.0, std::min(1.0, dot(fore, hand_dir)))) * kRadToDeg;
-                    double over = std::max(0.0, bend - limit);
-                    double cost = over * over + cfg.elbow_stiffness * angle * angle;
+                    double roll = std::fabs(twist_of(lu)) * kRadToDeg;
+                    double over_bend = std::max(0.0, bend - cfg.wrist_bend_limit);
+                    double over_roll = std::max(0.0, roll - cfg.twist_limit);
+                    double moved = angle - side.elbow_angle;
+                    double cost = over_bend * over_bend + over_roll * over_roll + cfg.elbow_stiffness * angle * angle + 0.01 * moved * moved;
                     if (cost < best_cost)
                     {
                         best_cost = cost;
                         best_angle = angle;
                     }
                 }
-                // Ease towards it so the elbow does not jump between frames.
                 double now = now_seconds();
                 double dt = side.elbow_time > 0 ? std::min(0.1, now - side.elbow_time) : 0.0;
                 side.elbow_time = now;
-                double alpha = dt > 0 ? 1.0 - std::exp(-dt / 0.04) : 1.0;
+                double alpha = dt > 0 ? 1.0 - std::exp(-dt / 0.06) : 1.0;
                 side.elbow_angle += (best_angle - side.elbow_angle) * alpha;
-                double rad = side.elbow_angle * kDegToRad;
-                perp = normalized(perp * std::cos(rad) + side_axis * std::sin(rad));
             }
-            Vec3 E = S + dir * (a * cos_a) + perp * (a * sin_a);
+            Vec3 E, f, hinge;
+            Quat lower_untwisted;
+            arm_for(side.have_hinge ? side.elbow_angle : 0.0, E, f, hinge, lower_untwisted);
             Vec3 T = S + dir * d;
-            Vec3 u = normalized(E - S), f = normalized(T - E);
-            Vec3 hinge = normalized(cross(perp, dir));
+            Vec3 u = normalized(E - S);
 
             Quat upper_q, lower_q;
+            Quat hand_q = target.q;
             if (side.have_hinge)
             {
                 upper_q = quat_from_frame(u, hinge) * quat_from_frame(side.upper_axis, side.hinge_upper).inverse();
-                lower_q = quat_from_frame(f, hinge) * quat_from_frame(side.lower_axis, side.hinge_lower).inverse();
+                // Hand roll about the forearm: kept continuous from frame to frame (no jump from
+                // +180 to -180) and held within twist_clamp, so the arm never flips over.
+                double twist = twist_of(lower_untwisted);
+                while (twist - side.last_twist > kPi) twist -= 2.0 * kPi;
+                while (twist - side.last_twist < -kPi) twist += 2.0 * kPi;
+                double clamp = cfg.twist_clamp * kDegToRad;
+                double sent_twist = std::max(-clamp, std::min(clamp, twist));
+                side.last_twist = sent_twist;
+                Quat rel = lower_untwisted.inverse() * target.q;
+                double proj = rel.x * axis.x + rel.y * axis.y + rel.z * axis.z;
+                Quat rel_twist = Quat{axis.x * proj, axis.y * proj, axis.z * proj, rel.w}.normalized();
+                Quat rel_swing = rel * rel_twist.inverse();
+                hand_q = (lower_untwisted * rel_swing * quat_axis_angle(axis, sent_twist)).normalized();
+                double share = std::max(0.0, std::min(1.0, cfg.forearm_twist_share));
+                lower_q = (lower_untwisted * quat_axis_angle(axis, sent_twist * share)).normalized();
             }
             else
             {
                 // Hinge not learned yet: swing the animated bones the shortest way.
                 auto swing = [](const Vec3& from, const Vec3& to) {
-                    Vec3 axis = cross(from, to);
-                    double s = length(axis), c = dot(from, to);
-                    if (s < 1e-9) return Quat{};
-                    return quat_axis_angle(axis * (1.0 / s), std::atan2(s, c));
+                    Vec3 cr = cross(from, to);
+                    double sn = length(cr), c = dot(from, to);
+                    if (sn < 1e-9) return Quat{};
+                    return quat_axis_angle(cr * (1.0 / sn), std::atan2(sn, c));
                 };
                 upper_q = swing(normalized(lower0.t - S), u) * upper0.q;
                 Vec3 lower_dir_now = (upper_q * upper0.q.inverse()).rotate(normalized(hand0.t - lower0.t));
@@ -898,18 +932,10 @@ namespace hsvr
             }
             upper_q = upper_q.normalized();
             lower_q = lower_q.normalized();
-            // Give the forearm a share of the hand's roll about the forearm.
-            Quat rel = lower_q.inverse() * target.q;
-            Vec3 axis = side.lower_axis;
-            double twist = 2.0 * std::atan2(rel.x * axis.x + rel.y * axis.y + rel.z * axis.z, rel.w);
-            if (twist > kPi) twist -= 2.0 * kPi;
-            if (twist < -kPi) twist += 2.0 * kPi;
-            double share = std::max(0.0, std::min(1.0, cfg.forearm_twist_share));
-            lower_q = (lower_q * quat_axis_angle(axis, twist * share)).normalized();
 
             pose[side.upper] = {upper_q, S};
             pose[side.lower] = {lower_q, E};
-            pose[side.hand] = {target.q, T};
+            pose[side.hand] = {hand_q, T};
             changed[side.upper] = changed[side.lower] = changed[side.hand] = 1;
 
             // How far the physical hand is from where it is sent (for the log).

@@ -1,4 +1,4 @@
-#include "config.hpp"
+﻿#include "config.hpp"
 
 #include "log.hpp"
 
@@ -242,6 +242,9 @@ namespace hsvr
         num("reach_max", c.reach_max);
         num("wrist_bend_limit", c.wrist_bend_limit);
         num("elbow_stiffness", c.elbow_stiffness);
+        num("twist_limit", c.twist_limit);
+        num("twist_clamp", c.twist_clamp);
+        num("elbow_swing_max", c.elbow_swing_max);
         num("grip_shift_cm", c.grip_shift_cm);
         num("hand_pitch", c.hand_pitch);
         num("hand_yaw", c.hand_yaw);
