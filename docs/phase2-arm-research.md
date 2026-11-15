@@ -115,3 +115,51 @@ then up-down; then F8 again doing a few swings without guard.
 
 Recommendation: probe first, then prototype B in Lua (fast to try) while building A in the
 C++ mod as the real implementation, with C as an optional "assist" slider for accuracy.
+
+## Live probe results (2026-11-15, Map_Arena_Cellar, one-handed sword)
+
+Probe v3 wrote a full dump and about 20 s of recording before the game crashed. The crash came about 20 s
+after the probe hooked 433 Blueprint functions with Lua counters, so the hooks are the main suspect.
+**Never hook Blueprint functions in bulk from Lua.** Earlier versions (1 and 2) broke menu clicking.
+The suspects there are UE4SS `RegisterKeyBind` and/or one `os.execute` mkdir at load time. Avoid both.
+Bone poses were not captured: `GetSocketTransform(FName, RTS_Component)` returned nothing through the Lua bridge.
+
+### How mouse input becomes an arm pose (now verified)
+
+1. `Axis Value X` / `Axis Value Y` on the pawn = mouse motion per frame, clamped to ±10
+   (with smoothed `... Interp` copies).
+2. These are integrated into **`Aim Vector`**, a 2-D point clamped to **±90 on X and Y**
+   (`Aim Vector_0` and the X/Y temporaries are the same). The pawn also derives `Aim Vector Delayed`,
+   `Aim Velocity`, `Aim Swing Speed`, `Swing Direction`, `Swing Direction SlowDown (Inertia)`
+   and `Swing Velocity proxy` for stamina and swing physics.
+3. ABP_Willie receives `Aim Vector` plus `Aim Inertia` (±16, so the effective range is about ±104),
+   `Total Y Aim`, `Swing Direction`, `Control Rotation`, `R Guarding`, `R Hand Toggle`, and so on.
+4. The ABP_Willie AnimGraph turns that into the driver skeleton pose. It is almost all authored-pose blending:
+   270 BlendSpacePlayer, 238 BlendListByBool, 203 SequencePlayer, 198 TwoWayBlend, 11 RotationOffsetBlendSpace,
+   8 BlendSpaceEvaluator, 49 ApplyAdditive, 40 Mirror and 77 ModifyBone nodes. There are only 2 TwoBoneIK
+   nodes (effectors around 70 to 78 cm below the hip in bone space, very likely the legs; ABP also has
+   `R/L Knee IK Location` and `Right/Left Foot Effector Location`) and 1 CCDIK.
+5. Pawn per-joint variables (`R Shoulder Rotation`, `R Elbow Rotation`, `R Hand Rotation`,
+   `R Wrist Direct Rotation`, `R Aim Rotation`) **did not change at all** during sword movement. They are not
+   the control path, at least in this mode.
+6. Left click toggles `R Hand Toggle` (pawn and ABP). `R Guarding` stayed true. There are input events for
+   `Thrust`, `Grab Left/Right`, `Swap Hands`, `RightMouseButton`, `Chain Attack`, and others.
+
+### What this means for VR
+
+The game's own arm control is a **2-D aim space** (where the sword points on a ±90 grid) mapped to animator-made
+poses. It cannot represent an arbitrary hand position and rotation. Feeding the controller into `Aim Vector`
+(option B) would therefore only give a rough "point the sword" control, with no real reach, wrist roll or blade
+angle. For accurate sword control, **option A is required**: replace the driver skeleton's arm bones
+(clavicle, upper arm, forearm, hand) after ABP_Willie has evaluated, using a pose solved from the controller.
+The physical arm then chases it through the game's own muscles. Next steps:
+
+1. In the C++ mod, find a hook after the DriverSkeleton anim evaluation and before CharacterMesh0's
+   CopyPoseFromMesh reads it. Candidates: `USkeletalMeshComponent::FinalizeBoneTransform` /
+   `PostAnimEvaluation` on the DriverSkeleton instance, or writing its component-space transforms on the game
+   thread in a tick that runs before the physical mesh's anim update.
+2. Solve the arm with a two-bone IK from the shoulder to the controller-held hand, set the hand rotation from
+   the controller, and scale for the player's arm length versus the character's.
+3. Keep `Aim Vector` roughly in sync (from the controller direction), so swing speed, stamina burn and swing
+   sounds still behave.
+4. Measure how far the physical hand trails the target, and add an optional physics assist only if needed.
