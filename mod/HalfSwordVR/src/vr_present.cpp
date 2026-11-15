@@ -6,6 +6,12 @@
 #include "xr_loader.hpp"
 
 #include <dxgi1_4.h>
+#ifdef _MSC_VER
+#include <intrin.h>
+#define HSVR_RETURN_ADDRESS() _ReturnAddress()
+#else
+#define HSVR_RETURN_ADDRESS() __builtin_return_address(0)
+#endif
 #include <tlhelp32.h>
 
 #include <algorithm>
@@ -1902,8 +1908,38 @@ float4 PSMain(VSOut i) : SV_Target
             g_next_unpaced_present += period;
         }
 
+        // Who presents the game window: the game itself, or an add-on that sits between the game
+        // and the window (the frame generation parts of FSR and DLSS replace the window's
+        // pictures with their own and copy them over at the Present). Written when it changes.
+        void log_present_caller(void* return_address, IDXGISwapChain* swapchain)
+        {
+            static HMODULE last_module = nullptr;
+            static int lines_left = 6;
+            HMODULE module = nullptr;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)return_address, &module);
+            if (lines_left <= 0 || (module == last_module && lines_left < 6)) return;
+            last_module = module;
+            --lines_left;
+            wchar_t path[MAX_PATH] = L"?";
+            if (module) GetModuleFileNameW(module, path, MAX_PATH);
+            const wchar_t* name = wcsrchr(path, L'\\');
+            name = name ? name + 1 : path;
+            static const wchar_t* const add_ons[] = {L"amd_fidelityfx_framegeneration_dx12.dll", L"amd_fidelityfx_dx12.dll", L"sl.interposer.dll", L"sl.dlss_g.dll", L"sl.common.dll",
+                                                     L"nvngx_dlssg.dll"};
+            std::string loaded;
+            for (const wchar_t* add_on : add_ons)
+            {
+                if (!GetModuleHandleW(add_on)) continue;
+                if (!loaded.empty()) loaded += ", ";
+                for (const wchar_t* c = add_on; *c; ++c) loaded += (char)*c;
+            }
+            HSVR_LOG("Window: the Present of swap chain %p is called from %ls; frame generation add-ons loaded: %s", (void*)swapchain, name,
+                     loaded.empty() ? "none" : loaded.c_str());
+        }
+
         HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* self, UINT sync_interval, UINT flags)
         {
+            log_present_caller(HSVR_RETURN_ADDRESS(), self);
             if (t_in_present || (flags & DXGI_PRESENT_TEST)) return g_original_present(self, sync_interval, flags);
             t_in_present = true;
             bool vr_paced = on_present(self);
@@ -1921,6 +1957,7 @@ float4 PSMain(VSOut i) : SV_Target
 
         HRESULT STDMETHODCALLTYPE hooked_present1(IDXGISwapChain1* self, UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS* params)
         {
+            log_present_caller(HSVR_RETURN_ADDRESS(), self);
             if (t_in_present || (flags & DXGI_PRESENT_TEST)) return g_original_present1(self, sync_interval, flags, params);
             t_in_present = true;
             bool vr_paced = on_present(self);

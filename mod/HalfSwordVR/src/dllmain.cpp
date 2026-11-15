@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -719,6 +720,54 @@ namespace
         HSVR_LOG("Widgets: end of list (%d line(s), %d widgets exist)", lines, total);
     }
 
+    // What each slider on screen is doing, written whenever it changes. A slider follows the
+    // pointer only while it "holds the mouse": from a button press on it until the release.
+    // Holding it with no real button down means the game missed the release.
+    void log_sliders()
+    {
+        static std::map<UObject*, std::string> last;
+        static int lines_left = 300;
+        if (lines_left <= 0) return;
+        bool button = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        walk_screen_widgets([&](UObject* widget, int) {
+            auto name = widget->GetFullName();
+            if (name.rfind(STR("Slider "), 0) != 0) return;
+            bool holds = false, hovered = false;
+            float value = -1.0f;
+            if (UFunction* fn = widget->GetFunctionByNameInChain(STR("HasMouseCapture")))
+            {
+                BoolReturnParams r{};
+                widget->ProcessEvent(fn, &r);
+                holds = r.ReturnValue;
+            }
+            if (UFunction* fn = widget->GetFunctionByNameInChain(STR("IsHovered")))
+            {
+                BoolReturnParams r{};
+                widget->ProcessEvent(fn, &r);
+                hovered = r.ReturnValue;
+            }
+            if (UFunction* fn = widget->GetFunctionByNameInChain(STR("GetValue")))
+            {
+                FloatParams r{};
+                widget->ProcessEvent(fn, &r);
+                value = r.Value;
+            }
+            char state[96];
+            snprintf(state, sizeof(state), "value %.3f, holds the mouse %d, pointer over it %d, real left button down %d", (double)value, holds ? 1 : 0,
+                     hovered ? 1 : 0, button ? 1 : 0);
+            std::string& before = last[widget];
+            if (before == state || lines_left <= 0) return;
+            // A slider nobody touches is written once only.
+            bool first = before.empty();
+            before = state;
+            if (!first || holds || hovered)
+            {
+                --lines_left;
+                HSVR_LOG("Slider: %ls | %s", name.c_str(), state);
+            }
+        });
+    }
+
     // A number that changes when a menu screen opens or closes: which widgets are on screen and
     // which of them are visible.
     uint64_t screen_signature()
@@ -813,6 +862,12 @@ namespace
 
         // While a menu has the mouse pointer, also write the list whenever the screen changes, so
         // that every menu screen the player visits is on record (checked twice a second).
+        static double last_slider_scan = 0.0;
+        if (game.wants_pointer && now - last_slider_scan >= 0.25)
+        {
+            last_slider_scan = now;
+            log_sliders();
+        }
         static double last_scan = 0.0;
         static uint64_t last_signature = 0;
         static int change_lists_left = 16;
