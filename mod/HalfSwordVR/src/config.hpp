@@ -77,6 +77,9 @@ namespace hsvr
         // half-size picture, which lets cloud land on thin far things (a steeple, leaves) and
         // makes them flicker.
         int cloud_mode = 2;
+        // 1 = switch off the engine's copy of the window picture for menu materials, which in the
+        // headset fills see-through parts of a menu with old pointers (see keep_menu_copy_off).
+        bool fix_menu_copy = true;
         // Extra engine console commands to run, separated by semicolons (for tuning; empty = none).
         std::string extra_commands;
         // 1 = while the headset is asleep or showing something else, the game keeps running at

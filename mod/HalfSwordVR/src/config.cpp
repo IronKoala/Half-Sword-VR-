@@ -195,6 +195,7 @@ namespace hsvr
         text("extra_commands", c.extra_commands);
         flag("fix_clouds", c.fix_clouds);
         integer("cloud_mode", c.cloud_mode);
+        flag("fix_menu_copy", c.fix_menu_copy);
         flag("idle_helper", c.idle_helper);
         flag("log_poses", c.log_poses);
         flag("log_input", c.log_input);

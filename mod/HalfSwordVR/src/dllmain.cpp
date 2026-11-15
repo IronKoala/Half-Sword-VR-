@@ -249,6 +249,9 @@ namespace
                 STR("r.VolumetricRenderTarget"),
                 STR("r.VolumetricRenderTarget.Mode"),
                 STR("r.VolumetricRenderTarget.UpsamplingMode"),
+                STR("Slate.CopyBackbufferToSlatePostRenderTargets"),
+                STR("r.TSR.ShadingRejection.Flickering"),
+                STR("r.TSR.History.UpdateQuality"),
                 STR("r.DynamicRes.OperationMode"),
                 STR("r.NGX.DLSS.Enable"),
                 STR("r.NGX.DLAA.Enable"),
@@ -349,6 +352,27 @@ namespace
             --lines_left;
             HSVR_LOG("Clouds: cloud mode was %g, set to %g so that both eyes show them behind the scenery (now reads %g)", (double)mode, (double)target,
                      (double)console_variable(STR("r.VolumetricRenderTarget.Mode")));
+        }
+    }
+
+    // Unreal 5.4 can hand menu materials a copy of the window picture taken just before the menus
+    // are drawn ("Slate post buffers", Slate.CopyBackbufferToSlatePostRenderTargets). On a monitor
+    // that copy is the 3D scene, and a see-through part of a menu (the doorway of Half Sword's
+    // equipment screen) shows the scene through it. In the headset the scene is not in the window,
+    // and the copy turned out to hold earlier finished window pictures, mouse pointer included:
+    // every frame added one more pointer to the doorway. Without the copy that part stays empty.
+    void keep_menu_copy_off(const hsvr::Config& cfg)
+    {
+        if (!cfg.fix_menu_copy) return;
+        float value = console_variable(STR("Slate.CopyBackbufferToSlatePostRenderTargets"));
+        if (value == 0.0f || value < -900.0f) return;
+        run_console_command(STR("Slate.CopyBackbufferToSlatePostRenderTargets 0"));
+        static int lines_left = 20;
+        if (lines_left > 0)
+        {
+            --lines_left;
+            HSVR_LOG("Menus: the game copies the window picture for its menu materials (setting was %g); switched off, in the headset it holds old pictures (now reads %g)",
+                     (double)value, (double)console_variable(STR("Slate.CopyBackbufferToSlatePostRenderTargets")));
         }
     }
 
@@ -727,6 +751,7 @@ namespace
         {
             apply_picture_settings(cfg);
             keep_clouds_correct(cfg);
+            keep_menu_copy_off(cfg);
         }
         // The mod's keys count only while the game has the keyboard, so that Home or End typed in
         // another program does not move the view or hide the panel.
