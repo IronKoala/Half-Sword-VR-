@@ -89,7 +89,7 @@ namespace hsvr
                 "; Which cloud mode replaces the faulty one: 2 (thin far things stay clean) or 0.\n"
                 "cloud_mode=%d\n"
                 "; Bounce lighting: one light sample per this many pixels. The game uses 64, which flickers\n"
-                "; in the headset. 32 = twice as dense, 16 = four times (slower), 0 = leave the game's value.\n"
+                "; in the headset. 32 = twice as dense, 16 = four times, 8 = eight times (each slower), 0 = leave the game's value.\n"
                 "light_samples=%d\n"
                 "; 1 = keep the game at normal speed while the headset is asleep.\n"
                 "idle_helper=%d\n"

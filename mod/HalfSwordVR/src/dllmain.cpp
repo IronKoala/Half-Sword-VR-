@@ -401,8 +401,8 @@ namespace
     // things against the sky (a steeple, leaves) then catch a different sample from frame to frame
     // and flicker, and plants are lit in blotches. The player found this with the picture tests:
     // lighting off stopped the flicker, twice as dense samples stopped most of it and made the
-    // plants look better. The game sets its value again when a map loads, so it is checked
-    // every frame.
+    // plants look better, and of 32, 16 and 8 he preferred 16. The game sets its value again when
+    // a map loads, so it is checked every frame.
     void keep_light_samples(const hsvr::Config& cfg)
     {
         if (cfg.light_samples <= 0) return;

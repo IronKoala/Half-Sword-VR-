@@ -81,8 +81,9 @@ namespace hsvr
         // pixels (r.Lumen.ScreenProbeGather.DownsampleFactor). Half Sword uses 64, which in the
         // headset is only about 16 samples across an eye and makes far thin things flicker and
         // plants look blotchy. The mod lowers it to this value; it never raises a smaller value
-        // the game chose. 32 = twice as dense, 16 = four times (costs more). 0 = leave alone.
-        int light_samples = 32;
+        // the game chose. 32 = twice as dense, 16 = four times (costs more), 8 = eight times.
+        // 0 = leave alone. The player compared 32, 16 and 8 in the headset and chose 16.
+        int light_samples = 16;
         // Extra engine console commands to run, separated by semicolons (for tuning; empty = none).
         std::string extra_commands;
         // 1 = while the headset is asleep or showing something else, the game keeps running at
