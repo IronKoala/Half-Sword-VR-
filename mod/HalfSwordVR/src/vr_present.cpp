@@ -1480,12 +1480,10 @@ float4 PSMain(VSOut i) : SV_Target
 
                 // With the eyes in their own target the game window holds only the flat menus and
                 // HUD: copy it for the floating panel, then put the monitor picture together.
-                // Where the mouse pointer is, if there is one to show: either Windows is showing
-                // its own, or the game says it wants one. The game draws its pointer in a small
-                // window of its own that follows the mouse, which is never part of the game's
-                // picture, so without this the panel would show menus with no pointer at all.
+                // Is a menu up? Either Windows is showing its mouse pointer inside the game window
+                // or the game says it wants one. (The mod draws no pointer of its own: the game's
+                // own pointer is visible in the headset.)
                 bool pointer_showing = false;
-                float pointer_u = 0.0f, pointer_v = 0.0f;
                 bool game_pointer = shared().game_wants_pointer.load();
                 if (separate)
                 {
@@ -1494,17 +1492,12 @@ float4 PSMain(VSOut i) : SV_Target
                     CURSORINFO ci{};
                     ci.cbSize = sizeof(ci);
                     RECT client{};
-                    if (scd.OutputWindow && GetCursorInfo(&ci) && ((ci.flags & CURSOR_SHOWING) || game_pointer) &&
-                        GetClientRect(scd.OutputWindow, &client) && client.right > 0 && client.bottom > 0)
+                    if (scd.OutputWindow && GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && GetClientRect(scd.OutputWindow, &client) &&
+                        client.right > 0 && client.bottom > 0)
                     {
                         POINT p = ci.ptScreenPos;
                         ScreenToClient(scd.OutputWindow, &p);
-                        if (p.x >= 0 && p.y >= 0 && p.x < client.right && p.y < client.bottom)
-                        {
-                            pointer_showing = true;
-                            pointer_u = (float)p.x / (float)client.right;
-                            pointer_v = (float)p.y / (float)client.bottom;
-                        }
+                        pointer_showing = p.x >= 0 && p.y >= 0 && p.x < client.right && p.y < client.bottom;
                     }
                 }
                 // The panel is for menus. During a fight the game window holds only full-screen
@@ -1606,13 +1599,6 @@ float4 PSMain(VSOut i) : SV_Target
                     c.params[1] = cfg.ui_use_alpha ? 2.0f : 1.0f;
                     c.params[2] = (float)cfg.ui_opacity_gain;
                     c.cursor[0] = -1.0f;
-                    if (pointer_showing)
-                    {
-                        c.cursor[0] = pointer_u;
-                        c.cursor[1] = pointer_v;
-                        c.cursor[2] = (float)g.ui_copy_width / (float)std::max<UINT>(1, g.ui_copy_height);
-                        c.cursor[3] = 0.008f;
-                    }
                     // A menu (the game is paused or wants a mouse pointer): put a dark sheet behind
                     // the panel so every button can be read whatever is behind it.
                     if (pointer_showing || game_pointer || shared().game_paused.load()) c.params[3] = (float)cfg.ui_menu_backdrop;
