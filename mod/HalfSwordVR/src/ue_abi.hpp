@@ -29,7 +29,7 @@ namespace ue
         int32_t MinX, MinY, MaxX, MaxY;
     };
 
-    enum EStereoscopicPass
+    enum class EStereoscopicPass
     {
         eSSP_FULL,
         eSSP_PRIMARY,
@@ -59,7 +59,7 @@ namespace ue
 namespace ue
 {
     // Mirror of the engine's stereo rendering interface (UE 5.4.4). One vtable slot per virtual,
-    // in this exact order; slot 0 is the destructor.
+    // in this exact order; slot 0 is the destructor. 20 slots, checked against the 5.4.4 header.
     class IStereoRendering
     {
       public:

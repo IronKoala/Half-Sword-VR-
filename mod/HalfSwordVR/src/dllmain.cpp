@@ -17,6 +17,7 @@
 #include <Unreal/UObjectGlobals.hpp>
 
 #include "config.hpp"
+#include "engine_slot.hpp"
 #include "log.hpp"
 #include "stereo_device.hpp"
 #include "ue_abi.hpp"
@@ -198,7 +199,31 @@ namespace
     // UEngine keeps `TSharedPtr<IStereoRendering> StereoRenderingDevice` followed directly by
     // `TSharedPtr<IXRTrackingSystem> XRSystem`. Neither is a reflected property, so their offset is
     // worked out from reflected neighbours (filled in from the UE 5.4.4 layout; see find_stereo_slot).
-    ue::TSharedPtr<ue::IStereoRendering>* find_stereo_slot(UObject* engine);
+    ue::TSharedPtr<ue::IStereoRendering>* find_stereo_slot(UObject* engine)
+    {
+        auto* base = reinterpret_cast<uint8_t*>(engine);
+        size_t offset = (size_t)hsvr::config().stereo_slot_offset;
+        if (offset == 0)
+        {
+            // Both neighbours are reflected properties, so their offsets can be asked for by name.
+            size_t begin = 0x400, end = 0x1800;
+            FProperty* before = engine->GetPropertyByNameInChain(STR("SelectionHighlightIntensityBillboards"));
+            FProperty* after = engine->GetPropertyByNameInChain(STR("GlobalNetTravelCount"));
+            if (before && after && after->GetOffset_Internal() > before->GetOffset_Internal())
+            {
+                begin = (size_t)before->GetOffset_Internal() + 4;
+                end = (size_t)after->GetOffset_Internal();
+            }
+            else
+            {
+                HSVR_LOG("Neighbouring engine properties not found; searching a default range");
+            }
+            HSVR_LOG("Searching for the stereo device slot in UEngine between 0x%zX and 0x%zX", begin, end);
+            offset = hsvr::find_stereo_slot_offset(base, begin, end);
+        }
+        if (offset == 0) return nullptr;
+        return reinterpret_cast<ue::TSharedPtr<ue::IStereoRendering>*>(base + offset);
+    }
 
     void install_stereo_device()
     {

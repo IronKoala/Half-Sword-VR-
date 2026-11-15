@@ -100,8 +100,8 @@ namespace hsvr
             int32_t GetDesiredNumberOfViews(bool bStereoRequested) const override { return bStereoRequested ? 2 : 1; }
             ue::EStereoscopicPass GetViewPassForIndex(bool bStereoRequested, int32_t ViewIndex) const override
             {
-                if (!bStereoRequested) return ue::eSSP_FULL;
-                return ViewIndex == 0 ? ue::eSSP_PRIMARY : ue::eSSP_SECONDARY;
+                if (!bStereoRequested) return ue::EStereoscopicPass::eSSP_FULL;
+                return ViewIndex == 0 ? ue::EStereoscopicPass::eSSP_PRIMARY : ue::EStereoscopicPass::eSSP_SECONDARY;
             }
             uint32_t GetLODViewIndex() const override { return 0; }
             bool IsStandaloneStereoOnlyDevice() const override { return false; }
@@ -183,9 +183,14 @@ namespace hsvr
 
             void InitCanvasFromView(ue::FSceneView*, ue::UCanvas*) override {}
 
-            void RenderTexture_RenderThread(ue::FRHICommandListImmediate&, ue::FRHITexture* BackBuffer, ue::FRHITexture* SrcTexture, ue::FVector2D) const override;
+            void RenderTexture_RenderThread(ue::FRHICommandListImmediate&, ue::FRHITexture*, ue::FRHITexture*, ue::FVector2D) const override
+            {
+                // Only called when the engine renders into a separate target (not used yet).
+            }
 
-            ue::IStereoRenderTargetManager* GetRenderTargetManager() override;
+            // No render target manager yet: the engine draws both eyes side by side into the window
+            // and the presenter copies each half to the headset.
+            ue::IStereoRenderTargetManager* GetRenderTargetManager() override { return nullptr; }
             ue::IStereoLayers* GetStereoLayers() override { return nullptr; }
             void StartFinalPostprocessSettings(ue::FPostProcessSettings*, const ue::EStereoscopicPass, const int32_t) override {}
             bool OverrideFinalPostprocessSettings(ue::FPostProcessSettings*, const ue::EStereoscopicPass, const int32_t, float&) override { return false; }

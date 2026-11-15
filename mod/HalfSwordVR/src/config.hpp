@@ -37,7 +37,7 @@ namespace hsvr
         // Frames of prediction added when asking the headset for a pose (-1 = adapt automatically).
         double predict_frames = -1.0;
         // Developer switches.
-        bool separate_render_target = true;
+        bool separate_render_target = false;
         bool log_poses = false;
         int stereo_slot_offset = 0; // 0 = find automatically
     };
