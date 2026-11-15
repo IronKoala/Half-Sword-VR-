@@ -44,7 +44,13 @@ namespace hsvr
         std::atomic<bool> stereo_installed{false};
         // Asked by the game thread (recenter key); consumed where the head pose is known.
         std::atomic<bool> recenter_requested{true};
-        std::atomic<bool> ui_visible{true};
+        // Flipped by the menu-panel key. With ui_panel_auto the panel shows while a menu is up
+        // and this forces it on all the time; without, the panel is always on and this hides it.
+        std::atomic<bool> ui_toggled{false};
+        // Told by the game thread: the game is paused / a menu is probably up (paused, or there
+        // is no player character yet, as in the intro and main menu).
+        std::atomic<bool> game_paused{false};
+        std::atomic<bool> menu_up{true};
         // View from the game's own (third-person) camera instead of the character's head.
         std::atomic<bool> third_person{false};
         // Set by a key to flip between full-resolution mode and the fallback while playing:

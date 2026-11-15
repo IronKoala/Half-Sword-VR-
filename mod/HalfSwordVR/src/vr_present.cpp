@@ -1475,7 +1475,37 @@ float4 PSMain(VSOut i) : SV_Target
 
                 // With the eyes in their own target the game window holds only the flat menus and
                 // HUD: copy it for the floating panel, then put the monitor picture together.
-                bool want_ui = separate && cfg.ui_panel && shared().ui_visible.load();
+                // Where the mouse pointer is, if Windows is showing one inside the game window.
+                bool pointer_showing = false;
+                float pointer_u = 0.0f, pointer_v = 0.0f;
+                if (separate)
+                {
+                    DXGI_SWAP_CHAIN_DESC scd{};
+                    swapchain->GetDesc(&scd);
+                    CURSORINFO ci{};
+                    ci.cbSize = sizeof(ci);
+                    RECT client{};
+                    if (scd.OutputWindow && GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && GetClientRect(scd.OutputWindow, &client) &&
+                        client.right > 0 && client.bottom > 0)
+                    {
+                        POINT p = ci.ptScreenPos;
+                        ScreenToClient(scd.OutputWindow, &p);
+                        if (p.x >= 0 && p.y >= 0 && p.x < client.right && p.y < client.bottom)
+                        {
+                            pointer_showing = true;
+                            pointer_u = (float)p.x / (float)client.right;
+                            pointer_v = (float)p.y / (float)client.bottom;
+                        }
+                    }
+                }
+                // The panel is for menus. During a fight the game window holds only full-screen
+                // effects (the game tints the edges of the picture), which would hang in front of
+                // the player as a coloured frame, so by default the panel shows only while a menu
+                // is up; the menu-panel key forces it on.
+                bool menu_showing = shared().menu_up.load() || pointer_showing;
+                bool toggled = shared().ui_toggled.load();
+                bool panel_on = cfg.ui_panel_auto ? (menu_showing || toggled) : !toggled;
+                bool want_ui = separate && cfg.ui_panel && panel_on;
                 bool want_monitor = separate && cfg.mirror_window;
                 bool need_back_buffer = separate ? (want_ui || want_monitor) : (render && have_item);
                 bool have_back_buffer = need_back_buffer && copy_back_buffer(swapchain);
@@ -1567,27 +1597,16 @@ float4 PSMain(VSOut i) : SV_Target
                     c.params[1] = 1.0f;
                     c.params[2] = (float)cfg.ui_opacity_gain;
                     c.cursor[0] = -1.0f;
-                    DXGI_SWAP_CHAIN_DESC scd{};
-                    swapchain->GetDesc(&scd);
-                    CURSORINFO ci{};
-                    ci.cbSize = sizeof(ci);
-                    RECT client{};
-                    if (scd.OutputWindow && GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && GetClientRect(scd.OutputWindow, &client) &&
-                        client.right > 0 && client.bottom > 0)
+                    if (pointer_showing)
                     {
-                        POINT p = ci.ptScreenPos;
-                        ScreenToClient(scd.OutputWindow, &p);
-                        if (p.x >= 0 && p.y >= 0 && p.x < client.right && p.y < client.bottom)
-                        {
-                            c.cursor[0] = (float)p.x / (float)client.right;
-                            c.cursor[1] = (float)p.y / (float)client.bottom;
-                            c.cursor[2] = (float)g.ui_copy_width / (float)std::max<UINT>(1, g.ui_copy_height);
-                            c.cursor[3] = 0.008f;
-                            // A mouse pointer means a menu is up: put a dark sheet behind it so
-                            // every button can be read whatever is behind the panel.
-                            c.params[3] = (float)cfg.ui_menu_backdrop;
-                        }
+                        c.cursor[0] = pointer_u;
+                        c.cursor[1] = pointer_v;
+                        c.cursor[2] = (float)g.ui_copy_width / (float)std::max<UINT>(1, g.ui_copy_height);
+                        c.cursor[3] = 0.008f;
                     }
+                    // A pause menu or a mouse pointer: put a dark sheet behind the panel so every
+                    // button can be read whatever is behind it.
+                    if (pointer_showing || shared().game_paused.load()) c.params[3] = (float)cfg.ui_menu_backdrop;
                     ui_acquired = blit_to_swapchain(g.ui, srv, c);
                     if (ui_acquired)
                     {

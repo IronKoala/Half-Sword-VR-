@@ -561,10 +561,88 @@ namespace
         bool ReturnValue;
     };
 
-    // Feeds the input record in the log (see input_watch.hpp). Reads only.
+    // ---- what the game's menus and HUD are made of (for the log) --------------------------------
+    struct BoolReturnParams
+    {
+        bool ReturnValue;
+    };
+
+    struct ByteReturnParams
+    {
+        uint8_t ReturnValue;
+    };
+
+    struct IntReturnParams
+    {
+        int32_t ReturnValue;
+    };
+
+    struct ChildAtParams
+    {
+        int32_t Index;
+        UObject* ReturnValue;
+    };
+
+    // Visibility values are the engine's ESlateVisibility: 0 visible, 1 collapsed, 2 hidden,
+    // 3 not hit-testable (self and children), 4 not hit-testable (self only).
+    void log_widget_tree(UObject* widget, int depth, int& lines)
+    {
+        if (!widget || depth > 6 || lines >= 400) return;
+        int visibility = -1;
+        if (UFunction* visibility_fn = widget->GetFunctionByNameInChain(STR("GetVisibility")))
+        {
+            ByteReturnParams v{};
+            widget->ProcessEvent(visibility_fn, &v);
+            visibility = v.ReturnValue;
+        }
+        ++lines;
+        HSVR_LOG("  %*s%ls | visibility %d", depth * 2, "", widget->GetFullName().c_str(), visibility);
+        // A widget made in the game's editor keeps its parts in a tree of its own.
+        if (UObject* tree = object_property(widget, STR("WidgetTree")))
+        {
+            log_widget_tree(object_property(tree, STR("RootWidget")), depth + 1, lines);
+        }
+        UFunction* count_fn = widget->GetFunctionByNameInChain(STR("GetChildrenCount"));
+        UFunction* child_fn = widget->GetFunctionByNameInChain(STR("GetChildAt"));
+        if (!count_fn || !child_fn) return;
+        IntReturnParams count{};
+        widget->ProcessEvent(count_fn, &count);
+        for (int32_t i = 0; i < count.ReturnValue && i < 64; ++i)
+        {
+            ChildAtParams child{};
+            child.Index = i;
+            widget->ProcessEvent(child_fn, &child);
+            log_widget_tree(child.ReturnValue, depth + 1, lines);
+        }
+    }
+
+    void log_widgets(const char* reason)
+    {
+        std::vector<UObject*> widgets;
+        UObjectGlobals::FindAllOf(STR("UserWidget"), widgets);
+        HSVR_LOG("Widgets (%s): %d exist; those on screen:", reason, (int)widgets.size());
+        int lines = 0;
+        for (UObject* widget : widgets)
+        {
+            if (!widget) continue;
+            if (widget->GetName().starts_with(STR("Default__"))) continue;
+            UFunction* in_viewport_fn = widget->GetFunctionByNameInChain(STR("IsInViewport"));
+            if (!in_viewport_fn) continue;
+            BoolReturnParams in_viewport{};
+            widget->ProcessEvent(in_viewport_fn, &in_viewport);
+            if (!in_viewport.ReturnValue) continue;
+            log_widget_tree(widget, 0, lines);
+        }
+        HSVR_LOG("Widgets: end of list (%d line(s))", lines);
+    }
+
+    // Feeds the input record in the log (see input_watch.hpp) and tells the picture side whether
+    // a menu is up. Reads only.
     void watch_input()
     {
         hsvr::InputWatchGame game;
+        UObject* pawn = nullptr;
+        UObject* pawn_mesh = find_pawn_mesh(&pawn);
         if (UObject* controller = find_player_controller())
         {
             game.have_player = true;
@@ -581,7 +659,46 @@ namespace
                 game.paused = params.ReturnValue;
             }
         }
+        auto& shared = hsvr::shared();
+        shared.game_paused.store(game.paused);
+        // No character yet means the intro or the main menu.
+        shared.menu_up.store(game.paused || !pawn || !pawn_mesh);
         hsvr::input_watch_tick(game);
+
+        // A few times per run, write down what is on screen: once early (intro), a few seconds
+        // into each new character's life, and whenever the game pauses.
+        if (!hsvr::config().log_input) return;
+        static int lists_left = 8;
+        static double due = -1.0;
+        static const char* due_reason = "";
+        static bool intro_done = false, was_paused = false;
+        static UObject* last_pawn = nullptr;
+        static double first_tick = hsvr::now_seconds();
+        double now = hsvr::now_seconds();
+        if (!intro_done && now - first_tick > 20.0)
+        {
+            intro_done = true;
+            due = now;
+            due_reason = "20 seconds in";
+        }
+        if (pawn && pawn_mesh && pawn != last_pawn)
+        {
+            last_pawn = pawn;
+            due = now + 5.0;
+            due_reason = "a few seconds after the character appeared";
+        }
+        if (game.paused && !was_paused)
+        {
+            due = now + 0.5;
+            due_reason = "game paused";
+        }
+        was_paused = game.paused;
+        if (due >= 0.0 && now >= due && lists_left > 0)
+        {
+            due = -1.0;
+            --lists_left;
+            log_widgets(due_reason);
+        }
     }
 
     bool key_pressed_once(int vk, bool& was_down)
@@ -624,7 +741,19 @@ namespace
         if (GetForegroundWindow() != nullptr)
         {
             if (key_pressed_once(cfg.recenter_key, recenter_down)) shared.recenter_requested.store(true);
-            if (key_pressed_once(cfg.toggle_ui_key, ui_down)) shared.ui_visible.store(!shared.ui_visible.load());
+            if (key_pressed_once(cfg.toggle_ui_key, ui_down))
+            {
+                bool toggled = !shared.ui_toggled.load();
+                shared.ui_toggled.store(toggled);
+                if (cfg.ui_panel_auto)
+                {
+                    HSVR_LOG(toggled ? "Menu panel: always shown" : "Menu panel: shown only while a menu is up");
+                }
+                else
+                {
+                    HSVR_LOG(toggled ? "Menu panel: hidden" : "Menu panel: shown");
+                }
+            }
             if (key_pressed_once(cfg.toggle_mode_key, mode_down)) shared.separate_override.store(hsvr::stereo_separate_target() ? 0 : 1);
             if (key_pressed_once(cfg.toggle_view_key, view_down))
             {

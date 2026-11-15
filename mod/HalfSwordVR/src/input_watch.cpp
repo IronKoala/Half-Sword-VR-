@@ -135,7 +135,7 @@ namespace hsvr
         cursor.cbSize = sizeof(cursor);
         bool pointer = GetCursorInfo(&cursor) && (cursor.flags & CURSOR_SHOWING) != 0;
 
-        // Esc and mouse clicks, as they happen. Clicks only while a pointer shows (a menu),
+        // Esc and mouse clicks, as they happen. Clicks only while a pointer shows or the game is paused (a menu),
         // otherwise every sword swing would be a line.
         static bool esc_was = false, click_was = false;
         bool esc = key_down(VK_ESCAPE);
@@ -145,14 +145,14 @@ namespace hsvr
             HSVR_LOG("Input: Esc pressed (keyboard goes to %s, game paused: %s, pointer showing: %s)", front.c_str(), game.paused ? "yes" : "no",
                      pointer ? "yes" : "no");
         }
-        if (click && !click_was && pointer)
+        if (click && !click_was && (pointer || game.paused))
         {
             POINT p = cursor.ptScreenPos;
             RECT client{};
             HWND window = GetForegroundWindow();
             if (window && front_is_game && GetClientRect(window, &client)) ScreenToClient(window, &p);
-            HSVR_LOG("Input: click at (%ld, %ld) of %ld x %ld (keyboard goes to %s, game paused: %s)", (long)p.x, (long)p.y, (long)client.right,
-                     (long)client.bottom, front.c_str(), game.paused ? "yes" : "no");
+            HSVR_LOG("Input: click at (%ld, %ld) of %ld x %ld (keyboard goes to %s, game paused: %s, pointer showing: %s)", (long)p.x, (long)p.y,
+                     (long)client.right, (long)client.bottom, front.c_str(), game.paused ? "yes" : "no", pointer ? "yes" : "no");
         }
         esc_was = esc;
         click_was = click;
