@@ -6,6 +6,6 @@
 | UE4SS | Installed build is commit e3ba1016 ("3.0.1 Beta"); our C++ mod builds against it and loads cleanly. |
 | Hello mod | Loaded, saw Unreal initialise, found the player (`Willie_BP_DressUp_C` in the tavern hub). No errors or crashes. |
 | xrtest (OpenXR) | SteamVR OpenXR 2.19.3, Steam Frame. 2480 x 2480 per eye recommended. ~2,300 frames rendered, world-fixed grid confirmed in headset. |
-| `-emulatestereo` | Engine renders two full side-by-side views with lighting, shadows and fog, and a visible eye offset. The right view looks somewhat softer than the left, likely the temporal AA/upscaler sharing history across views; to check in Phase 1. |
+| `-emulatestereo` | Not yet confirmed. The first screenshots were produced by vorpX (its service was running), not the engine. Rerun pending with vorpX closed. |
 
-Conclusion: the engine's own stereo path works in this build, so Phase 1 can use a native stereo device instead of alternating eyes.
+Conclusion: pending the `-emulatestereo` rerun. Keep vorpX closed whenever testing this mod.
