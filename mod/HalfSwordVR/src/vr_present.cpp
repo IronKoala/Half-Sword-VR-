@@ -364,6 +364,11 @@ namespace hsvr
             XrTime frame_time = 0;
             PresentItem last_item;
             bool have_last_item = false;
+            // Checks on the wipe of the window buffer (see clear_next_window_buffer).
+            ID3D12Resource* wiped_buffer = nullptr; // identity only, never used as a reference
+            UINT wiped_index = 0;
+            uint64_t wipes = 0, wipe_mismatches = 0, wipe_checks = 0;
+            bool swapchain_logged = false;
             ID3D12Resource* logged_scene = nullptr;
             uint64_t presents = 0;
         };
@@ -1183,31 +1188,6 @@ float4 PSMain(VSOut i) : SV_Target
             transition(back.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
         }
 
-        // Runs right after the game's Present while the eyes have their own target: wipes the
-        // window buffer the game will draw its menus and HUD into next, so that what we copy from
-        // it next frame is only that frame's menus on black.
-        void clear_next_window_buffer(IDXGISwapChain* swapchain)
-        {
-            std::lock_guard<std::mutex> lock(g_present_mutex);
-            if (!g.ready || swapchain != g.game_swapchain) return;
-            {
-                std::lock_guard<std::mutex> pipe_lock(g_pipe.mutex);
-                if (!g_pipe.separate_mode || !shared().stereo_installed.load()) return;
-            }
-            Com<ID3D12Resource> back;
-            if (!current_back_buffer(swapchain, back)) return;
-            begin_commands();
-            D3D12_CPU_DESCRIPTOR_HANDLE rtv = window_rtv(1, back.get());
-            if (rtv.ptr)
-            {
-                transition(back.get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                g.cmd->ClearRenderTargetView(rtv, clear, 0, nullptr);
-                transition(back.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-            }
-            end_commands();
-        }
-
         void adapt_prediction(const FramePose& pose, const Config& cfg)
         {
             int64_t period = g_frame_period.load();
@@ -1290,7 +1270,7 @@ float4 PSMain(VSOut i) : SV_Target
         // panel is made from) and the finished monitor picture are saved as half-size .bmp files in
         // Mods\HalfSwordVR\captures. The GPU copies them into buffers we can read; a helper thread
         // writes the files, so the game does not wait for the disk.
-        constexpr int kCaptureKinds = 2; // 0: menu layer, 1: monitor picture
+        constexpr int kCaptureKinds = 4; // 0: menu layer, 1: monitor picture, 2: next window buffer just after it was wiped, 3: menu layer one Present later
         constexpr int kCaptureFiles = 48;
         struct CaptureBuffer
         {
@@ -1304,6 +1284,12 @@ float4 PSMain(VSOut i) : SV_Target
             CaptureBuffer kind[kCaptureKinds];
             bool recorded = false; // copy commands are in the command list being built
             bool pending = false;  // submitted, waiting for the GPU
+            // Menus-only pictures come as a set of three, to show where old content in the window
+            // buffer comes from: the menu layer, the next buffer right after the wipe, and the
+            // menu layer of the following Present (the same buffer after the game drew into it).
+            bool want_cleared = false;
+            bool want_next = false;
+            void* shot_buffer = nullptr; // window buffer of the Present the set started with
             UINT64 fence_value = 0;
             std::atomic<bool> writing{false};
             double last_time = -1000.0;
@@ -1454,8 +1440,9 @@ float4 PSMain(VSOut i) : SV_Target
         // Called once per Present, before new commands are built.
         void service_capture()
         {
-            if (!g_capture.pending || g.fence->GetCompletedValue() < g_capture.fence_value) return;
+            if (!g_capture.pending || g_capture.want_next || g.fence->GetCompletedValue() < g_capture.fence_value) return;
             g_capture.pending = false;
+            g_capture.want_cleared = false;
             struct Job
             {
                 ID3D12Resource* buffer;
@@ -1476,7 +1463,7 @@ float4 PSMain(VSOut i) : SV_Target
             std::thread([jobs, index]() {
                 std::wstring folder = mod_dir() + L"captures";
                 CreateDirectoryW(folder.c_str(), nullptr);
-                static const wchar_t* const names[kCaptureKinds] = {L"menu", L"monitor"};
+                static const wchar_t* const names[kCaptureKinds] = {L"menu", L"monitor", L"cleared", L"next"};
                 int saved = 0;
                 for (int i = 0; i < kCaptureKinds; ++i)
                 {
@@ -1488,6 +1475,58 @@ float4 PSMain(VSOut i) : SV_Target
                 HSVR_LOG("Capture %02d saved (%d picture(s))", index, saved);
                 g_capture.writing.store(false);
             }).detach();
+        }
+
+        // Runs right after the game's Present while the eyes have their own target: wipes the
+        // window buffer the game will draw its menus and HUD into next, so that what we copy from
+        // it next frame is only that frame's menus on black.
+        void clear_next_window_buffer(IDXGISwapChain* swapchain)
+        {
+            std::lock_guard<std::mutex> lock(g_present_mutex);
+            if (!g.ready || swapchain != g.game_swapchain) return;
+            {
+                std::lock_guard<std::mutex> pipe_lock(g_pipe.mutex);
+                if (!g_pipe.separate_mode || !shared().stereo_installed.load()) return;
+            }
+            Com<IDXGISwapChain3> sc3;
+            if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(sc3.put())))) return;
+            UINT index = sc3->GetCurrentBackBufferIndex();
+            Com<ID3D12Resource> back;
+            if (FAILED(sc3->GetBuffer(index, IID_PPV_ARGS(back.put()))) || !back) return;
+            if (!g.swapchain_logged)
+            {
+                g.swapchain_logged = true;
+                DXGI_SWAP_CHAIN_DESC d{};
+                if (SUCCEEDED(swapchain->GetDesc(&d)))
+                {
+                    HSVR_LOG("Window: swap chain has %u buffers, %ux%u, format %d, swap effect %d, flags 0x%X, windowed %d", d.BufferCount, d.BufferDesc.Width,
+                             d.BufferDesc.Height, (int)d.BufferDesc.Format, (int)d.SwapEffect, d.Flags, (int)d.Windowed);
+                }
+            }
+            begin_commands();
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = window_rtv(1, back.get());
+            bool shot = false;
+            if (rtv.ptr)
+            {
+                transition(back.get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                g.cmd->ClearRenderTargetView(rtv, clear, 0, nullptr);
+                transition(back.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+                g.wiped_buffer = back.get();
+                g.wiped_index = index;
+                ++g.wipes;
+                if (g_capture.pending && g_capture.want_cleared)
+                {
+                    g_capture.want_cleared = false;
+                    record_capture(2, back.get(), D3D12_RESOURCE_STATE_PRESENT);
+                    g_capture.recorded = false;
+                    shot = true;
+                    HSVR_LOG("Window: picture set %02d: Present drew into buffer %p, wiped next buffer %p (index %u)", g_capture.index, g_capture.shot_buffer,
+                             (void*)back.get(), index);
+                }
+            }
+            end_commands();
+            if (shot) g_capture.fence_value = g.fence_counter;
         }
 
         // Finishes the OpenXR frame that is open: copies the engine's eyes (and the flat UI) and submits.
@@ -1669,14 +1708,43 @@ float4 PSMain(VSOut i) : SV_Target
 
                 if (want_monitor && have_back_buffer) draw_monitor_picture(swapchain, have_item ? &item : nullptr, scene, scene_srv, ui_srv);
 
+                if (separate && have_back_buffer)
+                {
+                    // Is the buffer the game drew into the one that was wiped after the last Present?
+                    Com<ID3D12Resource> now_back;
+                    if (g.wiped_buffer && current_back_buffer(swapchain, now_back))
+                    {
+                        ++g.wipe_checks;
+                        if (now_back.get() != g.wiped_buffer) ++g.wipe_mismatches;
+                    }
+                    if (g_capture.pending && g_capture.want_next)
+                    {
+                        // Third picture of a set: the buffer that was wiped, after the game drew its menus into it.
+                        g_capture.want_next = false;
+                        record_capture(3, g.ui_copy.get(), g.ui_copy_state);
+                        HSVR_LOG("Window: picture set %02d: the following Present drew into buffer %p (wiped was %p)", g_capture.index, (void*)now_back.get(),
+                                 (void*)g.wiped_buffer);
+                    }
+                }
+                else
+                {
+                    g_capture.want_next = false;
+                }
                 if (separate && have_back_buffer && capture_due(cfg) && (!cfg.capture_menus_only || game_pointer))
                 {
                     g_capture.last_time = now_seconds();
                     record_capture(0, g.ui_copy.get(), g.ui_copy_state);
                     Com<ID3D12Resource> back;
-                    if (!cfg.capture_menus_only && want_monitor && current_back_buffer(swapchain, back))
+                    bool have_back = current_back_buffer(swapchain, back);
+                    if (!cfg.capture_menus_only && want_monitor && have_back)
                     {
                         record_capture(1, back.get(), D3D12_RESOURCE_STATE_PRESENT);
+                    }
+                    if (cfg.capture_menus_only)
+                    {
+                        g_capture.want_cleared = true;
+                        g_capture.want_next = true;
+                        g_capture.shot_buffer = have_back ? (void*)back.get() : nullptr;
                     }
                 }
 
@@ -1759,6 +1827,8 @@ float4 PSMain(VSOut i) : SV_Target
                      (unsigned long long)shared().frames_without_image.load(), game_depth, present_depth,
                      (unsigned long long)dropped_game, (unsigned long long)dropped_present, (unsigned long long)reused,
                      (double)g_lead_ns.load() / 1e6);
+            HSVR_LOG("Window: wiped %llu, checked %llu, the game drew into a different buffer than the wiped one %llu time(s)", (unsigned long long)g.wipes,
+                     (unsigned long long)g.wipe_checks, (unsigned long long)g.wipe_mismatches);
             HSVR_LOG("Pairing: poses waiting at a Present %zu to %zu, too old and dropped %llu (all session), Presents between pose and picture 0:%llu 1:%llu 2:%llu 3:%llu 4+:%llu",
                      depth_min, depth_max, (unsigned long long)stale, (unsigned long long)age[0], (unsigned long long)age[1],
                      (unsigned long long)age[2], (unsigned long long)age[3], (unsigned long long)age[4]);
