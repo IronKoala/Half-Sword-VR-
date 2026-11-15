@@ -93,6 +93,22 @@ namespace hsvr
             candidates.push_back(offset);
         }
         if (candidates.size() == 1) return candidates[0];
+        if (candidates.size() > 1)
+        {
+            // Other runs of empty shared pointers look the same, so check the neighbours too.
+            // After EyeTrackingDevice comes a multicast delegate (empty list, compaction threshold 2);
+            // before the slot comes a TMap, which when empty ends with a recognisable bit-array header.
+            std::vector<size_t> confirmed;
+            for (size_t c : candidates)
+            {
+                const uint8_t* p = engine + c;
+                bool delegate_after = c + 0x58 <= end && all_zero(p + 0x40, 16) && read_u64(p + 0x50) == 2;
+                bool map_before = c >= begin + 0x28 && read_u64(p - 0x28) == 0x0000008000000000ull && read_u64(p - 0x20) == 0x00000000FFFFFFFFull;
+                HSVR_LOG("  candidate 0x%zX: delegate after %d, empty map before %d", c, delegate_after ? 1 : 0, map_before ? 1 : 0);
+                if (delegate_after || map_before) confirmed.push_back(c);
+            }
+            if (confirmed.size() == 1) return confirmed[0];
+        }
         HSVR_LOG("Stereo slot search between 0x%zX and 0x%zX found %zu candidates", begin, end, candidates.size());
         for (size_t c : candidates) HSVR_LOG("  candidate at 0x%zX", c);
         // Dump the pointer-shaped contents of the range so the layout can be worked out by hand.

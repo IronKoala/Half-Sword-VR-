@@ -317,7 +317,7 @@ class HalfSwordVR : public CppUserModBase
                     game_tick(reinterpret_cast<UObject*>(engine), delta_seconds);
                 },
                 {false, false, STR("HalfSwordVR"), STR("Tick")});
-        Output::send<LogLevel::Verbose>(STR("[HalfSwordVR] started (VR {})\n"), g_vr_started ? STR("available") : STR("not available, see HalfSwordVR.log"));
+        Output::send<LogLevel::Verbose>(STR("[HalfSwordVR] started (headset link {})\n"), g_vr_started ? STR("ok") : STR("off, see HalfSwordVR.log"));
     }
 };
 
