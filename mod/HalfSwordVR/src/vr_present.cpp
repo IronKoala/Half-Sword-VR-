@@ -318,6 +318,151 @@ namespace hsvr
             return true;
         }
 
+        // ---------------------------------------------------------------------- controllers ----
+        // One action set with a grip pose, trigger and squeeze for each hand. Bindings are
+        // suggested for the common controller types; SteamVR maps whichever controllers are in
+        // use (the Steam Frame's included) onto one of them.
+        struct HandActions
+        {
+            std::atomic<bool> ready{false};
+            std::atomic<bool> profile_changed{true};
+            XrActionSet set = XR_NULL_HANDLE;
+            XrAction grip_pose = XR_NULL_HANDLE;
+            XrAction trigger = XR_NULL_HANDLE;
+            XrAction squeeze = XR_NULL_HANDLE;
+            XrPath hand_path[2]{XR_NULL_PATH, XR_NULL_PATH};
+            XrSpace grip_space[2]{XR_NULL_HANDLE, XR_NULL_HANDLE};
+            XrHandRaw last[2];
+        };
+        HandActions g_hands;
+
+        XrPath to_path(const char* text)
+        {
+            XrPath path = XR_NULL_PATH;
+            xr.StringToPath(g_instance, text, &path);
+            return path;
+        }
+
+        XrAction make_action(const char* name, const char* label, XrActionType type)
+        {
+            XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
+            strncpy(info.actionName, name, XR_MAX_ACTION_NAME_SIZE - 1);
+            strncpy(info.localizedActionName, label, XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+            info.actionType = type;
+            info.countSubactionPaths = 2;
+            info.subactionPaths = g_hands.hand_path;
+            XrAction action = XR_NULL_HANDLE;
+            XrResult r = xr.CreateAction(g_hands.set, &info, &action);
+            if (XR_FAILED(r)) HSVR_LOG("OpenXR: could not make the controller action %s: %s", name, xr_result_name(r));
+            return action;
+        }
+
+        void suggest_profile(const char* profile, const char* trigger_input, const char* squeeze_input)
+        {
+            std::vector<XrActionSuggestedBinding> bindings;
+            const char* sides[2] = {"left", "right"};
+            std::string paths[6];
+            int n = 0;
+            for (int h = 0; h < 2; ++h)
+            {
+                paths[n] = std::string("/user/hand/") + sides[h] + "/input/grip/pose";
+                bindings.push_back({g_hands.grip_pose, to_path(paths[n++].c_str())});
+                if (trigger_input)
+                {
+                    paths[n] = std::string("/user/hand/") + sides[h] + trigger_input;
+                    bindings.push_back({g_hands.trigger, to_path(paths[n++].c_str())});
+                }
+                if (squeeze_input)
+                {
+                    paths[n] = std::string("/user/hand/") + sides[h] + squeeze_input;
+                    bindings.push_back({g_hands.squeeze, to_path(paths[n++].c_str())});
+                }
+            }
+            XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+            suggested.interactionProfile = to_path(profile);
+            suggested.countSuggestedBindings = (uint32_t)bindings.size();
+            suggested.suggestedBindings = bindings.data();
+            XrResult r = xr.SuggestInteractionProfileBindings(g_instance, &suggested);
+            if (XR_FAILED(r)) HSVR_LOG("OpenXR: controller bindings for %s not accepted: %s", profile, xr_result_name(r));
+        }
+
+        // Called once, right after the session is made (bindings must be in before attaching).
+        void create_hand_actions(XrSession session)
+        {
+            if (!xr.CreateActionSet || !xr.SyncActions)
+            {
+                HSVR_LOG("OpenXR: the runtime lacks the controller functions; no motion controls");
+                return;
+            }
+            g_hands.hand_path[0] = to_path("/user/hand/left");
+            g_hands.hand_path[1] = to_path("/user/hand/right");
+            XrActionSetCreateInfo set_info{XR_TYPE_ACTION_SET_CREATE_INFO};
+            strncpy(set_info.actionSetName, "halfsword", XR_MAX_ACTION_SET_NAME_SIZE - 1);
+            strncpy(set_info.localizedActionSetName, "Half Sword", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE - 1);
+            XrResult r = xr.CreateActionSet(g_instance, &set_info, &g_hands.set);
+            if (XR_FAILED(r))
+            {
+                HSVR_LOG("OpenXR: could not make the controller action set: %s", xr_result_name(r));
+                return;
+            }
+            g_hands.grip_pose = make_action("hand_pose", "Hand pose", XR_ACTION_TYPE_POSE_INPUT);
+            g_hands.trigger = make_action("trigger", "Trigger", XR_ACTION_TYPE_FLOAT_INPUT);
+            g_hands.squeeze = make_action("squeeze", "Grip", XR_ACTION_TYPE_FLOAT_INPUT);
+            if (g_hands.grip_pose == XR_NULL_HANDLE) return;
+            suggest_profile("/interaction_profiles/valve/index_controller", "/input/trigger/value", "/input/squeeze/value");
+            suggest_profile("/interaction_profiles/oculus/touch_controller", "/input/trigger/value", "/input/squeeze/value");
+            suggest_profile("/interaction_profiles/htc/vive_controller", "/input/trigger/value", "/input/squeeze/click");
+            suggest_profile("/interaction_profiles/khr/simple_controller", "/input/select/click", nullptr);
+            XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+            attach.countActionSets = 1;
+            attach.actionSets = &g_hands.set;
+            r = xr.AttachSessionActionSets(session, &attach);
+            if (XR_FAILED(r))
+            {
+                HSVR_LOG("OpenXR: could not attach the controller actions: %s", xr_result_name(r));
+                return;
+            }
+            for (int h = 0; h < 2; ++h)
+            {
+                XrActionSpaceCreateInfo space_info{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+                space_info.action = g_hands.grip_pose;
+                space_info.subactionPath = g_hands.hand_path[h];
+                space_info.poseInActionSpace.orientation.w = 1.0f;
+                r = xr.CreateActionSpace(session, &space_info, &g_hands.grip_space[h]);
+                if (XR_FAILED(r))
+                {
+                    HSVR_LOG("OpenXR: could not make the %s hand space: %s", h ? "right" : "left", xr_result_name(r));
+                    return;
+                }
+            }
+            g_hands.ready.store(true);
+            HSVR_LOG("OpenXR: controller actions ready (hand poses, trigger, grip)");
+        }
+
+        float read_float_action(XrSession session, XrAction action, int hand)
+        {
+            if (action == XR_NULL_HANDLE) return 0.0f;
+            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+            info.action = action;
+            info.subactionPath = g_hands.hand_path[hand];
+            XrActionStateFloat state{XR_TYPE_ACTION_STATE_FLOAT};
+            if (XR_FAILED(xr.GetActionStateFloat(session, &info, &state)) || !state.isActive) return 0.0f;
+            return state.currentState;
+        }
+
+        void log_interaction_profiles(XrSession session)
+        {
+            for (int h = 0; h < 2; ++h)
+            {
+                XrInteractionProfileState state{XR_TYPE_INTERACTION_PROFILE_STATE};
+                if (XR_FAILED(xr.GetCurrentInteractionProfile(session, g_hands.hand_path[h], &state))) continue;
+                char text[XR_MAX_PATH_LENGTH] = "none";
+                uint32_t length = 0;
+                if (state.interactionProfile != XR_NULL_PATH) xr.PathToString(g_instance, state.interactionProfile, sizeof(text), &length, text);
+                HSVR_LOG("OpenXR: %s controller uses the bindings for %s", h ? "right" : "left", text);
+            }
+        }
+
         // --------------------------------------------------------------------------- D3D12 ----
         struct XrSwap
         {
@@ -918,6 +1063,7 @@ float4 PSMain(VSOut i) : SV_Target
                 return false;
             }
             g_local_space.store(local);
+            create_hand_actions(session);
 
             uint32_t format_count = 0;
             xr.EnumerateSwapchainFormats(session, 0, &format_count, nullptr);
@@ -1092,6 +1238,10 @@ float4 PSMain(VSOut i) : SV_Target
                         g.frame_begun = false;
                         shared().xr_running.store(false);
                     }
+                }
+                else if (ev.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED)
+                {
+                    g_hands.profile_changed.store(true);
                 }
                 else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING)
                 {
@@ -2364,6 +2514,92 @@ float4 PSMain(VSOut i) : SV_Target
         }
         out = pose;
         return true;
+    }
+
+    bool vr_locate_hands(XrHandRaw out[2])
+    {
+        if (config().dev_fake_hands)
+        {
+            // Pretend controllers for tests without anyone holding them: both hands in front of
+            // the chest, circling slowly, the handles pointing forward and tilting up and down.
+            float head[3];
+            float yaw;
+            {
+                std::lock_guard<std::mutex> lock(g_recenter_mutex);
+                head[0] = g_recenter_xr_pos[0];
+                head[1] = g_recenter_xr_pos[1];
+                head[2] = g_recenter_xr_pos[2];
+                yaw = g_recenter_xr_yaw;
+            }
+            double t = now_seconds();
+            float tilt = (float)((40.0 + 30.0 * std::sin(t * 0.7)) * kDegToRad);
+            for (int h = 0; h < 2; ++h)
+            {
+                float side = h ? 1.0f : -1.0f;
+                float ox = 0.22f * side + 0.08f * (float)std::sin(t * 1.3);
+                float oy = -0.30f + 0.08f * (float)std::cos(t * 1.3);
+                float oz = -0.35f;
+                // Turn the offset by the recentred heading (about +Y).
+                float cy = std::cos(yaw), sy = std::sin(yaw);
+                XrHandRaw& hand = out[h];
+                hand.valid = hand.position_tracked = true;
+                hand.px = head[0] + cy * ox + sy * oz;
+                hand.py = head[1] + oy;
+                hand.pz = head[2] - sy * ox + cy * oz;
+                // Heading about +Y, then the tilt about the hand's +X.
+                float hy = yaw * 0.5f, hx = tilt * 0.5f;
+                hand.qx = std::cos(hy) * std::sin(hx);
+                hand.qy = std::sin(hy) * std::cos(hx);
+                hand.qz = -std::sin(hy) * std::sin(hx);
+                hand.qw = std::cos(hy) * std::cos(hx);
+                hand.trigger = hand.squeeze = 0.0f;
+            }
+            return true;
+        }
+        XrSession session = g_session.load();
+        XrSpace local = g_local_space.load();
+        if (g_fake_headset || !g_hands.ready.load() || !shared().xr_running.load() || session == XR_NULL_HANDLE || local == XR_NULL_HANDLE) return false;
+        XrActiveActionSet active{g_hands.set, XR_NULL_PATH};
+        XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
+        sync.countActiveActionSets = 1;
+        sync.activeActionSets = &active;
+        XrResult r = xr.SyncActions(session, &sync);
+        if (XR_FAILED(r)) HSVR_LOG_EVERY(10.0, "OpenXR: xrSyncActions: %s", xr_result_name(r));
+        if (g_hands.profile_changed.exchange(false)) log_interaction_profiles(session);
+        XrTime time = g_frame_time.load() + g_lead_ns.load();
+        bool any = false;
+        for (int h = 0; h < 2; ++h)
+        {
+            XrHandRaw& hand = g_hands.last[h];
+            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+            info.action = g_hands.grip_pose;
+            info.subactionPath = g_hands.hand_path[h];
+            XrActionStatePose pose_state{XR_TYPE_ACTION_STATE_POSE};
+            bool active_pose = XR_SUCCEEDED(xr.GetActionStatePose(session, &info, &pose_state)) && pose_state.isActive;
+            XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+            if (active_pose && XR_SUCCEEDED(xr.LocateSpace(g_hands.grip_space[h], local, time, &loc)) &&
+                (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) && (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+            {
+                hand.valid = true;
+                hand.position_tracked = (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
+                hand.px = loc.pose.position.x;
+                hand.py = loc.pose.position.y;
+                hand.pz = loc.pose.position.z;
+                hand.qx = loc.pose.orientation.x;
+                hand.qy = loc.pose.orientation.y;
+                hand.qz = loc.pose.orientation.z;
+                hand.qw = loc.pose.orientation.w;
+            }
+            else
+            {
+                hand.valid = false;
+            }
+            hand.trigger = read_float_action(session, g_hands.trigger, h);
+            hand.squeeze = read_float_action(session, g_hands.squeeze, h);
+            out[h] = hand;
+            any = any || hand.valid;
+        }
+        return any;
     }
 
     Recenter vr_recenter()

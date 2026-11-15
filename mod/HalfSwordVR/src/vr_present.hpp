@@ -29,6 +29,11 @@ namespace hsvr
     Recenter vr_recenter();
     void vr_set_recenter_from(const FramePose& pose);
 
+    // Where the two controllers will be when the frame the game is about to make is shown
+    // (index 0 = left hand, 1 = right). Reads the controller buttons too. Returns false when no
+    // controller is known (no session yet, or none tracked).
+    bool vr_locate_hands(XrHandRaw out[2]);
+
     // ---- Render thread ----------------------------------------------------------------------
     // The scene for one eye has been drawn into this rectangle of the engine's render target.
     void vr_render_thread_view_rect(int view_index, int min_x, int min_y, int max_x, int max_y);

@@ -95,6 +95,32 @@ namespace hsvr
         // normal speed (a helper thread keeps the headset link alive). 0 = the game always waits
         // for the headset, which can make it crawl while the headset sleeps.
         bool idle_helper = true;
+        // ---- motion controls (arm_control.cpp) ----
+        // 1 = the controllers move the character's hands (when they are tracked).
+        bool motion_arms = true;
+        bool arm_right = true;
+        bool arm_left = true;
+        // Key that switches motion arms on and off while playing. 0x21 = Page Up.
+        int toggle_arms_key = 0x21;
+        // 1 = also feed the game's own aim (where the mouse would point the sword) from the
+        // controller, so that the game's swing speed, stamina and body turning follow along.
+        bool aim_sync = true;
+        double aim_scale = 1.0;   // aim degrees per degree of blade direction
+        bool aim_invert_y = false;
+        // Where the elbow points while the hand is placed: a mix of down, out to the side and back.
+        double elbow_down = 1.0;
+        double elbow_out = 0.6;
+        double elbow_back = 0.2;
+        // Share of the hand's roll that the forearm takes (0 = all in the wrist, 1 = all in the forearm).
+        double forearm_twist_share = 0.5;
+        // Moves the sword's grip along the handle relative to the controller, in cm (+ = towards the blade).
+        double grip_shift_cm = 0.0;
+        // Extra turn of the hands relative to the controllers, in degrees (pitch, yaw, roll).
+        double hand_pitch = 0.0;
+        double hand_yaw = 0.0;
+        double hand_roll = 0.0;
+        // Write "Arms:" lines to the log (once a second): where each hand should be and where it is.
+        bool log_arms = true;
         // Developer switches.
         bool log_poses = false;
         // Write "Input:" lines to the log: which window has the keyboard, Esc and menu clicks,
@@ -109,6 +135,10 @@ namespace hsvr
         // Test without a headset: a pretend headset that slowly looks left and right. The two
         // eye views show side by side in the game window.
         bool dev_fake_headset = false;
+        // Test without anyone holding the controllers: pretend hands in front of the chest.
+        bool dev_fake_hands = false;
+        // Test without anyone playing: drive the arms of the first fighter in the level.
+        bool dev_arms_any_character = false;
         // The pretend headset holds still, looking dev_fake_yaw degrees to the left and
         // dev_fake_pitch degrees up of where it looked when the game started.
         bool dev_fake_still = false;

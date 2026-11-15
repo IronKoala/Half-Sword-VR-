@@ -39,7 +39,19 @@ namespace hsvr
     X(EndFrame)                           \
     X(LocateViews)                        \
     X(LocateSpace)                        \
-    X(ResultToString)
+    X(ResultToString)                     \
+    X(StringToPath)                       \
+    X(PathToString)                       \
+    X(CreateActionSet)                    \
+    X(CreateAction)                       \
+    X(SuggestInteractionProfileBindings)  \
+    X(AttachSessionActionSets)            \
+    X(CreateActionSpace)                  \
+    X(SyncActions)                        \
+    X(GetActionStatePose)                 \
+    X(GetActionStateBoolean)              \
+    X(GetActionStateFloat)                \
+    X(GetCurrentInteractionProfile)
 
     struct XrApi
     {

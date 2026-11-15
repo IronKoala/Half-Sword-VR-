@@ -332,6 +332,20 @@ namespace hsvr
         g_anchor_provider = provider;
     }
 
+    bool stereo_tracking_to_world(float px, float py, float pz, float qx, float qy, float qz, float qw, Vec3& pos, Quat& rot)
+    {
+        if (!g_view.valid || !g_view.recenter.valid) return false;
+        Config cfg = config();
+        double scale = cfg.world_scale; // Unreal units are centimetres (WorldToMeters 100)
+        Quat recenter_inverse = quat_from_yaw_deg(g_view.recenter.yaw_deg).inverse();
+        Vec3 real_cm = xr_to_ue_position(px, py, pz, 100.0);
+        Vec3 relative = recenter_inverse.rotate(real_cm - g_view.recenter.position_cm) * scale;
+        Quat base = quat_from_yaw_deg(g_view.base_yaw);
+        pos = g_view.anchor + base.rotate(relative);
+        rot = (base * recenter_inverse * xr_to_ue_rotation(qx, qy, qz, qw)).normalized();
+        return true;
+    }
+
     void stereo_begin_game_frame(double delta_seconds)
     {
         g_game_frame.fetch_add(1);

@@ -25,6 +25,7 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
+#include "arm_control.hpp"
 #include "config.hpp"
 #include "engine_slot.hpp"
 #include "input_watch.hpp"
@@ -844,6 +845,30 @@ namespace
         }
 
         watch_input();
+        {
+            UObject* pawn = nullptr;
+            find_pawn_mesh(&pawn);
+            bool menu = shared.menu_up.load() || shared.game_wants_pointer.load();
+            if (!pawn && hsvr::config().dev_arms_any_character)
+            {
+                // Unattended tests: when nobody plays a character, drive the arms of the first
+                // fighter in the level (the hands then reach towards the camera).
+                static UObject* stand_in = nullptr;
+                static double next_look = 0.0;
+                if (hsvr::now_seconds() >= next_look)
+                {
+                    next_look = hsvr::now_seconds() + 2.0;
+                    std::vector<UObject*> fighters;
+                    UObjectGlobals::FindAllOf(STR("Willie_BP_C"), fighters);
+                    UObject* first = fighters.empty() ? nullptr : fighters[0];
+                    if (first != stand_in && first) HSVR_LOG("Test: %d fighter(s) in the level; arms driven on %ls", (int)fighters.size(), first->GetFullName().c_str());
+                    stand_in = first;
+                }
+                pawn = stand_in;
+                menu = shared.game_paused.load();
+            }
+            hsvr::arm_game_tick(pawn, menu);
+        }
 
         hsvr::Config cfg = hsvr::config();
         if (g_console_done)
@@ -855,7 +880,8 @@ namespace
         }
         // The mod's keys count only while the game has the keyboard, so that Home or End typed in
         // another program does not move the view or hide the panel.
-        static bool recenter_down = false, ui_down = false, view_down = false, mode_down = false;
+        static bool recenter_down = false, ui_down = false, view_down = false, mode_down = false, arms_down = false;
+        bool arms = key_pressed_once(cfg.toggle_arms_key, arms_down);
         bool recenter = key_pressed_once(cfg.recenter_key, recenter_down);
         bool ui = key_pressed_once(cfg.toggle_ui_key, ui_down);
         bool mode = key_pressed_once(cfg.toggle_mode_key, mode_down);
@@ -863,6 +889,7 @@ namespace
         DWORD front_process = 0;
         if (HWND front = GetForegroundWindow()) GetWindowThreadProcessId(front, &front_process);
         if (front_process != GetCurrentProcessId()) return;
+        if (arms) hsvr::arm_toggle();
         if (recenter)
         {
             shared.recenter_requested.store(true);

@@ -104,6 +104,32 @@ namespace hsvr
                 d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.near_clip_cm, d.gamma_mode, d.ui_panel, d.ui_panel_auto,
                 d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, d.ui_opacity_gain, d.ui_menu_backdrop, d.ui_use_alpha, d.mirror_window, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key, (unsigned)d.toggle_view_key, (unsigned)d.toggle_mode_key,
                 d.predict_frames, d.pose_max_age, d.separate_render_target, d.sharpen, d.screen_percentage, d.extra_commands.c_str(), d.fix_clouds, d.cloud_mode, d.light_samples, d.idle_helper, d.log_poses, d.log_input, d.capture_seconds, d.stereo_slot_offset, d.dev_fake_headset);
+        fprintf(f,
+                "; ---- Motion controls: the controllers move the character's hands ----\n"
+                "motion_arms=%d\n"
+                "arm_right=%d\n"
+                "arm_left=%d\n"
+                "; 0x21 = Page Up: switch motion arms on and off while playing.\n"
+                "toggle_arms_key=0x%X\n"
+                "; 1 = the game's own aim follows the sword (swing speed, stamina, body turning).\n"
+                "aim_sync=%d\n"
+                "aim_scale=%.2f\n"
+                "aim_invert_y=%d\n"
+                "; Where the elbow points: a mix of down, out to the side and back.\n"
+                "elbow_down=%.2f\n"
+                "elbow_out=%.2f\n"
+                "elbow_back=%.2f\n"
+                "; Share of the hand's roll taken by the forearm (0 = all in the wrist).\n"
+                "forearm_twist_share=%.2f\n"
+                "; Slide the sword along the handle relative to the controller, cm (+ = towards the blade).\n"
+                "grip_shift_cm=%.1f\n"
+                "; Extra turn of the hands relative to the controllers, degrees.\n"
+                "hand_pitch=%.1f\n"
+                "hand_yaw=%.1f\n"
+                "hand_roll=%.1f\n"
+                "log_arms=%d\n",
+                d.motion_arms, d.arm_right, d.arm_left, (unsigned)d.toggle_arms_key, d.aim_sync, d.aim_scale, d.aim_invert_y, d.elbow_down, d.elbow_out,
+                d.elbow_back, d.forearm_twist_share, d.grip_shift_cm, d.hand_pitch, d.hand_yaw, d.hand_roll, d.log_arms);
         fclose(f);
     }
 
@@ -201,6 +227,22 @@ namespace hsvr
         flag("wipe_standins", c.wipe_standins);
         flag("log_sliders", c.log_sliders);
         flag("idle_helper", c.idle_helper);
+        flag("motion_arms", c.motion_arms);
+        flag("arm_right", c.arm_right);
+        flag("arm_left", c.arm_left);
+        integer("toggle_arms_key", c.toggle_arms_key);
+        flag("aim_sync", c.aim_sync);
+        num("aim_scale", c.aim_scale);
+        flag("aim_invert_y", c.aim_invert_y);
+        num("elbow_down", c.elbow_down);
+        num("elbow_out", c.elbow_out);
+        num("elbow_back", c.elbow_back);
+        num("forearm_twist_share", c.forearm_twist_share);
+        num("grip_shift_cm", c.grip_shift_cm);
+        num("hand_pitch", c.hand_pitch);
+        num("hand_yaw", c.hand_yaw);
+        num("hand_roll", c.hand_roll);
+        flag("log_arms", c.log_arms);
         flag("log_poses", c.log_poses);
         flag("log_input", c.log_input);
         num("capture_seconds", c.capture_seconds);
@@ -208,6 +250,8 @@ namespace hsvr
         integer("stereo_slot_offset", c.stereo_slot_offset);
         flag("dev_fake_headset", c.dev_fake_headset);
         flag("dev_fake_still", c.dev_fake_still);
+        flag("dev_fake_hands", c.dev_fake_hands);
+        flag("dev_arms_any_character", c.dev_arms_any_character);
         num("dev_fake_yaw", c.dev_fake_yaw);
         num("dev_fake_pitch", c.dev_fake_pitch);
         num("dev_fake_scale", c.dev_fake_scale);

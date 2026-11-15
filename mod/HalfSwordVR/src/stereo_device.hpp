@@ -19,6 +19,11 @@ namespace hsvr
     using AnchorProvider = bool (*)(PlayerAnchor& out);
     void stereo_set_anchor_provider(AnchorProvider provider);
 
+    // Puts a controller into the game world the same way the eyes are put there (recentering,
+    // head anchor, heading, world scale), using the most recent frame's view. Game thread only.
+    // `rot` is in Unreal axes: its X axis is the controller's handle direction (OpenXR -Z).
+    bool stereo_tracking_to_world(float px, float py, float pz, float qx, float qy, float qz, float qw, Vec3& pos, Quat& rot);
+
     // Called once per engine tick on the game thread, before the frame is drawn.
     void stereo_begin_game_frame(double delta_seconds);
 
