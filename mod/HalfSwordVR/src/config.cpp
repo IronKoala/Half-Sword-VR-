@@ -62,11 +62,12 @@ namespace hsvr
                 "predict_frames=%.1f\n"
                 "separate_render_target=%d\n"
                 "log_poses=%d\n"
-                "stereo_slot_offset=%d\n",
+                "stereo_slot_offset=%d\n"
+                "dev_fake_headset=%d\n",
                 d.enabled, d.require_steamvr_running, d.render_scale, d.world_scale, d.anchor.c_str(), d.head_bone.c_str(),
                 d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.hide_head, d.near_clip_cm, d.gamma_mode, d.ui_panel,
                 d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key,
-                d.predict_frames, d.separate_render_target, d.log_poses, d.stereo_slot_offset);
+                d.predict_frames, d.separate_render_target, d.log_poses, d.stereo_slot_offset, d.dev_fake_headset);
         fclose(f);
     }
 
@@ -149,6 +150,7 @@ namespace hsvr
         flag("separate_render_target", c.separate_render_target);
         flag("log_poses", c.log_poses);
         integer("stereo_slot_offset", c.stereo_slot_offset);
+        flag("dev_fake_headset", c.dev_fake_headset);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;

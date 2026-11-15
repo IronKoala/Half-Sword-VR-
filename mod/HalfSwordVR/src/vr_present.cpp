@@ -141,6 +141,39 @@ namespace hsvr
         std::atomic<int64_t> g_lead_ns{22222222};
         bool g_vr_available = false;
         bool g_vr_failed = false;
+        bool g_fake_headset = false;
+
+        // Pretend headset for tests without SteamVR: sits at the origin and looks slowly left and right.
+        void fake_pose(FramePose& pose)
+        {
+            double t = now_seconds();
+            float yaw = (float)(std::sin(t * 1.0) * 0.35);   // radians, positive = left
+            float pitch = (float)(std::sin(t * 0.6) * 0.15); // radians, positive = up
+            // OpenXR orientation: yaw about +Y, then pitch about the head's +X.
+            float cy = std::cos(yaw * 0.5f), sy = std::sin(yaw * 0.5f);
+            float cp = std::cos(pitch * 0.5f), sp = std::sin(pitch * 0.5f);
+            float qx = cy * sp, qy = sy * cp, qz = -sy * sp, qw = cy * cp;
+            float sway = (float)(std::sin(t * 0.4) * 0.10); // metres, side to side
+            for (int e = 0; e < 2; ++e)
+            {
+                float side = e == 0 ? -0.032f : 0.032f;
+                XrEyeRaw& eye = pose.eye[e];
+                // Eye offset along the head's right axis (rotated by yaw only; good enough for a test).
+                eye.px = sway + side * std::cos(yaw);
+                eye.py = 0.0f;
+                eye.pz = -side * std::sin(yaw);
+                eye.qx = qx;
+                eye.qy = qy;
+                eye.qz = qz;
+                eye.qw = qw;
+                eye.angle_left = e == 0 ? -0.87f : -0.70f;
+                eye.angle_right = e == 0 ? 0.70f : 0.87f;
+                eye.angle_up = 0.79f;
+                eye.angle_down = -0.79f;
+            }
+            pose.valid = true;
+            pose.predicted_time = 0;
+        }
 
         std::mutex g_recenter_mutex;
         Recenter g_recenter;
@@ -1235,6 +1268,21 @@ float4 PSMain(VSOut i) : SV_Target
             HSVR_LOG("VR is switched off in HalfSwordVR.ini (enabled=0)");
             return false;
         }
+        if (cfg.dev_fake_headset)
+        {
+            g_fake_headset = true;
+            shared().eye_width.store(1280);
+            shared().eye_height.store(1280);
+            FramePose pose;
+            fake_pose(pose);
+            {
+                std::lock_guard<std::mutex> lock(g_pipe.mutex);
+                g_pipe.last_latched = pose;
+            }
+            shared().xr_ready.store(true);
+            HSVR_LOG("TEST MODE: pretend headset (dev_fake_headset=1). No SteamVR is used; both eye views show in the game window.");
+            return true;
+        }
         if (cfg.require_steamvr_running && !process_running(L"vrserver.exe") && !process_running(L"vrmonitor.exe"))
         {
             HSVR_LOG("SteamVR is not running, so the game starts flat. Start SteamVR first to play in VR.");
@@ -1318,6 +1366,7 @@ float4 PSMain(VSOut i) : SV_Target
 
     void vr_install_present_hook()
     {
+        if (g_fake_headset) return;
         std::thread(install_hook_thread).detach();
     }
 
@@ -1328,7 +1377,11 @@ float4 PSMain(VSOut i) : SV_Target
             std::lock_guard<std::mutex> lock(g_pipe.mutex);
             pose = g_pipe.last_latched;
         }
-        if (shared().xr_running.load())
+        if (g_fake_headset)
+        {
+            fake_pose(pose);
+        }
+        else if (shared().xr_running.load())
         {
             XrTime time = g_frame_time.load() + g_lead_ns.load();
             locate_views(time, pose);
@@ -1339,7 +1392,7 @@ float4 PSMain(VSOut i) : SV_Target
             pose.sequence = ++g_pipe.sequence;
             g_pipe.last_latched = pose;
             g_pipe.game_queue.push_back(pose);
-            while (g_pipe.game_queue.size() > 8)
+            while (g_pipe.game_queue.size() > (g_fake_headset ? 1u : 8u))
             {
                 g_pipe.game_queue.pop_front();
                 ++g_pipe.dropped_game;

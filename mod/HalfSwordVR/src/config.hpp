@@ -39,6 +39,9 @@ namespace hsvr
         // Developer switches.
         bool separate_render_target = false;
         bool log_poses = false;
+        // Test without a headset: a pretend headset that slowly looks left and right. The two
+        // eye views show side by side in the game window.
+        bool dev_fake_headset = false;
         int stereo_slot_offset = 0; // 0 = find automatically
     };
 
