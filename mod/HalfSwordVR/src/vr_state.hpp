@@ -51,6 +51,8 @@ namespace hsvr
         // is no player character yet, as in the intro and main menu).
         std::atomic<bool> game_paused{false};
         std::atomic<bool> menu_up{true};
+        // The game has asked for a mouse pointer (it does in menus, not in a fight).
+        std::atomic<bool> game_wants_pointer{false};
         // View from the game's own (third-person) camera instead of the character's head.
         std::atomic<bool> third_person{false};
         // Set by a key to flip between full-resolution mode and the fallback while playing:

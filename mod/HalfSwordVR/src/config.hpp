@@ -30,16 +30,17 @@ namespace hsvr
         // 0 = always shown (the menu-panel key hides it). 1 = the panel only shows while a menu is
         // up (game paused, intro, main menu, or a mouse pointer showing); the key forces it on.
         bool ui_panel_auto = false;
-        double ui_distance_m = 1.6;
-        double ui_width_m = 1.8;
+        double ui_distance_m = 1.1;
+        double ui_width_m = 1.25;
         double ui_height_offset_m = -0.05;
         // How solid the panel's menus and HUD are drawn: opacity = brightness x this.
         double ui_opacity_gain = 2.0;
-        // Darkness of the sheet behind the panel while a mouse pointer is showing (0 = none, 1 = solid).
-        double ui_menu_backdrop = 0.85;
-        // Also use the coverage the game's UI pass leaves in the window's alpha channel, so dark
-        // but solid parts of a menu stay visible on the panel.
-        bool ui_use_alpha = true;
+        // Darkness of the sheet behind the panel while a menu is up (0 = none, 1 = solid).
+        double ui_menu_backdrop = 0.92;
+        // Also use the coverage the game's UI pass leaves in the window's alpha channel. Off by
+        // default: the window only has four levels of alpha, which shows as rings on soft overlays,
+        // and the dark sheet behind menus already keeps dark menu parts visible.
+        bool ui_use_alpha = false;
         // Show the left eye's picture (with menus) in the game window on the monitor.
         bool mirror_window = true;
         // Virtual key codes. 0x24 = Home, 0x23 = End, 0x2D = Insert.

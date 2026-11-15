@@ -11,6 +11,7 @@
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Mod/CppUserModBase.hpp>
 #include <Unreal/FProperty.hpp>
+#include <Unreal/Property/FBoolProperty.hpp>
 #include <Unreal/FString.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/NameTypes.hpp>
@@ -40,6 +41,17 @@ namespace
         if (!owner) return nullptr;
         UObject** value = owner->GetValuePtrByPropertyNameInChain<UObject*>(name);
         return value ? *value : nullptr;
+    }
+
+    // Reads a yes/no property that the engine packs into a single bit.
+    bool bool_property(UObject* owner, const TCHAR* name)
+    {
+        if (!owner) return false;
+        FProperty* property = owner->GetPropertyByNameInChain(name);
+        if (!property) return false;
+        auto* flag = static_cast<FBoolProperty*>(property);
+        const uint8_t* byte = reinterpret_cast<const uint8_t*>(owner) + property->GetOffset_Internal() + flag->GetByteOffset();
+        return (*byte & flag->GetFieldMask()) != 0;
     }
 
     struct RawArray
@@ -351,6 +363,7 @@ namespace
             {
                 game.view_yaw = rotation->Yaw;
             }
+            game.wants_pointer = bool_property(controller, STR("bShowMouseCursor"));
             static UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.GameplayStatics:IsGamePaused"));
             static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
             if (fn && cdo)
@@ -362,6 +375,7 @@ namespace
         }
         auto& shared = hsvr::shared();
         shared.game_paused.store(game.paused);
+        shared.game_wants_pointer.store(game.wants_pointer);
         // No character yet means the intro or the main menu.
         shared.menu_up.store(game.paused || !pawn || !pawn_mesh);
         hsvr::input_watch_tick(game);

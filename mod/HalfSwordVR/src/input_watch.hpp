@@ -10,6 +10,7 @@ namespace hsvr
     {
         bool have_player = false; // a player controller exists
         bool paused = false;      // the game reports itself paused
+        bool wants_pointer = false; // the game has asked for a mouse pointer (menus)
         double view_yaw = 0.0;    // the player's control heading, degrees
     };
 

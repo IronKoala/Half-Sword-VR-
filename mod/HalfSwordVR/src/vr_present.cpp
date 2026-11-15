@@ -1480,9 +1480,13 @@ float4 PSMain(VSOut i) : SV_Target
 
                 // With the eyes in their own target the game window holds only the flat menus and
                 // HUD: copy it for the floating panel, then put the monitor picture together.
-                // Where the mouse pointer is, if Windows is showing one inside the game window.
+                // Where the mouse pointer is, if there is one to show: either Windows is showing
+                // its own, or the game says it wants one. The game draws its pointer in a small
+                // window of its own that follows the mouse, which is never part of the game's
+                // picture, so without this the panel would show menus with no pointer at all.
                 bool pointer_showing = false;
                 float pointer_u = 0.0f, pointer_v = 0.0f;
+                bool game_pointer = shared().game_wants_pointer.load();
                 if (separate)
                 {
                     DXGI_SWAP_CHAIN_DESC scd{};
@@ -1490,8 +1494,8 @@ float4 PSMain(VSOut i) : SV_Target
                     CURSORINFO ci{};
                     ci.cbSize = sizeof(ci);
                     RECT client{};
-                    if (scd.OutputWindow && GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && GetClientRect(scd.OutputWindow, &client) &&
-                        client.right > 0 && client.bottom > 0)
+                    if (scd.OutputWindow && GetCursorInfo(&ci) && ((ci.flags & CURSOR_SHOWING) || game_pointer) &&
+                        GetClientRect(scd.OutputWindow, &client) && client.right > 0 && client.bottom > 0)
                     {
                         POINT p = ci.ptScreenPos;
                         ScreenToClient(scd.OutputWindow, &p);
@@ -1507,7 +1511,7 @@ float4 PSMain(VSOut i) : SV_Target
                 // effects (the game tints the edges of the picture), which would hang in front of
                 // the player as a coloured frame, so by default the panel shows only while a menu
                 // is up; the menu-panel key forces it on.
-                bool menu_showing = shared().menu_up.load() || pointer_showing;
+                bool menu_showing = shared().menu_up.load() || pointer_showing || game_pointer;
                 bool toggled = shared().ui_toggled.load();
                 bool panel_on = cfg.ui_panel_auto ? (menu_showing || toggled) : !toggled;
                 bool want_ui = separate && cfg.ui_panel && panel_on;
@@ -1609,9 +1613,9 @@ float4 PSMain(VSOut i) : SV_Target
                         c.cursor[2] = (float)g.ui_copy_width / (float)std::max<UINT>(1, g.ui_copy_height);
                         c.cursor[3] = 0.008f;
                     }
-                    // A pause menu or a mouse pointer: put a dark sheet behind the panel so every
-                    // button can be read whatever is behind it.
-                    if (pointer_showing || shared().game_paused.load()) c.params[3] = (float)cfg.ui_menu_backdrop;
+                    // A menu (the game is paused or wants a mouse pointer): put a dark sheet behind
+                    // the panel so every button can be read whatever is behind it.
+                    if (pointer_showing || game_pointer || shared().game_paused.load()) c.params[3] = (float)cfg.ui_menu_backdrop;
                     ui_acquired = blit_to_swapchain(g.ui, srv, c);
                     if (ui_acquired)
                     {

@@ -145,7 +145,7 @@ namespace hsvr
             HSVR_LOG("Input: Esc pressed (keyboard goes to %s, game paused: %s, pointer showing: %s)", front.c_str(), game.paused ? "yes" : "no",
                      pointer ? "yes" : "no");
         }
-        if (click && !click_was && (pointer || game.paused))
+        if (click && !click_was && (pointer || game.paused || game.wants_pointer))
         {
             POINT p = cursor.ptScreenPos;
             RECT client{};
@@ -173,8 +173,8 @@ namespace hsvr
 
         std::string pads = describe_pads();
         char state[768];
-        snprintf(state, sizeof(state), "keyboard goes to %s, game paused: %s, pointer showing: %s, gamepads: %s", front.c_str(),
-                 game.paused ? "yes" : "no", pointer ? "yes" : "no", pads.c_str());
+        snprintf(state, sizeof(state), "keyboard goes to %s, game paused: %s, pointer showing: %s, game wants a pointer: %s, gamepads: %s",
+                 front.c_str(), game.paused ? "yes" : "no", pointer ? "yes" : "no", game.wants_pointer ? "yes" : "no", pads.c_str());
 
         static std::string last_state;
         static double last_line = 0.0;
