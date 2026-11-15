@@ -31,10 +31,12 @@ namespace hsvr
         int gamma_mode = 0;
         // Show the game's flat picture (menus, HUD) on a floating panel.
         bool ui_panel = true;
-        // 1 = the panel only shows while a menu is up (game paused, intro, main menu, or a mouse
-        // pointer showing), so full-screen effects the game draws around the picture do not hang
-        // in front of the player during a fight. 0 = always shown.
-        bool ui_panel_auto = true;
+        // 0 = always shown (the menu-panel key hides it). 1 = the panel only shows while a menu is
+        // up (game paused, intro, main menu, or a mouse pointer showing); the key forces it on.
+        bool ui_panel_auto = false;
+        // Parts of widget names, separated by commas: matching on-screen widgets of the game are
+        // made fully see-through. For full-screen effects that make no sense on the panel.
+        std::string hide_widgets;
         double ui_distance_m = 1.6;
         double ui_width_m = 1.8;
         double ui_height_offset_m = -0.05;

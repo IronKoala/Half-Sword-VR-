@@ -55,8 +55,10 @@ namespace hsvr
                 "near_clip_cm=%.1f\n"
                 "gamma_mode=%d\n"
                 "ui_panel=%d\n"
-                "; 1 = the panel only shows while a menu is up (the menu-panel key forces it on); 0 = always shown.\n"
+                "; 0 = panel always shown (the menu-panel key hides it); 1 = only while a menu is up.\n"
                 "ui_panel_auto=%d\n"
+                "; Parts of widget names, separated by commas: matching game widgets are made see-through.\n"
+                "hide_widgets=%s\n"
                 "ui_distance_m=%.2f\n"
                 "ui_width_m=%.2f\n"
                 "ui_height_offset_m=%.2f\n"
@@ -86,7 +88,7 @@ namespace hsvr
                 "stereo_slot_offset=%d\n"
                 "dev_fake_headset=%d\n",
                 d.enabled, d.require_steamvr_running, d.render_scale, d.world_scale, d.anchor.c_str(), d.head_bone.c_str(),
-                d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.hide_head, d.hide_head_bones, d.near_clip_cm, d.gamma_mode, d.ui_panel, d.ui_panel_auto,
+                d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.hide_head, d.hide_head_bones, d.near_clip_cm, d.gamma_mode, d.ui_panel, d.ui_panel_auto, d.hide_widgets.c_str(),
                 d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, d.ui_opacity_gain, d.ui_menu_backdrop, d.mirror_window, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key, (unsigned)d.toggle_view_key, (unsigned)d.toggle_mode_key,
                 d.predict_frames, d.separate_render_target, d.idle_helper, d.log_poses, d.log_input, d.capture_seconds, d.stereo_slot_offset, d.dev_fake_headset);
         fclose(f);
@@ -164,6 +166,7 @@ namespace hsvr
         integer("gamma_mode", c.gamma_mode);
         flag("ui_panel", c.ui_panel);
         flag("ui_panel_auto", c.ui_panel_auto);
+        text("hide_widgets", c.hide_widgets);
         num("ui_distance_m", c.ui_distance_m);
         num("ui_width_m", c.ui_width_m);
         num("ui_height_offset_m", c.ui_height_offset_m);

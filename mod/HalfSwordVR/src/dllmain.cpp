@@ -583,24 +583,22 @@ namespace
         UObject* ReturnValue;
     };
 
-    // Visibility values are the engine's ESlateVisibility: 0 visible, 1 collapsed, 2 hidden,
-    // 3 not hit-testable (self and children), 4 not hit-testable (self only).
-    void log_widget_tree(UObject* widget, int depth, int& lines)
+    struct FloatParams
     {
-        if (!widget || depth > 6 || lines >= 400) return;
-        int visibility = -1;
-        if (UFunction* visibility_fn = widget->GetFunctionByNameInChain(STR("GetVisibility")))
-        {
-            ByteReturnParams v{};
-            widget->ProcessEvent(visibility_fn, &v);
-            visibility = v.ReturnValue;
-        }
-        ++lines;
-        HSVR_LOG("  %*s%ls | visibility %d", depth * 2, "", widget->GetFullName().c_str(), visibility);
+        float Value;
+    };
+
+    // Calls `visit(widget, depth)` for a widget and everything inside it.
+    template <typename Visit>
+    void walk_widget_tree(UObject* widget, int depth, int& budget, Visit&& visit)
+    {
+        if (!widget || depth > 6 || budget <= 0) return;
+        --budget;
+        visit(widget, depth);
         // A widget made in the game's editor keeps its parts in a tree of its own.
         if (UObject* tree = object_property(widget, STR("WidgetTree")))
         {
-            log_widget_tree(object_property(tree, STR("RootWidget")), depth + 1, lines);
+            walk_widget_tree(object_property(tree, STR("RootWidget")), depth + 1, budget, visit);
         }
         UFunction* count_fn = widget->GetFunctionByNameInChain(STR("GetChildrenCount"));
         UFunction* child_fn = widget->GetFunctionByNameInChain(STR("GetChildAt"));
@@ -612,28 +610,112 @@ namespace
             ChildAtParams child{};
             child.Index = i;
             widget->ProcessEvent(child_fn, &child);
-            log_widget_tree(child.ReturnValue, depth + 1, lines);
+            walk_widget_tree(child.ReturnValue, depth + 1, budget, visit);
         }
     }
 
-    void log_widgets(const char* reason)
+    // Calls `visit` for every widget the game currently has on screen.
+    template <typename Visit>
+    int walk_screen_widgets(Visit&& visit)
     {
         std::vector<UObject*> widgets;
         UObjectGlobals::FindAllOf(STR("UserWidget"), widgets);
-        HSVR_LOG("Widgets (%s): %d exist; those on screen:", reason, (int)widgets.size());
-        int lines = 0;
+        int budget = 400;
         for (UObject* widget : widgets)
         {
             if (!widget) continue;
-            if (widget->GetName().starts_with(STR("Default__"))) continue;
             UFunction* in_viewport_fn = widget->GetFunctionByNameInChain(STR("IsInViewport"));
             if (!in_viewport_fn) continue;
             BoolReturnParams in_viewport{};
             widget->ProcessEvent(in_viewport_fn, &in_viewport);
             if (!in_viewport.ReturnValue) continue;
-            log_widget_tree(widget, 0, lines);
+            walk_widget_tree(widget, 0, budget, visit);
         }
-        HSVR_LOG("Widgets: end of list (%d line(s))", lines);
+        return (int)widgets.size();
+    }
+
+    // Visibility values are the engine's ESlateVisibility: 0 visible, 1 collapsed, 2 hidden,
+    // 3 not hit-testable (self and children), 4 not hit-testable (self only).
+    void log_widgets(const char* reason)
+    {
+        HSVR_LOG("Widgets (%s), those on screen:", reason);
+        int lines = 0;
+        int total = walk_screen_widgets([&lines](UObject* widget, int depth) {
+            int visibility = -1;
+            if (UFunction* visibility_fn = widget->GetFunctionByNameInChain(STR("GetVisibility")))
+            {
+                ByteReturnParams v{};
+                widget->ProcessEvent(visibility_fn, &v);
+                visibility = v.ReturnValue;
+            }
+            float opacity = -1.0f;
+            if (UFunction* opacity_fn = widget->GetFunctionByNameInChain(STR("GetRenderOpacity")))
+            {
+                FloatParams o{};
+                widget->ProcessEvent(opacity_fn, &o);
+                opacity = o.Value;
+            }
+            ++lines;
+            HSVR_LOG("  %*s%ls | visibility %d, opacity %.2f", depth * 2, "", widget->GetFullName().c_str(), visibility, opacity);
+        });
+        HSVR_LOG("Widgets: end of list (%d line(s), %d widgets exist)", lines, total);
+    }
+
+    // Settings file `hide_widgets`: parts of widget names, separated by commas. Any on-screen
+    // widget whose full name contains one of them is made fully see-through (its render opacity
+    // is set to 0; nothing else about it changes, so the game's own logic is not disturbed).
+    // Meant for full-screen effects of the game that make no sense on a floating panel.
+    void hide_listed_widgets()
+    {
+        std::string list = hsvr::config().hide_widgets;
+        if (list.empty()) return;
+        static double last = 0.0;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+
+        std::vector<std::wstring> words;
+        std::wstring word;
+        auto flush = [&]() {
+            while (!word.empty() && word.back() == L' ') word.pop_back();
+            if (!word.empty()) words.push_back(word);
+            word.clear();
+        };
+        for (char c : list)
+        {
+            if (c == ',')
+            {
+                flush();
+            }
+            else if (!(c == ' ' && word.empty()))
+            {
+                word.push_back((wchar_t)towlower((wint_t)(unsigned char)c));
+            }
+        }
+        flush();
+        if (words.empty()) return;
+
+        static std::vector<std::wstring> reported;
+        walk_screen_widgets([&](UObject* widget, int) {
+            std::wstring name = widget->GetFullName();
+            std::wstring lower = name;
+            std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t c) { return (wchar_t)towlower(c); });
+            bool listed = false;
+            for (const std::wstring& w : words)
+            {
+                if (lower.find(w) != std::wstring::npos) listed = true;
+            }
+            if (!listed) return;
+            UFunction* opacity_fn = widget->GetFunctionByNameInChain(STR("SetRenderOpacity"));
+            if (!opacity_fn) return;
+            FloatParams zero{0.0f};
+            widget->ProcessEvent(opacity_fn, &zero);
+            if (std::find(reported.begin(), reported.end(), name) == reported.end() && reported.size() < 64)
+            {
+                reported.push_back(name);
+                HSVR_LOG("Widgets: made see-through (hide_widgets): %ls", name.c_str());
+            }
+        });
     }
 
     // Feeds the input record in the log (see input_watch.hpp) and tells the picture side whether
@@ -664,6 +746,7 @@ namespace
         // No character yet means the intro or the main menu.
         shared.menu_up.store(game.paused || !pawn || !pawn_mesh);
         hsvr::input_watch_tick(game);
+        hide_listed_widgets();
 
         // A few times per run, write down what is on screen: once early (intro), a few seconds
         // into each new character's life, and whenever the game pauses.
