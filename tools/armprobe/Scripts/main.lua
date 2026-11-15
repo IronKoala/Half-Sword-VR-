@@ -15,7 +15,7 @@
 --       counts which Blueprint functions run. Move the sword with the mouse
 --       while it records.
 
-local VERSION = "armprobe-1"
+local VERSION = "armprobe-2"
 local RECORD_SECONDS = 8
 local MAX_DEPTH = 6 -- class inheritance levels to walk
 
@@ -330,6 +330,7 @@ end
 ----------------------------------------------------------------------------
 -- F8: change recording
 local recording = nil
+local sample -- defined below, used by start_recording
 local hook_counts = {}
 local hooks_registered = false
 
@@ -380,10 +381,21 @@ local function start_recording()
     f:write(VERSION .. " recording, " .. #fields .. " fields; lines: t <tab> key <tab> value (only on change)\n")
     hook_counts = {}
     recording = { f = f, path = path, fields = fields, last = {}, parts = parts, t0 = os.clock(), frame = 0 }
+    -- Per-frame sampling runs ONLY while a recording is active; nothing runs per frame otherwise.
+    LoopInGameThreadAfterFrames(1, function()
+        if not recording then return true end
+        local ok, err = pcall(sample)
+        if not ok then
+            log("recording error: " .. tostring(err))
+            pcall(function() recording.f:close() end)
+            recording = nil
+        end
+        return recording == nil -- true stops the loop
+    end)
     log("recording " .. RECORD_SECONDS .. " s to " .. path .. " - move the sword now")
 end
 
-local function sample()
+function sample()
     local r = recording
     r.frame = r.frame + 1
     local t = os.clock() - r.t0
@@ -416,18 +428,6 @@ local function sample()
         recording = nil
     end
 end
-
-LoopInGameThreadAfterFrames(1, function()
-    if recording then
-        local ok, err = pcall(sample)
-        if not ok then
-            log("recording error: " .. tostring(err))
-            pcall(function() recording.f:close() end)
-            recording = nil
-        end
-    end
-    return false -- keep looping
-end)
 
 RegisterKeyBind(Key.F7, function() ExecuteInGameThread(function()
     local ok, err = pcall(full_dump)

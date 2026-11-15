@@ -93,7 +93,7 @@ A read-only UE4SS Lua mod that answers questions 1 to 4 in one short session:
   property with its type and value, every Blueprint function name, every component with its
   attach parent, every AnimGraph node **with its node type and settings**, and every physics
   constraint's drive settings.
-- **F8** records 8 seconds: every number/bool/vector/rotator on the pawn and ABP_Willie, only
+- **F8** records 8 seconds (nothing runs per frame except during a recording): every number/bool/vector/rotator on the pawn and ABP_Willie, only
   when it changes, plus driver vs physical arm bone poses each frame, plus a count of which
   Blueprint functions ran.
 
