@@ -50,6 +50,8 @@ namespace hsvr
                 "eye_up_cm=%.1f\n"
                 "anchor_smoothing=%.3f\n"
                 "hide_head=%d\n"
+                "; 1 = also hide the head bone on every body model (older way; the game may react to it).\n"
+                "hide_head_bones=%d\n"
                 "near_clip_cm=%.1f\n"
                 "gamma_mode=%d\n"
                 "ui_panel=%d\n"
@@ -82,7 +84,7 @@ namespace hsvr
                 "stereo_slot_offset=%d\n"
                 "dev_fake_headset=%d\n",
                 d.enabled, d.require_steamvr_running, d.render_scale, d.world_scale, d.anchor.c_str(), d.head_bone.c_str(),
-                d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.hide_head, d.near_clip_cm, d.gamma_mode, d.ui_panel,
+                d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.hide_head, d.hide_head_bones, d.near_clip_cm, d.gamma_mode, d.ui_panel,
                 d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, d.ui_opacity_gain, d.ui_menu_backdrop, d.mirror_window, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key, (unsigned)d.toggle_view_key, (unsigned)d.toggle_mode_key,
                 d.predict_frames, d.separate_render_target, d.idle_helper, d.log_poses, d.log_input, d.capture_seconds, d.stereo_slot_offset, d.dev_fake_headset);
         fclose(f);
@@ -155,6 +157,7 @@ namespace hsvr
         num("eye_up_cm", c.eye_up_cm);
         num("anchor_smoothing", c.anchor_smoothing);
         flag("hide_head", c.hide_head);
+        flag("hide_head_bones", c.hide_head_bones);
         num("near_clip_cm", c.near_clip_cm);
         integer("gamma_mode", c.gamma_mode);
         flag("ui_panel", c.ui_panel);

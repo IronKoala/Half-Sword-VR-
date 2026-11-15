@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cwctype>
 #include <string>
 #include <vector>
 
@@ -191,7 +192,8 @@ namespace
         bool bRecursivelyIncludeAttachedActors;
     };
 
-    std::vector<UObject*> g_no_see_components; // components we told "do not draw for the player"
+    std::vector<UObject*> g_no_see_components;      // components we told "do not draw for the player"
+    std::vector<UObject*> g_bone_hidden_components; // models whose head bone we stopped drawing
     UObject* g_head_pawn = nullptr;
 
     // The pawn's own components: its main mesh plus everything its blueprint added.
@@ -270,6 +272,22 @@ namespace
                 return is_head_bone(parent.ReturnValue, bone.ReturnValue);
             }
             current = parent.ReturnValue;
+        }
+        return false;
+    }
+
+    // True for a model that is only the head or something worn on it (told by its name or the
+    // name of the asset it shows), as opposed to a whole body that merely has a head bone.
+    bool is_head_piece(UObject* component)
+    {
+        static const wchar_t* const words[] = {L"head", L"helm", L"hair", L"hood", L"coif", L"visor"};
+        std::wstring names = component->GetName();
+        UObject* asset = object_property(component, STR("SkinnedAsset"));
+        if (asset) names += L" " + asset->GetName();
+        std::transform(names.begin(), names.end(), names.begin(), [](wchar_t c) { return (wchar_t)towlower(c); });
+        for (const wchar_t* word : words)
+        {
+            if (names.find(word) != std::wstring::npos) return true;
         }
         return false;
     }
@@ -355,53 +373,81 @@ namespace
         {
             g_head_pawn = pawn;
             g_no_see_components.clear(); // those belonged to the previous character
+            g_bone_hidden_components.clear();
         }
 
         std::vector<UObject*> components;
         collect_components(pawn, mesh, components);
         if (new_pawn) log_components_once(pawn, components, view_head);
 
+        // Two ways to hide a head. The default marks whole pieces (the head model, hair, anything
+        // attached at the head) as "not drawn for the player who owns them", which changes nothing
+        // the game's own logic looks at. The other way (hide_head_bones=1) also stops drawing the
+        // head bone of every body model; games use that same switch for a severed head, so the
+        // game may react to it.
         int bones_changed = 0, parts_changed = 0;
         for (UObject* component : components)
         {
-            if (head_bone_index(component) >= 0)
+            bool has_head_bone = head_bone_index(component) >= 0;
+            if (has_head_bone)
             {
+                auto ours = std::find(g_bone_hidden_components.begin(), g_bone_hidden_components.end(), component);
+                bool is_ours = ours != g_bone_hidden_components.end();
+                bool want_bone_hidden = want_hidden && cfg.hide_head_bones;
                 UFunction* hidden_fn = component->GetFunctionByNameInChain(STR("IsBoneHiddenByName"));
                 UFunction* hide_fn = component->GetFunctionByNameInChain(STR("HideBoneByName"));
                 UFunction* show_fn = component->GetFunctionByNameInChain(STR("UnHideBoneByName"));
-                if (!hidden_fn || !hide_fn || !show_fn) continue;
-                BoneHiddenParams hidden{};
-                hidden.BoneName = head_bone_name();
-                component->ProcessEvent(hidden_fn, &hidden);
-                if (hidden.ReturnValue == want_hidden) continue;
-                if (want_hidden)
+                if (hidden_fn && hide_fn && show_fn && (want_bone_hidden || is_ours))
                 {
-                    HideBoneParams hide{};
-                    hide.BoneName = head_bone_name();
-                    hide.PhysBodyOption = 0; // PBO_None: only stop drawing it
-                    component->ProcessEvent(hide_fn, &hide);
+                    BoneHiddenParams hidden{};
+                    hidden.BoneName = head_bone_name();
+                    component->ProcessEvent(hidden_fn, &hidden);
+                    if (want_bone_hidden)
+                    {
+                        if (!hidden.ReturnValue)
+                        {
+                            HideBoneParams hide{};
+                            hide.BoneName = head_bone_name();
+                            hide.PhysBodyOption = 0; // PBO_None: only stop drawing it
+                            component->ProcessEvent(hide_fn, &hide);
+                            ++bones_changed;
+                        }
+                        if (!is_ours) g_bone_hidden_components.push_back(component);
+                    }
+                    else
+                    {
+                        // Only bring back what we hid ourselves, never a head the game removed.
+                        if (hidden.ReturnValue)
+                        {
+                            UnHideBoneParams show{};
+                            show.BoneName = head_bone_name();
+                            component->ProcessEvent(show_fn, &show);
+                            ++bones_changed;
+                        }
+                        g_bone_hidden_components.erase(ours);
+                    }
                 }
-                else
-                {
-                    UnHideBoneParams show{};
-                    show.BoneName = head_bone_name();
-                    component->ProcessEvent(show_fn, &show);
-                }
-                ++bones_changed;
-                continue;
             }
             UFunction* no_see_fn = component->GetFunctionByNameInChain(STR("SetOwnerNoSee"));
             if (!no_see_fn) continue;
             auto marked = std::find(g_no_see_components.begin(), g_no_see_components.end(), component);
             bool is_marked = marked != g_no_see_components.end();
-            if (want_hidden == is_marked) continue;
-            if (want_hidden && !hangs_off_head(component)) continue;
+            if (!want_hidden && !is_marked) continue;
+            if (want_hidden && !is_marked)
+            {
+                bool is_head_part = has_head_bone ? (component != mesh && is_head_piece(component)) : hangs_off_head(component);
+                if (!is_head_part) continue;
+            }
+            // Sent again on every check while hidden: it costs nothing when already set, and the
+            // game may have switched it back.
             BoolParams no_see{};
             no_see.Value = want_hidden;
             component->ProcessEvent(no_see_fn, &no_see);
+            if (want_hidden == is_marked) continue;
             if (want_hidden)
             {
                 g_no_see_components.push_back(component);
+                HSVR_LOG("  not drawn for the player: %ls", component->GetName().c_str());
             }
             else
             {
@@ -411,7 +457,7 @@ namespace
         }
         if (bones_changed || parts_changed)
         {
-            HSVR_LOG("%s the character's head: %d mesh(es), %d part(s) worn on it", want_hidden ? "Hid" : "Showing", bones_changed, parts_changed);
+            HSVR_LOG("%s the character's head: %d part(s) switched, head bone changed on %d model(s)", want_hidden ? "Hid" : "Showing", parts_changed, bones_changed);
         }
     }
 

@@ -23,6 +23,9 @@ namespace hsvr
         // Seconds of smoothing on the head anchor (0 = none). Takes the physics jitter out.
         double anchor_smoothing = 0.06;
         bool hide_head = true;
+        // Also stop drawing the head bone of every body model (the older, harsher way; the game
+        // may take it for a severed head). Off: only whole head pieces are hidden from the player.
+        bool hide_head_bones = false;
         double near_clip_cm = 4.0;
         // 0 = auto (decode sRGB unless the engine target is a float format), 1 = always decode, 2 = never.
         int gamma_mode = 0;
