@@ -46,7 +46,7 @@ Played by Matthew in the headset: "everything looks good" (commit 0a2e88e).
 
 ## Open
 
-- Idle helper (`idle_helper`): keeps the game at normal speed while the headset sleeps. Written; the handoff when the headset wakes has not been tried in the headset.
+- Idle helper (`idle_helper`, on by default): keeps the game at normal speed while the headset sleeps. A 7-minute run with the headset asleep held 72 frames a second throughout and SteamVR stayed up (without it the game fell to about 6 fps after 5 minutes and SteamVR quit). The handoff when the headset wakes has not been tried in the headset.
 - Insert and Page Down have not been confirmed in the headset.
 - Comfort: nothing is done about the game's camera shake or about being knocked down.
 - Sharpness: `render_scale` is 0.75 of the headset's recommended size. GPU time was about 10.5 ms of the 13.9 ms budget in a fight, so there is little room to raise it without an upscaler.
