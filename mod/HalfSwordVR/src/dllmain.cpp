@@ -280,6 +280,26 @@ namespace
                 STR("r.FidelityFX.FI.Enabled"),
                 STR("r.DynamicGlobalIlluminationMethod"),
                 STR("r.ReflectionMethod"),
+                STR("r.Lumen.DiffuseIndirect.Allow"),
+                STR("r.Lumen.Reflections.Allow"),
+                STR("r.Lumen.HardwareRayTracing"),
+                STR("r.Lumen.TraceMeshSDFs.Allow"),
+                STR("r.Lumen.ScreenProbeGather.DownsampleFactor"),
+                STR("r.Lumen.ScreenProbeGather.TracingOctahedronResolution"),
+                STR("r.Lumen.ScreenProbeGather.IrradianceFormat"),
+                STR("r.Lumen.ScreenProbeGather.StochasticInterpolation"),
+                STR("r.Lumen.ScreenProbeGather.FullResolutionJitterWidth"),
+                STR("r.Lumen.ScreenProbeGather.FixedJitterIndex"),
+                STR("r.Lumen.ScreenProbeGather.ScreenTraces"),
+                STR("r.Lumen.ScreenProbeGather.ScreenTraces.HZBTraversal.FullResDepth"),
+                STR("r.Lumen.ScreenProbeGather.ShortRangeAO"),
+                STR("r.Lumen.ScreenProbeGather.Temporal.MaxFramesAccumulated"),
+                STR("r.Lumen.ScreenProbeGather.TemporalFilterProbes"),
+                STR("r.Lumen.ScreenProbeGather.TwoSidedFoliageBackfaceDiffuse"),
+                STR("r.Lumen.ScreenProbeGather.RadianceCache.ProbeResolution"),
+                STR("r.LumenScene.Radiosity.ProbeSpacing"),
+                STR("r.DistanceFieldAO"),
+                STR("r.AOQuality"),
                 STR("r.Shadow.Virtual.Enable"),
                 STR("r.MaxAnisotropy"),
                 STR("r.MipMapLODBias"),
@@ -407,26 +427,22 @@ namespace
         const char* value;     // the value to try
     };
 
-    // Already tried by the player without effect: no sharpening, upscaler flicker rejection,
-    // upscaler history quality. Full internal resolution (r.ScreenPercentage 100) overloaded the
-    // graphics card so badly that the SteamVR link driver gave up, so the resolution test is a
-    // small step now and comes last.
+    // Found so far: no sharpening, the upscaler's settings, fog, clouds, occlusion culling and the
+    // anti-aliasing method make no difference; switching the game's bounce lighting (Lumen global
+    // illumination) off stops the flicker but makes the plants look worse. These tests keep the
+    // bounce lighting on and change one part of it at a time. A value that starts with "/" divides
+    // the current value (not below 8).
     const TestStep g_test_steps[] = {
-            {"no volumetric fog", STR("r.VolumetricFog"), "0"},
-            {"no fog", STR("r.Fog"), "0"},
-            {"no volumetric clouds", STR("r.VolumetricCloud"), "0"},
-            {"no occlusion culling", STR("r.AllowOcclusionQueries"), "0"},
-            {"older anti-aliasing instead of the upscaler", STR("r.AntiAliasingMethod"), "2"},
-            {"no anti-aliasing at all", STR("r.AntiAliasingMethod"), "0"},
-            {"no Lumen lighting", STR("r.Lumen.DiffuseIndirect.Allow"), "0"},
+            {"bounce lighting without screen traces", STR("r.Lumen.ScreenProbeGather.ScreenTraces"), "0"},
+            {"no short-range shading", STR("r.Lumen.ScreenProbeGather.ShortRangeAO"), "0"},
+            {"smooth blending between light samples", STR("r.Lumen.ScreenProbeGather.StochasticInterpolation"), "0"},
+            {"light samples stay in place from frame to frame", STR("r.Lumen.ScreenProbeGather.FixedJitterIndex"), "0"},
+            {"lighting smoothed over more frames", STR("r.Lumen.ScreenProbeGather.Temporal.MaxFramesAccumulated"), "40"},
+            {"light samples filtered over time", STR("r.Lumen.ScreenProbeGather.TemporalFilterProbes"), "1"},
+            {"twice as dense light samples", STR("r.Lumen.ScreenProbeGather.DownsampleFactor"), "/2"},
+            {"four times as dense light samples", STR("r.Lumen.ScreenProbeGather.DownsampleFactor"), "/4"},
+            {"full-size depth for screen traces", STR("r.Lumen.ScreenProbeGather.ScreenTraces.HZBTraversal.FullResDepth"), "1"},
             {"no Lumen reflections", STR("r.Lumen.Reflections.Allow"), "0"},
-            {"no dithered change of detail level", STR("foliage.DitheredLOD"), "0"},
-            {"most detailed models everywhere", STR("r.ForceLOD"), "0"},
-            {"no distance field shadows", STR("r.DistanceFieldShadowing"), "0"},
-            {"no ambient occlusion", STR("r.AmbientOcclusionLevels"), "0"},
-            {"no shadows", STR("r.ShadowQuality"), "0"},
-            {"no sky atmosphere", STR("r.SkyAtmosphere"), "0"},
-            {"slightly higher internal resolution", STR("r.ScreenPercentage"), "65"},
     };
     const int g_test_count = (int)(sizeof(g_test_steps) / sizeof(g_test_steps[0]));
 
@@ -458,8 +474,17 @@ namespace
         }
         const TestStep& step = g_test_steps[current];
         saved = console_variable(step.variable);
-        set_test_variable(step.variable, step.value);
-        HSVR_LOG("Test %d of %d ON: %s (%ls %s, was %g, now reads %g)", current + 1, g_test_count, step.what, step.variable, step.value, (double)saved,
+        char value[32];
+        snprintf(value, sizeof(value), "%s", step.value);
+        if (step.value[0] == '/')
+        {
+            double divided = (double)saved / atof(step.value + 1);
+            if (divided < 8.0) divided = 8.0;
+            if (divided > (double)saved) divided = (double)saved;
+            snprintf(value, sizeof(value), "%g", divided);
+        }
+        set_test_variable(step.variable, value);
+        HSVR_LOG("Test %d of %d ON: %s (%ls %s, was %g, now reads %g)", current + 1, g_test_count, step.what, step.variable, value, (double)saved,
                  (double)console_variable(step.variable));
     }
 
