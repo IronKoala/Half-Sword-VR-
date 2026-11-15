@@ -240,6 +240,7 @@ namespace hsvr
         num("forearm_twist_share", c.forearm_twist_share);
         num("reach_knee", c.reach_knee);
         num("reach_max", c.reach_max);
+        num("shoulder_reach_cm", c.shoulder_reach_cm);
         num("wrist_bend_limit", c.wrist_bend_limit);
         num("elbow_stiffness", c.elbow_stiffness);
         num("twist_limit", c.twist_limit);

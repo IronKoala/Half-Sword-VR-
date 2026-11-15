@@ -113,8 +113,10 @@ namespace hsvr
         double elbow_back = 0.2;
         // Reach: beyond reach_knee of the character's arm length the hand is eased in towards
         // reach_max, so the elbow stays a little bent (0.94 is about 40 degrees of bend).
-        double reach_knee = 0.80;
-        double reach_max = 0.94;
+        double reach_knee = 0.85;
+        double reach_max = 0.95;
+        // How far the shoulder may move towards a hand beyond easy reach, cm (0 = never).
+        double shoulder_reach_cm = 10.0;
         // The elbow swings out of its natural place when the wrist would have to bend more than
         // this (the game's wrist stops near 78 degrees). elbow_stiffness: cost per degree squared
         // of moving the elbow; larger keeps it more in place.

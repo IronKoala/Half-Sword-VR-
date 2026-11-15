@@ -395,6 +395,7 @@ namespace hsvr
             double last_reach = 0;    // controller distance from the shoulder / arm length
             double elbow_angle = 0;   // how far the elbow is swung from its natural place, degrees
             double elbow_time = 0;
+            double shoulder_shift = 0, shoulder_time = 0;
             double last_twist = 0;    // hand roll about the forearm last frame, radians (unwrapped)
         };
 
@@ -816,6 +817,37 @@ namespace hsvr
             double a = length(lower0.t - upper0.t), b = length(hand0.t - lower0.t);
             if (a < 1.0 || b < 1.0) return;
             Vec3 S = upper0.t;
+            // Shoulder reach: like a real shoulder blade, the clavicle swings the shoulder towards a
+            // hand that is beyond easy reach, by up to shoulder_reach_cm. The character's arms are
+            // shorter than most players', so this lets the in-game hand get closer to the real one.
+            if (side.clavicle >= 0 && cfg.shoulder_reach_cm > 0.0)
+            {
+                Xf clav = pose[side.clavicle];
+                Vec3 bone = S - clav.t;
+                double len = length(bone);
+                double excess = length(target.t - S) - cfg.reach_knee * (a + b);
+                double want = std::max(0.0, std::min(cfg.shoulder_reach_cm, excess));
+                double now = now_seconds();
+                double dt = side.shoulder_time > 0 ? std::min(0.1, now - side.shoulder_time) : 0.0;
+                side.shoulder_time = now;
+                double alpha = dt > 0 ? 1.0 - std::exp(-dt / 0.08) : 1.0;
+                side.shoulder_shift += (want - side.shoulder_shift) * alpha;
+                if (len > 1.0 && side.shoulder_shift > 0.05)
+                {
+                    Vec3 moved = bone + normalized(target.t - S) * side.shoulder_shift;
+                    Vec3 from = bone * (1.0 / len), to = normalized(moved);
+                    Vec3 cr = cross(from, to);
+                    double sn = length(cr), cs = dot(from, to);
+                    if (sn > 1e-9)
+                    {
+                        Quat turn = quat_axis_angle(cr * (1.0 / sn), std::atan2(sn, cs));
+                        clav.q = (turn * clav.q).normalized();
+                        pose[side.clavicle] = clav;
+                        changed[side.clavicle] = 1;
+                        S = clav.t + turn.rotate(bone);
+                    }
+                }
+            }
             Vec3 to_target = target.t - S;
             double d = length(to_target);
             Vec3 dir = normalized(to_target, normalized(lower0.t - S));
