@@ -238,6 +238,10 @@ namespace hsvr
         num("elbow_out", c.elbow_out);
         num("elbow_back", c.elbow_back);
         num("forearm_twist_share", c.forearm_twist_share);
+        num("reach_knee", c.reach_knee);
+        num("reach_max", c.reach_max);
+        num("wrist_bend_limit", c.wrist_bend_limit);
+        num("elbow_stiffness", c.elbow_stiffness);
         num("grip_shift_cm", c.grip_shift_cm);
         num("hand_pitch", c.hand_pitch);
         num("hand_yaw", c.hand_yaw);

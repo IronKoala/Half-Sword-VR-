@@ -111,6 +111,15 @@ namespace hsvr
         double elbow_down = 1.0;
         double elbow_out = 0.6;
         double elbow_back = 0.2;
+        // Reach: beyond reach_knee of the character's arm length the hand is eased in towards
+        // reach_max, so the elbow stays a little bent (0.94 is about 40 degrees of bend).
+        double reach_knee = 0.80;
+        double reach_max = 0.94;
+        // The elbow swings out of its natural place when the wrist would have to bend more than
+        // this (the game's wrist stops near 78 degrees). elbow_stiffness: cost per degree squared
+        // of moving the elbow; larger keeps it more in place.
+        double wrist_bend_limit = 55.0;
+        double elbow_stiffness = 0.02;
         // Share of the hand's roll that the forearm takes (0 = all in the wrist, 1 = all in the forearm).
         double forearm_twist_share = 0.5;
         // Moves the sword's grip along the handle relative to the controller, in cm (+ = towards the blade).

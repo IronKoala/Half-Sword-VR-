@@ -392,6 +392,9 @@ namespace hsvr
             Vec3 blade_world;
             // For the log.
             double last_error_cm = 0, last_error_deg = 0;
+            double last_reach = 0;    // controller distance from the shoulder / arm length
+            double elbow_angle = 0;   // how far the elbow is swung from its natural place, degrees
+            double elbow_time = 0;
         };
 
         struct State
@@ -815,6 +818,17 @@ namespace hsvr
             Vec3 to_target = target.t - S;
             double d = length(to_target);
             Vec3 dir = normalized(to_target, normalized(lower0.t - S));
+            // Reach: a straight arm leaves the blade angle to the wrist alone, and the game's wrist
+            // stops at about 78 degrees of bend. So the elbow is always kept a little bent: past
+            // reach_knee of the full arm length the distance is eased towards reach_max.
+            side.last_reach = d / (a + b);
+            {
+                double knee = std::max(0.3, std::min(0.98, cfg.reach_knee));
+                double top = std::max(knee + 0.01, std::min(0.999, cfg.reach_max));
+                double r = d / (a + b);
+                if (r > knee) r = knee + (top - knee) * std::tanh((r - knee) / (top - knee));
+                d = r * (a + b);
+            }
             d = std::max(std::fabs(a - b) + 0.5, std::min(d, (a + b) * 0.999));
 
             // Elbow direction: down, out and back relative to the character's facing.
@@ -825,6 +839,39 @@ namespace hsvr
             Vec3 perp = normalized(pole, normalized(perpendicular_part({0, 0, -1}, dir)));
             double cos_a = std::max(-1.0, std::min(1.0, (a * a + d * d - b * b) / (2.0 * a * d)));
             double sin_a = std::sqrt(std::max(0.0, 1.0 - cos_a * cos_a));
+            // Swing the elbow around the shoulder-to-hand line so that the forearm points closer to
+            // where the hand points, when the wrist would otherwise have to bend past
+            // wrist_bend_limit. A small cost keeps the elbow near its natural place otherwise.
+            {
+                Vec3 hand_dir = target.q.rotate(side.lower_axis); // the hand's own lengthwise axis
+                Vec3 side_axis = cross(dir, perp);
+                double limit = cfg.wrist_bend_limit;
+                double best_cost = 1e30, best_angle = 0;
+                for (int step = -30; step <= 30; ++step)
+                {
+                    double angle = step * 5.0;
+                    double rad = angle * kDegToRad;
+                    Vec3 p = perp * std::cos(rad) + side_axis * std::sin(rad);
+                    Vec3 e = S + dir * (a * cos_a) + p * (a * sin_a);
+                    Vec3 fore = normalized(S + dir * d - e);
+                    double bend = std::acos(std::max(-1.0, std::min(1.0, dot(fore, hand_dir)))) * kRadToDeg;
+                    double over = std::max(0.0, bend - limit);
+                    double cost = over * over + cfg.elbow_stiffness * angle * angle;
+                    if (cost < best_cost)
+                    {
+                        best_cost = cost;
+                        best_angle = angle;
+                    }
+                }
+                // Ease towards it so the elbow does not jump between frames.
+                double now = now_seconds();
+                double dt = side.elbow_time > 0 ? std::min(0.1, now - side.elbow_time) : 0.0;
+                side.elbow_time = now;
+                double alpha = dt > 0 ? 1.0 - std::exp(-dt / 0.04) : 1.0;
+                side.elbow_angle += (best_angle - side.elbow_angle) * alpha;
+                double rad = side.elbow_angle * kDegToRad;
+                perp = normalized(perp * std::cos(rad) + side_axis * std::sin(rad));
+            }
             Vec3 E = S + dir * (a * cos_a) + perp * (a * sin_a);
             Vec3 T = S + dir * d;
             Vec3 u = normalized(E - S), f = normalized(T - E);
@@ -914,7 +961,7 @@ namespace hsvr
                     g_rec.until = now + 8.0;
                     g_rec.number++;
                     g_rec.last_time = 0;
-                    g_rec.text = "t,side,err_cm,err_deg,target_speed_dps,sent_wrist_bend,sent_wrist_roll,real_wrist_bend,real_wrist_roll,sent_elbow,real_elbow\n";
+                    g_rec.text = "t,side,err_cm,err_deg,target_speed_dps,sent_wrist_bend,sent_wrist_roll,real_wrist_bend,real_wrist_roll,sent_elbow,real_elbow,reach,elbow_swing\n";
                     HSVR_LOG("Arms: recording 8 seconds (right trigger)");
                 }
                 return;
@@ -955,8 +1002,8 @@ namespace hsvr
                 swing_twist_deg(pose[side.upper].q.inverse() * pose[side.lower].q, side.upper_axis, se, dummy);
                 swing_twist_deg(upper.q.inverse() * lower.q, side.upper_axis, re, dummy);
                 char line[256];
-                snprintf(line, sizeof(line), "%.3f,%c,%.1f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f\n", now - g_rec.start, k ? 'R' : 'L', length(hand.t - side.target_world.t),
-                         quat_angle_deg(hand.q, side.target_world.q), speed, sb, sr, rb, rr, se, re);
+                snprintf(line, sizeof(line), "%.3f,%c,%.1f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.2f,%.0f\n", now - g_rec.start, k ? 'R' : 'L', length(hand.t - side.target_world.t),
+                         quat_angle_deg(hand.q, side.target_world.q), speed, sb, sr, rb, rr, se, re, side.last_reach, side.elbow_angle);
                 g_rec.text += line;
             }
             g_rec.last_time = now;
