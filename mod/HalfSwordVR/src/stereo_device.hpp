@@ -12,6 +12,9 @@ namespace hsvr
         bool has_head = false;
         Vec3 head_position;  // world, cm
         Vec3 actor_position; // world, cm
+        // Where the player is aiming (the controller's heading, set by the mouse), in degrees.
+        bool has_heading = false;
+        double heading_yaw = 0.0;
     };
     using AnchorProvider = bool (*)(PlayerAnchor& out);
     void stereo_set_anchor_provider(AnchorProvider provider);

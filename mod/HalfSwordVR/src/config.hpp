@@ -17,6 +17,9 @@ namespace hsvr
         // Where the view sits: "head" (character's head bone), "camera" (the game's own camera).
         std::string anchor = "head";
         std::string head_bone = "head";
+        // What "straight ahead" follows in first person: "aim" (where the player aims with the
+        // mouse; steady) or "camera" (the game's own camera, which trails the aim and shakes).
+        std::string heading = "aim";
         // Offset from the head bone to between the eyes, in cm, along the body's forward and up.
         double eye_forward_cm = 9.0;
         double eye_up_cm = 7.0;
@@ -55,6 +58,13 @@ namespace hsvr
         // 1 = the eyes are drawn at the headset's own resolution and menus float on a panel.
         // 0 = fallback: both eyes are squeezed through the game window (lower resolution).
         bool separate_render_target = true;
+        // Picture tuning, passed on to the engine when set (-1 = leave the game's own value).
+        // sharpen: 0 = none, 0.5 to 1 = crisper. screen_percentage: the share of the eye size the
+        // engine draws before its upscaler brings it up to full size (100 = no upscaling).
+        double sharpen = -1.0;
+        double screen_percentage = -1.0;
+        // Extra engine console commands to run, separated by semicolons (for tuning; empty = none).
+        std::string extra_commands;
         // 1 = while the headset is asleep or showing something else, the game keeps running at
         // normal speed (a helper thread keeps the headset link alive). 0 = the game always waits
         // for the headset, which can make it crawl while the headset sleeps.

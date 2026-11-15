@@ -66,8 +66,13 @@ namespace hsvr
             PlayerAnchor player;
             bool have_player = g_anchor_provider && g_anchor_provider(player) && player.has_head;
             bool first_person = cfg.anchor == "head" && !shared().third_person.load();
+            double camera_yaw = g_view.base_yaw;
             if (first_person && have_player)
             {
+                // Straight ahead follows where the player aims rather than the game's camera:
+                // the camera trails the aim and shakes on hits, which in a headset would swing
+                // the whole world around.
+                if (cfg.heading == "aim" && player.has_heading) g_view.base_yaw = player.heading_yaw;
                 Vec3 offset = player.head_position - player.actor_position;
                 if (!g_have_smoothed || cfg.anchor_smoothing <= 0.0)
                 {
@@ -92,8 +97,8 @@ namespace hsvr
 
             if (cfg.log_poses)
             {
-                HSVR_LOG_EVERY(1.0, "Pose: anchor (%.0f, %.0f, %.0f) base yaw %.0f, camera (%.0f, %.0f, %.0f), head bone %s, %s",
-                               g_view.anchor.x, g_view.anchor.y, g_view.anchor.z, g_view.base_yaw, camera.x, camera.y, camera.z,
+                HSVR_LOG_EVERY(1.0, "Pose: anchor (%.0f, %.0f, %.0f) base yaw %.0f (camera yaw %.0f), camera (%.0f, %.0f, %.0f), head bone %s, %s",
+                               g_view.anchor.x, g_view.anchor.y, g_view.anchor.z, g_view.base_yaw, camera_yaw, camera.x, camera.y, camera.z,
                                player.has_head ? "found" : "not found", first_person ? "first person" : "game camera");
             }
         }

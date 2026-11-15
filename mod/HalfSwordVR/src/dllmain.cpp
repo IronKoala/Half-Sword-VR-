@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -171,6 +172,14 @@ namespace
         out.head_position = {socket.ReturnValue.X, socket.ReturnValue.Y, socket.ReturnValue.Z};
         out.actor_position = {actor.ReturnValue.X, actor.ReturnValue.Y, actor.ReturnValue.Z};
         out.has_head = true;
+        if (UObject* controller = find_player_controller())
+        {
+            if (ue::FRotator* rotation = controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")))
+            {
+                out.has_heading = true;
+                out.heading_yaw = rotation->Yaw;
+            }
+        }
         return true;
     }
 
@@ -189,6 +198,124 @@ namespace
         if (!fn || !cdo || !viewport) return;
         ConsoleCommandParams params{viewport, FString(command), nullptr};
         cdo->ProcessEvent(fn, &params);
+    }
+
+    void run_console_command(const std::string& command)
+    {
+        std::wstring wide(command.begin(), command.end());
+        run_console_command(wide.c_str());
+    }
+
+    struct ConsoleVariableParams
+    {
+        FString VariableName;
+        float ReturnValue;
+    };
+
+    // The value of an engine setting, as a number. A setting this game does not have reads as 0.
+    float console_variable(const TCHAR* name)
+    {
+        static UFunction* fn =
+                UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.KismetSystemLibrary:GetConsoleVariableFloatValue"));
+        static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        if (!fn || !cdo) return -999.0f;
+        ConsoleVariableParams params{FString(name), 0.0f};
+        cdo->ProcessEvent(fn, &params);
+        return params.ReturnValue;
+    }
+
+    // Writes the game's picture settings to the log, so that sharpness can be tuned from facts.
+    void log_graphics(const char* reason)
+    {
+        static const TCHAR* const names[] = {
+                STR("r.ScreenPercentage"),
+                STR("r.ScreenPercentage.Default"),
+                STR("r.ScreenPercentage.Default.VR.Mode"),
+                STR("r.SecondaryScreenPercentage.GameViewport"),
+                STR("r.AntiAliasingMethod"),
+                STR("r.TemporalAA.Upsampling"),
+                STR("r.TSR.History.ScreenPercentage"),
+                STR("r.Tonemapper.Sharpen"),
+                STR("r.Tonemapper.Quality"),
+                STR("r.SceneColorFringeQuality"),
+                STR("r.Tonemapper.GrainQuantization"),
+                STR("r.FilmGrain"),
+                STR("r.BloomQuality"),
+                STR("r.LensFlareQuality"),
+                STR("r.MotionBlurQuality"),
+                STR("r.DepthOfFieldQuality"),
+                STR("r.DynamicRes.OperationMode"),
+                STR("r.NGX.DLSS.Enable"),
+                STR("r.NGX.DLAA.Enable"),
+                STR("r.Streamline.DLSSG.Enable"),
+                STR("r.FidelityFX.FSR3.Enabled"),
+                STR("r.FidelityFX.FSR3.QualityMode"),
+                STR("r.FidelityFX.FI.Enabled"),
+                STR("r.DynamicGlobalIlluminationMethod"),
+                STR("r.ReflectionMethod"),
+                STR("r.Shadow.Virtual.Enable"),
+                STR("r.MaxAnisotropy"),
+                STR("r.MipMapLODBias"),
+                STR("r.VSync"),
+                STR("t.MaxFPS"),
+                STR("sg.ResolutionQuality"),
+                STR("sg.ViewDistanceQuality"),
+                STR("sg.AntiAliasingQuality"),
+                STR("sg.ShadowQuality"),
+                STR("sg.GlobalIlluminationQuality"),
+                STR("sg.ReflectionQuality"),
+                STR("sg.PostProcessQuality"),
+                STR("sg.TextureQuality"),
+                STR("sg.EffectsQuality"),
+                STR("sg.FoliageQuality"),
+                STR("sg.ShadingQuality"),
+        };
+        HSVR_LOG("Graphics (%s), the engine's picture settings (one the game does not have reads 0):", reason);
+        for (const TCHAR* name : names) HSVR_LOG("  Graphics: %ls = %.3f", name, console_variable(name));
+        HSVR_LOG("Graphics: end of list");
+    }
+
+    // Passes the picture tuning from the settings file on to the engine, when it is set and
+    // whenever it changes (the file can be edited while the game runs).
+    void apply_picture_settings(const hsvr::Config& cfg)
+    {
+        static double applied_sharpen = -1.0, applied_percentage = -1.0;
+        static std::string applied_commands;
+        char command[96];
+        if (cfg.sharpen >= 0.0 && cfg.sharpen != applied_sharpen)
+        {
+            applied_sharpen = cfg.sharpen;
+            snprintf(command, sizeof(command), "r.Tonemapper.Sharpen %.2f", cfg.sharpen);
+            run_console_command(std::string(command));
+            HSVR_LOG("Picture: %s", command);
+        }
+        if (cfg.screen_percentage >= 0.0 && cfg.screen_percentage != applied_percentage)
+        {
+            applied_percentage = cfg.screen_percentage;
+            snprintf(command, sizeof(command), "r.ScreenPercentage %.0f", cfg.screen_percentage);
+            run_console_command(std::string(command));
+            HSVR_LOG("Picture: %s", command);
+        }
+        if (cfg.extra_commands != applied_commands)
+        {
+            applied_commands = cfg.extra_commands;
+            size_t start = 0;
+            while (start < applied_commands.size())
+            {
+                size_t end = applied_commands.find(';', start);
+                if (end == std::string::npos) end = applied_commands.size();
+                std::string one = applied_commands.substr(start, end - start);
+                size_t first = one.find_first_not_of(" \t");
+                size_t last = one.find_last_not_of(" \t");
+                if (first != std::string::npos)
+                {
+                    one = one.substr(first, last - first + 1);
+                    run_console_command(one);
+                    HSVR_LOG("Picture: extra command: %s", one.c_str());
+                }
+                start = end + 1;
+            }
+        }
     }
 
     // ---- installing the stereo device ------------------------------------------------------------
@@ -413,6 +540,13 @@ namespace
             due = -1.0;
             --lists_left;
             log_widgets(due_reason);
+            // The picture settings alongside the first two lists (start-up, and once in a fight).
+            static int graphics_left = 2;
+            if (graphics_left > 0)
+            {
+                --graphics_left;
+                log_graphics(due_reason);
+            }
         }
     }
 
@@ -452,6 +586,7 @@ namespace
         watch_input();
 
         hsvr::Config cfg = hsvr::config();
+        if (g_console_done) apply_picture_settings(cfg);
         static bool recenter_down = false, ui_down = false, view_down = false, mode_down = false;
         if (GetForegroundWindow() != nullptr)
         {
