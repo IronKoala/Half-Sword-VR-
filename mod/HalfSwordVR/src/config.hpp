@@ -22,10 +22,6 @@ namespace hsvr
         double eye_up_cm = 7.0;
         // Seconds of smoothing on the head anchor (0 = none). Takes the physics jitter out.
         double anchor_smoothing = 0.06;
-        bool hide_head = true;
-        // Also stop drawing the head bone of every body model (the older, harsher way; the game
-        // may take it for a severed head). Off: only whole head pieces are hidden from the player.
-        bool hide_head_bones = false;
         double near_clip_cm = 4.0;
         // 0 = auto (decode sRGB unless the engine target is a float format), 1 = always decode, 2 = never.
         int gamma_mode = 0;
@@ -34,9 +30,6 @@ namespace hsvr
         // 0 = always shown (the menu-panel key hides it). 1 = the panel only shows while a menu is
         // up (game paused, intro, main menu, or a mouse pointer showing); the key forces it on.
         bool ui_panel_auto = false;
-        // Parts of widget names, separated by commas: matching on-screen widgets of the game are
-        // made fully see-through. For full-screen effects that make no sense on the panel.
-        std::string hide_widgets;
         double ui_distance_m = 1.6;
         double ui_width_m = 1.8;
         double ui_height_offset_m = -0.05;

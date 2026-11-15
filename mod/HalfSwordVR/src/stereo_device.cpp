@@ -63,7 +63,6 @@ namespace hsvr
             g_view.base_yaw = camera_rotation.Yaw;
             Vec3 camera{camera_location.X, camera_location.Y, camera_location.Z};
             g_view.anchor = camera;
-            // The provider is asked every frame (it also shows or hides the character's head).
             PlayerAnchor player;
             bool have_player = g_anchor_provider && g_anchor_provider(player) && player.has_head;
             bool first_person = cfg.anchor == "head" && !shared().third_person.load();

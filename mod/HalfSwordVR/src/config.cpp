@@ -49,16 +49,11 @@ namespace hsvr
                 "eye_forward_cm=%.1f\n"
                 "eye_up_cm=%.1f\n"
                 "anchor_smoothing=%.3f\n"
-                "hide_head=%d\n"
-                "; 1 = also hide the head bone on every body model (older way; the game may react to it).\n"
-                "hide_head_bones=%d\n"
                 "near_clip_cm=%.1f\n"
                 "gamma_mode=%d\n"
                 "ui_panel=%d\n"
                 "; 0 = panel always shown (the menu-panel key hides it); 1 = only while a menu is up.\n"
                 "ui_panel_auto=%d\n"
-                "; Parts of widget names, separated by commas: matching game widgets are made see-through.\n"
-                "hide_widgets=%s\n"
                 "ui_distance_m=%.2f\n"
                 "ui_width_m=%.2f\n"
                 "ui_height_offset_m=%.2f\n"
@@ -88,7 +83,7 @@ namespace hsvr
                 "stereo_slot_offset=%d\n"
                 "dev_fake_headset=%d\n",
                 d.enabled, d.require_steamvr_running, d.render_scale, d.world_scale, d.anchor.c_str(), d.head_bone.c_str(),
-                d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.hide_head, d.hide_head_bones, d.near_clip_cm, d.gamma_mode, d.ui_panel, d.ui_panel_auto, d.hide_widgets.c_str(),
+                d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.near_clip_cm, d.gamma_mode, d.ui_panel, d.ui_panel_auto,
                 d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, d.ui_opacity_gain, d.ui_menu_backdrop, d.mirror_window, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key, (unsigned)d.toggle_view_key, (unsigned)d.toggle_mode_key,
                 d.predict_frames, d.separate_render_target, d.idle_helper, d.log_poses, d.log_input, d.capture_seconds, d.stereo_slot_offset, d.dev_fake_headset);
         fclose(f);
@@ -160,13 +155,10 @@ namespace hsvr
         num("eye_forward_cm", c.eye_forward_cm);
         num("eye_up_cm", c.eye_up_cm);
         num("anchor_smoothing", c.anchor_smoothing);
-        flag("hide_head", c.hide_head);
-        flag("hide_head_bones", c.hide_head_bones);
         num("near_clip_cm", c.near_clip_cm);
         integer("gamma_mode", c.gamma_mode);
         flag("ui_panel", c.ui_panel);
         flag("ui_panel_auto", c.ui_panel_auto);
-        text("hide_widgets", c.hide_widgets);
         num("ui_distance_m", c.ui_distance_m);
         num("ui_width_m", c.ui_width_m);
         num("ui_height_offset_m", c.ui_height_offset_m);
@@ -194,9 +186,9 @@ namespace hsvr
             g_cfg = c;
         }
         HSVR_LOG("Settings loaded: render_scale=%.2f world_scale=%.2f anchor=%s head_bone=%s eye_fwd=%.1f eye_up=%.1f smoothing=%.3f "
-                 "hide_head=%d near=%.1f gamma=%d ui_panel=%d separate_rt=%d",
+                 "near=%.1f gamma=%d ui_panel=%d separate_rt=%d",
                  c.render_scale, c.world_scale, c.anchor.c_str(), c.head_bone.c_str(), c.eye_forward_cm, c.eye_up_cm,
-                 c.anchor_smoothing, c.hide_head, c.near_clip_cm, c.gamma_mode, c.ui_panel, c.separate_render_target);
+                 c.anchor_smoothing, c.near_clip_cm, c.gamma_mode, c.ui_panel, c.separate_render_target);
         return true;
     }
 } // namespace hsvr
