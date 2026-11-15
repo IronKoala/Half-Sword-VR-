@@ -37,6 +37,9 @@ namespace hsvr
         double ui_opacity_gain = 2.0;
         // Darkness of the sheet behind the panel while a mouse pointer is showing (0 = none, 1 = solid).
         double ui_menu_backdrop = 0.85;
+        // Also use the coverage the game's UI pass leaves in the window's alpha channel, so dark
+        // but solid parts of a menu stay visible on the panel.
+        bool ui_use_alpha = true;
         // Show the left eye's picture (with menus) in the game window on the monitor.
         bool mirror_window = true;
         // Virtual key codes. 0x24 = Home, 0x23 = End, 0x2D = Insert.

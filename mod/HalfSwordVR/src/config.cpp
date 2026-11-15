@@ -61,6 +61,8 @@ namespace hsvr
                 "ui_opacity_gain=%.1f\n"
                 "; Dark sheet behind the panel while a mouse pointer is showing: 0 = none, 1 = solid.\n"
                 "ui_menu_backdrop=%.2f\n"
+                "; 1 = dark but solid parts of menus stay visible on the panel (uses the window's alpha).\n"
+                "ui_use_alpha=%d\n"
                 "; Show the left eye's picture in the game window on the monitor.\n"
                 "mirror_window=%d\n"
                 "; Keys are Windows virtual key codes: 0x24 = Home (recenter), 0x23 = End (show/hide menu panel),\n"
@@ -84,7 +86,7 @@ namespace hsvr
                 "dev_fake_headset=%d\n",
                 d.enabled, d.require_steamvr_running, d.render_scale, d.world_scale, d.anchor.c_str(), d.head_bone.c_str(),
                 d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.near_clip_cm, d.gamma_mode, d.ui_panel, d.ui_panel_auto,
-                d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, d.ui_opacity_gain, d.ui_menu_backdrop, d.mirror_window, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key, (unsigned)d.toggle_view_key, (unsigned)d.toggle_mode_key,
+                d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, d.ui_opacity_gain, d.ui_menu_backdrop, d.ui_use_alpha, d.mirror_window, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key, (unsigned)d.toggle_view_key, (unsigned)d.toggle_mode_key,
                 d.predict_frames, d.separate_render_target, d.idle_helper, d.log_poses, d.log_input, d.capture_seconds, d.stereo_slot_offset, d.dev_fake_headset);
         fclose(f);
     }
@@ -164,6 +166,7 @@ namespace hsvr
         num("ui_height_offset_m", c.ui_height_offset_m);
         num("ui_opacity_gain", c.ui_opacity_gain);
         num("ui_menu_backdrop", c.ui_menu_backdrop);
+        flag("ui_use_alpha", c.ui_use_alpha);
         flag("mirror_window", c.mirror_window);
         integer("recenter_key", c.recenter_key);
         integer("toggle_ui_key", c.toggle_ui_key);

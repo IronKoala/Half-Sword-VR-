@@ -432,7 +432,7 @@ namespace hsvr
 cbuffer Constants : register(b0)
 {
     float4 uvRect;   // xy = offset, zw = scale
-    float4 params;   // x: decode sRGB, y: key black to transparent, z: alpha gain, w: minimum alpha (backdrop)
+    float4 params;   // x: decode sRGB, y: 1 = key black to transparent, 2 = same plus the source's alpha, z: alpha gain, w: minimum alpha (backdrop)
     float4 cursor;   // xy = uv (negative = none), z = aspect (w/h), w = radius (fraction of height)
 };
 Texture2D sourceTexture : register(t0);
@@ -455,7 +455,8 @@ float3 SrgbToLinear(float3 c)
 float4 PSMain(VSOut i) : SV_Target
 {
     float2 uv = uvRect.xy + i.uv * uvRect.zw;
-    float3 rgb = saturate(sourceTexture.SampleLevel(linearSampler, uv, 0).rgb);
+    float4 texel = sourceTexture.SampleLevel(linearSampler, uv, 0);
+    float3 rgb = saturate(texel.rgb);
     float a = 1.0;
     if (params.y > 0.5)
     {
@@ -463,6 +464,10 @@ float4 PSMain(VSOut i) : SV_Target
         // opacity". Brightness is the best guess at opacity; the output stays premultiplied,
         // so faint glows stay faint instead of turning into solid colour.
         a = max(saturate(max(rgb.r, max(rgb.g, rgb.b)) * params.z), params.w);
+        // The engine's UI pass also adds up how much of each pixel it covered in the alpha
+        // channel (the buffer starts at 0). Using it keeps dark but solid parts of a menu
+        // from turning see-through.
+        if (params.y > 1.5) a = max(a, saturate(texel.a));
     }
     if (cursor.x >= 0.0)
     {
@@ -1594,7 +1599,7 @@ float4 PSMain(VSOut i) : SV_Target
                     c.uv_rect[2] = 1.0f;
                     c.uv_rect[3] = 1.0f;
                     c.params[0] = (is_srgb_format(g.xr_format) && !is_float) ? 1.0f : 0.0f;
-                    c.params[1] = 1.0f;
+                    c.params[1] = cfg.ui_use_alpha ? 2.0f : 1.0f;
                     c.params[2] = (float)cfg.ui_opacity_gain;
                     c.cursor[0] = -1.0f;
                     if (pointer_showing)
