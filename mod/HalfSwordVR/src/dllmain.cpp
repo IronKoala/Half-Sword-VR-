@@ -863,7 +863,7 @@ namespace
         // While a menu has the mouse pointer, also write the list whenever the screen changes, so
         // that every menu screen the player visits is on record (checked twice a second).
         static double last_slider_scan = 0.0;
-        if (game.wants_pointer && now - last_slider_scan >= 0.25)
+        if (hsvr::config().log_sliders && game.wants_pointer && now - last_slider_scan >= 0.25)
         {
             last_slider_scan = now;
             log_sliders();

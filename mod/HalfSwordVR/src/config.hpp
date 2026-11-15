@@ -88,6 +88,9 @@ namespace hsvr
         // makes the game draw its menus on (see "stand-in window pictures" in vr_present.cpp).
         // Without it closed menus and old mouse pointers stay visible on the menu panel.
         bool wipe_standins = true;
+        // 1 = write down what each menu slider is doing (value, holding the mouse, pointer over
+        // it) whenever it changes. For troubleshooting; can be switched while the game runs.
+        bool log_sliders = false;
         // Extra engine console commands to run, separated by semicolons (for tuning; empty = none).
         std::string extra_commands;
         // 1 = while the headset is asleep or showing something else, the game keeps running at
