@@ -1,30 +1,40 @@
 -- HalfSwordVR_ArmProbe: a read-only UE4SS Lua mod for Phase 2 research.
 --
 -- It never writes game properties, injects input or changes physics.
--- It only reads reflected values and writes text files into its own
--- "output" folder next to this Scripts folder.
+-- It only reads reflected values and writes text files into its own mod folder.
 --
--- Keys (only while a match is loaded):
---   F7  one-shot dump: every property, function and component of the player
---       pawn (Willie_BP_C), its DriverSkeleton anim BP (ABP_Willie_C), the
---       physical mesh's anim BP (ABP_CopyPose1_C), physics constraints and
---       the physical-animation component. Includes the TYPE of every
---       AnimGraph node, which tells us how ABP_Willie poses the arms.
---   F8  8-second recording. Writes every pawn / ABP_Willie number, bool,
---       vector and rotator whenever it changes, plus arm bone poses, and
---       counts which Blueprint functions run. Move the sword with the mouse
---       while it records.
+-- No hotkeys (UE4SS key binds broke menu clicking on this game) and no shell
+-- commands. Instead it runs by itself, once per game start:
+--   * every 2 s it checks (cheaply) whether you are in a fight with a weapon;
+--   * then it writes armprobe-dump-*.txt (one short hitch): every property,
+--     function and component of the pawn, ABP_Willie (incl. every AnimGraph
+--     node type), ABP_CopyPose1, physics constraints and physical animation;
+--   * 10 s later it records for 30 s (armprobe-rec-*.txt): every changing
+--     pawn / ABP_Willie value, driver vs physical arm bone poses, and which
+--     Blueprint functions ran;
+--   * then it stops completely.
 
-local VERSION = "armprobe-2"
-local RECORD_SECONDS = 8
+local VERSION = "armprobe-3"
+local RECORD_SECONDS = 30
+local COUNTDOWN_SECONDS = 10
 local MAX_DEPTH = 6 -- class inheritance levels to walk
 
 ----------------------------------------------------------------------------
 -- paths
 local source = debug.getinfo(1, "S").source:gsub("^@", "")
 local scripts_dir = assert(source:match("^(.*[/\\])"), "cannot find mod path")
-local out_dir = scripts_dir .. "..\\output\\"
-os.execute('if not exist "' .. out_dir .. '" mkdir "' .. out_dir .. '"')
+local out_dir = scripts_dir .. "..\\" -- the mod folder itself (already exists)
+
+local statics = nil
+local function game_time()
+    if not (statics and statics:IsValid()) then statics = StaticFindObject("/Script/Engine.Default__GameplayStatics") end
+    local ok, t = pcall(function()
+        local pcs = FindAllOf("PlayerController") or {}
+        return statics:GetRealTimeSeconds(pcs[1])
+    end)
+    if ok and type(t) == "number" then return t end
+    return os.time()
+end
 
 local function log(msg) print("[ArmProbe] " .. msg .. "\n") end
 
@@ -275,7 +285,7 @@ local function full_dump()
     local pawn = find_player()
     if not pawn then log("no player pawn yet; load a match first"); return end
     local parts = find_parts(pawn)
-    local path = out_dir .. "dump-" .. os.date("%Y%m%d-%H%M%S") .. ".txt"
+    local path = out_dir .. "armprobe-dump-" .. os.date("%Y%m%d-%H%M%S") .. ".txt"
     local f = io.open(path, "w")
     if not f then log("cannot write " .. path); return end
     f:write(VERSION .. "  " .. os.date() .. "\n")
@@ -375,12 +385,12 @@ local function start_recording()
     scalar_fields(pawn, "pawn.", fields)
     scalar_fields(parts.driver_anim, "driver_anim.", fields)
     register_hooks(parts)
-    local path = out_dir .. "rec-" .. os.date("%Y%m%d-%H%M%S") .. ".txt"
+    local path = out_dir .. "armprobe-rec-" .. os.date("%Y%m%d-%H%M%S") .. ".txt"
     local f = io.open(path, "w")
     if not f then log("cannot write " .. path); return end
     f:write(VERSION .. " recording, " .. #fields .. " fields; lines: t <tab> key <tab> value (only on change)\n")
     hook_counts = {}
-    recording = { f = f, path = path, fields = fields, last = {}, parts = parts, t0 = os.clock(), frame = 0 }
+    recording = { f = f, path = path, fields = fields, last = {}, parts = parts, t0 = game_time(), frame = 0 }
     -- Per-frame sampling runs ONLY while a recording is active; nothing runs per frame otherwise.
     LoopInGameThreadAfterFrames(1, function()
         if not recording then return true end
@@ -398,7 +408,7 @@ end
 function sample()
     local r = recording
     r.frame = r.frame + 1
-    local t = os.clock() - r.t0
+    local t = game_time() - r.t0
     local ts = string.format("%.3f", t)
     for _, fd in ipairs(r.fields) do
         local v = value_text(read(fd.obj, fd.name))
@@ -429,13 +439,42 @@ function sample()
     end
 end
 
-RegisterKeyBind(Key.F7, function() ExecuteInGameThread(function()
-    local ok, err = pcall(full_dump)
-    if not ok then log("dump error: " .. tostring(err)) end
-end) end)
-RegisterKeyBind(Key.F8, function() ExecuteInGameThread(function()
-    local ok, err = pcall(start_recording)
-    if not ok then log("record error: " .. tostring(err)) end
-end) end)
+----------------------------------------------------------------------------
+-- automatic run: wait for a fight, dump, count down, record, stop
+local state, t_mark = "waiting", 0
 
-log(VERSION .. " ready. F7 = dump, F8 = 8 s recording. Output: " .. out_dir)
+local function in_fight()
+    local pawn = find_player()
+    if not pawn then return false end
+    if not valid(read(pawn, "Weapon R")) then return false end
+    local parts = find_parts(pawn)
+    return valid(parts.driver) and valid(parts.driver_anim)
+end
+
+local function step()
+    if state == "waiting" then
+        if in_fight() then
+            full_dump()
+            state, t_mark = "countdown", os.time()
+            log("fight found; recording starts in " .. COUNTDOWN_SECONDS .. " s")
+        end
+    elseif state == "countdown" then
+        if os.time() - t_mark >= COUNTDOWN_SECONDS then
+            start_recording()
+            state = recording and "recording" or "finished"
+        end
+    elseif state == "recording" then
+        if not recording then state = "finished"; log("all done; probe idle until next game start") end
+    end
+end
+
+LoopAsync(2000, function()
+    if state == "finished" then return true end
+    ExecuteInGameThread(function()
+        local ok, err = pcall(step)
+        if not ok then log("error: " .. tostring(err)); state = "finished" end
+    end)
+    return false
+end)
+
+log(VERSION .. " ready; runs once when you enter a fight. Output: " .. out_dir)
