@@ -45,6 +45,10 @@ namespace hsvr
         // 1 = the eyes are drawn at the headset's own resolution and menus float on a panel.
         // 0 = fallback: both eyes are squeezed through the game window (lower resolution).
         bool separate_render_target = true;
+        // 1 = while the headset is asleep or showing something else, the game keeps running at
+        // normal speed (a helper thread keeps the headset link alive). 0 = the game always waits
+        // for the headset, which can make it crawl while the headset sleeps.
+        bool idle_helper = true;
         // Developer switches.
         bool log_poses = false;
         // Test without a headset: a pretend headset that slowly looks left and right. The two

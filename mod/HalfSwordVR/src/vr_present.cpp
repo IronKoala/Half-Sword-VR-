@@ -323,6 +323,7 @@ namespace hsvr
             D3D12_RESOURCE_STATES ui_copy_state = D3D12_RESOURCE_STATE_COPY_DEST;
             // Session state.
             bool session_running = false;
+            XrSessionState session_state = XR_SESSION_STATE_UNKNOWN;
             bool session_lost = false;
             bool frame_begun = false;
             bool should_render = false;
@@ -676,6 +677,8 @@ float4 PSMain(VSOut i) : SV_Target
             return true;
         }
 
+        void idle_pump_thread();
+
         // First Present from the game: find its D3D12 queue and create the OpenXR session on it.
         bool init_graphics(IDXGISwapChain* swapchain)
         {
@@ -785,7 +788,78 @@ float4 PSMain(VSOut i) : SV_Target
             if (!create_xr_swapchain(g.eye[1], w, h, "right eye")) return false;
             if (!create_xr_swapchain(g.ui, 1920, 1080, "menu panel")) return false;
             g.ready = true;
+            std::thread(idle_pump_thread).detach();
             return true;
+        }
+
+        // ---- keeping the session alive while the headset is not showing the game -------------
+        // While the headset is asleep or showing something else, SteamVR may hand out frames very
+        // slowly. Waiting for them inside the game's Present would drag the whole game down to that
+        // pace, so in that state a helper thread runs the (empty) frame loop instead and the game
+        // runs free. The presenting thread takes the loop back once the headset shows the game.
+        std::atomic<bool> g_pump_allowed{false};
+        std::atomic<bool> g_pump_in_frame{false};
+
+        // First successful view query: remember the pose and let the engine side start.
+        void probe_first_view(XrTime time)
+        {
+            if (shared().xr_ready.load()) return;
+            FramePose probe;
+            if (!locate_views(time, probe)) return;
+            {
+                std::lock_guard<std::mutex> lock(g_pipe.mutex);
+                g_pipe.last_latched = probe;
+            }
+            g_lead_ns.store(g_frame_period.load() * 2);
+            HSVR_LOG("OpenXR: first view. FOV left eye %.1f/%.1f/%.1f/%.1f deg, right eye %.1f/%.1f/%.1f/%.1f deg (left/right/up/down), period %.2f ms",
+                     probe.eye[0].angle_left * kRadToDeg, probe.eye[0].angle_right * kRadToDeg, probe.eye[0].angle_up * kRadToDeg, probe.eye[0].angle_down * kRadToDeg,
+                     probe.eye[1].angle_left * kRadToDeg, probe.eye[1].angle_right * kRadToDeg, probe.eye[1].angle_up * kRadToDeg, probe.eye[1].angle_down * kRadToDeg,
+                     (double)g_frame_period.load() / 1e6);
+            shared().xr_ready.store(true);
+        }
+
+        void idle_pump_thread()
+        {
+            for (;;)
+            {
+                if (!g_pump_allowed.load())
+                {
+                    Sleep(5);
+                    continue;
+                }
+                g_pump_in_frame.store(true);
+                if (g_pump_allowed.load())
+                {
+                    XrSession session = g_session.load();
+                    XrFrameState fs{XR_TYPE_FRAME_STATE};
+                    if (XR_SUCCEEDED(xr.WaitFrame(session, nullptr, &fs)) && XR_SUCCEEDED(xr.BeginFrame(session, nullptr)))
+                    {
+                        g_frame_time.store(fs.predictedDisplayTime);
+                        if (fs.predictedDisplayPeriod > 0) g_frame_period.store(fs.predictedDisplayPeriod);
+                        probe_first_view(fs.predictedDisplayTime);
+                        XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
+                        fei.displayTime = fs.predictedDisplayTime;
+                        fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+                        xr.EndFrame(session, &fei);
+                        g_pump_in_frame.store(false);
+                    }
+                    else
+                    {
+                        g_pump_in_frame.store(false);
+                        Sleep(50);
+                    }
+                }
+                else
+                {
+                    g_pump_in_frame.store(false);
+                }
+            }
+        }
+
+        void stop_idle_pump_and_wait()
+        {
+            g_pump_allowed.store(false);
+            for (int i = 0; i < 200 && g_pump_in_frame.load(); ++i) Sleep(5);
         }
 
         void poll_events()
@@ -797,6 +871,7 @@ float4 PSMain(VSOut i) : SV_Target
                 {
                     auto* changed = reinterpret_cast<XrEventDataSessionStateChanged*>(&ev);
                     HSVR_LOG("OpenXR: session state -> %d", (int)changed->state);
+                    g.session_state = changed->state;
                     if (changed->state == XR_SESSION_STATE_READY)
                     {
                         XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO};
@@ -815,6 +890,7 @@ float4 PSMain(VSOut i) : SV_Target
                     }
                     else if (changed->state == XR_SESSION_STATE_STOPPING)
                     {
+                        stop_idle_pump_and_wait();
                         xr.EndSession(g_session.load());
                         g.session_running = false;
                         g.frame_begun = false;
@@ -1071,7 +1147,7 @@ float4 PSMain(VSOut i) : SV_Target
         void clear_next_window_buffer(IDXGISwapChain* swapchain)
         {
             std::lock_guard<std::mutex> lock(g_present_mutex);
-            if (!g.ready || swapchain != g.game_swapchain || g.session_lost) return;
+            if (!g.ready || swapchain != g.game_swapchain) return;
             {
                 std::lock_guard<std::mutex> pipe_lock(g_pipe.mutex);
                 if (!g_pipe.separate_mode || !shared().stereo_installed.load()) return;
@@ -1159,9 +1235,13 @@ float4 PSMain(VSOut i) : SV_Target
         }
 
         // Finishes the OpenXR frame that is open: copies the engine's eyes (and the flat UI) and submits.
-        void end_frame(IDXGISwapChain* swapchain, const Config& cfg, FetchedFrame& fetched)
+        // With `submit` false nothing goes to the headset (the helper thread owns the frame loop
+        // then); only the monitor picture is put together.
+        void end_frame(IDXGISwapChain* swapchain, const Config& cfg, FetchedFrame& fetched, bool submit)
         {
             bool separate = fetched.separate;
+            if (!submit && !separate) return;
+            const bool render = submit && g.should_render;
             bool have_item = fetched.have_item;
             PresentItem& item = fetched.item;
             if (fetched.fresh) adapt_prediction(item.pose, cfg);
@@ -1186,7 +1266,7 @@ float4 PSMain(VSOut i) : SV_Target
                 // HUD: copy it for the floating panel, then put the monitor picture together.
                 bool want_ui = separate && cfg.ui_panel && shared().ui_visible.load();
                 bool want_monitor = separate && cfg.mirror_window;
-                bool need_back_buffer = separate ? (want_ui || want_monitor) : (g.should_render && have_item);
+                bool need_back_buffer = separate ? (want_ui || want_monitor) : (render && have_item);
                 bool have_back_buffer = need_back_buffer && copy_back_buffer(swapchain);
 
                 ID3D12Resource* scene = separate ? item.scene.get() : (have_back_buffer ? g.ui_copy.get() : nullptr);
@@ -1211,7 +1291,7 @@ float4 PSMain(VSOut i) : SV_Target
                 }
 
                 // ---- eyes ----
-                if (g.should_render && have_item && item.pose.valid && scene)
+                if (render && have_item && item.pose.valid && scene)
                 {
                     D3D12_RESOURCE_DESC sd = scene->GetDesc();
                     D3D12_GPU_DESCRIPTOR_HANDLE srv = scene_srv;
@@ -1259,13 +1339,13 @@ float4 PSMain(VSOut i) : SV_Target
                         layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
                     }
                 }
-                else if (g.should_render)
+                else if (render)
                 {
                     shared().frames_without_image.fetch_add(1);
                 }
 
                 // ---- flat UI panel ----
-                if (g.should_render && want_ui && ui_srv.ptr)
+                if (render && want_ui && ui_srv.ptr)
                 {
                     bool is_float = ui_is_float;
                     D3D12_GPU_DESCRIPTOR_HANDLE srv = ui_srv;
@@ -1328,6 +1408,7 @@ float4 PSMain(VSOut i) : SV_Target
                 if (ui_acquired) release_swapchain(g.ui);
             }
 
+            if (!submit) return;
             XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
             fei.displayTime = g.frame_time;
             fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -1361,23 +1442,7 @@ float4 PSMain(VSOut i) : SV_Target
             g_frame_time.store(fs.predictedDisplayTime);
             if (fs.predictedDisplayPeriod > 0) g_frame_period.store(fs.predictedDisplayPeriod);
 
-            if (!shared().xr_ready.load())
-            {
-                FramePose probe;
-                if (locate_views(fs.predictedDisplayTime, probe))
-                {
-                    {
-                        std::lock_guard<std::mutex> lock(g_pipe.mutex);
-                        g_pipe.last_latched = probe;
-                    }
-                    g_lead_ns.store(g_frame_period.load() * 2);
-                    HSVR_LOG("OpenXR: first view. FOV left eye %.1f/%.1f/%.1f/%.1f deg, right eye %.1f/%.1f/%.1f/%.1f deg (left/right/up/down), period %.2f ms",
-                             probe.eye[0].angle_left * kRadToDeg, probe.eye[0].angle_right * kRadToDeg, probe.eye[0].angle_up * kRadToDeg, probe.eye[0].angle_down * kRadToDeg,
-                             probe.eye[1].angle_left * kRadToDeg, probe.eye[1].angle_right * kRadToDeg, probe.eye[1].angle_up * kRadToDeg, probe.eye[1].angle_down * kRadToDeg,
-                             (double)g_frame_period.load() / 1e6);
-                    shared().xr_ready.store(true);
-                }
-            }
+            probe_first_view(fs.predictedDisplayTime);
         }
 
         void log_statistics()
@@ -1392,8 +1457,8 @@ float4 PSMain(VSOut i) : SV_Target
                 game_depth = g_pipe.game_queue.size();
                 present_depth = g_pipe.present_queue.size();
             }
-            HSVR_LOG("Stats: presents %llu, submitted %llu, without image %llu, pose queue %zu/%zu, dropped %llu/%llu, reused %llu, lead %.1f ms",
-                     (unsigned long long)g.presents, (unsigned long long)shared().frames_submitted.load(),
+            HSVR_LOG("Stats: state %d, presents %llu, submitted %llu, without image %llu, pose queue %zu/%zu, dropped %llu/%llu, reused %llu, lead %.1f ms",
+                     (int)g.session_state, (unsigned long long)g.presents, (unsigned long long)shared().frames_submitted.load(),
                      (unsigned long long)shared().frames_without_image.load(), game_depth, present_depth,
                      (unsigned long long)dropped_game, (unsigned long long)dropped_present, (unsigned long long)reused,
                      (double)g_lead_ns.load() / 1e6);
@@ -1404,9 +1469,9 @@ float4 PSMain(VSOut i) : SV_Target
         {
             if (!g_vr_available || g_vr_failed) return false;
             std::lock_guard<std::mutex> lock(g_present_mutex);
-            if (g.session_lost) return false;
             if (!g.ready)
             {
+                if (g.session_lost) return false;
                 if (g.game_swapchain) return false; // init was tried and failed part-way
                 if (!init_graphics(swapchain))
                 {
@@ -1421,13 +1486,44 @@ float4 PSMain(VSOut i) : SV_Target
             if (swapchain != g.game_swapchain) return false;
             ++g.presents;
             FetchedFrame fetched = fetch_frame();
-            poll_events();
-            if (!g.session_running) return false;
-            Config cfg = config();
-            if (g.frame_begun) end_frame(swapchain, cfg, fetched);
-            begin_frame();
+            if (!g.session_lost) poll_events();
             if (log_throttle("stats", 10.0)) log_statistics();
+            Config cfg = config();
+            bool showing = g.session_running && !g.session_lost &&
+                           (!cfg.idle_helper || g.session_state == XR_SESSION_STATE_VISIBLE || g.session_state == XR_SESSION_STATE_FOCUSED);
+            if (!showing)
+            {
+                // The headset is not showing the game: finish any frame we had open, then let
+                // the helper thread keep the session alive while the game runs at its own pace.
+                end_frame(swapchain, cfg, fetched, g.frame_begun);
+                g_pump_allowed.store(g.session_running && !g.session_lost);
+                return false;
+            }
+            g_pump_allowed.store(false);
+            if (g_pump_in_frame.load())
+            {
+                // The helper thread is finishing its last frame; take over on the next Present.
+                end_frame(swapchain, cfg, fetched, false);
+                return false;
+            }
+            end_frame(swapchain, cfg, fetched, g.frame_begun);
+            begin_frame();
             return true;
+        }
+
+        // While the headset is not pacing the game (asleep, or SteamVR gone) and the engine is
+        // drawing two eyes with its own frame cap off, hold the game to about the headset's rate.
+        double g_next_unpaced_present = 0.0;
+        void limit_unpaced_frame_rate(IDXGISwapChain* swapchain)
+        {
+            if (swapchain != g.game_swapchain || !shared().stereo_installed.load()) return;
+            double period = (double)g_frame_period.load() / 1e9;
+            if (period < 0.004 || period > 0.05) period = 1.0 / 72.0;
+            double now = now_seconds();
+            if (g_next_unpaced_present < now - period || g_next_unpaced_present > now + period) g_next_unpaced_present = now;
+            double wait = g_next_unpaced_present - now;
+            if (wait > 0.0015) Sleep((DWORD)(wait * 1000.0));
+            g_next_unpaced_present += period;
         }
 
         HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* self, UINT sync_interval, UINT flags)
@@ -1435,6 +1531,7 @@ float4 PSMain(VSOut i) : SV_Target
             if (t_in_present || (flags & DXGI_PRESENT_TEST)) return g_original_present(self, sync_interval, flags);
             t_in_present = true;
             bool vr_paced = on_present(self);
+            if (!vr_paced) limit_unpaced_frame_rate(self);
             HRESULT hr = g_original_present(self, vr_paced ? 0 : sync_interval, flags);
             if (SUCCEEDED(hr)) clear_next_window_buffer(self);
             t_in_present = false;
@@ -1446,6 +1543,7 @@ float4 PSMain(VSOut i) : SV_Target
             if (t_in_present || (flags & DXGI_PRESENT_TEST)) return g_original_present1(self, sync_interval, flags, params);
             t_in_present = true;
             bool vr_paced = on_present(self);
+            if (!vr_paced) limit_unpaced_frame_rate(self);
             HRESULT hr = g_original_present1(self, vr_paced ? 0 : sync_interval, flags, params);
             if (SUCCEEDED(hr)) clear_next_window_buffer(self);
             t_in_present = false;
