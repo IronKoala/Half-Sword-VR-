@@ -99,38 +99,70 @@ namespace hsvr
         struct Pipeline
         {
             std::mutex mutex;
-            std::deque<FramePose> game_queue; // game thread -> render thread
-            FramePose render_current;
-            bool render_took = false;
+            std::deque<FramePose> game_queue; // game thread -> presenting thread
+            bool rects_started = false;       // render thread: a view rectangle of this frame was seen
             int rect[2][4]{};
             bool rect_valid[2]{false, false};
-            std::deque<PresentItem> present_queue; // render thread -> present thread
+            std::deque<PresentItem> present_queue; // render thread -> presenting thread (picture and rectangles)
             FramePose last_latched;
             bool separate_mode = false;
             uint64_t sequence = 0;
             uint64_t dropped_game = 0;
             uint64_t dropped_present = 0;
             uint64_t reused_render = 0;
+            uint64_t dropped_stale = 0;
+            // Since the last statistics line: how many Presents had finished between a pose being
+            // taken on the game thread and its picture being presented (last slot: 4 or more).
+            uint64_t age_count[5]{};
+            size_t depth_min = 99, depth_max = 0; // poses waiting when a Present looked
         };
         Pipeline g_pipe;
 
-        // Called with g_pipe.mutex held. `allowed` is how many entries may legitimately be waiting.
-        void take_from_game_queue(FramePose& out, size_t allowed)
+        // Presents of the game's window that have completely finished.
+        std::atomic<uint64_t> g_presents_done{0};
+        thread_local bool t_game_present = false;
+
+        // Called with g_pipe.mutex held, once per Present: the pose the picture now being
+        // presented was drawn with.
+        //
+        // Poses and pictures are matched by order, and order alone can stay one step out for good
+        // (a pose whose frame was never drawn waits in the queue for ever, and every later picture
+        // then goes out with the pose of the frame before it: the world swims when the head turns).
+        // The engine gives a hard limit that catches this: the game thread may not start frame N
+        // before the render thread finished frame N-2, which itself waits for the Present of frame
+        // N-3. So between taking the pose of a frame and the start of its Present at most
+        // `max_age` (2) other Presents can finish. A pose older than that belongs to an earlier
+        // picture and is thrown away.
+        bool take_pose_for_present(FramePose& out, size_t allowed, int max_age)
         {
+            uint64_t done = g_presents_done.load();
+            size_t depth = g_pipe.game_queue.size();
+            g_pipe.depth_min = std::min(g_pipe.depth_min, depth);
+            g_pipe.depth_max = std::max(g_pipe.depth_max, depth);
             while (g_pipe.game_queue.size() > allowed)
             {
                 g_pipe.game_queue.pop_front();
                 ++g_pipe.dropped_game;
             }
-            if (!g_pipe.game_queue.empty())
+            if (max_age >= 0)
             {
-                out = g_pipe.game_queue.front();
-                g_pipe.game_queue.pop_front();
+                // Keep the newest even if it looks old (a long stall): something must be shown.
+                while (g_pipe.game_queue.size() > 1 && g_pipe.game_queue.front().presents_done + (uint64_t)max_age < done)
+                {
+                    g_pipe.game_queue.pop_front();
+                    ++g_pipe.dropped_stale;
+                }
             }
-            else
+            if (g_pipe.game_queue.empty())
             {
                 ++g_pipe.reused_render;
+                return false;
             }
+            out = g_pipe.game_queue.front();
+            g_pipe.game_queue.pop_front();
+            uint64_t age = done >= out.presents_done ? done - out.presents_done : 0;
+            ++g_pipe.age_count[age > 4 ? 4 : age];
+            return true;
         }
 
         // ------------------------------------------------------------------------- OpenXR ----
@@ -1202,15 +1234,21 @@ float4 PSMain(VSOut i) : SV_Target
 
         // Called exactly once for every Present of the game's window, whether or not the headset
         // is taking frames, so that poses stay matched to pictures by simple counting.
-        FetchedFrame fetch_frame()
+        FetchedFrame fetch_frame(const Config& cfg)
         {
             FetchedFrame f;
+            FramePose pose;
+            bool have_pose = false;
             {
                 std::lock_guard<std::mutex> lock(g_pipe.mutex);
-                f.separate = g_pipe.separate_mode && shared().stereo_installed.load();
+                bool stereo = shared().stereo_installed.load();
+                f.separate = g_pipe.separate_mode && stereo;
+                // In both modes the pose is taken here, at the Present, in the same way.
+                if (stereo) have_pose = take_pose_for_present(pose, 3, cfg.pose_max_age);
                 if (f.separate)
                 {
-                    // The render thread is at most one frame ahead of the presenting thread.
+                    // Picture and rectangles come from the render thread, which is at most one
+                    // frame ahead of the presenting thread.
                     while (g_pipe.present_queue.size() > 2)
                     {
                         g_pipe.present_queue.pop_front();
@@ -1223,16 +1261,19 @@ float4 PSMain(VSOut i) : SV_Target
                         f.have_item = true;
                     }
                 }
-                else if (shared().stereo_installed.load())
+                else if (stereo)
                 {
                     // The engine draws both eyes side by side into the window itself.
-                    take_from_game_queue(f.item.pose, 3);
-                    f.have_item = f.item.pose.valid;
+                    f.have_item = have_pose && pose.valid;
                 }
             }
             if (f.have_item)
             {
-                f.fresh = true;
+                // No new pose with a new picture (a frame without the 3D world, such as a loading
+                // screen): the picture keeps the pose it was last shown with.
+                if (have_pose) f.item.pose = pose;
+                else if (g.have_last_item) f.item.pose = g.last_item.pose;
+                f.fresh = have_pose;
                 g.last_item = f.item;
                 g.have_last_item = true;
             }
@@ -1692,21 +1733,35 @@ float4 PSMain(VSOut i) : SV_Target
 
         void log_statistics()
         {
-            uint64_t dropped_game, dropped_present, reused;
-            size_t game_depth, present_depth;
+            uint64_t dropped_game, dropped_present, reused, stale, age[5];
+            size_t game_depth, present_depth, depth_min, depth_max;
             {
                 std::lock_guard<std::mutex> lock(g_pipe.mutex);
                 dropped_game = g_pipe.dropped_game;
                 dropped_present = g_pipe.dropped_present;
                 reused = g_pipe.reused_render;
+                stale = g_pipe.dropped_stale;
                 game_depth = g_pipe.game_queue.size();
                 present_depth = g_pipe.present_queue.size();
+                depth_min = g_pipe.depth_min;
+                depth_max = g_pipe.depth_max;
+                for (int i = 0; i < 5; ++i)
+                {
+                    age[i] = g_pipe.age_count[i];
+                    g_pipe.age_count[i] = 0;
+                }
+                g_pipe.depth_min = 99;
+                g_pipe.depth_max = 0;
             }
+            if (depth_min > depth_max) depth_min = depth_max;
             HSVR_LOG("Stats: state %d, presents %llu, submitted %llu, without image %llu, pose queue %zu/%zu, dropped %llu/%llu, reused %llu, lead %.1f ms",
                      (int)g.session_state, (unsigned long long)g.presents, (unsigned long long)shared().frames_submitted.load(),
                      (unsigned long long)shared().frames_without_image.load(), game_depth, present_depth,
                      (unsigned long long)dropped_game, (unsigned long long)dropped_present, (unsigned long long)reused,
                      (double)g_lead_ns.load() / 1e6);
+            HSVR_LOG("Pairing: poses waiting at a Present %zu to %zu, too old and dropped %llu (all session), Presents between pose and picture 0:%llu 1:%llu 2:%llu 3:%llu 4+:%llu",
+                     depth_min, depth_max, (unsigned long long)stale, (unsigned long long)age[0], (unsigned long long)age[1],
+                     (unsigned long long)age[2], (unsigned long long)age[3], (unsigned long long)age[4]);
         }
 
         // Runs inside the game's Present call, on whichever thread presents. Returns true while VR is driving frame timing.
@@ -1730,10 +1785,11 @@ float4 PSMain(VSOut i) : SV_Target
             }
             if (swapchain != g.game_swapchain) return false;
             ++g.presents;
-            FetchedFrame fetched = fetch_frame();
+            t_game_present = true;
+            Config cfg = config();
+            FetchedFrame fetched = fetch_frame(cfg);
             if (!g.session_lost) poll_events();
             if (log_throttle("stats", 10.0)) log_statistics();
-            Config cfg = config();
             bool showing = g.session_running && !g.session_lost &&
                            (!cfg.idle_helper || g.session_state == XR_SESSION_STATE_VISIBLE || g.session_state == XR_SESSION_STATE_FOCUSED);
             if (!showing)
@@ -1779,6 +1835,11 @@ float4 PSMain(VSOut i) : SV_Target
             if (!vr_paced) limit_unpaced_frame_rate(self);
             HRESULT hr = g_original_present(self, vr_paced ? 0 : sync_interval, flags);
             if (SUCCEEDED(hr)) clear_next_window_buffer(self);
+            if (t_game_present)
+            {
+                t_game_present = false;
+                g_presents_done.fetch_add(1);
+            }
             t_in_present = false;
             return hr;
         }
@@ -1791,6 +1852,11 @@ float4 PSMain(VSOut i) : SV_Target
             if (!vr_paced) limit_unpaced_frame_rate(self);
             HRESULT hr = g_original_present1(self, vr_paced ? 0 : sync_interval, flags, params);
             if (SUCCEEDED(hr)) clear_next_window_buffer(self);
+            if (t_game_present)
+            {
+                t_game_present = false;
+                g_presents_done.fetch_add(1);
+            }
             t_in_present = false;
             return hr;
         }
@@ -2009,6 +2075,7 @@ float4 PSMain(VSOut i) : SV_Target
         {
             std::lock_guard<std::mutex> lock(g_pipe.mutex);
             pose.sequence = ++g_pipe.sequence;
+            pose.presents_done = g_presents_done.load();
             g_pipe.last_latched = pose;
             g_pipe.game_queue.push_back(pose);
             while (g_pipe.game_queue.size() > (g_fake_headset ? 1u : 8u))
@@ -2052,13 +2119,10 @@ float4 PSMain(VSOut i) : SV_Target
     {
         if (view_index < 0 || view_index > 1) return;
         std::lock_guard<std::mutex> lock(g_pipe.mutex);
-        // Without a separate target the presenter pairs poses itself; taking one here would
-        // put it a frame out of step.
         if (!g_pipe.separate_mode) return;
-        if (!g_pipe.render_took)
+        if (!g_pipe.rects_started)
         {
-            take_from_game_queue(g_pipe.render_current, 2);
-            g_pipe.render_took = true;
+            g_pipe.rects_started = true;
             g_pipe.rect_valid[0] = g_pipe.rect_valid[1] = false;
         }
         g_pipe.rect[view_index][0] = min_x;
@@ -2068,18 +2132,13 @@ float4 PSMain(VSOut i) : SV_Target
         g_pipe.rect_valid[view_index] = max_x > min_x && max_y > min_y;
     }
 
+    // The pose is not attached here: the presenting thread pairs it (see take_pose_for_present).
     void vr_render_thread_frame_done(ID3D12Resource* scene)
     {
         std::lock_guard<std::mutex> lock(g_pipe.mutex);
-        if (!g_pipe.render_took)
-        {
-            // No per-view callback this frame (or the engine does not make one): pair by order.
-            take_from_game_queue(g_pipe.render_current, 2);
-            g_pipe.rect_valid[0] = g_pipe.rect_valid[1] = false;
-        }
-        g_pipe.render_took = false;
+        if (!g_pipe.rects_started) g_pipe.rect_valid[0] = g_pipe.rect_valid[1] = false; // no per-view callback this frame
+        g_pipe.rects_started = false;
         PresentItem item;
-        item.pose = g_pipe.render_current;
         for (int e = 0; e < 2; ++e)
         {
             item.rect_valid[e] = g_pipe.rect_valid[e];
@@ -2099,13 +2158,13 @@ float4 PSMain(VSOut i) : SV_Target
         std::lock_guard<std::mutex> lock(g_pipe.mutex);
         g_pipe.separate_mode = separate;
         g_pipe.present_queue.clear();
-        g_pipe.render_took = false;
+        g_pipe.rects_started = false;
     }
 
     void vr_render_thread_target_reset()
     {
         std::lock_guard<std::mutex> lock(g_pipe.mutex);
         g_pipe.present_queue.clear();
-        g_pipe.render_took = false;
+        g_pipe.rects_started = false;
     }
 } // namespace hsvr

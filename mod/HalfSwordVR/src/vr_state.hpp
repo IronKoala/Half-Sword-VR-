@@ -27,6 +27,7 @@ namespace hsvr
     {
         uint64_t sequence = 0;
         int64_t predicted_time = 0; // XrTime the pose was predicted for
+        uint64_t presents_done = 0; // Presents of the game's window finished when the pose was taken
         bool valid = false;
         XrEyeRaw eye[2];
     };

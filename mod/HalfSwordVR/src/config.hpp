@@ -55,6 +55,10 @@ namespace hsvr
         int toggle_mode_key = 0x22;
         // Frames of prediction added when asking the headset for a pose (-1 = adapt automatically).
         double predict_frames = -1.0;
+        // A head position is matched to its picture by order. One that was taken more than this
+        // many finished Presents before its picture is presented cannot belong to that picture
+        // (the engine never runs further ahead) and is skipped. -1 = no check.
+        int pose_max_age = 2;
         // 1 = the eyes are drawn at the headset's own resolution and menus float on a panel.
         // 0 = fallback: both eyes are squeezed through the game window (lower resolution).
         bool separate_render_target = true;
