@@ -51,6 +51,8 @@ namespace hsvr
         XINPUT_GAMEPAD g_last_sent{};
         // Polls of pad 0 by the game (any thread), for the log and to notice a game that stopped asking.
         volatile LONG g_polls = 0;
+        // The real pad 0's buttons (and triggers in the high bytes) as last read, for the log.
+        volatile LONG g_real_buttons = 0;
         bool g_installed = false;
 
         SHORT to_short(float v)
@@ -70,6 +72,7 @@ namespace hsvr
             if (!g_pad.active) return result;
             XINPUT_GAMEPAD real{};
             if (result == ERROR_SUCCESS) real = state->Gamepad;
+            g_real_buttons = (LONG)real.wButtons | ((LONG)real.bLeftTrigger << 16) | ((LONG)real.bRightTrigger << 24);
             XINPUT_GAMEPAD out{};
             // A real pad's sticks win where they are pushed further than the controllers'.
             auto pick = [](SHORT real_value, float ours) {
@@ -1001,6 +1004,18 @@ namespace hsvr
             t.polls_at_check = polls;
         }
 
+        {
+            // Anything the real pad 0 (Steam's own virtual pad, or a plugged-in one) presses is
+            // merged into what the game sees; log every change so it can be told apart from ours.
+            static LONG last_real = 0;
+            LONG real = g_real_buttons;
+            if (real != last_real)
+            {
+                last_real = real;
+                HSVR_LOG("Pad: the real gamepad 0 now reads buttons 0x%04X triggers (%d, %d)%s", (unsigned)(real & 0xFFFF), (int)((real >> 16) & 0xFF),
+                         (int)((real >> 24) & 0xFF), real ? " (passed on to the game with ours)" : "");
+            }
+        }
         if (cfg.log_input && pad.active)
         {
             const PadOut& l = t.last_logged;
