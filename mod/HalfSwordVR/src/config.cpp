@@ -365,6 +365,7 @@ namespace hsvr
         flag("dev_fake_still", c.dev_fake_still);
         flag("dev_fake_hands", c.dev_fake_hands);
         flag("dev_arms_any_character", c.dev_arms_any_character);
+        flag("dev_study", c.dev_study);
         num("dev_fake_yaw", c.dev_fake_yaw);
         num("dev_fake_pitch", c.dev_fake_pitch);
         num("dev_fake_scale", c.dev_fake_scale);

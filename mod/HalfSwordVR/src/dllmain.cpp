@@ -34,6 +34,7 @@
 #include "stereo_device.hpp"
 #include "ue_abi.hpp"
 #include "vr_present.hpp"
+#include "study_dump.hpp"
 
 #include <windows.h>
 
@@ -745,6 +746,11 @@ namespace
         // No character yet means the intro or the main menu.
         shared.menu_up.store(game.paused || !pawn || !pawn_mesh);
         hsvr::input_watch_tick(game);
+        {
+            std::wstring level = L"menu";
+            if (pawn) { std::wstring full = pawn->GetFullName(); size_t dot = full.find(L'.'); size_t slash = full.rfind(L'/', dot); if (dot != std::wstring::npos && slash != std::wstring::npos) level = full.substr(slash + 1, dot - slash - 1); }
+            hsvr::study_tick(pawn, level);
+        }
 
         // A few times per run, write down what is on screen: once early (intro), a few seconds
         // into each new character's life, and whenever the game pauses.

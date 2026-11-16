@@ -319,6 +319,8 @@ namespace hsvr
         // moment the mod is ready. A command is an engine console command. Read once at the start.
         // Example: 20:open /Game/Maps/Arenas/Map_Arena_Slums;50:r.Fog 0;56:r.Fog 1
         std::string dev_script;
+        // Write the game's Blueprint script and the player's settings to the study folder.
+        bool dev_study = false;
         int stereo_slot_offset = 0; // 0 = find automatically
     };
 

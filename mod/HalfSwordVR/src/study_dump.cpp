@@ -709,11 +709,17 @@ namespace hsvr
             // The physics asset: every body and every joint as authored.
             UObject* asset = object_value(mesh, STR("SkeletalMeshAsset"));
             if (!asset) asset = object_value(mesh, STR("SkinnedAsset"));
-            UObject* physics = object_value(asset, STR("PhysicsAsset"));
+            UObject* physics = object_value(mesh, STR("PhysicsAssetOverride"));
+            if (!physics) physics = object_value(asset, STR("PhysicsAsset"));
             export_object(out, asset, "skeletal mesh asset");
             export_object(out, physics, "physics asset");
             export_array_objects(out, physics, STR("SkeletalBodySetups"), "physics body");
             export_array_objects(out, physics, STR("ConstraintSetup"), "physics joint");
+            // The hidden animated skeleton the body copies its pose from.
+            UObject* driver = object_value(pawn, STR("DriverSkeleton"));
+            export_object(out, object_value(driver, STR("AnimScriptInstance")), "driver skeleton anim instance");
+            export_object(out, object_value(mesh, STR("AnimScriptInstance")), "body anim instance");
+            export_object(out, object_value(pawn, STR("PhysicalAnimation")), "physical animation component");
             for (const TCHAR* hand : {STR("Weapon R"), STR("Weapon L")})
             {
                 UObject* weapon = object_value(pawn, hand);
@@ -752,16 +758,22 @@ namespace hsvr
             g_levels_done.insert(level_name);
             // Every Blueprint class in memory that has script.
             int written = 0, classes = 0;
-            for (const TCHAR* kind : {STR("BlueprintGeneratedClass"), STR("AnimBlueprintGeneratedClass"), STR("WidgetBlueprintGeneratedClass")})
-            {
-                std::vector<UObject*> found;
-                UObjectGlobals::FindAllOf(kind, found);
-                for (UObject* object : found)
+            std::vector<UClass*> found;
+            UObjectGlobals::ForEachUObject([&](UObject* object, int32, int32) {
+                if (!object) return LoopAction::Continue;
+                UClass* type = object->GetClassPrivate();
+                if (!type) return LoopAction::Continue;
+                std::wstring kind = type->GetName();
+                if (kind == STR("BlueprintGeneratedClass") || kind == STR("AnimBlueprintGeneratedClass"))
                 {
-                    if (!object) continue;
-                    ++classes;
-                    if (dump_class(static_cast<UClass*>(object))) ++written;
+                    if (object->GetPathName().rfind(STR("/Game/"), 0) == 0) found.push_back(static_cast<UClass*>(object));
                 }
+                return LoopAction::Continue;
+            });
+            for (UClass* cls : found)
+            {
+                ++classes;
+                if (dump_class(cls)) ++written;
             }
             HSVR_LOG("Study: level %ls: %d Blueprint classes in memory, %d newly written to the study folder", level_name.c_str(), classes, written);
         }
