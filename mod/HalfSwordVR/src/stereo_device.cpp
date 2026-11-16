@@ -17,6 +17,12 @@ namespace hsvr
     namespace
     {
         AnchorProvider g_anchor_provider = nullptr;
+        // Height match: the factor that makes the player's standing eye height the character's
+        // (1 until both are known), and the headset's height above the real floor (cm; below 0 =
+        // not known).
+        double g_height_scale = 1.0;
+        double g_real_eye_cm = -1.0;
+        double scale_now(const Config& cfg) { return cfg.world_scale * g_height_scale; }
         std::atomic<uint64_t> g_game_frame{1};
         double g_delta_seconds = 1.0 / 90.0;
 
@@ -95,7 +101,8 @@ namespace hsvr
                 g_view.has_actor = true;
                 g_view.actor_position = player.actor_position;
                 Quat base = quat_from_yaw_deg(g_view.base_yaw);
-                Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
+                double body_size = shared().body_scale.load();
+                Vec3 eye_offset{cfg.eye_forward_cm * body_size, 0.0, cfg.eye_up_cm * body_size};
                 if (cfg.body_follow && !shared().vr_controls_off.load())
                 {
                     // Body follow: the view is the player's own head. Its place in the world is
@@ -108,9 +115,33 @@ namespace hsvr
                     // together in the long run, and view_leash_cm is the furthest the view may
                     // ever be from the real head (a knock-down drags the view along).
                     const XrEyeRaw mid = eye_for_view(-1);
+                    {
+                        // The player's height against the character's.
+                        static double held = 0.0, tallest = 0.0;
+                        float origin = shared().local_origin_height_m.load();
+                        double willie = shared().willie_eye_cm.load();
+                        g_real_eye_cm = cfg.height_match && origin >= 0.0f ? (origin + mid.py) * 100.0 : -1.0;
+                        double factor = 1.0, player = 0.0;
+                        if (g_real_eye_cm > 0.0)
+                        {
+                            // Standing height: what the calibration stored, or else the highest the
+                            // headset has been held (a hop barely moves the slow value).
+                            if (held <= 0.0) held = g_real_eye_cm;
+                            held += (g_real_eye_cm - held) * (1.0 - std::exp(-g_delta_seconds / 0.7));
+                            tallest = std::max(tallest, held);
+                            player = cfg.player_eye_cm > 50.0 ? cfg.player_eye_cm : tallest;
+                            if (player > 100.0 && player < 230.0 && willie > 80.0 && willie < 260.0) factor = std::max(0.6, std::min(1.6, willie / player));
+                        }
+                        static double told = 0.0;
+                        if (std::fabs(factor - told) > 0.015 && (told = factor) > 0.0)
+                            HSVR_LOG("Height: your eyes %.0f cm above the floor standing, the character's %.0f cm: the world is scaled by %.2f for you", player, willie, factor);
+                        g_height_scale = factor;
+                        shared().height_scale.store((float)factor);
+                        shared().player_eye_cm.store((float)player);
+                    }
                     Quat recenter_inverse = quat_from_yaw_deg(g_view.recenter.yaw_deg).inverse();
                     Vec3 mid_cm = xr_to_ue_position(mid.px, mid.py, mid.pz, 100.0);
-                    Vec3 moved = base.rotate(recenter_inverse.rotate(mid_cm - g_view.recenter.position_cm) * cfg.world_scale);
+                    Vec3 moved = base.rotate(recenter_inverse.rotate(mid_cm - g_view.recenter.position_cm) * scale_now(cfg));
                     Quat head_rotation = (base * recenter_inverse * xr_to_ue_rotation(mid.qx, mid.qy, mid.qz, mid.qw)).normalized();
                     Vec3 eyes_now = head_rotation.rotate(eye_offset); // head bone to between the eyes
                     // The offset is kept in the character's heading frame, so it turns with the character.
@@ -134,6 +165,14 @@ namespace hsvr
                         if (gap > leash) g_smoothed_offset = g_smoothed_offset + delta * ((gap - leash) / gap);
                     }
                     g_view.body_gap_cm = size(raw - g_smoothed_offset);
+                    {
+                        // Floor to floor: the view is as high above the character's feet as the
+                        // headset is above the real floor (times the scale). Standing straight that
+                        // is the character's own eye height; a real crouch lowers it by its own depth.
+                        float feet = shared().feet_below_actor_cm.load();
+                        if (g_real_eye_cm > 0.0 && feet > 1.0f && shared().body_placed.load())
+                            g_smoothed_offset.z = -feet + g_real_eye_cm * scale_now(cfg) - moved.z;
+                    }
                     g_view.anchor = player.actor_position + base.rotate(g_smoothed_offset);
                     // The crouch button lowers the player: the view goes down, and with it the head's
                     // place, the hands and (through the hips following the head) the whole body.
@@ -313,7 +352,7 @@ namespace hsvr
                 if (!g_view.valid) return;
                 Config cfg = config();
                 const XrEyeRaw eye = eye_for_view(ViewIndex);
-                double cm_per_metre = (WorldToMeters > 1.0f ? (double)WorldToMeters : 100.0) * cfg.world_scale;
+                double cm_per_metre = (WorldToMeters > 1.0f ? (double)WorldToMeters : 100.0) * scale_now(cfg);
                 Quat recenter_inverse = quat_from_yaw_deg(g_view.recenter.yaw_deg).inverse();
                 Vec3 eye_real_cm = xr_to_ue_position(eye.px, eye.py, eye.pz, 100.0);
                 Vec3 relative = recenter_inverse.rotate(eye_real_cm - g_view.recenter.position_cm) * (cm_per_metre / 100.0);
@@ -442,7 +481,7 @@ namespace hsvr
         // World movement back into real centimetres in tracking axes (see stereo_tracking_to_world).
         Quat base = quat_from_yaw_deg(g_view.base_yaw);
         Quat recenter = quat_from_yaw_deg(g_view.recenter.yaw_deg);
-        Vec3 real = recenter.rotate(base.inverse().rotate(world_delta)) * (1.0 / cfg.world_scale);
+        Vec3 real = recenter.rotate(base.inverse().rotate(world_delta)) * (1.0 / scale_now(cfg));
         vr_shift_recenter(real, yaw_delta_deg);
         g_view.recenter = vr_recenter();
         g_view.base_yaw = normalize_axis(g_view.base_yaw + yaw_delta_deg);
@@ -461,7 +500,7 @@ namespace hsvr
     {
         if (!g_view.valid || !g_view.recenter.valid) return false;
         Config cfg = config();
-        double scale = cfg.world_scale; // Unreal units are centimetres (WorldToMeters 100)
+        double scale = scale_now(cfg); // Unreal units are centimetres (WorldToMeters 100)
         Quat recenter_inverse = quat_from_yaw_deg(g_view.recenter.yaw_deg).inverse();
         Vec3 real_cm = xr_to_ue_position(px, py, pz, 100.0);
         Vec3 relative = recenter_inverse.rotate(real_cm - g_view.recenter.position_cm) * scale;

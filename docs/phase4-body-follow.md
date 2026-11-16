@@ -47,6 +47,58 @@ head). The first cut of this branch did the same and was never switched on. It n
 like headgear) and never touches a bone. **Never use HideBoneByName on this game's characters.**
 Where the sections below mention `HideBoneByName` or `hide_head_bone`, that is the removed way.
 
+## Thirteenth cut (2026-11-16): the player's height is the character's, and what the hands hold
+
+After the twelfth cut Matthew asked for a point-by-point comparison with Blade & Sorcery and gave
+seven requirements (project memory has them in his words). Agreed plan: three builds. This is the
+first (his points 1 and 4), plus what its self-test runs turned up with his new character: resized
+(0.92 of the standard height), a heavy pavise in the left hand, a longer weapon in the right, and an
+armed opponent in the cellar.
+
+- **Size.** The game sets a character's height with the actor's scale; the body mesh's own world
+  scale is a second number that creeps back towards 1 during a life. The body math had no scale at
+  all (`Xf`), so every placed bone landed at feet + scale x (target - feet): short Willie's head
+  below the view, tall Willie's above it. `Xf` now has a size `s` for frames things are placed in;
+  `compose` and `relative` use it and always return s = 1. The mesh's nominal place uses the
+  actor's scale for the offset and the mesh's scale for its contents.
+- **Height match** (`height_match`, `player_eye_cm`). An OpenXR stage space gives the tracking
+  origin's height above the real floor. The world scale for the player is the character's
+  standing eye height over the player's (calibration stores `player_eye_cm`; until then the highest
+  the headset has been held). The view's height is absolute: as high above the character's feet as
+  the headset is above the real floor, times that scale. Real floor = game floor, standing straight =
+  the character's own eye height, a real crouch = a crouch of the same depth.
+- **The game rebuilds the body mid-life** (muscle growth; everything below the hips simulated
+  again, the mesh resized). After it the collision switches are gone and the grip joints no longer
+  hold. The retake path now sets the switches again and re-joins the grip joints
+  (`GetConstrainedComponents` into `SetConstrainedComponents`).
+- **Grip.** The game's script rewrites the hand joints' limits as it runs, so the lock set from the
+  mesh tick was undone before the physics ran (relocked every frame, never in force). The lock is
+  now also written from the muscles' tick, after the script. The game's disarm rule (joint force
+  against arm strength, `@360369`) would then open the hand at once; its own switch `R/L Hand Block
+  Drop` is held on while placed (`hold_tight`).
+- **Wrist with a long weapon.** The turn servo set the hand's angular velocity only and dragged the
+  weapon round through the joint (38 degrees behind at 2.5 twists a second). The held thing now
+  gets the same angular velocity and the matching velocity of its centre of mass about the hand
+  (8 degrees).
+- **What one holds does not wound oneself.** The switch-off of collisions now covers every
+  primitive component of a held actor (a shield's board is not in `Collision Components Array`),
+  and the ProcessEvent hook empties hit events between the player's body and the player's own held
+  things, on the body's side and on the thing's side.
+- `hide_head=1` in Matthew's ini (own head, hair and headgear not drawn for his own eyes;
+  `SetOwnerNoSee`, never a bone). The self-test cannot see this one: it needs the real headset.
+- Log: "Room: this second the character walked ... on movement input (strongest ..., ... of it
+  forward)" names what moved the character (his point 6).
+
+Self-test changes: a "standing" check (hips not moved to reach the headset: the heights fit); the
+walk stays 1.2 to 3.2 m behind the start at a walk (big held things catch on the cellar's stairs);
+a stuck weapon is tugged free after the floor part; another character within 150 cm during a part
+turns that part's failures into notes (the arena now sends in an armed opponent);
+`dev_character_scale` forces a height. Passed with his character (0.92) and at 1.15.
+
+Open: once in eight runs a pavise took the lower body's health to 0 (run 37); the log now says
+whether the thing was held by the player. The self-test's opponent makes "after the floor" a note
+in every run.
+
 ## Twelfth cut (2026-11-16): what the game's script does to a placed body
 
 Matthew on the eleventh cut: "kicking whilst crouching damages me. i crouch walked into the hanging

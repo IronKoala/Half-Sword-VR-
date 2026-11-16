@@ -177,6 +177,7 @@ namespace hsvr
         XrSystemId g_system = XR_NULL_SYSTEM_ID;
         std::atomic<XrSession> g_session{XR_NULL_HANDLE};
         std::atomic<XrSpace> g_local_space{XR_NULL_HANDLE};
+        std::atomic<XrSpace> g_stage_space{XR_NULL_HANDLE}; // the room, origin on the floor (for the player's height)
         std::atomic<int64_t> g_frame_time{0};
         std::atomic<int64_t> g_frame_period{11111111};
         std::atomic<int64_t> g_lead_ns{22222222};
@@ -200,6 +201,8 @@ namespace hsvr
             float cp = std::cos(pitch * 0.5f), sp = std::sin(pitch * 0.5f);
             float qx = cy * sp, qy = sy * cp, qz = -sy * sp, qw = cy * cp;
             float sway = (float)std::sin(t * 0.4) * 0.10f * amount; // metres, side to side
+            // The pretend player stands upright: its eyes are a standing player's height above the floor.
+            shared().local_origin_height_m.store((float)((cfg.player_eye_cm > 50.0 ? cfg.player_eye_cm : 170.0) / 100.0));
             for (int e = 0; e < 2; ++e)
             {
                 float side = e == 0 ? -0.032f : 0.032f;
@@ -1140,6 +1143,15 @@ float4 PSMain(VSOut i) : SV_Target
                 return false;
             }
             g_local_space.store(local);
+            {
+                XrReferenceSpaceCreateInfo stage_info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+                stage_info.poseInReferenceSpace.orientation.w = 1.0f;
+                stage_info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+                XrSpace stage = XR_NULL_HANDLE;
+                XrResult stage_result = xr.CreateReferenceSpace(session, &stage_info, &stage);
+                if (XR_SUCCEEDED(stage_result)) g_stage_space.store(stage);
+                else HSVR_LOG("OpenXR: no stage space (%s): the floor's height is not known, so heights are not matched", xr_result_name(stage_result));
+            }
             create_hand_actions(session);
 
             uint32_t format_count = 0;
@@ -2709,6 +2721,22 @@ float4 PSMain(VSOut i) : SV_Target
         if (XR_FAILED(r)) HSVR_LOG_EVERY(10.0, "OpenXR: xrSyncActions: %s", xr_result_name(r));
         if (g_hands.profile_changed.exchange(false)) log_interaction_profiles(session);
         XrTime time = g_frame_time.load() + g_lead_ns.load();
+        {
+            // Where the tracking origin is above the real floor (it only changes on a recenter in
+            // the headset's own software).
+            static int every = 0;
+            XrSpace stage = g_stage_space.load();
+            if (stage != XR_NULL_HANDLE && (every++ % 45) == 0)
+            {
+                XrSpaceLocation where{XR_TYPE_SPACE_LOCATION};
+                if (XR_SUCCEEDED(xr.LocateSpace(local, stage, time, &where)) && (where.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+                {
+                    float before = shared().local_origin_height_m.exchange(where.pose.position.y);
+                    if (std::fabs(before - where.pose.position.y) > 0.05f)
+                        HSVR_LOG("OpenXR: the tracking origin is %.0f cm above the floor", where.pose.position.y * 100.0f);
+                }
+            }
+        }
         bool any = false;
         for (int h = 0; h < 2; ++h)
         {

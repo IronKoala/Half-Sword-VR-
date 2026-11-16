@@ -104,6 +104,16 @@ namespace hsvr
         std::atomic<float> selftest_phase_time{0.0f};
         std::atomic<float> selftest_head_y{0.0f};
         std::atomic<float> selftest_stick_y{0.0f}; // the self-test's own push on the left stick
+        // Heights. The tracking origin above the real floor (metres; below 0 = not known), the
+        // character's size (1 = the game's standard Willie), its feet below its centre and its
+        // standing eye height above its feet (world cm; 0 = not known yet), and what came of them:
+        // the player's standing eye height in use (real cm) and the world scale that matches the two.
+        std::atomic<float> local_origin_height_m{-1.0f};
+        std::atomic<float> body_scale{1.0f};
+        std::atomic<float> feet_below_actor_cm{0.0f};
+        std::atomic<float> willie_eye_cm{0.0f};
+        std::atomic<float> player_eye_cm{0.0f};
+        std::atomic<float> height_scale{1.0f};
         // Set by a key to flip between full-resolution mode and the fallback while playing:
         // -1 = follow the settings file, 0 = fallback, 1 = full resolution.
         std::atomic<int> separate_override{-1};

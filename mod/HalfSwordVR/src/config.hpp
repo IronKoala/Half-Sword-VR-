@@ -206,6 +206,16 @@ namespace hsvr
         // opens an arena): pretend hands hold still, move, swing, strike the floor; the character
         // walks and turns; numbers are checked and written to selftest_result.txt.
         bool dev_selftest = false;
+        // Self-test only: the character is made this size when it appears (0 = left as it is).
+        double dev_character_scale = 0.0;
+        // 1 = the player's height is the character's height: the world is scaled so that the
+        // player's standing eye height is the character's, and the view's height comes from the
+        // real floor (the real floor is the game's floor), so a real crouch is a crouch of the same
+        // depth. Needs the headset's floor height (OpenXR stage space); without it, as before.
+        bool height_match = true;
+        // The player's standing eye height above the floor, real cm. Stored by the calibration
+        // pose; 0 = taken as the highest the headset has been held this session.
+        double player_eye_cm = 0.0;
         // 1 = a physical hand is turned to the controller's rotation by setting its turning speed each
         // frame (the error closed over hand_turn_seconds), not by the engine's drive, whose torque
         // limit let a sword's weight leave the hand far behind a twisting wrist. What the hand
@@ -231,6 +241,9 @@ namespace hsvr
         // with the player's hands and what they hold. A placed body cannot give way, so a loose
         // object caught against it was thrown about (the hanging kettle).
         bool loose_things_pass = true;
+        // 1 = what the hands hold stays in them until the player lets go (the game's own disarm, which
+        // opens the hand when the force on the weapon is too much for the arm, is switched off).
+        bool hold_tight = true;
         // A weapon stuck in something (the game sticks points and edges into wood, floors and
         // bodies) comes free once the hand that holds it has been pulled this many cm away from
         // it. 0 = never: only the game's own force threshold frees it, which the hand's pull does

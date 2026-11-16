@@ -256,4 +256,14 @@ All in `Willie_BP_C`'s event graph unless said otherwise; offsets are for `tools
   releases them all and calls `Temporary Disable Damage` (0.2 s).
 - **`CollisionDisablerFunctionLibrary`**: the last parameter of the `DisableCollision_...` calls is
   a FloatProperty (seconds; -1 = for good).
+- **Size**: `Set Character Height` and the construction script call `SetActorScale3D` (capsule and
+  all). The refresh at `@19656` (run at spawn and again from the muscle-growth path `@298398`)
+  sets `Mesh->SetWorldScale3D(VLerp(1, current, Scale Mutation Inhibitor))`, so the mesh's world
+  scale creeps towards 1 while the actor keeps its height; the same routine simulates everything
+  below the pelvis again.
+- **Disarm**: `@360369` reads `PhysicsConstraint R Hand->GetConstraintForce`; force above a
+  threshold built from arm tonus, consciousness, grip type and pain opens the hand unless `R Hand
+  Block Drop` (the game sets it for a moment after a grab, `@530179`, cleared at `@82420`).
+- The script sets limits, reference positions and drives on `PhysicsConstraint R/L Hand` at some
+  forty places in its tick; anything of ours on those joints has to be written after it.
 

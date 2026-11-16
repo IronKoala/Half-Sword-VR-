@@ -325,6 +325,7 @@ namespace hsvr
         text("ctrl_axes_l", c.ctrl_axes_l);
         text("ctrl_axes_r", c.ctrl_axes_r);
         flag("loose_things_pass", c.loose_things_pass);
+        flag("hold_tight", c.hold_tight);
         num("stuck_pull_free_cm", c.stuck_pull_free_cm);
         flag("carry_hands", c.carry_hands);
         flag("body_passes_itself", c.body_passes_itself);
@@ -337,6 +338,9 @@ namespace hsvr
         flag("rigid_grip", c.rigid_grip);
         flag("kick_legs", c.kick_legs);
         flag("dev_selftest", c.dev_selftest);
+        num("dev_character_scale", c.dev_character_scale);
+        flag("height_match", c.height_match);
+        num("player_eye_cm", c.player_eye_cm);
         num("step_length_cm", c.step_length_cm);
         num("step_height_cm", c.step_height_cm);
         num("kinematic_min_consciousness", c.kinematic_min_consciousness);
