@@ -88,6 +88,10 @@ namespace hsvr
         std::atomic<bool> game_wants_pointer{false};
         // View from the game's own (third-person) camera instead of the character's head.
         std::atomic<bool> third_person{false};
+        // Mouse-and-keyboard mode (Page Up, or X held on the left controller): every VR control is
+        // off (motion arms, body follow, roomscale, the virtual gamepad, gestures, pickup, the kept
+        // guard) and the game plays exactly as it does flat, seen through the headset.
+        std::atomic<bool> vr_controls_off{false};
         // Set by a key to flip between full-resolution mode and the fallback while playing:
         // -1 = follow the settings file, 0 = fallback, 1 = full resolution.
         std::atomic<int> separate_override{-1};

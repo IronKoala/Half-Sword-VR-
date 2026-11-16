@@ -1813,6 +1813,12 @@ namespace hsvr
             if (!active || dt <= 0.0)
             {
                 r.have_last_actor = false;
+                if (!active && r.crouch_held && s.pawn)
+                {
+                    // Do not leave the game crouching when the VR controls go off.
+                    if (bool* holding = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Crouch Key Holding"))) *holding = false;
+                    r.crouch_held = false;
+                }
                 return;
             }
             if (!r.tried)
@@ -2142,7 +2148,9 @@ namespace hsvr
     void arm_toggle()
     {
         g_state.enabled_by_key = !g_state.enabled_by_key;
-        HSVR_LOG(g_state.enabled_by_key ? "Key: motion arms on" : "Key: motion arms off (the game's own arm animation)");
+        shared().vr_controls_off.store(!g_state.enabled_by_key);
+        HSVR_LOG(g_state.enabled_by_key ? "Key: VR controls on (motion arms, body, roomscale, controller buttons and gestures)"
+                                        : "Key: VR controls off: the game plays with mouse and keyboard as it does flat, seen through the headset");
     }
 
     void arm_game_tick(UObject* pawn, bool menu_up)

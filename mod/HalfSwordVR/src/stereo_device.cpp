@@ -96,7 +96,7 @@ namespace hsvr
                 g_view.actor_position = player.actor_position;
                 Quat base = quat_from_yaw_deg(g_view.base_yaw);
                 Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
-                if (cfg.body_follow)
+                if (cfg.body_follow && !shared().vr_controls_off.load())
                 {
                     // Body follow: the view is the player's own head. Its place in the world is
                     // the character's position plus a slowly moving offset, plus the headset's

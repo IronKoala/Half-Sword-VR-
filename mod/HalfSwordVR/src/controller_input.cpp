@@ -22,6 +22,7 @@
 #include "config.hpp"
 #include "log.hpp"
 #include "vr_present.hpp"
+#include "vr_state.hpp"
 
 #include <windows.h>
 #include <Xinput.h>
@@ -876,6 +877,10 @@ namespace hsvr
     {
         TickState& t = g_tick;
         Config cfg = config();
+        // Mouse-and-keyboard mode: nothing from the controllers reaches the game. The mod's own
+        // controller keys (X held switches back) and the menu pointer keep working.
+        bool vr_off = shared().vr_controls_off.load();
+        if (vr_off) cfg.auto_guard = cfg.controller_gestures = cfg.kick_on_b = cfg.pickup = cfg.eat_at_mouth = false;
         keep_guard(pawn, in_menu, cfg);
         log_weapon_functions(pawn);
         if (cfg.pad_map != t.parsed_text)
@@ -899,7 +904,7 @@ namespace hsvr
         if (have) point_at_panel(hands, cfg, in_menu);
         if (have) gestures(pawn, hands, in_menu, cfg);
         else vr_set_panel_pointer(-1.0f, -1.0f);
-        if (have)
+        if (have && !vr_off)
         {
             pad.active = true;
             float value[kSourceCount] = {};
