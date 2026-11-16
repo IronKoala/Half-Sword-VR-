@@ -327,6 +327,7 @@ namespace hsvr
         flag("grip_fixed", c.grip_fixed);
         num("grip_tilt_deg", c.grip_tilt_deg);
         flag("shield_on_hand", c.shield_on_hand);
+        flag("shield_straight_wrist", c.shield_straight_wrist);
         flag("loose_things_pass", c.loose_things_pass);
         flag("hold_tight", c.hold_tight);
         num("stuck_pull_free_cm", c.stuck_pull_free_cm);

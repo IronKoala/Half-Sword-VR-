@@ -455,6 +455,10 @@ namespace hsvr
             UObject* shield_joint_seen = nullptr;
             int shield_moved = 0;
             bool shield_on_hand = false;
+            // The hand's drive is made for the hand alone (about 1 kg). A shield moved onto it from
+            // the forearm (the forearm, placed, carried it before) has its own weight counted in:
+            // the hand's pull is this many times stronger while it holds one.
+            double held_carry = 1.0;
             // For the log.
             double last_error_cm = 0, last_error_deg = 0;
             double last_reach = 0;    // controller distance from the shoulder / arm length
@@ -1917,9 +1921,10 @@ namespace hsvr
                     {
                         d[L.f_local] &= 0xFE;
                         scale_turn(std::max(0.1, std::min(20.0, cfg.hand_turn_scale)));
-                        pull_set(d, L.f_pos, (float)cfg.hand_pull_strength);
-                        pull_set(d, L.f_vel, (float)std::max(0.0, cfg.hand_pull_damping));
-                        pull_set(d, L.f_maxlin, (float)std::max(0.0, cfg.hand_pull_max_force));
+                        double carry = s.side[body.side].held_carry;
+                        pull_set(d, L.f_pos, (float)(cfg.hand_pull_strength * carry));
+                        pull_set(d, L.f_vel, (float)(std::max(0.0, cfg.hand_pull_damping) * carry));
+                        pull_set(d, L.f_maxlin, (float)(std::max(0.0, cfg.hand_pull_max_force) * carry));
                     }
                 }
                 else if (body.kind == PullKind::arm)
@@ -2302,6 +2307,7 @@ namespace hsvr
         {
             State& s = g_state;
             side.shield_on_hand = false;
+            side.held_carry = 1.0;
             if (!cfg.shield_on_hand || !s.kin_active || s.kin_hands || !side.wrist_freed || !s.body) return;
             const TCHAR* property = side.out_sign > 0 ? STR("PhysicsConstraint R Hand") : STR("PhysicsConstraint L Hand");
             const TCHAR* held_property = side.out_sign > 0 ? STR("Weapon R") : STR("Weapon L");
@@ -2331,6 +2337,36 @@ namespace hsvr
                          grip_type ? (int)*grip_type : -1, c2 == s.body ? bone2.ToString().c_str() : L"(not the body)");
             }
             side.shield_on_hand = on_hand;
+            if (on_hand && side.shield_moved > 0)
+            {
+                static double hand_mass = 0.0;
+                if (hand_mass <= 0.0)
+                {
+                    UFunction* mass_fn = s.body->GetFunctionByNameInChain(STR("GetBoneMass"));
+                    int32_t at_bone = mass_fn ? param_offset(mass_fn, L"BoneName") : -1, at_scale = mass_fn ? param_offset(mass_fn, L"bScaleMass") : -1,
+                            at_ret = mass_fn ? param_offset(mass_fn, L"ReturnValue") : -1;
+                    if (at_bone >= 0 && at_scale >= 0 && at_ret >= 0 && mass_fn->GetParmsSize() <= 64)
+                    {
+                        alignas(16) uint8_t parms[64] = {};
+                        memcpy(parms + at_bone, &side.hand_name, sizeof(FName));
+                        parms[at_scale] = 1;
+                        s.body->ProcessEvent(mass_fn, parms);
+                        float m = 0.0f;
+                        memcpy(&m, parms + at_ret, sizeof(float));
+                        hand_mass = m > 0.05f && m < 20.0f ? m : 1.0;
+                    }
+                    else hand_mass = 1.0;
+                }
+                float* held = s.pawn->GetValuePtrByPropertyNameInChain<float>(side.out_sign > 0 ? STR("R Weapon Mass") : STR("L Weapon Mass"));
+                double mass = held ? std::max(0.0, (double)*held) : 0.0;
+                side.held_carry = std::max(1.0, std::min(60.0, 1.0 + mass / hand_mass));
+                static int said = 0;
+                if (said < 2 && side.shield_moved != said)
+                {
+                    said = side.shield_moved;
+                    HSVR_LOG("Hands: the %s hand carries the shield: %.1f kg against the hand's %.1f kg, its pull %.1f times stronger", side.label, mass, hand_mass, side.held_carry);
+                }
+            }
             if (!on_forearm || side.shield_moved < 0) return;
             // Where the shield is on the forearm now, and where the hand is.
             Xf lower, hand, shield, body_xf, straight;
@@ -2370,7 +2406,7 @@ namespace hsvr
             }
             Xf on_lower = relative(shield, lower);
             Xf lower_if_straight = compose(relative(Xf{}, straight), hand); // the forearm a straight wrist would give this hand
-            Xf target = compose(on_lower, lower_if_straight);
+            Xf target = cfg.shield_straight_wrist ? compose(on_lower, lower_if_straight) : shield;
             UFunction* place = base->GetFunctionByNameInChain(STR("K2_SetWorldTransform"));
             if (!place || place->GetParmsSize() > 512) return;
             int32_t at_xf = param_offset(place, L"NewTransform"), at_tp = param_offset(place, L"bTeleport");
@@ -2391,8 +2427,10 @@ namespace hsvr
             joint->ProcessEvent(set, put);
             ++side.shield_moved;
             side.grip_locked = false; // locked again on the hand (grip_lock_update, next)
-            HSVR_LOG("Hands: the %s hand's %ls was strapped to the forearm; now joined to the hand as a straight wrist holds it (moved %.0f cm, turned %.0f degrees; time %d)",
+            HSVR_LOG("Hands: the %s hand's %ls was strapped to the forearm; now joined to the hand (moved %.0f cm, turned %.0f degrees; time %d)",
                      side.label, std::wstring(weapon->GetClassPrivate()->GetName()).c_str(), length(target.t - shield.t), quat_angle_deg(target.q, shield.q), side.shield_moved);
+            HSVR_LOG("Hands: the shield is now %.0f cm from the character's middle (%.0f %.0f %.0f), the hand %.0f cm", length(target.t - s.actor_world), target.t.x - s.actor_world.x,
+                     target.t.y - s.actor_world.y, target.t.z - s.actor_world.z, length(hand.t - s.actor_world));
         }
 
         void grip_lock_update(Side& side, bool want)
@@ -4483,6 +4521,7 @@ namespace hsvr
                 Vec3 want = axis * std::min(45.0, angle / seconds); // rad/s
                 float* mass = s.pawn->GetValuePtrByPropertyNameInChain<float>(side.out_sign > 0 ? STR("R Weapon Mass") : STR("L Weapon Mass"));
                 double held = mass ? std::max(0.0, (double)*mass) : 0.0;
+                if (side.held_carry > 1.0) held = 0.0; // a shield on the hand: its weight is in the hand's pull (shield_to_hand)
                 double share = 1.0 / (1.0 + held / std::max(0.2, cfg.hand_turn_mass_kg)); // of the way to that speed, this frame
                 alignas(16) uint8_t get_parms[64] = {};
                 memcpy(get_parms + g_bone, &side.hand_name, sizeof(FName));

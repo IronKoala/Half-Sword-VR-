@@ -249,6 +249,11 @@ namespace hsvr
         // hand instead, at the angle a straight wrist gives, so it goes where the hand goes and
         // turns as the hand turns.
         bool shield_on_hand = true;
+        // 0 (default) = the shield keeps the place on the hand it has at the moment it is moved
+        // (with the mod's own arm drawn to the hand, so as the player's wrist held it then); 1 = as the
+        // skeleton's reference pose would hold it with a straight wrist. In the self-test 1 turned
+        // the pavise 61 degrees into the character and held the hand 30 cm off its controller.
+        bool shield_straight_wrist = false;
         // 1 = loose weapons and traps (held by nobody) do not collide with the player's body, only
         // with the player's hands and what they hold. A placed body cannot give way, so a loose
         // object caught against it was thrown about (the hanging kettle).
