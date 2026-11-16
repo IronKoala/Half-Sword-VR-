@@ -331,6 +331,8 @@ namespace hsvr
         num("roomscale_turn_deg", c.roomscale_turn_deg);
         num("roomscale_turn_speed", c.roomscale_turn_speed);
         num("roomscale_crouch_cm", c.roomscale_crouch_cm);
+        num("crouch_view_drop_cm", c.crouch_view_drop_cm);
+        flag("hold_ground", c.hold_ground);
         num("chest_turn_max_deg", c.chest_turn_max_deg);
         num("head_pull_strength", c.head_pull_strength);
         num("head_pull_damping", c.head_pull_damping);

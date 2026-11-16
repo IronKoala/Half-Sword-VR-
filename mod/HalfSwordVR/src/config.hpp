@@ -216,7 +216,15 @@ namespace hsvr
         double roomscale_turn_deg = 25.0;
         double roomscale_turn_speed = 360.0;
         // The character crouches while the headset is this far below its recentered height (0 = never).
-        double roomscale_crouch_cm = 25.0;
+        double roomscale_crouch_cm = 0.0;
+        // The crouch button crouches the player: while the game says the character is crouched,
+        // the view is lowered this far (and the body with it, since hip height follows the head).
+        double crouch_view_drop_cm = 40.0;
+        // 1 = while the body is placed, the character may only be moved by walking (stick), by the
+        // player's own steps (roomscale) or by a real teleport. The game's own balancing shifts the
+        // character after its hips and feet; with the placed body that dragged the player sideways
+        // 20 cm at a time and threw him across the room. Such moves are taken back.
+        bool hold_ground = true;
         // The head body is held at the headset's place (0 strength = only its pose is sent).
         double head_pull_strength = 3000.0;
         double head_pull_damping = 80.0;

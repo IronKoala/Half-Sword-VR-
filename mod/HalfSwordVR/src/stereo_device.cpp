@@ -135,6 +135,9 @@ namespace hsvr
                     }
                     g_view.body_gap_cm = size(raw - g_smoothed_offset);
                     g_view.anchor = player.actor_position + base.rotate(g_smoothed_offset);
+                    // The crouch button lowers the player: the view goes down, and with it the head's
+                    // place, the hands and (through the hips following the head) the whole body.
+                    g_view.anchor.z -= (double)shared().view_drop_cm.load();
                     g_view.head_bone = g_view.anchor + moved - eyes_now;
                     g_view.head_valid = true;
                     g_view.head_rotation = head_rotation;

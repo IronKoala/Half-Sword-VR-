@@ -494,6 +494,13 @@ namespace hsvr
             Vec3 actor_world;           // the character's position this frame
             bool have_actor_world = false;
             Vec3 step_last_actor, step_velocity;
+            // hold_ground: where the character may be this frame at the most, and what was taken back.
+            double ground_time = 0;
+            Vec3 room_step;             // what roomscale moved the character since the last look
+            int ground_undone = 0;
+            double ground_undone_cm = 0;
+            bool have_max_dislocation = false;
+            double game_max_dislocation = 10.0;
             double step_time = 0;
             int steps_taken = 0;
             double thrown_cm = 0;
@@ -718,6 +725,9 @@ namespace hsvr
             s.kin_attach_ok = false;
             s.wrist_failed = false;
             s.have_actor_world = false;
+            s.have_max_dislocation = false;
+            s.ground_time = 0;
+            s.room_step = {};
             s.hold_wanted = s.hold_active = s.placed = false;
             s.kin_retaken = 0;
             s.pelvis = s.spine_base >= 0 ? s.parents[s.spine_base] : -1;
@@ -1770,17 +1780,39 @@ namespace hsvr
             {
                 if (fn->GetParmsSize() > kMax) return false;
             }
-            int32_t n_name = param_offset(by_name, L"ConstraintName"), n_ret = param_offset(by_name, L"ReturnValue");
+            // The joint that ties the hand to its parent body, whatever it is called: the engine
+            // lists a body's joints (GetConstraintsFromBody, "parent" joints = the body is the child).
+            UFunction* from_body = s.body->GetFunctionByNameInChain(STR("GetConstraintsFromBody"));
+            if (!from_body || from_body->GetParmsSize() > kMax) return false;
             int32_t accessor_size = 0;
-            for (FProperty* p : by_name->ForEachProperty())
+            for (FProperty* p : get_lin->ForEachProperty())
             {
-                if (p->GetName() == L"ReturnValue") accessor_size = p->GetSize();
+                if (p->GetName() == L"Accessor") accessor_size = p->GetSize();
             }
-            if (n_name < 0 || n_ret < 0 || accessor_size <= 0) return false;
-            alignas(16) uint8_t found[kMax] = {};
-            memcpy(found + n_name, &side.hand_name, sizeof(FName));
-            s.body->ProcessEvent(by_name, found);
-            const uint8_t* accessor = found + n_ret;
+            int32_t b_name = param_offset(from_body, L"BodyName"), b_parent = param_offset(from_body, L"bParentConstraints"),
+                    b_child = param_offset(from_body, L"bChildConstraints"), b_out = param_offset(from_body, L"OutConstraints");
+            if (b_name < 0 || b_parent < 0 || b_child < 0 || b_out < 0 || accessor_size <= 0 || accessor_size > 64) return false;
+            alignas(16) uint8_t listing[kMax] = {};
+            memcpy(listing + b_name, &side.hand_name, sizeof(FName));
+            listing[b_parent] = 1;
+            listing[b_child] = 0;
+            s.body->ProcessEvent(from_body, listing);
+            struct
+            {
+                uint8_t* data;
+                int32_t num;
+                int32_t max;
+            } joints;
+            memcpy(&joints, listing + b_out, sizeof(joints)); // the engine's array; its few bytes are left to the engine
+            if (!joints.data || joints.num < 1 || joints.num > 8)
+            {
+                if (free) HSVR_LOG("Hands: the engine lists %d joints tying the %s hand to its arm; expected 1", joints.data ? joints.num : 0, side.label);
+                return false;
+            }
+            alignas(16) uint8_t found[64] = {};
+            memcpy(found, joints.data, accessor_size);
+            const uint8_t* accessor = found;
+            (void)by_name;
             auto put_accessor = [&](UFunction* fn, uint8_t* parms) {
                 int32_t at = param_offset(fn, L"Accessor");
                 if (at < 0) return false;
@@ -1991,6 +2023,17 @@ namespace hsvr
                     s.kin_active = true;
                     s.kin_hands = hands;
                 }
+                // The game moves the character after its hips once they are further apart than this
+                // (10 cm by default). The placed body's hips are where the player is; keep it out of reach.
+                if (double* limit = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Capsule Max Dislocation")))
+                {
+                    if (!s.have_max_dislocation && *limit < 100000.0)
+                    {
+                        s.game_max_dislocation = *limit;
+                        s.have_max_dislocation = true;
+                    }
+                    *limit = 1000000.0;
+                }
                 // The mesh rides on the character; if anything took it off again, put it back.
                 if (!body_attached_to_capsule())
                 {
@@ -2005,6 +2048,10 @@ namespace hsvr
             {
                 wrist_set_free(s.side[0], false);
                 wrist_set_free(s.side[1], false);
+                if (s.have_max_dislocation)
+                {
+                    if (double* limit = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Capsule Max Dislocation"))) *limit = s.game_max_dislocation;
+                }
                 body_set_simulate(L"pelvis", true);
                 s.kin_active = false;
                 HSVR_LOG("Body: the body is given back to the game's simulation (%s)", why_not);
@@ -2151,7 +2198,9 @@ namespace hsvr
                     double along = dot(rel, up);
                     double disc = along * along - (dot(rel, rel) - torso * torso);
                     double drop = disc > 0.0 ? along - std::sqrt(disc) : along;
-                    drop = std::max(-75.0, std::min(4.0, drop));
+                    // Up as well as down: the game's own crouch animation must not lower the body
+                    // while the player's head stays up. Hip height comes from the player's head only.
+                    drop = std::max(-75.0, std::min(80.0, drop));
                     bool own_legs = cfg.own_legs && s.have_actor_world && s.side[0].have_foot_home && s.side[1].have_foot_home;
                     if (std::fabs(drop) > 0.2 || own_legs)
                     {
@@ -2416,6 +2465,18 @@ namespace hsvr
             r.last_time = now;
             HeadWorld view;
             bool active = cfg.roomscale != 0 && cfg.body_follow && cfg.motion_arms && s.pawn && s.ready && s.enabled_by_key && !s.menu_up && stereo_head_world(view) && view.head_valid;
+            {
+                // The crouch button: the game's crouch state lowers the view (smoothly), so the
+                // player crouches with the character instead of watching it crouch.
+                bool* crouched = s.pawn ? s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Is Crouched??")) : nullptr;
+                double want = active && crouched && *crouched && !r.crouch_held ? std::max(0.0, std::min(70.0, cfg.crouch_view_drop_cm)) : 0.0;
+                double have = (double)shared().view_drop_cm.load();
+                double step = 160.0 * std::max(dt, 0.0);
+                if (!active) have = 0.0;
+                else if (have < want) have = std::min(want, have + step);
+                else have = std::max(want, have - step);
+                shared().view_drop_cm.store((float)have);
+            }
             if (!active || dt <= 0.0)
             {
                 r.have_last_actor = false;
@@ -2469,6 +2530,7 @@ namespace hsvr
                 {
                     Vec3 went{after.x - actor.x, after.y - actor.y, 0};
                     stereo_consume_room(went, 0.0);
+                    s.room_step = s.room_step + went;
                     r.moved_cm += length(went);
                     r.blocked_cm += std::max(0.0, step - length(went));
                     actor = after;
@@ -2542,9 +2604,9 @@ namespace hsvr
                 double* root_height = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Root Height"));
                 double* height_rate = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Height Rate"));
                 HSVR_LOG("Room: mode %d | head %.0f cm from over the feet, %.0f cm below standing | this second: feet moved %.0f cm (blocked %.0f), legs turned %.0f deg | "
-                         "crouch asked %s, game says crouched %s, root height %.1f, height rate %.2f",
+                         "crouch asked %s, game says crouched %s, root height %.1f, height rate %.2f | crouch button lowers the view %.0f cm",
                          cfg.roomscale, distance, -view.lean.z, r.moved_cm, r.blocked_cm, r.turned_deg, r.crouch_held ? "yes" : "no", crouched ? (*crouched ? "yes" : "no") : "?",
-                         root_height ? *root_height : -1.0, height_rate ? *height_rate : -1.0);
+                         root_height ? *root_height : -1.0, height_rate ? *height_rate : -1.0, (double)shared().view_drop_cm.load());
                 r.moved_cm = r.turned_deg = r.blocked_cm = 0;
             }
         }
@@ -2671,20 +2733,49 @@ namespace hsvr
             if (s.have_view && actor_location(s.pawn, actor_now))
             {
                 s.actor_delta = actor_now - s.view.actor_position;
-                if (s.have_actor_world)
                 {
-                    Vec3 jump = actor_now - s.actor_world;
-                    if (length(jump) > 20.0 && length(jump) < 2000.0)
+                    double now = now_seconds();
+                    double dt = s.ground_time > 0 ? std::min(0.1, now - s.ground_time) : 0.0;
+                    s.ground_time = now;
+                    UObject* movement = object_property(s.pawn, STR("CharacterMovement"));
+                    ue::FVector* velocity = movement ? movement->GetValuePtrByPropertyNameInChain<ue::FVector>(STR("Velocity")) : nullptr;
+                    if (s.have_actor_world && velocity && dt > 0.0)
                     {
-                        s.thrown_cm += length(jump);
-                        UObject* movement = object_property(s.pawn, STR("CharacterMovement"));
-                        ue::FVector* velocity = movement ? movement->GetValuePtrByPropertyNameInChain<ue::FVector>(STR("Velocity")) : nullptr;
-                        uint8_t* mode = movement ? movement->GetValuePtrByPropertyNameInChain<uint8_t>(STR("MovementMode")) : nullptr;
-                        if (log_throttle("thrown", 0.25))
-                            HSVR_LOG("Room: the character moved %.0f cm in one frame (not by walking): its movement says speed (%.0f, %.0f, %.0f) cm/s, mode %d (1 walking, 3 falling)",
-                                     length(jump), velocity ? velocity->X : 0.0, velocity ? velocity->Y : 0.0, velocity ? velocity->Z : 0.0, mode ? (int)*mode : -1);
+                        // What walking (the movement component's own speed) and the player's own
+                        // steps account for; the rest was done to the character by something else.
+                        Vec3 explained = Vec3{velocity->X, velocity->Y, velocity->Z} * dt + s.room_step;
+                        Vec3 rest = actor_now - s.actor_world - explained;
+                        rest.z = 0; // slopes, steps and landing are the movement component's business
+                        double size = length(rest);
+                        bool teleport = size > 250.0; // a real teleport (arena start, respawn)
+                        if (size > 12.0 && !teleport)
+                        {
+                            s.thrown_cm += size;
+                            if (cfg.hold_ground && s.kin_active)
+                            {
+                                Vec3 back = actor_now - rest;
+                                UFunction* set_fn = s.pawn->GetFunctionByNameInChain(STR("K2_SetActorLocation"));
+                                int32_t o_loc = set_fn ? param_offset(set_fn, L"NewLocation") : -1, o_tp = set_fn ? param_offset(set_fn, L"bTeleport") : -1;
+                                if (set_fn && o_loc >= 0 && o_tp >= 0 && set_fn->GetParmsSize() <= 1024)
+                                {
+                                    alignas(16) uint8_t parms[1024] = {};
+                                    ue::FVector to{back.x, back.y, back.z};
+                                    memcpy(parms + o_loc, &to, sizeof(to));
+                                    parms[o_tp] = 1;
+                                    s.pawn->ProcessEvent(set_fn, parms);
+                                    actor_now = back;
+                                    ++s.ground_undone;
+                                    s.ground_undone_cm += size;
+                                }
+                            }
+                            if (log_throttle("thrown", 0.5))
+                                HSVR_LOG("Room: something other than walking moved the character %.0f cm in one frame (its own speed %.0f cm/s)%s", size,
+                                         length(Vec3{velocity->X, velocity->Y, velocity->Z}), cfg.hold_ground && s.kin_active ? "; taken back" : "");
+                        }
                     }
+                    s.room_step = {};
                 }
+                s.actor_delta = actor_now - s.view.actor_position;
                 s.actor_world = actor_now;
                 s.have_actor_world = true;
                 if (length(s.actor_delta) > 100.0) s.actor_delta = {}; // a teleport, not a step
@@ -2812,6 +2903,9 @@ namespace hsvr
                 }
                 HSVR_LOG("Body: %s | right forearm's physics body %.0f cm from where it is drawn (about 13 is normal)", s.hold_active ? "held at its place" : "not held",
                          s.forearm_off_cm);
+                HSVR_LOG("Room: moves by something other than walking taken back this second: %d (%.0f cm)", s.ground_undone, s.ground_undone_cm);
+                s.ground_undone = 0;
+                s.ground_undone_cm = 0;
                 HSVR_LOG("Legs: %d steps this second | feet %s | hands %s (wrists free: right %s, left %s)", s.steps_taken,
                          cfg.own_legs && s.side[0].have_foot_home ? "the mod's own" : "the game's animation", s.kin_active ? (s.kin_hands ? "placed rigidly" : "physical, driven to the controllers") : "the game's",
                          s.side[1].wrist_freed ? "yes" : "no", s.side[0].wrist_freed ? "yes" : "no");
