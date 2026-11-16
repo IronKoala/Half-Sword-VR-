@@ -47,6 +47,37 @@ head). The first cut of this branch did the same and was never switched on. It n
 like headgear) and never touches a bone. **Never use HideBoneByName on this game's characters.**
 Where the sections below mention `HideBoneByName` or `hide_head_bone`, that is the removed way.
 
+## Third cut (2026-11-16): roomscale, Blade and Sorcery as the reference
+
+After the second cut Matthew: "you're not getting it". Asked directly, he named Blade & Sorcery as the
+game whose body feels right, said roomscale is mandatory for his VR mods ("willies legs should
+absolutely do the same" when he steps, turns or crouches), wants an option for whether a shove throws
+the view or not, and is not sure yet whether a heavy weapon may pull the hand off his hand. He also
+does not want the head removed as the fix ("other VR games have character heads but dont have this
+issue"); `hide_head=0` is in his ini. The second cut's log (head within 0.2 to 4 cm of the headset
+most of the time) says the hold itself worked; what was missing is that the body stood where he
+recentered instead of under him.
+
+`roomscale_tick` (arm_control.cpp), before the world ticks:
+
+- **Steps** (`roomscale` 2): when the head bone's place is more than `roomscale_lean_cm` (8) from over
+  the feet, the pawn is moved towards it with `K2_AddActorWorldOffset` (sweep on, at most
+  `roomscale_max_speed` 400 cm/s) and the distance it really went is taken out of the recentered place
+  (`stereo_consume_room` / `vr_shift_recenter`), so the view does not change and the menu panel comes
+  along. `roomscale` 1 uses the game's own walking (`AddMovementInput`) instead and takes off whatever
+  the pawn moved towards the head. Unknown until tested: whether the simulated legs step or drag.
+- **Turns**: when the head looks more than `roomscale_turn_deg` (25) from the aim heading, the
+  controller's `ControlRotation` yaw and the recenter heading turn together (at most
+  `roomscale_turn_speed` 360 deg/s). Only with `heading=aim`.
+- **Ducking**: below `roomscale_crouch_cm` (25) under the recentered height the pawn's
+  `Crouch Key Holding` is set (a guess at the game's crouch; the "Room:" line logs `Is Crouched??`,
+  `Root Height` and `Height Rate` to learn what really happens).
+- Shove option: `view_leash_cm` (40 = the view is dragged along when the real head is more than 40 cm
+  away; a large value = the view always stays with the real head).
+
+Log: `Room: mode 2 | head N cm from over the feet, N cm below standing | this second: feet moved N cm
+(blocked N), legs turned N deg | crouch asked ..., game says crouched ..., root height ..., height rate ...`.
+
 ## What was wrong, and why
 
 Matthew's three complaints after phase 3: the character moves without him and not with him, the hand
