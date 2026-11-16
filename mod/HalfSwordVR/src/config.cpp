@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace hsvr
 {
@@ -133,6 +134,43 @@ namespace hsvr
         fclose(f);
     }
 
+    void config_store(const std::map<std::string, std::string>& values)
+    {
+        std::vector<std::string> lines;
+        if (FILE* f = _wfopen(ini_path().c_str(), L"r"))
+        {
+            char line[512];
+            while (fgets(line, sizeof(line), f))
+            {
+                std::string s = line;
+                while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+                lines.push_back(s);
+            }
+            fclose(f);
+        }
+        std::map<std::string, bool> done;
+        for (std::string& s : lines)
+        {
+            size_t eq = s.find('=');
+            if (eq == std::string::npos || s.empty() || s[0] == ';') continue;
+            std::string key = trim(s.substr(0, eq));
+            auto it = values.find(key);
+            if (it == values.end()) continue;
+            s = key + "=" + it->second;
+            done[key] = true;
+        }
+        for (auto& kv : values)
+        {
+            if (!done[kv.first]) lines.push_back(kv.first + "=" + kv.second);
+        }
+        if (FILE* f = _wfopen(ini_path().c_str(), L"w"))
+        {
+            for (const std::string& s : lines) fprintf(f, "%s\n", s.c_str());
+            fclose(f);
+        }
+        config_reload_if_changed(true);
+    }
+
     Config config()
     {
         std::lock_guard<std::mutex> lock(g_cfg_mutex);
@@ -244,6 +282,11 @@ namespace hsvr
         num("assist_seconds", c.assist_seconds);
         num("assist_max_cm", c.assist_max_cm);
         num("assist_max_deg", c.assist_max_deg);
+        num("assist_speed_cms", c.assist_speed_cms);
+        num("player_arm_cm", c.player_arm_cm);
+        num("player_shoulder_drop_cm", c.player_shoulder_drop_cm);
+        num("player_shoulder_side_cm", c.player_shoulder_side_cm);
+        flag("arm_scaling", c.arm_scaling);
         num("wrist_bend_limit", c.wrist_bend_limit);
         num("elbow_stiffness", c.elbow_stiffness);
         num("twist_limit", c.twist_limit);

@@ -332,6 +332,21 @@ namespace hsvr
         g_anchor_provider = provider;
     }
 
+    bool stereo_head_tracking(Vec3& pos, Vec3& forward)
+    {
+        if (!g_view.valid) return false;
+        const XrEyeRaw& a = g_view.pose.eye[0];
+        const XrEyeRaw& b = g_view.pose.eye[1];
+        pos = {(a.px + b.px) * 0.5, (a.py + b.py) * 0.5, (a.pz + b.pz) * 0.5};
+        Quat q{a.qx, a.qy, a.qz, a.qw};
+        Vec3 f = q.rotate({0, 0, -1});
+        f.y = 0;
+        double n = std::sqrt(f.x * f.x + f.z * f.z);
+        if (n < 1e-6) return false;
+        forward = f * (1.0 / n);
+        return true;
+    }
+
     bool stereo_tracking_to_world(float px, float py, float pz, float qx, float qy, float qz, float qw, Vec3& pos, Quat& rot)
     {
         if (!g_view.valid || !g_view.recenter.valid) return false;

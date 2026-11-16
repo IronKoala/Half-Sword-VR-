@@ -22,6 +22,10 @@ namespace hsvr
     // Puts a controller into the game world the same way the eyes are put there (recentering,
     // head anchor, heading, world scale), using the most recent frame's view. Game thread only.
     // `rot` is in Unreal axes: its X axis is the controller's handle direction (OpenXR -Z).
+    // The point between the eyes in tracking space (OpenXR axes, metres) and the head's level
+    // forward direction, from the most recent frame's view. Game thread only.
+    bool stereo_head_tracking(Vec3& pos, Vec3& forward);
+
     bool stereo_tracking_to_world(float px, float py, float pz, float qx, float qy, float qz, float qw, Vec3& pos, Quat& rot);
 
     // Called once per engine tick on the game thread, before the frame is drawn.

@@ -1,6 +1,7 @@
 ﻿// Settings read from HalfSwordVR.ini next to the mod. The file is re-read when it changes,
 // so values can be tuned while the game runs.
 #pragma once
+#include <map>
 #include <string>
 
 namespace hsvr
@@ -129,9 +130,20 @@ namespace hsvr
         double elbow_swing_max = 90.0;
         // Hold assist: the steady gap between where a hand is sent and where the muscles hold it
         // is made up for over this many seconds (0 = off), within these limits.
-        double assist_seconds = 0.4;
-        double assist_max_cm = 15.0;
-        double assist_max_deg = 35.0;
+        // It only works while the hand is slow (assist_speed_cms: speed at which it is half as strong).
+        double assist_seconds = 1.0;
+        double assist_max_cm = 10.0;
+        double assist_max_deg = 25.0;
+        double assist_speed_cms = 40.0;
+        // Arm-length calibration (hold both grip buttons for 2 seconds with both arms straight out
+        // in front at shoulder height). Written here by the mod; player_arm_cm 0 = not calibrated.
+        // The player's shoulders are placed this far below the eyes and to each side; reach is
+        // then scaled from the player's shoulder to the character's, and the shoulders lined up.
+        double player_arm_cm = 0.0;
+        double player_shoulder_drop_cm = 22.0;
+        double player_shoulder_side_cm = 18.0;
+        // 1 = use the calibration (when there is one).
+        bool arm_scaling = true;
         // Share of the hand's roll that the forearm takes (0 = all in the wrist, 1 = all in the forearm).
         double forearm_twist_share = 0.5;
         // Moves the sword's grip along the handle relative to the controller, in cm (+ = towards the blade).
@@ -180,4 +192,6 @@ namespace hsvr
     Config config();
     // Loads the file, writing a default one if it is missing. Returns true if values changed.
     bool config_reload_if_changed(bool force = false);
+    // Writes these keys into the settings file (replacing or adding lines) and reloads it.
+    void config_store(const std::map<std::string, std::string>& values);
 } // namespace hsvr

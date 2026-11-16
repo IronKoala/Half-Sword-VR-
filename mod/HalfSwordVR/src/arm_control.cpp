@@ -398,7 +398,11 @@ namespace hsvr
             double shoulder_shift = 0, shoulder_time = 0;
             double last_twist = 0;
             Vec3 assist_pos, assist_rot; // hold assist, in the upper body's frame (cm, rotation vector)
-            double assist_time = 0;    // hand roll about the forearm last frame, radians (unwrapped)
+            double assist_time = 0;
+            Vec3 assist_last_target;
+            double arm_len = 0;         // the character's shoulder-to-wrist length, cm
+            Vec3 shoulder_offset;       // character shoulder minus player shoulder, facing frame, cm
+            bool have_offset = false;    // hand roll about the forearm last frame, radians (unwrapped)
         };
 
         struct State
@@ -643,6 +647,7 @@ namespace hsvr
             Xf su = from_raw(pose[side.upper]), sl = from_raw(pose[side.lower]), sh = from_raw(pose[side.hand]);
             Vec3 u = sl.t - su.t, f = sh.t - sl.t;
             if (length(u) < 1.0 || length(f) < 1.0) return;
+            side.arm_len = length(u) + length(f);
             Vec3 upper_axis = normalized(su.q.inverse().rotate(u));
             Vec3 lower_axis = normalized(sl.q.inverse().rotate(f));
             if (!side.have_axes)
@@ -725,6 +730,82 @@ namespace hsvr
             }
         }
 
+        // ---- arm length calibration ----------------------------------------------------------------
+        // The player holds both arms straight out in front at shoulder height and holds both grip
+        // buttons for 2 seconds. The hands are then in front of the shoulders: their height gives
+        // the shoulder drop below the eyes, their spread the shoulder width, and their distance in
+        // front of the eyes (plus 6 cm from the eyes back to the shoulder joint) the arm length.
+        constexpr double kShoulderBackM = 0.06;
+
+        void calibrate_tick()
+        {
+            State& s = g_state;
+            static double hold_start = 0.0;
+            static bool done = false;
+            const XrHandRaw& l = s.hands[0];
+            const XrHandRaw& r = s.hands[1];
+            bool holding = s.hands_valid && l.valid && r.valid && l.squeeze > 0.8f && r.squeeze > 0.8f;
+            if (!holding)
+            {
+                hold_start = 0.0;
+                done = false;
+                return;
+            }
+            double now = now_seconds();
+            if (hold_start == 0.0) hold_start = now;
+            if (done || now - hold_start < 2.0) return;
+            done = true;
+            Vec3 head, fwd;
+            if (!stereo_head_tracking(head, fwd)) return;
+            Vec3 right{-fwd.z, 0, fwd.x};
+            Vec3 dl = Vec3{l.px, l.py, l.pz} - head, dr = Vec3{r.px, r.py, r.pz} - head;
+            double side_cm = (dot(dr, right) - dot(dl, right)) * 0.5 * 100.0;
+            double drop_cm = -(dl.y + dr.y) * 0.5 * 100.0;
+            double arm_cm = ((dot(dl, fwd) + dot(dr, fwd)) * 0.5 + kShoulderBackM) * 100.0;
+            if (arm_cm < 40.0 || arm_cm > 95.0 || side_cm < 8.0 || side_cm > 35.0 || drop_cm < 5.0 || drop_cm > 50.0)
+            {
+                HSVR_LOG("Arms: calibration ignored (arm %.0f cm, shoulders %.0f cm to each side, %.0f cm below the eyes): hold both arms straight out in front "
+                         "at shoulder height", arm_cm, side_cm, drop_cm);
+                return;
+            }
+            char a[32], b[32], c[32];
+            snprintf(a, sizeof(a), "%.1f", arm_cm);
+            snprintf(b, sizeof(b), "%.1f", drop_cm);
+            snprintf(c, sizeof(c), "%.1f", side_cm);
+            config_store({{"player_arm_cm", a}, {"player_shoulder_drop_cm", b}, {"player_shoulder_side_cm", c}});
+            for (Side& side : s.side) side.have_offset = false;
+            HSVR_LOG("Arms: calibrated: your arm %.0f cm (character %.0f / %.0f cm), shoulders %.0f cm below the eyes and %.0f cm to each side", arm_cm,
+                     s.side[0].arm_len + length(s.side[0].grip_center), s.side[1].arm_len + length(s.side[1].grip_center), drop_cm, side_cm);
+        }
+
+        // Moves a controller's grip from the player's proportions to the character's: measured from
+        // the player's shoulder, scaled by the ratio of arm lengths, and placed at the character's
+        // shoulder. The hand's turn is not changed, so the blade angle stays the player's.
+        void scale_reach(Side& side, const XrHandRaw& raw, Vec3& grip_pos, const Config& cfg)
+        {
+            State& s = g_state;
+            if (!cfg.arm_scaling || cfg.player_arm_cm <= 0.0 || side.arm_len <= 0.0) return;
+            Vec3 head, fwd;
+            if (!stereo_head_tracking(head, fwd)) return;
+            Vec3 right{-fwd.z, 0, fwd.x};
+            Vec3 shoulder_xr = head + right * (side.out_sign * cfg.player_shoulder_side_cm / 100.0) + Vec3{0, -cfg.player_shoulder_drop_cm / 100.0, 0} -
+                               fwd * kShoulderBackM;
+            Vec3 player_shoulder;
+            Quat unused;
+            if (!stereo_tracking_to_world((float)shoulder_xr.x, (float)shoulder_xr.y, (float)shoulder_xr.z, 0, 0, 0, 1, player_shoulder, unused)) return;
+            Xf character_shoulder;
+            if (!socket_transform(s.body, side_name(L"upperarm", side), RTS_World, character_shoulder)) return;
+            Quat facing = quat_from_yaw_deg(s.actor_yaw);
+            Vec3 offset = facing.inverse().rotate(character_shoulder.t - player_shoulder);
+            // Smoothed, so the character's sway does not shake the sword.
+            side.shoulder_offset = side.have_offset ? side.shoulder_offset * 0.95 + offset * 0.05 : offset;
+            side.have_offset = true;
+            double k = (side.arm_len + length(side.grip_center)) / cfg.player_arm_cm;
+            k = std::max(0.6, std::min(1.4, k));
+            grip_pos = player_shoulder + facing.rotate(side.shoulder_offset) + (grip_pos - player_shoulder) * k;
+            (void)raw;
+        }
+
         // ---- where the hands should be (game thread, before the world ticks) -------------------
         void compute_targets()
         {
@@ -747,6 +828,7 @@ namespace hsvr
                 Quat grip_rot;
                 if (!stereo_tracking_to_world(raw.px, raw.py, raw.pz, raw.qx, raw.qy, raw.qz, raw.qw, grip_pos, grip_rot)) continue;
                 grip_rot = (grip_rot * extra).normalized();
+                scale_reach(side, raw, grip_pos, cfg);
                 // The controller's handle (+X) and the direction from the wrist into the fist (-Z)
                 // match the hand's handle and grip-centre directions.
                 Quat hand_frame = quat_from_frame(side.grip_forward, side.grip_center);
@@ -831,6 +913,14 @@ namespace hsvr
                 double dt = side.assist_time > 0 ? std::min(0.1, now - side.assist_time) : 0.0;
                 side.assist_time = now;
                 double k = dt / cfg.assist_seconds;
+                // Only while the hand moves slowly: fast swings keep the game's own lag.
+                if (dt > 0)
+                {
+                    double speed = length(target_rel.t - side.assist_last_target) / dt;
+                    double ratio = cfg.assist_speed_cms > 0 ? speed / cfg.assist_speed_cms : 0.0;
+                    k /= 1.0 + ratio * ratio;
+                }
+                side.assist_last_target = target_rel.t;
                 Vec3 pos_err = target_rel.t - real_rel.t;
                 Quat rot_err = (target_rel.q * real_rel.q.inverse()).normalized();
                 if (rot_err.w < 0) rot_err = {-rot_err.x, -rot_err.y, -rot_err.z, -rot_err.w};
@@ -862,7 +952,7 @@ namespace hsvr
             // Shoulder reach: like a real shoulder blade, the clavicle swings the shoulder towards a
             // hand that is beyond easy reach, by up to shoulder_reach_cm. The character's arms are
             // shorter than most players', so this lets the in-game hand get closer to the real one.
-            if (side.clavicle >= 0 && cfg.shoulder_reach_cm > 0.0)
+            if (side.clavicle >= 0 && cfg.shoulder_reach_cm > 0.0 && !(cfg.arm_scaling && cfg.player_arm_cm > 0.0))
             {
                 Xf clav = pose[side.clavicle];
                 Vec3 bone = S - clav.t;
@@ -1230,6 +1320,7 @@ namespace hsvr
             next_grip = now + 0.25;
             for (Side& side : s.side) learn_grip(side);
         }
+        calibrate_tick();
         compute_targets();
         recorder_tick();
         if (s.enabled_by_key && !menu_up && s.hands_valid) sync_aim();
