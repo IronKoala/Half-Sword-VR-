@@ -339,6 +339,7 @@ namespace hsvr
         num("pickup_radius_m", c.pickup_radius_m);
         flag("eat_at_mouth", c.eat_at_mouth);
         flag("keep_held_weapon", c.keep_held_weapon);
+        num("drop_double_squeeze_s", c.drop_double_squeeze_s);
         flag("arms_recorder", c.arms_recorder);
         flag("log_poses", c.log_poses);
         flag("log_input", c.log_input);

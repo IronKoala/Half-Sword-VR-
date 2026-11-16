@@ -202,3 +202,4 @@ Finger tracking: not started.
 ### Dropped weapons (2026-11-16)
 
 Matthew lost two weapons. The 07:4x log shows one: the right hand drew a sword (59.5 s), the right grip was squeezed away from a holster spot at 62.1 s and went to the game as Grab Right (RB), and from then on the hand was empty. The game's grab on a hand that holds a weapon lets go of it. Now a grip squeeze on a hand holding a weapon is kept from the game (`keep_held_weapon=1`), and logged.
+Deliberate drop: two grip squeezes within `drop_double_squeeze_s` (0.4 s) on the hand holding a weapon; the second goes to the game as its grab, which lets go.

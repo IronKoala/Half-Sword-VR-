@@ -787,8 +787,21 @@ namespace hsvr
                     // was gone). Squeezing a held weapon is natural in VR, so keep it from the game.
                     if (full && cfg.keep_held_weapon)
                     {
-                        g.consumed[h] = true;
-                        HSVR_LOG("Gesture: %s hand squeezes its weapon; not passed on as the game's grab (it would drop it)", h ? "right" : "left");
+                        // A second squeeze soon after the first is a deliberate drop: that one
+                        // goes to the game as its grab, which lets go of the weapon.
+                        static double last_squeeze[2] = {-10.0, -10.0};
+                        double now = now_seconds();
+                        if (now - last_squeeze[h] <= cfg.drop_double_squeeze_s)
+                        {
+                            last_squeeze[h] = -10.0;
+                            HSVR_LOG("Gesture: %s hand double-squeezes its weapon; dropping it (the game's grab)", h ? "right" : "left");
+                        }
+                        else
+                        {
+                            last_squeeze[h] = now;
+                            g.consumed[h] = true;
+                            HSVR_LOG("Gesture: %s hand squeezes its weapon; not passed on as the game's grab (it would drop it)", h ? "right" : "left");
+                        }
                     }
                     continue;
                 }
