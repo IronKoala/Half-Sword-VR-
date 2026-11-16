@@ -782,6 +782,14 @@ namespace hsvr
                 if (!zone)
                 {
                     if (!full && cfg.pickup) g.consumed[h] = pick_up_near(pawn, h, cfg);
+                    // A hand that holds a weapon: the game's grab on that hand lets go of the
+                    // weapon (seen in a test: a grip squeeze with a sword in hand, and the sword
+                    // was gone). Squeezing a held weapon is natural in VR, so keep it from the game.
+                    if (full && cfg.keep_held_weapon)
+                    {
+                        g.consumed[h] = true;
+                        HSVR_LOG("Gesture: %s hand squeezes its weapon; not passed on as the game's grab (it would drop it)", h ? "right" : "left");
+                    }
                     continue;
                 }
                 if (full)

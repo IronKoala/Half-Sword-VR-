@@ -237,6 +237,8 @@ namespace hsvr
         double pickup_radius_m = 0.30;
         // Food held up to the mouth is eaten.
         bool eat_at_mouth = true;
+        // A grip squeeze on a hand that holds a weapon is not passed to the game as a grab (which drops it).
+        bool keep_held_weapon = true;
         // The right trigger starts an 8-second arm recording (arms_record_N.csv). Off by default now
         // that the trigger guards.
         bool arms_recorder = false;
