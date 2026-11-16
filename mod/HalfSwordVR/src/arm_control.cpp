@@ -1725,9 +1725,10 @@ namespace hsvr
             {
                 // The legs and hips: the game's own leg animation, set over the character's feet.
                 // (The body mesh itself may sit elsewhere; it used to ride on the simulated hips.)
+                // Every bone is taken over, the upper body too: it is rebuilt below on top of the
+                // lowest spine bone, which must be in the same place as the hips it sits on.
                 for (int32_t i = 0; i < s.bone_count; ++i)
                 {
-                    if (s.below_spine[i]) continue;
                     pose[i] = relative(compose(pose[i], s.nominal), s.body_world);
                     moved[i] = 1;
                 }
