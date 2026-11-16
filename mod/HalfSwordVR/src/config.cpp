@@ -313,6 +313,12 @@ namespace hsvr
         num("arm_soft_scale", c.arm_soft_scale);
         flag("own_upper_body", c.own_upper_body);
         flag("kinematic_body", c.kinematic_body);
+        flag("body_hold", c.body_hold);
+        num("hold_strength", c.hold_strength);
+        num("hold_damping", c.hold_damping);
+        num("hold_max_force", c.hold_max_force);
+        num("hold_turn_scale", c.hold_turn_scale);
+        flag("kinematic_hands", c.kinematic_hands);
         num("kinematic_min_consciousness", c.kinematic_min_consciousness);
         flag("leg_ik", c.leg_ik);
         integer("roomscale", c.roomscale);

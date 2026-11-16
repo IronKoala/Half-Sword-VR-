@@ -473,7 +473,11 @@ namespace hsvr
             double chest_yaw = 0, chest_time = 0;
             bool head_pull_wanted = false, head_pull_active = false;
             // Placed body (kinematic_body): the body's physics bodies follow the pose exactly.
+            bool hold_wanted = false, hold_active = false; // the held body (body_hold)
+            bool placed = false;        // the pose is the whole body's truth this frame (held or kinematic)
+            double forearm_off_cm = -1; // the right forearm's physics body against where it is drawn
             bool kin_active = false;
+            bool kin_hands = false;     // the hands are placed too
             int kin_retaken = 0;        // times the game switched simulation back on and we undid it
             double kin_blocked_until = 0;
             int32_t pelvis = -1;
@@ -688,6 +692,7 @@ namespace hsvr
                 if (!s.below_spine[s.head]) s.head = -1;
             }
             s.kin_active = false;
+            s.hold_wanted = s.hold_active = s.placed = false;
             s.kin_retaken = 0;
             s.pelvis = s.spine_base >= 0 ? s.parents[s.spine_base] : -1;
             s.below_pelvis.assign(s.bone_count, 0);
@@ -1009,9 +1014,13 @@ namespace hsvr
             wanted.t = wanted.t + s.actor_delta;
             // Hand pull: the hand body is pulled to a place in the world, so the pose is solved
             // in the world too, from where the physical shoulder really is.
-            bool pull = side.pull_active && s.have_body_world;
+            // The same holds for the placed body, whose shoulder is exactly where this frame's pose
+            // has put it (the body's own shoulder would be last frame's).
+            bool placed = s.placed && s.have_body_world;
+            bool pull = (side.pull_active || placed) && s.have_body_world;
             Xf shoulder_world;
-            if (pull && !socket_transform(s.body, side.upper_name, RTS_World, shoulder_world)) pull = false;
+            if (placed) shoulder_world = compose(pose[side.upper], s.body_world);
+            else if (pull && !socket_transform(s.body, side.upper_name, RTS_World, shoulder_world)) pull = false;
             Xf target_rel = relative(wanted, parent_world);
             // Hold assist: the muscles leave the real hand short of where it is sent by a steady
             // amount (sword weight, muscle strength). That steady part is measured in the upper
@@ -1294,7 +1303,8 @@ namespace hsvr
         {
             hand,
             arm,
-            head
+            head,
+            other
         };
         struct PullBody
         {
@@ -1421,15 +1431,28 @@ namespace hsvr
                 if (last) HSVR_LOG("Pull: could not find the game's muscle settings; hand pull stays off");
                 return;
             }
-            for (int k = 0; k < 2; ++k)
             {
-                Side& side = s.side[k];
-                g_pull_bodies.push_back({side.hand_name, PullKind::hand, k});
-                g_pull_bodies.push_back({side.lower_name, PullKind::arm, k});
-                g_pull_bodies.push_back({side.upper_name, PullKind::arm, k});
-                g_pull_bodies.push_back({side_name(L"clavicle", side), PullKind::arm, k});
+                // Every body the game drives, sorted into hands, arm bones, the head and the rest.
+                RawBytesArray arr = *reinterpret_cast<RawBytesArray*>(base + L.drive_offset);
+                FName head_name = make_name(L"head");
+                for (int32_t i = 0; i < arr.num; ++i)
+                {
+                    FName name;
+                    memcpy(&name, arr.data + (size_t)i * L.size + L.f_body, sizeof(FName));
+                    PullBody body{name, PullKind::other, -1};
+                    for (int k = 0; k < 2; ++k)
+                    {
+                        Side& side = s.side[k];
+                        FName clavicle = side_name(L"clavicle", side);
+                        if (memcmp(&name, &side.hand_name, sizeof(FName)) == 0) body.kind = PullKind::hand, body.side = k;
+                        else if (memcmp(&name, &side.lower_name, sizeof(FName)) == 0 || memcmp(&name, &side.upper_name, sizeof(FName)) == 0 ||
+                                 memcmp(&name, &clavicle, sizeof(FName)) == 0)
+                            body.kind = PullKind::arm, body.side = k;
+                    }
+                    if (memcmp(&name, &head_name, sizeof(FName)) == 0) body.kind = PullKind::head;
+                    g_pull_bodies.push_back(body);
+                }
             }
-            g_pull_bodies.push_back({make_name(L"head"), PullKind::head, -1});
             L.component = component;
             L.apply = apply;
             UFunction* target_fn = component->GetFunctionByNameInChain(STR("GetBodyTargetTransform"));
@@ -1453,7 +1476,11 @@ namespace hsvr
             }
             for (Side& side : s.side) side.pull_active = false;
             s.head_pull_active = false;
-            if (!L.ok) return;
+            if (!L.ok)
+            {
+                s.hold_active = false;
+                return;
+            }
             RawBytesArray arr = *reinterpret_cast<RawBytesArray*>(reinterpret_cast<uint8_t*>(L.component) + L.drive_offset);
             if (!arr.data || arr.num <= 0 || arr.num > 400) return;
             auto hand_wanted = [&](int k) {
@@ -1485,7 +1512,24 @@ namespace hsvr
                     pull_set(d, L.f_angvel, (float)(pull_get(base, L.f_angvel) * std::sqrt(scale)));
                     pull_set(d, L.f_maxang, (float)(pull_get(base, L.f_maxang) * scale));
                 };
-                if (body.kind == PullKind::hand)
+                if (s.hold_wanted)
+                {
+                    // The held body: every part is held at its place in the pose, in place and turn.
+                    want = true;
+                    d[L.f_local] &= 0xFE;
+                    double scale = std::max(0.1, std::min(50.0, cfg.hold_turn_scale));
+                    pull_set(d, L.f_orient, (float)(pull_get(base, L.f_orient) * scale));
+                    pull_set(d, L.f_angvel, (float)(pull_get(base, L.f_angvel) * std::sqrt(scale)));
+                    pull_set(d, L.f_maxang, 0.0f); // no torque limit
+                    // The feet are not held in place, only turned: they stand on the ground, and a stiff
+                    // spring pressing a foot into the floor would fight the floor. The shins carry them.
+                    static const FName foot_r = make_name(L"foot_r"), foot_l = make_name(L"foot_l");
+                    bool foot = memcmp(&body.name, &foot_r, sizeof(FName)) == 0 || memcmp(&body.name, &foot_l, sizeof(FName)) == 0;
+                    pull_set(d, L.f_pos, foot ? 0.0f : (float)std::max(0.0, cfg.hold_strength));
+                    pull_set(d, L.f_vel, foot ? 0.0f : (float)std::max(0.0, cfg.hold_damping));
+                    pull_set(d, L.f_maxlin, (float)std::max(0.0, cfg.hold_max_force));
+                }
+                else if (body.kind == PullKind::hand)
                 {
                     want = hand_wanted(body.side);
                     if (want)
@@ -1502,7 +1546,7 @@ namespace hsvr
                     want = hand_wanted(body.side) && cfg.arm_soft_scale != 1.0;
                     if (want) scale_turn(std::max(0.02, std::min(5.0, cfg.arm_soft_scale)));
                 }
-                else
+                else if (body.kind == PullKind::head)
                 {
                     want = s.head_pull_wanted && cfg.head_pull_strength > 0.0;
                     if (want)
@@ -1526,6 +1570,12 @@ namespace hsvr
                 body.active = want;
                 if (body.kind == PullKind::hand) s.side[body.side].pull_active = want;
                 if (body.kind == PullKind::head) s.head_pull_active = want;
+            }
+            if (s.hold_wanted != s.hold_active)
+            {
+                s.hold_active = s.hold_wanted;
+                HSVR_LOG(s.hold_active ? "Body: every part of the body is now held at its place (still physical; %d bodies)" : "Body: the body's own muscles are the game's again (%d bodies)",
+                         (int)g_pull_bodies.size());
             }
         }
 
@@ -1598,16 +1648,23 @@ namespace hsvr
             if (!s.body) return;
             if (want)
             {
+                bool hands = config().kinematic_hands;
                 // The game may switch simulation back on (its own script); look every frame.
-                bool game_took_it = s.kin_active && (body_simulating(L"spine_03") || body_simulating(L"thigh_r"));
-                if (!s.kin_active || game_took_it)
+                bool game_took_it = s.kin_active && (body_simulating(L"spine_03") || body_simulating(L"thigh_r") || body_simulating(L"lowerarm_r") ||
+                                                     (hands && (body_simulating(L"hand_r") || body_simulating(L"hand_l"))));
+                if (!s.kin_active || game_took_it || hands != s.kin_hands)
                 {
                     if (!body_set_simulate(L"pelvis", false)) return;
-                    body_set_simulate(L"hand_r", true);
-                    body_set_simulate(L"hand_l", true);
+                    if (!hands)
+                    {
+                        body_set_simulate(L"hand_r", true);
+                        body_set_simulate(L"hand_l", true);
+                    }
                     if (game_took_it) ++s.kin_retaken;
-                    else HSVR_LOG("Body: the body is now placed, not simulated (hands and weapons stay physical)");
+                    else HSVR_LOG(hands ? "Body: the body is now placed, not simulated, hands included (only what the hands hold stays physical)"
+                                        : "Body: the body is now placed, not simulated (hands and weapons stay physical)");
                     s.kin_active = true;
+                    s.kin_hands = hands;
                 }
             }
             else if (s.kin_active)
@@ -1721,7 +1778,7 @@ namespace hsvr
             s.lean_cm = length(s.view.lean);
             Vec3 head_target_world = s.view.head_bone + s.actor_delta;
             s.pelvis_drop = 0;
-            if (s.kin_active && s.have_nominal)
+            if (s.placed && s.have_nominal)
             {
                 // The legs and hips: the game's own leg animation, set over the character's feet.
                 // (The body mesh itself may sit elsewhere; it used to ride on the simulated hips.)
@@ -1834,7 +1891,7 @@ namespace hsvr
                 head_q = (delta * head_q).normalized();
             }
             Vec3 head_t = pose[s.head].t;
-            if (s.head_pull_active || s.kin_active)
+            if (s.head_pull_active || s.placed)
             {
                 // Not further from the spine than the neck can stretch, or the pull would hang
                 // the body from its head.
@@ -2271,16 +2328,19 @@ namespace hsvr
             {
                 double now = now_seconds();
                 const char* why_not = nullptr;
-                if (!cfg.kinematic_body) why_not = "switched off in the settings";
+                if (!cfg.kinematic_body) why_not = nullptr;
                 else if (!s.head_pull_wanted || !s.have_nominal) why_not = "no first-person view of the character";
                 else if (!s.have_rest) why_not = "the standing shape is not known yet";
                 else if (s.consciousness >= 0 && s.consciousness < cfg.kinematic_min_consciousness) why_not = "knocked out";
                 if (why_not && !s.have_rest && !s.kin_active) why_not = nullptr, s.kin_blocked_until = now; // not started yet: nothing to say
-                if (why_not) s.kin_blocked_until = now + 1.5;
-                bool want = cfg.kinematic_body && s.head_pull_wanted && s.have_nominal && s.have_rest && now >= s.kin_blocked_until;
-                kinematic_update(want, why_not ? why_not : "waiting");
+                if (why_not && cfg.kinematic_body) s.kin_blocked_until = now + 1.5;
+                bool ready = s.head_pull_wanted && s.have_nominal && s.have_rest && now >= s.kin_blocked_until;
+                bool knocked_out = s.consciousness >= 0 && s.consciousness < cfg.kinematic_min_consciousness;
+                kinematic_update(cfg.kinematic_body && ready, why_not ? why_not : "waiting");
+                s.hold_wanted = cfg.body_hold && !cfg.kinematic_body && s.head_pull_wanted && s.have_nominal && s.have_rest && !knocked_out;
             }
             pull_update(arms);
+            s.placed = s.kin_active || s.hold_active;
             learn_head_axes();
             if (!stale) learn_rest();
 
@@ -2337,6 +2397,26 @@ namespace hsvr
                 if (s.head_applied && s.have_head_target && s.body && socket_transform(s.body, make_name(L"head"), RTS_World, head_now))
                     s.head_err_cm = length(head_now.t - s.head_target_world);
                 Vec3 up = s.have_body_world ? s.body_world.q.rotate({0, 0, 1}) : Vec3{0, 0, 1};
+                s.forearm_off_cm = -1;
+                {
+                    // The right forearm's physics body (its centre of mass) against where the forearm
+                    // is drawn: about half a forearm apart when the body is where the picture is.
+                    UFunction* com_fn = s.body ? s.body->GetFunctionByNameInChain(STR("GetCenterOfMass")) : nullptr;
+                    struct
+                    {
+                        FName BoneName;
+                        ue::FVector ReturnValue;
+                    } com{};
+                    Xf drawn;
+                    if (com_fn && com_fn->GetParmsSize() == (int32_t)sizeof(com) && socket_transform(s.body, s.side[1].lower_name, RTS_World, drawn))
+                    {
+                        com.BoneName = s.side[1].lower_name;
+                        s.body->ProcessEvent(com_fn, &com);
+                        s.forearm_off_cm = length(Vec3{com.ReturnValue.X, com.ReturnValue.Y, com.ReturnValue.Z} - drawn.t);
+                    }
+                }
+                HSVR_LOG("Body: %s | right forearm's physics body %.0f cm from where it is drawn (about 13 is normal)", s.hold_active ? "held at its place" : "not held",
+                         s.forearm_off_cm);
                 HSVR_LOG("Body: %s (the game switched simulation back on %d times) | hips moved %.0f cm for the head's height | body mesh %.0f cm from its place over the feet | "
                          "consciousness %.0f, the game says fallen: %s",
                          s.kin_active ? "placed, not simulated" : "simulated by the game", s.kin_retaken, s.pelvis_drop, s.mesh_off_cm, s.consciousness, s.fallen ? "yes" : "no");
@@ -2388,6 +2468,7 @@ namespace hsvr
         if (s.failed || !cfg.motion_arms)
         {
             s.head_pull_wanted = false;
+            s.hold_wanted = false;
             kinematic_update(false, "motion controls off");
             pull_update(false);
             log_status(cfg);
@@ -2413,6 +2494,19 @@ namespace hsvr
             next_grip = now + 0.25;
             for (Side& side : s.side) learn_grip(side);
         }
+        {
+            // Every grip press and release, with the state of the hands at that moment.
+            static bool down[2] = {false, false};
+            for (int k = 0; k < 2; ++k)
+            {
+                bool now_down = s.hands_valid && s.hands[k].valid && (down[k] ? s.hands[k].squeeze > 0.4f : s.hands[k].squeeze > 0.6f);
+                if (now_down == down[k]) continue;
+                down[k] = now_down;
+                HSVR_LOG("Grip: %s grip %s | hands off their targets right %.1f cm %.0f deg, left %.1f cm %.0f deg | body %s | hand pull right %s left %s", k ? "right" : "left",
+                         now_down ? "pressed" : "released", s.side[1].last_error_cm, s.side[1].last_error_deg, s.side[0].last_error_cm, s.side[0].last_error_deg,
+                         s.hold_active ? "held" : (s.kin_active ? "kinematic" : "the game's"), s.side[1].pull_active ? "on" : "off", s.side[0].pull_active ? "on" : "off");
+            }
+        }
         calibrate_tick();
         roomscale_tick(cfg);
         compute_targets();
@@ -2424,7 +2518,9 @@ namespace hsvr
         {
             s.head_pull_wanted = false;
             s.head_applied = false;
+            if (!s.enabled_by_key) s.hold_wanted = false; // a menu keeps the hold (the game is paused)
             pull_update(false);
+            s.placed = s.kin_active || s.hold_active;
         }
         if (!s.enabled_by_key || !cfg.kinematic_body || !cfg.body_follow) kinematic_update(false, !s.enabled_by_key ? "VR controls off" : "switched off in the settings");
         log_status(cfg);
