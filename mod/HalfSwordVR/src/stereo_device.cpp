@@ -172,6 +172,15 @@ namespace hsvr
                         float feet = shared().feet_below_actor_cm.load();
                         if (g_real_eye_cm > 0.0 && feet > 1.0f && shared().body_placed.load())
                             g_smoothed_offset.z = -feet + g_real_eye_cm * scale_now(cfg) - moved.z;
+                        // Sideways and ahead the view has one place too: over the character's feet
+                        // (the eyes that little bit ahead of the head) at the recentered spot. It
+                        // used to be wherever the character's head happened to be when recentering,
+                        // which could leave the chest ahead of the player for good.
+                        if (shared().body_placed.load())
+                        {
+                            g_smoothed_offset.x = cfg.eye_forward_cm * body_size;
+                            g_smoothed_offset.y = 0.0;
+                        }
                     }
                     g_view.anchor = player.actor_position + base.rotate(g_smoothed_offset);
                     // The crouch button lowers the player: the view goes down, and with it the head's

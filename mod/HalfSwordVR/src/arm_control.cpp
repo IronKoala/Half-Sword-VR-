@@ -1082,7 +1082,7 @@ namespace hsvr
                 Vec3 handle{-thumb_xr.z, thumb_xr.x, thumb_xr.y}, fist{-fist_xr.z, fist_xr.x, fist_xr.y};
                 char text[160];
                 snprintf(text, sizeof(text), "%.4f %.4f %.4f %.4f %.4f %.4f", handle.x, handle.y, handle.z, fist.x, fist.y, fist.z);
-                config_store({{k ? "ctrl_axes_r" : "ctrl_axes_l", text}});
+                (void)text; // (logged only: measured again and again it differed by up to 15 degrees, and the weapon pointed elsewhere each time)
                 double handle_off = std::acos(std::max(-1.0, std::min(1.0, handle.x))) * kRadToDeg;
                 double fist_off = std::acos(std::max(-1.0, std::min(1.0, -fist.z))) * kRadToDeg;
                 HSVR_LOG("Arms: %s controller in the hand: handle (%.2f %.2f %.2f), wrist-to-fist (%.2f %.2f %.2f); that is %.0f and %.0f degrees from what was assumed; "
@@ -3090,7 +3090,21 @@ namespace hsvr
             Vec3 pivot = pose[s.spine_base].t;
             Vec3 head_target = to_pose.rotate(head_target_world - s.body_world.t) * (1.0 / s.body_world.s);
             Vec3 before_lean = pose[s.head].t - pivot;
-            Vec3 after_lean = before_lean + (head_target - pose[s.head].t) * std::max(0.0, std::min(1.0, cfg.lean_follow));
+            Vec3 lean_to = head_target;
+            if (cfg.look_down_back_cm > 0.0 && s.placed)
+            {
+                // How far down the player looks, and which way is "ahead" for the head (its forward
+                // and its up both tip that way when it looks down).
+                Vec3 look = s.view.rotation.rotate({1, 0, 0}), top = s.view.rotation.rotate({0, 0, 1});
+                Vec3 ahead{look.x + top.x * (look.z < 0 ? 1.0 : -1.0), look.y + top.y * (look.z < 0 ? 1.0 : -1.0), 0};
+                double down = std::asin(std::max(-1.0, std::min(1.0, -look.z))) * kRadToDeg;
+                if (down > 5.0 && length(ahead) > 0.05)
+                {
+                    double back = cfg.look_down_back_cm * std::min(1.0, (down - 5.0) / 55.0);
+                    lean_to = lean_to - to_pose.rotate(normalized(ahead)) * back;
+                }
+            }
+            Vec3 after_lean = before_lean + (lean_to - pose[s.head].t) * std::max(0.0, std::min(1.0, cfg.lean_follow));
             if (length(before_lean) > 5.0 && length(after_lean) > 5.0)
             {
                 Vec3 from = normalized(before_lean), to = normalized(after_lean);
@@ -3205,12 +3219,15 @@ namespace hsvr
             static size_t last_count = 0;
             UObject* body = object_property(s.pawn, STR("Mesh"));
             UObject* driver = object_property(s.pawn, STR("DriverSkeleton"));
-            bool want = cfg.hide_head && s.pawn && body && driver && cfg.anchor == "head" && !shared().third_person.load() && shared().xr_running.load();
+            // (Not while a menu is up: the menus show the character to these same eyes, and with
+            // the outer pieces not drawn its head was a skinless one.)
+            bool want = cfg.hide_head && s.pawn && body && driver && cfg.anchor == "head" && !shared().third_person.load() && shared().xr_running.load() &&
+                        !shared().menu_up.load();
             double now = now_seconds();
             if (hidden_pawn && hidden_pawn != s.pawn) hidden_pawn = nullptr; // the old character is gone or no longer ours
             bool was = hidden_pawn != nullptr;
             if (!want && !was) return;
-            if (want && was && now < next) return; // again now and then: headgear put on later, or the game switching it back
+            if (want == was && now < next) return; // again now and then: headgear put on later, or the game switching it back
             next = now + 2.0;
             if (!s.pawn || !body) return;
             std::vector<UObject*> pieces;
@@ -4653,7 +4670,7 @@ namespace hsvr
                 s.hold_wanted = cfg.body_hold && !cfg.kinematic_body && s.head_pull_wanted && s.have_nominal && s.have_rest && !knocked_out;
             }
             for (Side& side : s.side) shield_to_hand(side, cfg);
-            for (Side& side : s.side) grip_lock_update(side, cfg.rigid_grip && s.kin_active && !s.kin_hands && side.wrist_freed);
+            for (Side& side : s.side) grip_lock_update(side, cfg.rigid_grip && s.kin_active);
             if (s.kin_active)
             {
                 // The placed body has no springs anywhere. The one driven thing is a physical hand
@@ -5280,7 +5297,7 @@ namespace hsvr
                 // physics has not: locked here, the joint is locked when it counts.
                 Config cfg = config();
                 for (Side& side : s.side) shield_to_hand(side, cfg);
-                for (Side& side : s.side) grip_lock_update(side, cfg.rigid_grip && s.kin_active && !s.kin_hands && side.wrist_freed);
+                for (Side& side : s.side) grip_lock_update(side, cfg.rigid_grip && s.kin_active);
             }
             // The capsule leash's reach again, here as well as in the body's update: the game works
             // out its own value at the end of its script each frame, and that script may run before
