@@ -388,6 +388,7 @@ namespace hsvr
             int controller_index;
             // Driver bone indices.
             int32_t clavicle = -1, upper = -1, lower = -1, hand = -1, parent = -1;
+            int32_t thigh = -1, calf = -1, foot = -1; // the leg on this side (-1 = not usable)
             FName parent_name, hand_name, middle_name, thumb_name, lower_name, upper_name;
             // Hand pull (see "pulling the hands" below).
             bool pull_active = false;
@@ -471,6 +472,16 @@ namespace hsvr
             bool have_chest_yaw = false;
             double chest_yaw = 0, chest_time = 0;
             bool head_pull_wanted = false, head_pull_active = false;
+            // Placed body (kinematic_body): the body's physics bodies follow the pose exactly.
+            bool kin_active = false;
+            int kin_retaken = 0;        // times the game switched simulation back on and we undid it
+            double kin_blocked_until = 0;
+            int32_t pelvis = -1;
+            std::vector<char> below_pelvis, leg_below; // leg_below: strictly below a thigh
+            Xf nominal;                 // where the body mesh belongs over the character's feet, world
+            bool have_nominal = false;
+            double pelvis_drop = 0, consciousness = -1, mesh_off_cm = 0;
+            bool fallen = false;
             bool have_head_target = false;
             Vec3 head_target_world; // where the head bone was last sent
             double head_err_cm = -1;
@@ -675,6 +686,25 @@ namespace hsvr
                     s.below_head[i] = i == s.head || (parent >= 0 && s.below_head[parent]);
                 }
                 if (!s.below_spine[s.head]) s.head = -1;
+            }
+            s.kin_active = false;
+            s.kin_retaken = 0;
+            s.pelvis = s.spine_base >= 0 ? s.parents[s.spine_base] : -1;
+            s.below_pelvis.assign(s.bone_count, 0);
+            s.leg_below.assign(s.bone_count, 0);
+            for (Side& side : s.side)
+            {
+                side.thigh = driver_bone_index(side_name(L"thigh", side));
+                side.calf = driver_bone_index(side_name(L"calf", side));
+                side.foot = driver_bone_index(side_name(L"foot", side));
+                if (side.thigh < 0 || side.calf < 0 || side.foot < 0 || s.parents[side.calf] != side.thigh || s.parents[side.foot] != side.calf)
+                    side.thigh = side.calf = side.foot = -1;
+            }
+            for (int32_t i = 0; i < s.bone_count && s.pelvis >= 0; ++i)
+            {
+                int32_t parent = s.parents[i];
+                s.below_pelvis[i] = i == s.pelvis || (parent >= 0 && s.below_pelvis[parent]);
+                s.leg_below[i] = parent >= 0 && (parent == s.side[0].thigh || parent == s.side[1].thigh || s.leg_below[parent]);
             }
             if (s.head < 0 || s.spine_base < 0)
                 HSVR_LOG("Body: no head or spine bone found on the driver skeleton (%d %d); the upper body does not follow the headset", s.head, s.spine_base);
@@ -1516,6 +1546,113 @@ namespace hsvr
             }
         }
 
+        // ---- the placed body ----------------------------------------------------------------------
+        // Matthew's reference is Blade & Sorcery: there the player's body has no muscles or balance
+        // of its own, it is put where the player is. Half Sword's player is a simulated ragdoll like
+        // its enemies. Here the simulation is switched off for the player's body (its physics
+        // bodies become kinematic and follow the pose exactly), except for the hands and what they
+        // hold, so weapons keep their weight against the wrist and grip. Hits still land on the
+        // body's shapes; it just is not thrown about by them. When the character is knocked out
+        // or dies the body is given back to the game's simulation.
+        struct BelowSimulateParams
+        {
+            FName InBoneName;
+            bool bNewSimulate;
+            bool bIncludeSelf;
+            uint8_t pad[6];
+        };
+        struct BoneBoolParams
+        {
+            FName BoneName;
+            bool ReturnValue;
+            uint8_t pad[7];
+        };
+
+        bool body_simulating(const wchar_t* bone)
+        {
+            State& s = g_state;
+            UFunction* fn = s.body ? s.body->GetFunctionByNameInChain(STR("IsSimulatingPhysics")) : nullptr;
+            if (!fn || fn->GetParmsSize() > (int32_t)sizeof(BoneBoolParams)) return false;
+            BoneBoolParams p{};
+            p.BoneName = make_name(bone);
+            s.body->ProcessEvent(fn, &p);
+            return p.ReturnValue;
+        }
+
+        bool body_set_simulate(const wchar_t* bone, bool simulate)
+        {
+            State& s = g_state;
+            UFunction* fn = s.body ? s.body->GetFunctionByNameInChain(STR("SetAllBodiesBelowSimulatePhysics")) : nullptr;
+            if (!fn || fn->GetParmsSize() > (int32_t)sizeof(BelowSimulateParams)) return false;
+            BelowSimulateParams p{};
+            p.InBoneName = make_name(bone);
+            p.bNewSimulate = simulate;
+            p.bIncludeSelf = true;
+            s.body->ProcessEvent(fn, &p);
+            return true;
+        }
+
+        void kinematic_update(bool want, const char* why_not)
+        {
+            State& s = g_state;
+            if (!s.body) return;
+            if (want)
+            {
+                // The game may switch simulation back on (its own script); look every frame.
+                bool game_took_it = s.kin_active && (body_simulating(L"spine_03") || body_simulating(L"thigh_r"));
+                if (!s.kin_active || game_took_it)
+                {
+                    if (!body_set_simulate(L"pelvis", false)) return;
+                    body_set_simulate(L"hand_r", true);
+                    body_set_simulate(L"hand_l", true);
+                    if (game_took_it) ++s.kin_retaken;
+                    else HSVR_LOG("Body: the body is now placed, not simulated (hands and weapons stay physical)");
+                    s.kin_active = true;
+                }
+            }
+            else if (s.kin_active)
+            {
+                body_set_simulate(L"pelvis", true);
+                s.kin_active = false;
+                HSVR_LOG("Body: the body is given back to the game's simulation (%s)", why_not);
+            }
+        }
+
+        Quat quat_between(const Vec3& from_unit, const Vec3& to_unit)
+        {
+            Vec3 cr = cross(from_unit, to_unit);
+            double sn = length(cr), cs = dot(from_unit, to_unit);
+            if (sn < 1e-9) return Quat{};
+            return quat_axis_angle(cr * (1.0 / sn), std::atan2(sn, cs));
+        }
+
+        // The hips have just been moved by the pelvis drop; put this leg's foot back where the
+        // game's animation had it by bending the knee (in the direction the animation bends it).
+        void solve_leg(const Side& side, std::vector<Xf>& pose, const std::vector<Xf>& before, const Quat& to_pose)
+        {
+            State& s = g_state;
+            if (side.thigh < 0) return;
+            Vec3 hip0 = before[side.thigh].t, knee0 = before[side.calf].t, foot0 = before[side.foot].t;
+            Vec3 hip = pose[side.thigh].t;
+            double a = length(knee0 - hip0), b = length(foot0 - knee0);
+            if (a < 1.0 || b < 1.0) return;
+            Vec3 to_foot = foot0 - hip;
+            double d = std::max(std::fabs(a - b) + 0.5, std::min(length(to_foot), (a + b) * 0.999));
+            Vec3 dir = normalized(to_foot, {0, 0, -1});
+            Vec3 pole = perpendicular_part(knee0 - hip0, normalized(foot0 - hip0, dir));
+            if (length(pole) < 0.5) pole = to_pose.rotate(quat_from_yaw_deg(s.actor_yaw).rotate({1, 0, 0})); // a straight leg: knees go forward
+            pole = perpendicular_part(pole, dir);
+            if (length(pole) < 1e-3) return;
+            pole = normalized(pole);
+            double cos_a = std::max(-1.0, std::min(1.0, (a * a + d * d - b * b) / (2.0 * a * d)));
+            double sin_a = std::sqrt(std::max(0.0, 1.0 - cos_a * cos_a));
+            Vec3 knee = hip + dir * (a * cos_a) + pole * (a * sin_a);
+            Vec3 foot = hip + dir * d;
+            pose[side.thigh] = {(quat_between(normalized(knee0 - hip0), normalized(knee - hip)) * before[side.thigh].q).normalized(), hip};
+            pose[side.calf] = {(quat_between(normalized(foot0 - knee0), normalized(foot - knee)) * before[side.calf].q).normalized(), knee};
+            pose[side.foot] = {before[side.foot].q, foot};
+        }
+
         // ---- the upper body and head follow the headset ----------------------------------------
         // Which of the head bone's own axes points up and which forward, from the game's own
         // animation while the character stands (bone axes line up with the body's directions).
@@ -1583,6 +1720,49 @@ namespace hsvr
             Quat to_pose = s.body_world.q.inverse();
             s.lean_cm = length(s.view.lean);
             Vec3 head_target_world = s.view.head_bone + s.actor_delta;
+            s.pelvis_drop = 0;
+            if (s.kin_active && s.have_nominal)
+            {
+                // The legs and hips: the game's own leg animation, set over the character's feet.
+                // (The body mesh itself may sit elsewhere; it used to ride on the simulated hips.)
+                for (int32_t i = 0; i < s.bone_count; ++i)
+                {
+                    if (s.below_spine[i]) continue;
+                    pose[i] = relative(compose(pose[i], s.nominal), s.body_world);
+                    moved[i] = 1;
+                }
+                if (cfg.leg_ik && s.pelvis >= 0 && s.have_rest)
+                {
+                    // Lower (or raise a little) the hips so that the fixed-length upper body can put
+                    // the head at the headset's height; the knees bend to keep the feet in place.
+                    Vec3 up = to_pose.rotate({0, 0, 1});
+                    double torso = length(s.rest[s.head].t);
+                    Vec3 rel = to_pose.rotate(head_target_world - s.body_world.t) - pose[s.spine_base].t;
+                    double along = dot(rel, up);
+                    double disc = along * along - (dot(rel, rel) - torso * torso);
+                    double drop = disc > 0.0 ? along - std::sqrt(disc) : along;
+                    drop = std::max(-75.0, std::min(4.0, drop));
+                    if (std::fabs(drop) > 0.2)
+                    {
+                        std::vector<Xf> before(pose);
+                        for (int32_t i = 0; i < s.bone_count; ++i)
+                        {
+                            if (s.below_pelvis[i]) pose[i].t = pose[i].t + up * drop;
+                        }
+                        for (const Side& side : s.side) solve_leg(side, pose, before, to_pose);
+                        for (int32_t i = 0; i < s.bone_count; ++i)
+                        {
+                            if (!s.leg_below[i]) continue;
+                            bool solved = false;
+                            for (const Side& side : s.side) solved = solved || (side.thigh >= 0 && (i == side.calf || i == side.foot));
+                            if (solved) continue;
+                            int32_t parent = s.parents[i];
+                            pose[i] = compose(relative(before[i], before[parent]), pose[parent]); // toes, twist bones
+                        }
+                        s.pelvis_drop = drop;
+                    }
+                }
+            }
             if (cfg.own_upper_body && s.have_rest)
             {
                 // Nothing tracks the chest, so it follows the head's heading loosely: freely
@@ -1653,7 +1833,7 @@ namespace hsvr
                 head_q = (delta * head_q).normalized();
             }
             Vec3 head_t = pose[s.head].t;
-            if (s.head_pull_active)
+            if (s.head_pull_active || s.kin_active)
             {
                 // Not further from the spine than the neck can stretch, or the pull would hang
                 // the body from its head.
@@ -2068,6 +2248,37 @@ namespace hsvr
                 if (length(s.actor_delta) > 100.0) s.actor_delta = {}; // a teleport, not a step
             }
             s.head_pull_wanted = body && s.have_body_world && s.have_view && s.view.head_valid;
+            // The placed body: where the mesh belongs over the feet, and whether the character is
+            // in a state to be placed at all.
+            s.have_nominal = false;
+            {
+                ue::FVector* offset = s.pawn->GetValuePtrByPropertyNameInChain<ue::FVector>(STR("BaseTranslationOffset"));
+                double* turn = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("BaseRotationOffset")); // a quaternion: x y z w
+                double yaw_now = s.actor_yaw;
+                Vec3 at;
+                if (offset && turn && actor_yaw(s.pawn, yaw_now) && actor_location(s.pawn, at))
+                {
+                    s.actor_yaw = yaw_now;
+                    Xf local{Quat{turn[0], turn[1], turn[2], turn[3]}.normalized(), Vec3{offset->X, offset->Y, offset->Z}};
+                    s.nominal = compose(local, Xf{quat_from_yaw_deg(yaw_now), at});
+                    s.have_nominal = true;
+                    if (s.have_body_world) s.mesh_off_cm = length(s.body_world.t - s.nominal.t);
+                }
+            }
+            if (double* awake = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Consciousness"))) s.consciousness = *awake;
+            if (bool* fallen = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Fallen"))) s.fallen = *fallen;
+            {
+                double now = now_seconds();
+                const char* why_not = nullptr;
+                if (!cfg.kinematic_body) why_not = "switched off in the settings";
+                else if (!s.head_pull_wanted || !s.have_nominal) why_not = "no first-person view of the character";
+                else if (!s.have_rest) why_not = "the standing shape is not known yet";
+                else if (s.consciousness >= 0 && s.consciousness < cfg.kinematic_min_consciousness) why_not = "knocked out";
+                if (why_not && !s.have_rest && !s.kin_active) why_not = nullptr, s.kin_blocked_until = now; // not started yet: nothing to say
+                if (why_not) s.kin_blocked_until = now + 1.5;
+                bool want = cfg.kinematic_body && s.head_pull_wanted && s.have_nominal && s.have_rest && now >= s.kin_blocked_until;
+                kinematic_update(want, why_not ? why_not : "waiting");
+            }
             pull_update(arms);
             learn_head_axes();
             if (!stale) learn_rest();
@@ -2125,6 +2336,9 @@ namespace hsvr
                 if (s.head_applied && s.have_head_target && s.body && socket_transform(s.body, make_name(L"head"), RTS_World, head_now))
                     s.head_err_cm = length(head_now.t - s.head_target_world);
                 Vec3 up = s.have_body_world ? s.body_world.q.rotate({0, 0, 1}) : Vec3{0, 0, 1};
+                HSVR_LOG("Body: %s (the game switched simulation back on %d times) | hips moved %.0f cm for the head's height | body mesh %.0f cm from its place over the feet | "
+                         "consciousness %.0f, the game says fallen: %s",
+                         s.kin_active ? "placed, not simulated" : "simulated by the game", s.kin_retaken, s.pelvis_drop, s.mesh_off_cm, s.consciousness, s.fallen ? "yes" : "no");
                 HSVR_LOG("Body: follow %s (%s) | headset %.0f cm from its recentered place | real head %.1f cm from the headset's place (held: %s) | view pushed %.0f cm by the "
                          "leash | chest turned %.0f deg from the legs | body mesh tilted %.0f deg | hand pull right %s left %s (spring anchored %.1f / %.1f cm from the controller)",
                          !cfg.body_follow ? "off in settings" : (s.head_applied ? "on" : (have_view && view.head_valid ? "waiting" : "no first-person view")),
@@ -2173,6 +2387,7 @@ namespace hsvr
         if (s.failed || !cfg.motion_arms)
         {
             s.head_pull_wanted = false;
+            kinematic_update(false, "motion controls off");
             pull_update(false);
             log_status(cfg);
             return;
@@ -2210,6 +2425,7 @@ namespace hsvr
             s.head_applied = false;
             pull_update(false);
         }
+        if (!s.enabled_by_key || !cfg.kinematic_body || !cfg.body_follow) kinematic_update(false, !s.enabled_by_key ? "VR controls off" : "switched off in the settings");
         log_status(cfg);
     }
 } // namespace hsvr

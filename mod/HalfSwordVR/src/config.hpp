@@ -169,6 +169,15 @@ namespace hsvr
         double chest_turn_max_deg = 70.0;
         double lean_follow = 1.0;
         double lean_max_deg = 45.0;
+        // 1 = the player's body is placed, not simulated: head, torso and legs are put exactly
+        // where the pose says (head at the headset, legs from the game's leg animation) with no
+        // muscles or balance in between, as in Blade & Sorcery. Only the hands and what they hold
+        // stay physical. The body is given back to the game's simulation while the character's
+        // consciousness is below kinematic_min_consciousness (knocked out, dead).
+        bool kinematic_body = true;
+        double kinematic_min_consciousness = 15.0;
+        // 1 = the hips are lowered and the knees bent so the head can be at the headset's height.
+        bool leg_ik = true;
         // Roomscale: the character walks, turns and ducks under the player's real body.
         // 0 = off (the body only leans). 2 = the character is moved directly under the headset
         // every frame. 1 = the character is told to walk there with the game's own walking.
