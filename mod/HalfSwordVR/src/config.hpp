@@ -248,6 +248,8 @@ namespace hsvr
         bool eat_at_mouth = true;
         // A grip squeeze on a hand that holds a weapon is not passed to the game as a grab (which drops it).
         bool keep_held_weapon = true;
+        // Two grip squeezes within this many seconds on a hand holding a weapon drop it (0 = never).
+        double drop_double_squeeze_s = 0.4;
         // The right trigger starts an 8-second arm recording (arms_record_N.csv). Off by default now
         // that the trigger guards.
         bool arms_recorder = false;
