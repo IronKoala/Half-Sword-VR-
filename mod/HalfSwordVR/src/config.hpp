@@ -175,10 +175,10 @@ namespace hsvr
         double head_pull_max_force = 20000.0;
         bool head_turn = true;
         double head_turn_max_deg = 75.0;
-        // 1 = the character's own head is not drawn in first person. Off by default: Matthew had an
-        // earlier version of head hiding removed, so it is his to switch on.
-        bool hide_head = false;
-        std::string hide_head_bone = "head";
+        // 1 = the character's own head pieces (head model, hair, headgear) are not drawn for the
+        // player in first person. Only a drawing flag is set; the head bone is never hidden, because
+        // the game takes a hidden head bone for a severed head.
+        bool hide_head = true;
         // Hand pull: besides turning each arm bone towards its pose (all the game's muscles do),
         // each hand is pulled to the place of its controller. Strength is the spring, damping
         // the brake, max_force 0 = no limit. The sword's weight still slows the hand, because the

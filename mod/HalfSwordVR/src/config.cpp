@@ -305,7 +305,6 @@ namespace hsvr
         flag("head_turn", c.head_turn);
         num("head_turn_max_deg", c.head_turn_max_deg);
         flag("hide_head", c.hide_head);
-        text("hide_head_bone", c.hide_head_bone);
         flag("hand_pull", c.hand_pull);
         num("hand_pull_strength", c.hand_pull_strength);
         num("hand_pull_damping", c.hand_pull_damping);

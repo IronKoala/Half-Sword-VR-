@@ -40,6 +40,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cwctype>
 #include <map>
 #include <mutex>
 #include <string>
@@ -1675,71 +1676,94 @@ namespace hsvr
         }
 
         // ---- the character's own head is not drawn in first person -----------------------------
+        // Only a drawing flag is used: each head piece (the head model, hair, anything named or
+        // attached like headgear) is marked "not drawn for the player who owns it". Nothing the
+        // game's own logic reads is changed. In particular the head BONE is never hidden: the game
+        // uses that switch for a severed head and treated the character as beheaded when an earlier
+        // version of this mod did it (Matthew, 2026-11-16).
         struct RawObjectArray
         {
             UObject** data;
             int32_t num;
             int32_t max;
         };
-        struct HideBoneParams
+        struct OwnerNoSeeParams
         {
-            FName BoneName;
-            uint8_t PhysBodyOption; // 0 = leave the physics alone
-            uint8_t pad[7];
+            bool NewOwnerNoSee;
         };
-        struct HiddenInGameParams
+        struct NameReturnParams
         {
-            bool NewHidden;
-            bool PropagateToChildren;
+            FName ReturnValue;
         };
+
+        bool is_head_piece(UObject* component, UObject* body, UObject* driver)
+        {
+            if (!component || component == body || component == driver) return false;
+            if (!component->GetFunctionByNameInChain(STR("SetOwnerNoSee"))) return false; // not something that is drawn
+            static const wchar_t* const words[] = {L"head", L"helm", L"hair", L"hood", L"coif", L"visor", L"beard", L"brow", L"lash"};
+            std::wstring names = component->GetName();
+            for (const TCHAR* asset_property : {STR("SkinnedAsset"), STR("StaticMesh")})
+            {
+                if (!component->GetPropertyByNameInChain(asset_property)) continue;
+                if (UObject* asset = object_property(component, asset_property)) names += L" " + asset->GetName();
+            }
+            std::transform(names.begin(), names.end(), names.begin(), [](wchar_t ch) { return (wchar_t)towlower(ch); });
+            for (const wchar_t* word : words)
+            {
+                if (names.find(word) != std::wstring::npos) return true;
+            }
+            // Anything fixed to the head bone.
+            if (UFunction* fn = component->GetFunctionByNameInChain(STR("GetAttachSocketName")))
+            {
+                if (fn->GetParmsSize() == (int32_t)sizeof(NameReturnParams))
+                {
+                    NameReturnParams p{};
+                    component->ProcessEvent(fn, &p);
+                    static const FName head = make_name(L"head");
+                    if (memcmp(&p.ReturnValue, &head, sizeof(FName)) == 0) return true;
+                }
+            }
+            return false;
+        }
 
         void hide_head_tick(const Config& cfg)
         {
             State& s = g_state;
             static UObject* hidden_pawn = nullptr;
             static double next = 0.0;
+            static size_t last_count = 0;
             UObject* body = object_property(s.pawn, STR("Mesh"));
             UObject* driver = object_property(s.pawn, STR("DriverSkeleton"));
             bool want = cfg.hide_head && s.pawn && body && driver && cfg.anchor == "head" && !shared().third_person.load() && shared().xr_running.load();
             double now = now_seconds();
-            bool was = hidden_pawn != nullptr && hidden_pawn == s.pawn;
             if (hidden_pawn && hidden_pawn != s.pawn) hidden_pawn = nullptr; // the old character is gone or no longer ours
+            bool was = hidden_pawn != nullptr;
             if (!want && !was) return;
-            if (want && was && now < next) return; // again now and then: armour put on later
+            if (want && was && now < next) return; // again now and then: headgear put on later, or the game switching it back
             next = now + 2.0;
             if (!s.pawn || !body) return;
-            std::wstring bone_text(cfg.hide_head_bone.begin(), cfg.hide_head_bone.end());
-            FName bone = make_name(bone_text.c_str());
-            std::vector<UObject*> components{body};
+            std::vector<UObject*> pieces;
             for (const TCHAR* list : {STR("BlueprintCreatedComponents"), STR("InstanceComponents")})
             {
                 RawObjectArray* arr = s.pawn->GetValuePtrByPropertyNameInChain<RawObjectArray>(list);
                 if (!arr || !arr->data || arr->num <= 0 || arr->num > 2000) continue;
                 for (int32_t i = 0; i < arr->num; ++i)
                 {
-                    if (arr->data[i] && arr->data[i] != driver && arr->data[i] != body) components.push_back(arr->data[i]);
+                    if (is_head_piece(arr->data[i], body, driver)) pieces.push_back(arr->data[i]);
                 }
             }
-            int count = 0;
-            for (UObject* component : components)
+            std::wstring names;
+            for (UObject* piece : pieces)
             {
-                UFunction* fn = component->GetFunctionByNameInChain(want ? STR("HideBoneByName") : STR("UnHideBoneByName"));
-                if (!fn || fn->GetParmsSize() > (int32_t)sizeof(HideBoneParams)) continue;
-                HideBoneParams p{};
-                p.BoneName = bone;
-                component->ProcessEvent(fn, &p);
-                ++count;
+                UFunction* fn = piece->GetFunctionByNameInChain(STR("SetOwnerNoSee"));
+                if (!fn || fn->GetParmsSize() != (int32_t)sizeof(OwnerNoSeeParams)) continue;
+                OwnerNoSeeParams p{want};
+                piece->ProcessEvent(fn, &p);
+                names += piece->GetName() + L" ";
             }
-            if (UObject* hair = object_property(s.pawn, STR("Hair")))
-            {
-                UFunction* fn = hair->GetFunctionByNameInChain(STR("SetHiddenInGame"));
-                if (fn && fn->GetParmsSize() == (int32_t)sizeof(HiddenInGameParams))
-                {
-                    HiddenInGameParams p{want, false};
-                    hair->ProcessEvent(fn, &p);
-                }
-            }
-            if (want != was) HSVR_LOG(want ? "Body: the character's own head is hidden in first person (%d meshes)" : "Body: the character's head is shown again (%d meshes)", count);
+            if (want != was || pieces.size() != last_count)
+                HSVR_LOG(want ? "Body: not drawn for the player (drawing flag only, the head bone is untouched): %ls" : "Body: drawn again: %ls", names.c_str());
+            last_count = pieces.size();
             hidden_pawn = want ? s.pawn : nullptr;
         }
 

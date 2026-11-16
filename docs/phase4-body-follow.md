@@ -40,7 +40,12 @@ cut; these points replace what they say where they differ:
   leash, the chest turn, and how far the body mesh's own frame is tilted (to learn whether that frame
   follows the simulated hips).
 
-Head hiding is still off; with the head held at the headset it is recommended, and is Matthew's call.
+Head hiding (`hide_head`, on): Matthew explained why he had the Phase 1 version removed: hiding the
+head BONE made the game treat his character as beheaded (the game uses that switch for a severed
+head). The first cut of this branch did the same and was never switched on. It now only sets the
+"not drawn for its owner" flag on head pieces (`CharacterMesh_Head`, hair, anything named or attached
+like headgear) and never touches a bone. **Never use HideBoneByName on this game's characters.**
+Where the sections below mention `HideBoneByName` or `hide_head_bone`, that is the removed way.
 
 ## What was wrong, and why
 
