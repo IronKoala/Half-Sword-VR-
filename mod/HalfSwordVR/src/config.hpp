@@ -243,7 +243,7 @@ namespace hsvr
         // Controller sticks and buttons play the game through a virtual gamepad (see
         // controller_input.hpp). pad_map lists "controller input=gamepad input" pairs.
         bool controller_pad = true;
-        std::string pad_map = "l_stick=LSTICK r_stick_x=RSTICK_X l_grip=LB r_grip=RB r_lower=A r_click=RS l_click=LS l_menu=START";
+        std::string pad_map = "l_stick=LSTICK r_stick_x=RSTICK_X l_grip=LB r_grip=RB r_lower=A l_menu=START";
         // Stick movement below this is ignored; above it the stick is scaled so that the game's own
         // gamepad dead zone (pad_game_deadzone) does not swallow small pushes.
         double pad_deadzone = 0.12;
@@ -265,7 +265,7 @@ namespace hsvr
         double holster_back_behind_m = 0.08;
         double swap_distance_m = 0.15;
         // B on the right controller kicks.
-        bool kick_on_b = true;
+        bool kick_on_b = false;
         // An empty hand squeezing near a weapon or food picks it up (within this distance of the hand).
         bool pickup = true;
         double pickup_radius_m = 0.30;
