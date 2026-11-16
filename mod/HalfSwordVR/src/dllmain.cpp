@@ -870,7 +870,7 @@ namespace
                 menu = shared.game_paused.load();
             }
             hsvr::arm_game_tick(pawn, menu);
-            if (const char* command = hsvr::controller_input_tick(menu)) run_console_command(std::string(command));
+            if (const char* command = hsvr::controller_input_tick(pawn, menu)) run_console_command(std::string(command));
         }
 
         hsvr::Config cfg = hsvr::config();

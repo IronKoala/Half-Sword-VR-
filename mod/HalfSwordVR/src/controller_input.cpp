@@ -12,6 +12,7 @@
 
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FProperty.hpp>
+#include <Unreal/Property/FBoolProperty.hpp>
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
@@ -285,6 +286,62 @@ namespace hsvr
         };
         TickState g_tick;
 
+        // ---- guard kept up for the player --------------------------------------------------------
+        // On mouse and keyboard the mouse buttons flip "R Hand Toggle" / "L Hand Toggle" on the
+        // character (the hand is raised to fight; the game then refreshes the arm muscles,
+        // "Force Refresh Pa Strength"). With motion arms the player raises the hand themselves, so
+        // the mod keeps the toggle on for a hand that holds a weapon (auto_guard), and the triggers
+        // are free.
+        bool read_bool(UObject* owner, const TCHAR* name, bool& value)
+        {
+            FProperty* property = owner->GetPropertyByNameInChain(name);
+            if (!property) return false;
+            auto* flag = static_cast<FBoolProperty*>(property);
+            const uint8_t* byte = reinterpret_cast<const uint8_t*>(owner) + property->GetOffset_Internal() + flag->GetByteOffset();
+            value = (*byte & flag->GetFieldMask()) != 0;
+            return true;
+        }
+
+        bool write_bool(UObject* owner, const TCHAR* name, bool value)
+        {
+            FProperty* property = owner->GetPropertyByNameInChain(name);
+            if (!property) return false;
+            auto* flag = static_cast<FBoolProperty*>(property);
+            uint8_t* byte = reinterpret_cast<uint8_t*>(owner) + property->GetOffset_Internal() + flag->GetByteOffset();
+            if (value) *byte |= flag->GetFieldMask();
+            else *byte &= (uint8_t)~flag->GetFieldMask();
+            return true;
+        }
+
+        void keep_guard(UObject* pawn, bool in_menu, const Config& cfg)
+        {
+            static UObject* warned_pawn = nullptr;
+            if (!pawn || in_menu || !cfg.auto_guard) return;
+            const struct
+            {
+                const TCHAR* weapon;
+                const TCHAR* toggle;
+                const char* label;
+            } hands[] = {{STR("Weapon R"), STR("R Hand Toggle"), "right"}, {STR("Weapon L"), STR("L Hand Toggle"), "left"}};
+            bool changed = false;
+            for (const auto& hand : hands)
+            {
+                UObject** weapon = pawn->GetValuePtrByPropertyNameInChain<UObject*>(hand.weapon);
+                bool up = false;
+                if (!weapon || !read_bool(pawn, hand.toggle, up))
+                {
+                    if (warned_pawn != pawn) HSVR_LOG("Guard: %ls has no %ls / %ls; guard is left to the game", pawn->GetFullName().c_str(), hand.weapon, hand.toggle);
+                    warned_pawn = pawn;
+                    return;
+                }
+                if (!*weapon || up) continue;
+                write_bool(pawn, hand.toggle, true);
+                changed = true;
+                HSVR_LOG("Guard: %s hand holds a weapon; guard raised for it", hand.label);
+            }
+            if (changed) write_bool(pawn, STR("Force Refresh Pa Strength"), true);
+        }
+
         const char* source_name(Source s)
         {
             static const char* names[] = {"l_stick_x", "l_stick_y", "r_stick_x", "r_stick_y", "l_trigger", "r_trigger", "l_grip", "r_grip",
@@ -324,10 +381,11 @@ namespace hsvr
         HSVR_LOG("Pad: the game's gamepad reading (XInputGetState, %s) now goes through the mod", how);
     }
 
-    const char* controller_input_tick(bool in_menu)
+    const char* controller_input_tick(UObject* pawn, bool in_menu)
     {
         TickState& t = g_tick;
         Config cfg = config();
+        keep_guard(pawn, in_menu, cfg);
         if (cfg.pad_map != t.parsed_text)
         {
             t.parsed_text = cfg.pad_map;

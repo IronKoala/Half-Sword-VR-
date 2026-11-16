@@ -8,14 +8,20 @@
 // own question "what is gamepad 0 doing?" gets a different answer.
 #pragma once
 
+namespace RC::Unreal
+{
+    class UObject;
+}
+
 namespace hsvr
 {
     // Patches the game's import of XInputGetState. Call once at start-up (any thread).
     void controller_input_install();
 
     // Once per engine tick on the game thread. `in_menu` is true while a menu or pause screen shows.
-    // Returns an engine console command to run now, or nullptr.
-    const char* controller_input_tick(bool in_menu);
+    // `pawn` is the player's character (may be null). Returns an engine console command to run now,
+    // or nullptr.
+    const char* controller_input_tick(RC::Unreal::UObject* pawn, bool in_menu);
 
     // Writes the game's input bindings (action and axis mappings) to the log, once.
     void controller_input_log_bindings();

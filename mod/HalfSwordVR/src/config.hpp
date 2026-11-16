@@ -155,13 +155,16 @@ namespace hsvr
         // Controller sticks and buttons play the game through a virtual gamepad (see
         // controller_input.hpp). pad_map lists "controller input=gamepad input" pairs.
         bool controller_pad = true;
-        std::string pad_map = "l_stick=LSTICK r_stick_x=RSTICK_X l_trigger=LT r_trigger=RT l_grip=LB r_grip=RB r_lower=A r_upper=RS r_click=RS l_lower=X l_upper=DUP l_click=LS l_menu=START";
+        std::string pad_map = "l_stick=LSTICK r_stick_x=RSTICK_X l_grip=LB r_grip=RB r_lower=A r_upper=RS r_click=RS l_click=LS l_menu=START";
         // Stick movement below this is ignored; above it the stick is scaled so that the game's own
         // gamepad dead zone (pad_game_deadzone) does not swallow small pushes.
         double pad_deadzone = 0.12;
         double pad_game_deadzone = 0.25;
         // Write the game's input bindings to the log once (to know what each gamepad input does).
         bool log_bindings = true;
+        // Keep the game's guard ("R/L Hand Toggle") raised for a hand that holds a weapon, so no
+        // button is needed to fight.
+        bool auto_guard = true;
         // The right trigger starts an 8-second arm recording (arms_record_N.csv). Off by default now
         // that the trigger guards.
         bool arms_recorder = false;
