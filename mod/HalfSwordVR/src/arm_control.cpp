@@ -478,6 +478,8 @@ namespace hsvr
             double forearm_off_cm = -1; // the right forearm's physics body against where it is drawn
             bool kin_active = false;
             bool kin_hands = false;     // the hands are placed too
+            int kin_reattached = 0;     // times the body mesh had to be put back on the character
+            bool kin_attach_ok = false;
             int kin_retaken = 0;        // times the game switched simulation back on and we undid it
             double kin_blocked_until = 0;
             int32_t pelvis = -1;
@@ -692,6 +694,8 @@ namespace hsvr
                 if (!s.below_spine[s.head]) s.head = -1;
             }
             s.kin_active = false;
+            s.kin_reattached = 0;
+            s.kin_attach_ok = false;
             s.hold_wanted = s.hold_active = s.placed = false;
             s.kin_retaken = 0;
             s.pelvis = s.spine_base >= 0 ? s.parents[s.spine_base] : -1;
@@ -1642,6 +1646,66 @@ namespace hsvr
             return true;
         }
 
+        // Taking a body out of a ragdoll, the way engines normally do it: once its bodies no longer
+        // simulate, the mesh is put back on the character (its capsule) at its standard place, so it
+        // moves with the character like any animated body and its hit shapes follow the pose. When
+        // simulation started, the engine had detached the mesh; left detached it stays where it was,
+        // which is how the first attempt left the arms behind.
+        int32_t param_offset(UFunction* fn, const wchar_t* name)
+        {
+            for (FProperty* p : fn->ForEachProperty())
+            {
+                if (p->GetName() == name) return p->GetOffset_Internal();
+            }
+            return -1;
+        }
+
+        bool body_attached_to_capsule(UObject** capsule_out = nullptr)
+        {
+            State& s = g_state;
+            UObject* capsule = object_property(s.pawn, STR("CapsuleComponent"));
+            if (capsule_out) *capsule_out = capsule;
+            if (!capsule || !s.body->GetPropertyByNameInChain(STR("AttachParent"))) return false;
+            return object_property(s.body, STR("AttachParent")) == capsule;
+        }
+
+        bool body_reattach()
+        {
+            State& s = g_state;
+            UObject* capsule = nullptr;
+            if (body_attached_to_capsule(&capsule)) return true;
+            if (!capsule) return false;
+            UFunction* attach = s.body->GetFunctionByNameInChain(STR("K2_AttachToComponent"));
+            UFunction* place = s.body->GetFunctionByNameInChain(STR("K2_SetRelativeLocationAndRotation"));
+            ue::FVector* offset = s.pawn->GetValuePtrByPropertyNameInChain<ue::FVector>(STR("BaseTranslationOffset"));
+            double* turn = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("BaseRotationOffset")); // a quaternion: x y z w
+            if (!attach || !place || !offset || !turn) return false;
+            int32_t a_parent = param_offset(attach, L"Parent"), a_loc = param_offset(attach, L"LocationRule"), a_rot = param_offset(attach, L"RotationRule"),
+                    a_scale = param_offset(attach, L"ScaleRule");
+            int32_t p_loc = param_offset(place, L"NewLocation"), p_rot = param_offset(place, L"NewRotation"), p_teleport = param_offset(place, L"bTeleport");
+            if (a_parent < 0 || a_loc < 0 || a_rot < 0 || a_scale < 0 || p_loc < 0 || p_rot < 0 || p_teleport < 0 || attach->GetParmsSize() > 128 ||
+                place->GetParmsSize() > 1024)
+                return false;
+            {
+                alignas(16) uint8_t parms[128] = {};
+                memcpy(parms + a_parent, &capsule, sizeof(capsule));
+                parms[a_loc] = 2; // snap to the capsule
+                parms[a_rot] = 2;
+                parms[a_scale] = 1; // keep the size
+                s.body->ProcessEvent(attach, parms);
+            }
+            {
+                alignas(16) uint8_t parms[1024] = {};
+                Rot r = quat_to_rot(Quat{turn[0], turn[1], turn[2], turn[3]}.normalized());
+                ue::FRotator rotation{r.pitch, r.yaw, r.roll};
+                memcpy(parms + p_loc, offset, sizeof(ue::FVector));
+                memcpy(parms + p_rot, &rotation, sizeof(rotation));
+                parms[p_teleport] = 1;
+                s.body->ProcessEvent(place, parms);
+            }
+            return body_attached_to_capsule();
+        }
+
         void kinematic_update(bool want, const char* why_not)
         {
             State& s = g_state;
@@ -1665,6 +1729,15 @@ namespace hsvr
                                         : "Body: the body is now placed, not simulated (hands and weapons stay physical)");
                     s.kin_active = true;
                     s.kin_hands = hands;
+                }
+                // The mesh rides on the character; if anything took it off again, put it back.
+                if (!body_attached_to_capsule())
+                {
+                    bool ok = body_reattach();
+                    ++s.kin_reattached;
+                    if (ok != s.kin_attach_ok || s.kin_reattached == 1)
+                        HSVR_LOG(ok ? "Body: the body mesh is back on the character (it had been detached for the ragdoll)" : "Body: could NOT put the body mesh back on the character");
+                    s.kin_attach_ok = ok;
                 }
             }
             else if (s.kin_active)
@@ -2339,7 +2412,18 @@ namespace hsvr
                 kinematic_update(cfg.kinematic_body && ready, why_not ? why_not : "waiting");
                 s.hold_wanted = cfg.body_hold && !cfg.kinematic_body && s.head_pull_wanted && s.have_nominal && s.have_rest && !knocked_out;
             }
-            pull_update(arms);
+            if (s.kin_active)
+            {
+                // The placed body has no springs anywhere: the game's own muscle settings stay as
+                // they are (they do nothing to bodies that are not simulated).
+                s.head_pull_wanted = false;
+                s.hold_wanted = false;
+                pull_update(false);
+            }
+            else
+            {
+                pull_update(arms);
+            }
             s.placed = s.kin_active || s.hold_active;
             learn_head_axes();
             if (!stale) learn_rest();
@@ -2417,6 +2501,7 @@ namespace hsvr
                 }
                 HSVR_LOG("Body: %s | right forearm's physics body %.0f cm from where it is drawn (about 13 is normal)", s.hold_active ? "held at its place" : "not held",
                          s.forearm_off_cm);
+                HSVR_LOG("Body: mesh %s the character (put back %d times)", s.body && s.pawn && body_attached_to_capsule() ? "rides on" : "is NOT attached to", s.kin_reattached);
                 HSVR_LOG("Body: %s (the game switched simulation back on %d times) | hips moved %.0f cm for the head's height | body mesh %.0f cm from its place over the feet | "
                          "consciousness %.0f, the game says fallen: %s",
                          s.kin_active ? "placed, not simulated" : "simulated by the game", s.kin_retaken, s.pelvis_drop, s.mesh_off_cm, s.consciousness, s.fallen ? "yes" : "no");

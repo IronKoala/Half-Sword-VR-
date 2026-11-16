@@ -174,14 +174,14 @@ namespace hsvr
         // muscles or balance in between, as in Blade & Sorcery. Only the hands and what they hold
         // stay physical. The body is given back to the game's simulation while the character's
         // consciousness is below kinematic_min_consciousness (knocked out, dead).
-        bool kinematic_body = false;
+        bool kinematic_body = true;
         // 1 = the held body: every part of the player's body stays physical but is held at its
         // place in the pose by a very stiff spring in place and turn (the engine's own physical
         // animation spring, which the game only uses for turning). The pose is the player: head
         // at the headset, hands at the controllers, legs from the game's leg animation over the
         // feet. This replaced kinematic_body, whose rigid parts did not move with the character in
         // the physics (first test: "locked the arms into place even when i walked away").
-        bool body_hold = true;
+        bool body_hold = false;
         double hold_strength = 20000.0;
         double hold_damping = 200.0;
         double hold_max_force = 0.0; // 0 = no limit
