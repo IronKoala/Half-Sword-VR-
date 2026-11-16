@@ -12,7 +12,9 @@
 
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FProperty.hpp>
+#include <Unreal/Property/FBoolProperty.hpp>
 #include <Unreal/NameTypes.hpp>
+#include <Unreal/UFunction.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
@@ -285,6 +287,116 @@ namespace hsvr
         };
         TickState g_tick;
 
+        // ---- guard kept up for the player --------------------------------------------------------
+        // On mouse and keyboard the mouse buttons flip "R Hand Toggle" / "L Hand Toggle" on the
+        // character (the hand is raised to fight; the game then refreshes the arm muscles,
+        // "Force Refresh Pa Strength"). With motion arms the player raises the hand themselves, so
+        // the mod keeps the toggle on for a hand that holds a weapon (auto_guard), and the triggers
+        // are free.
+        bool read_bool(UObject* owner, const TCHAR* name, bool& value)
+        {
+            FProperty* property = owner->GetPropertyByNameInChain(name);
+            if (!property) return false;
+            auto* flag = static_cast<FBoolProperty*>(property);
+            const uint8_t* byte = reinterpret_cast<const uint8_t*>(owner) + property->GetOffset_Internal() + flag->GetByteOffset();
+            value = (*byte & flag->GetFieldMask()) != 0;
+            return true;
+        }
+
+        bool write_bool(UObject* owner, const TCHAR* name, bool value)
+        {
+            FProperty* property = owner->GetPropertyByNameInChain(name);
+            if (!property) return false;
+            auto* flag = static_cast<FBoolProperty*>(property);
+            uint8_t* byte = reinterpret_cast<uint8_t*>(owner) + property->GetOffset_Internal() + flag->GetByteOffset();
+            if (value) *byte |= flag->GetFieldMask();
+            else *byte &= (uint8_t)~flag->GetFieldMask();
+            return true;
+        }
+
+        void keep_guard(UObject* pawn, bool in_menu, const Config& cfg)
+        {
+            static UObject* warned_pawn = nullptr;
+            if (!pawn || in_menu || !cfg.auto_guard) return;
+            const struct
+            {
+                const TCHAR* weapon;
+                const TCHAR* toggle;
+                const char* label;
+            } hands[] = {{STR("Weapon R"), STR("R Hand Toggle"), "right"}, {STR("Weapon L"), STR("L Hand Toggle"), "left"}};
+            bool changed = false;
+            for (const auto& hand : hands)
+            {
+                UObject** weapon = pawn->GetValuePtrByPropertyNameInChain<UObject*>(hand.weapon);
+                bool up = false;
+                if (!weapon || !read_bool(pawn, hand.toggle, up))
+                {
+                    if (warned_pawn != pawn) HSVR_LOG("Guard: %ls has no %ls / %ls; guard is left to the game", pawn->GetFullName().c_str(), hand.weapon, hand.toggle);
+                    warned_pawn = pawn;
+                    return;
+                }
+                if (!*weapon || up) continue;
+                write_bool(pawn, hand.toggle, true);
+                changed = true;
+                HSVR_LOG("Guard: %s hand holds a weapon; guard raised for it", hand.label);
+            }
+            if (changed) write_bool(pawn, STR("Force Refresh Pa Strength"), true);
+        }
+
+        // ---- groundwork for physical swapping, holsters and kicks --------------------------------
+        // Writes the parameters of the character's weapon-handling events once per character class,
+        // so they can later be called directly (not through gamepad buttons).
+        void log_weapon_functions(UObject* pawn)
+        {
+            static std::vector<UObject*> done_classes;
+            if (!pawn || !config().log_bindings) return;
+            UObject* cls = reinterpret_cast<UObject*>(pawn->GetClassPrivate());
+            if (std::find(done_classes.begin(), done_classes.end(), cls) != done_classes.end()) return;
+            done_classes.push_back(cls);
+            static const TCHAR* names[] = {
+                    STR("Kick Event"), STR("Swap Weapons"), STR("Draw Weapon"), STR("Sheath R"), STR("Sheath L"), STR("Unsheath R"), STR("Unsheath L"),
+                    STR("Unsheath R Event"), STR("Unsheath L Event"), STR("R Hand Sheath Start"), STR("L Hand Sheath Start"),
+                    STR("Grab Specific Object R H"), STR("Grab Specific Object L H"), STR("Release Grab R"), STR("Release Grab L"),
+                    STR("Pick Up Right Event"), STR("Pick Up Left Event"), STR("Find Grab Location Right Event"), STR("Find Grab Location Left Event"),
+                    STR("Check if R Holding Weapon"), STR("Check if L Holding Weapon"), STR("Event Add Sheathed Weapon"),
+                    STR("Assign R Weapon Slot"), STR("Assign L Weapon Slot"), STR("Check Available Weapon R in All Slots"),
+            };
+            HSVR_LOG("Functions: weapon handling on %ls", pawn->GetFullName().c_str());
+            for (const TCHAR* name : names)
+            {
+                UFunction* fn = pawn->GetFunctionByNameInChain(name);
+                if (!fn)
+                {
+                    HSVR_LOG("Functions:   %ls: not found", name);
+                    continue;
+                }
+                std::wstring params;
+                for (FProperty* param : fn->ForEachProperty())
+                {
+                    params += param->GetName();
+                    params += L" (";
+                    params += param->GetClass().GetName();
+                    params += L", @";
+                    params += std::to_wstring(param->GetOffset_Internal());
+                    params += L", ";
+                    params += std::to_wstring(param->GetElementSize());
+                    params += L" bytes) ";
+                }
+                HSVR_LOG("Functions:   %ls: %d bytes of parameters: %ls", name, (int)fn->GetParmsSize(), params.empty() ? L"none" : params.c_str());
+            }
+            // Where the character carries its weapons (slots and sheaths), for the holsters.
+            for (FProperty* property : static_cast<UStruct*>(pawn->GetClassPrivate())->ForEachProperty())
+            {
+                std::wstring n = property->GetName();
+                std::wstring lower = n;
+                for (wchar_t& c : lower) c = (wchar_t)towlower(c);
+                if (lower.find(L"sheath") == std::wstring::npos && lower.find(L"slot") == std::wstring::npos && lower.find(L"scabbard") == std::wstring::npos &&
+                    lower.find(L"holster") == std::wstring::npos && lower.find(L"belt") == std::wstring::npos)
+                    continue;
+                HSVR_LOG("Functions:   property %ls (%ls)", n.c_str(), property->GetClass().GetName().c_str());
+            }
+        }
+
         const char* source_name(Source s)
         {
             static const char* names[] = {"l_stick_x", "l_stick_y", "r_stick_x", "r_stick_y", "l_trigger", "r_trigger", "l_grip", "r_grip",
@@ -324,10 +436,12 @@ namespace hsvr
         HSVR_LOG("Pad: the game's gamepad reading (XInputGetState, %s) now goes through the mod", how);
     }
 
-    const char* controller_input_tick(bool in_menu)
+    const char* controller_input_tick(UObject* pawn, bool in_menu)
     {
         TickState& t = g_tick;
         Config cfg = config();
+        keep_guard(pawn, in_menu, cfg);
+        log_weapon_functions(pawn);
         if (cfg.pad_map != t.parsed_text)
         {
             t.parsed_text = cfg.pad_map;

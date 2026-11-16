@@ -117,20 +117,29 @@ Axis"); LB grab left (also Slomo), RB grab right; A jump/talk; X swap hands; B c
 Y undress; left stick press crouch; right stick press thrust; Start pause; D-pad up inventory,
 down change camera. Run has no gamepad binding (Left Shift only).
 
-Default `pad_map` (controller -> gamepad):
+Default `pad_map` (controller -> gamepad), revised after Matthew's first look (he wants no
+attack button, physical hand swaps and body holsters instead of a menu):
 
 | Controller | Gamepad | Game action |
 | --- | --- | --- |
 | Left stick | Left stick | Walk |
 | Right stick left/right | Right stick X | Turn (smooth) |
-| Left / right trigger | LT / RT | Guard left / right |
-| Left / right grip | LB / RB | Grab left / right (LB also slow motion) |
-| A | A | Jump, talk |
+| Left / right grip | LB / RB | Grab left / right (LB also slow motion in the game's bindings) |
+| A | A | Jump (the game also puts talk on it) |
 | B, right stick press | Right stick press | Thrust |
-| X | X | Swap hands |
-| Y | D-pad up | Inventory |
 | Left stick press | Left stick press | Crouch |
 | Left menu button | Start | Pause |
+
+Triggers, X and Y are unmapped. Guard: on mouse and keyboard the mouse buttons flip the
+character's `R Hand Toggle` / `L Hand Toggle` (recorded: each left click flips it, and the game then
+sets `Force Refresh Pa Strength`; the per-bone arm strengths stayed the same). With `auto_guard=1`
+(default) the mod sets the toggle on for a hand whose `Weapon R` / `Weapon L` is set, and raises
+`Force Refresh Pa Strength` as the game does. What the toggle changes besides the arm animation the
+mod already overrides is not known yet; compare with `auto_guard=0` in the headset.
+
+Planned next (Matthew): separate jump, kick and talk by calling the game's own events (`Kick Event`
+and others) rather than through gamepad buttons; hand-to-hand swapping and body holsters done
+physically, using `Grab Specific Object R H / L H`, `Release Grab R / L` and the sheathing logic.
 
 Sources: `l_stick`, `r_stick`, `l_stick_x/y`, `r_stick_x/y`, `l_trigger`, `r_trigger`, `l_grip`,
 `r_grip`, `l_lower` (X), `l_upper` (Y), `r_lower` (A), `r_upper` (B), `l_click`, `r_click`, `l_menu`.
