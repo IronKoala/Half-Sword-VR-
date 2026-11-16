@@ -165,3 +165,22 @@ intersected with the menu panel; a dot is drawn there (the panel shader's cursor
 pointer is moved to the matching spot of the game window (`SetCursorPos`, only while the game
 window is in front), and the trigger posts `WM_LBUTTONDOWN` / `WM_LBUTTONUP` to the game's window.
 Switch: `controller_pointer`.
+
+### Holsters, swaps and kick (2026-11-16)
+
+From the logged signatures, the character's events used take no parameters: `R/L Hand Sheath Start`
+(put the weapon in that hand away; the game picks the slot), `Unsheath R/L Event` (draw),
+`Swap Weapons`, `Kick Event`. (`Grab Specific Object R/L H` takes a component and a location;
+`Draw Weapon` takes hand, side and slot bytes; `Sheath R/L` a slot name and a scabbard flag. Not used yet.)
+Character slots seen: `Weapon Slot R 1/2`, `Weapon Slot L 1/2`, `Weapon Slot Back`, scabbards
+`Scabbard_R_1/2`, `Scabbard_L_1/2`.
+
+Gestures (`controller_gestures=1`), on a grip squeeze, measured from the head in its heading:
+- hand at the hip (more than `holster_hip_below_m` below the eyes, 5 to 45 cm to either side) or
+  over the shoulder behind the head (`holster_back_behind_m`): with a weapon, put it away; empty,
+  draw one;
+- empty hand within `swap_distance_m` of the other hand while that one holds a weapon: `Swap Weapons`.
+A grip press used by a gesture is not passed on as the game's grab.
+Kick: right B (`kick_on_b`), replacing thrust on B (thrust stays on the right stick press).
+Menu pointer: the spot is held still while the trigger is down (the first test showed clicks
+landing 50 to 100 px from where they started).

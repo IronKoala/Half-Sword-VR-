@@ -2723,6 +2723,25 @@ float4 PSMain(VSOut i) : SV_Target
         return any;
     }
 
+    bool vr_head_in_tracking(float pos[3], float& yaw)
+    {
+        FramePose pose;
+        {
+            std::lock_guard<std::mutex> lock(g_pipe.mutex);
+            pose = g_pipe.last_latched;
+        }
+        if (!pose.valid) return false;
+        const XrEyeRaw& a = pose.eye[0];
+        const XrEyeRaw& b = pose.eye[1];
+        pos[0] = (a.px + b.px) * 0.5f;
+        pos[1] = (a.py + b.py) * 0.5f;
+        pos[2] = (a.pz + b.pz) * 0.5f;
+        Quat q = xr_to_ue_rotation(a.qx, a.qy, a.qz, a.qw);
+        Vec3 fwd_ue = q.rotate({1, 0, 0});
+        yaw = (float)std::atan2(-fwd_ue.y, fwd_ue.x);
+        return true;
+    }
+
     PanelGeometry vr_panel_geometry()
     {
         std::lock_guard<std::mutex> lock(g_panel_mutex);

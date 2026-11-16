@@ -330,6 +330,11 @@ namespace hsvr
         flag("auto_guard", c.auto_guard);
         flag("controller_mod_keys", c.controller_mod_keys);
         flag("controller_pointer", c.controller_pointer);
+        flag("controller_gestures", c.controller_gestures);
+        num("holster_hip_below_m", c.holster_hip_below_m);
+        num("holster_back_behind_m", c.holster_back_behind_m);
+        num("swap_distance_m", c.swap_distance_m);
+        flag("kick_on_b", c.kick_on_b);
         flag("arms_recorder", c.arms_recorder);
         flag("log_poses", c.log_poses);
         flag("log_input", c.log_input);

@@ -45,6 +45,10 @@ namespace hsvr
     // The menu panel as last shown, and the controller pointer's spot on it (u, v in 0..1 from the
     // top left; negative = no pointer drawn).
     PanelGeometry vr_panel_geometry();
+
+    // Where the head was at the last latched frame, in tracking space (metres), and its heading
+    // about +Y (radians, OpenXR sense: positive turns to the left). False before the first pose.
+    bool vr_head_in_tracking(float pos[3], float& yaw);
     void vr_set_panel_pointer(float u, float v);
 
     // ---- Render thread ----------------------------------------------------------------------
