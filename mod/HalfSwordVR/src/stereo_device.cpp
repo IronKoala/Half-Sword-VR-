@@ -36,10 +36,20 @@ namespace hsvr
             Vec3 anchor;           // world position of the point between the eyes at recenter pose
             double base_yaw = 0.0; // world heading that "straight ahead" maps to
             Recenter recenter;
+            // Body follow (see latch_frame): what the arm code needs about the head this frame.
+            bool has_actor = false;
+            Vec3 actor_position; // the character's position when this view was taken
+            bool head_valid = false;
+            Vec3 head_lean;      // how far the head bone should be from its neutral place, world axes, cm
+            Quat head_rotation;  // the headset's rotation in the world (X forward, Z up)
+            double body_gap_cm = 0.0;
         };
         FrameView g_view;
         bool g_have_smoothed = false;
         Vec3 g_smoothed_offset; // head position relative to the actor, smoothed
+        bool g_was_body_follow = false;
+
+        XrEyeRaw eye_for_view(int32_t view_index);
 
         void latch_frame(const ue::FRotator& camera_rotation, const ue::FVector& camera_location)
         {
@@ -50,14 +60,22 @@ namespace hsvr
 
             FramePose pose;
             g_view.valid = vr_latch_frame_pose(pose);
+            g_view.has_actor = false;
+            g_view.head_valid = false;
             if (!g_view.valid) return;
             g_view.pose = pose;
-            if (shared().recenter_requested.exchange(false)) vr_set_recenter_from(pose);
+            bool recentered = false;
+            if (shared().recenter_requested.exchange(false))
+            {
+                vr_set_recenter_from(pose);
+                recentered = true;
+            }
             g_view.recenter = vr_recenter();
             if (!g_view.recenter.valid)
             {
                 vr_set_recenter_from(pose);
                 g_view.recenter = vr_recenter();
+                recentered = true;
             }
 
             g_view.base_yaw = camera_rotation.Yaw;
@@ -73,26 +91,78 @@ namespace hsvr
                 // the camera trails the aim and shakes on hits, which in a headset would swing
                 // the whole world around.
                 if (cfg.heading == "aim" && player.has_heading) g_view.base_yaw = player.heading_yaw;
-                Vec3 offset = player.head_position - player.actor_position;
-                if (!g_have_smoothed || cfg.anchor_smoothing <= 0.0)
+                g_view.has_actor = true;
+                g_view.actor_position = player.actor_position;
+                Quat base = quat_from_yaw_deg(g_view.base_yaw);
+                Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
+                if (cfg.body_follow)
                 {
-                    g_smoothed_offset = offset;
-                    g_have_smoothed = true;
+                    // Body follow: the view is the player's own head. Its place in the world is
+                    // the character's position plus a slowly moving offset, plus the headset's
+                    // movement since recentering, one to one. The character's head is sent after
+                    // the headset (arm_control.cpp bends the spine and turns the head), so the
+                    // body moves with the player rather than the view moving with the body. The
+                    // slow offset is where the view would have to be for the eyes to sit in the
+                    // character's real head; following it over view_follow_seconds keeps the two
+                    // together in the long run, and view_leash_cm is the furthest the view may
+                    // ever be from the real head (a knock-down drags the view along).
+                    const XrEyeRaw mid = eye_for_view(-1);
+                    Quat recenter_inverse = quat_from_yaw_deg(g_view.recenter.yaw_deg).inverse();
+                    Vec3 mid_cm = xr_to_ue_position(mid.px, mid.py, mid.pz, 100.0);
+                    Vec3 moved = base.rotate(recenter_inverse.rotate(mid_cm - g_view.recenter.position_cm) * cfg.world_scale);
+                    Quat head_rotation = (base * recenter_inverse * xr_to_ue_rotation(mid.qx, mid.qy, mid.qz, mid.qw)).normalized();
+                    Vec3 eyes_now = head_rotation.rotate(eye_offset); // head bone to between the eyes
+                    Vec3 raw = player.head_position + eyes_now - player.actor_position - moved;
+                    auto size = [](const Vec3& v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); };
+                    if (!g_have_smoothed || !g_was_body_follow || recentered || size(raw - g_smoothed_offset) > 150.0)
+                    {
+                        g_smoothed_offset = raw; // first frame, recenter, teleport, respawn
+                        g_have_smoothed = true;
+                    }
+                    else
+                    {
+                        if (cfg.view_follow_seconds > 0.0)
+                        {
+                            double alpha = 1.0 - std::exp(-g_delta_seconds / cfg.view_follow_seconds);
+                            g_smoothed_offset = g_smoothed_offset + (raw - g_smoothed_offset) * alpha;
+                        }
+                        Vec3 delta = raw - g_smoothed_offset;
+                        double gap = size(delta);
+                        double leash = cfg.view_leash_cm > 1.0 ? cfg.view_leash_cm : 1.0;
+                        if (gap > leash) g_smoothed_offset = g_smoothed_offset + delta * ((gap - leash) / gap);
+                    }
+                    g_view.body_gap_cm = size(raw - g_smoothed_offset);
+                    g_view.anchor = player.actor_position + g_smoothed_offset;
+                    g_view.head_valid = true;
+                    g_view.head_rotation = head_rotation;
+                    // Neutral: the headset at its recentered place, looking straight ahead.
+                    g_view.head_lean = moved - eyes_now + base.rotate(eye_offset);
+                    g_was_body_follow = true;
                 }
                 else
                 {
-                    double alpha = 1.0 - std::exp(-g_delta_seconds / cfg.anchor_smoothing);
-                    Vec3 delta = offset - g_smoothed_offset;
-                    // A big jump (teleport, respawn) is taken at once.
-                    if (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z > 150.0 * 150.0) alpha = 1.0;
-                    g_smoothed_offset = g_smoothed_offset + delta * alpha;
+                    g_was_body_follow = false;
+                    Vec3 offset = player.head_position - player.actor_position;
+                    if (!g_have_smoothed || cfg.anchor_smoothing <= 0.0)
+                    {
+                        g_smoothed_offset = offset;
+                        g_have_smoothed = true;
+                    }
+                    else
+                    {
+                        double alpha = 1.0 - std::exp(-g_delta_seconds / cfg.anchor_smoothing);
+                        Vec3 delta = offset - g_smoothed_offset;
+                        // A big jump (teleport, respawn) is taken at once.
+                        if (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z > 150.0 * 150.0) alpha = 1.0;
+                        g_smoothed_offset = g_smoothed_offset + delta * alpha;
+                    }
+                    g_view.anchor = player.actor_position + g_smoothed_offset + base.rotate({cfg.eye_forward_cm, 0.0, 0.0}) + Vec3{0.0, 0.0, cfg.eye_up_cm};
                 }
-                Quat base = quat_from_yaw_deg(g_view.base_yaw);
-                g_view.anchor = player.actor_position + g_smoothed_offset + base.rotate({cfg.eye_forward_cm, 0.0, 0.0}) + Vec3{0.0, 0.0, cfg.eye_up_cm};
             }
             else
             {
                 g_have_smoothed = false;
+                g_was_body_follow = false;
             }
 
             if (cfg.log_poses)
@@ -344,6 +414,17 @@ namespace hsvr
         double n = std::sqrt(f.x * f.x + f.z * f.z);
         if (n < 1e-6) return false;
         forward = f * (1.0 / n);
+        return true;
+    }
+
+    bool stereo_head_world(HeadWorld& out)
+    {
+        if (!g_view.valid || !g_view.has_actor) return false;
+        out.actor_position = g_view.actor_position;
+        out.head_valid = g_view.head_valid;
+        out.lean = g_view.head_lean;
+        out.rotation = g_view.head_rotation;
+        out.body_gap_cm = g_view.body_gap_cm;
         return true;
     }
 

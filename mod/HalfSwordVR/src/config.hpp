@@ -152,6 +152,33 @@ namespace hsvr
         double hand_pitch = 0.0;
         double hand_yaw = 0.0;
         double hand_roll = 0.0;
+        // ---- body follow: the character moves with the player (docs/phase4-body-follow.md) ----
+        // 1 = the view is the player's own head and the character's head and upper body are sent
+        // after it; 0 = the view rides on the character's head bone as before.
+        bool body_follow = true;
+        // The view drifts back to the character's real head over this many seconds (0 = never),
+        // and is never further from it than view_leash_cm.
+        double view_follow_seconds = 2.0;
+        double view_leash_cm = 30.0;
+        // How much of the headset's movement the upper body leans after (1 = all), the most it
+        // leans, and whether the head turns with the headset (and how far from the body's own pose).
+        double lean_follow = 1.0;
+        double lean_max_deg = 35.0;
+        bool head_turn = true;
+        double head_turn_max_deg = 75.0;
+        // 1 = the character's own head is not drawn in first person (no more inside of the head).
+        bool hide_head = true;
+        std::string hide_head_bone = "head";
+        // Hand pull: besides turning each arm bone towards its pose (all the game's muscles do),
+        // each hand is pulled to the place of its controller. Strength is the spring, damping
+        // the brake, max_force 0 = no limit. The sword's weight still slows the hand, because the
+        // pull works on the hand and the sword hangs from it.
+        bool hand_pull = true;
+        double hand_pull_strength = 1500.0;
+        double hand_pull_damping = 60.0;
+        double hand_pull_max_force = 0.0;
+        // The hand's own turning strength (wrist) times this, so the blade angle holds better.
+        double hand_turn_scale = 2.0;
         // Controller sticks and buttons play the game through a virtual gamepad (see
         // controller_input.hpp). pad_map lists "controller input=gamepad input" pairs.
         bool controller_pad = true;

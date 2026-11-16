@@ -26,6 +26,18 @@ namespace hsvr
     // forward direction, from the most recent frame's view. Game thread only.
     bool stereo_head_tracking(Vec3& pos, Vec3& forward);
 
+    // What the most recent frame's view knows about the player's head and the character (game
+    // thread only). False while there is no first-person view of a character.
+    struct HeadWorld
+    {
+        Vec3 actor_position;      // the character's position when the view was taken, world, cm
+        bool head_valid = false;  // the three below are set (settings key body_follow)
+        Vec3 lean;                // where the head bone should be relative to its neutral place, world axes, cm
+        Quat rotation;            // the headset's rotation in the world (X forward, Z up)
+        double body_gap_cm = 0.0; // distance between the view and the character's real eyes
+    };
+    bool stereo_head_world(HeadWorld& out);
+
     bool stereo_tracking_to_world(float px, float py, float pz, float qx, float qy, float qz, float qw, Vec3& pos, Quat& rot);
 
     // Called once per engine tick on the game thread, before the frame is drawn.

@@ -21,6 +21,7 @@
 #include "stereo_device.hpp"
 #include "ue_abi.hpp"
 #include "vr_present.hpp"
+#include "vr_state.hpp"
 #include "vrmath.hpp"
 
 #include <Unreal/FProperty.hpp>
@@ -263,6 +264,17 @@ namespace hsvr
             return true;
         }
 
+        bool component_world(UObject* component, Xf& out)
+        {
+            if (!component) return false;
+            UFunction* fn = component->GetFunctionByNameInChain(STR("K2_GetComponentToWorld"));
+            if (!fn || fn->GetParmsSize() != (int32_t)sizeof(XfReturnParams)) return false;
+            XfReturnParams p{};
+            component->ProcessEvent(fn, &p);
+            out = from_raw(p.ReturnValue);
+            return true;
+        }
+
         int32_t call_int(UObject* obj, const TCHAR* fn_name)
         {
             UFunction* fn = obj ? obj->GetFunctionByNameInChain(fn_name) : nullptr;
@@ -375,7 +387,12 @@ namespace hsvr
             int controller_index;
             // Driver bone indices.
             int32_t clavicle = -1, upper = -1, lower = -1, hand = -1, parent = -1;
-            FName parent_name, hand_name, middle_name, thumb_name, lower_name;
+            FName parent_name, hand_name, middle_name, thumb_name, lower_name, upper_name;
+            // Hand pull (see "pulling the hands" below).
+            bool pull_active = false;
+            bool have_last_world = false;
+            Vec3 last_world_target;     // where the hand bone was last sent, world
+            double pull_check_cm = -1;  // the engine's own target for the hand versus ours
             // Learned from the game's own animation (bone-local).
             bool have_axes = false;
             Vec3 upper_axis, lower_axis; // bone direction in the bone's own frame
@@ -431,6 +448,18 @@ namespace hsvr
             // Counters for the log.
             uint64_t fresh_count = 0, stale_count = 0, applied_count = 0;
             std::map<void*, void*> hooked; // tick function object -> its original vtable
+            // Body follow (this frame, set in before_body_update).
+            Xf body_world; // the body mesh's place in the world
+            bool have_body_world = false;
+            HeadWorld view;
+            bool have_view = false;
+            Vec3 actor_delta; // how far the character has moved since the view was taken
+            int32_t head = -1, spine_base = -1;
+            std::vector<char> below_spine, below_head;
+            bool have_head_axes = false;
+            Quat head_look; // turns the look frame (X forward, Z up) into the head bone's own frame
+            bool head_applied = false;
+            double lean_cm = 0;
         };
         State g_state;
         std::mutex g_hook_mutex;
@@ -583,6 +612,8 @@ namespace hsvr
                 side.hand = driver_bone_index(side_name(L"hand", side));
                 side.hand_name = side_name(L"hand", side);
                 side.lower_name = side_name(L"lowerarm", side);
+                side.upper_name = side_name(L"upperarm", side);
+                side.pull_active = side.have_last_world = false;
                 side.middle_name = side_name(L"middle_01", side);
                 side.thumb_name = side_name(L"thumb_01", side);
                 side.have_axes = side.have_hinge = side.have_grip = false;
@@ -606,6 +637,25 @@ namespace hsvr
                 check_index.push_back(side.upper);
             }
             s.marker_bone = s.side[1].hand;
+            // Body follow: the head, and the lowest spine bone the upper body leans about.
+            s.head = driver_bone_index(make_name(L"head"));
+            s.spine_base = driver_bone_index(make_name(L"spine_01"));
+            if (s.spine_base < 0) s.spine_base = driver_bone_index(make_name(L"spine_02"));
+            s.below_spine.assign(s.bone_count, 0);
+            s.below_head.assign(s.bone_count, 0);
+            s.have_head_axes = false;
+            if (s.head >= 0 && s.spine_base >= 0)
+            {
+                for (int32_t i = 0; i < s.bone_count; ++i)
+                {
+                    int32_t parent = s.parents[i];
+                    s.below_spine[i] = i == s.spine_base || (parent >= 0 && s.below_spine[parent]);
+                    s.below_head[i] = i == s.head || (parent >= 0 && s.below_head[parent]);
+                }
+                if (!s.below_spine[s.head]) s.head = -1;
+            }
+            if (s.head < 0 || s.spine_base < 0)
+                HSVR_LOG("Body: no head or spine bone found on the driver skeleton (%d %d); the upper body does not follow the headset", s.head, s.spine_base);
             if (!g_layout.arrays_offset && !find_driver_layout(s.driver, s.bone_count, check_names, check_index))
             {
                 static int complaints = 0;
@@ -828,7 +878,9 @@ namespace hsvr
                 Quat grip_rot;
                 if (!stereo_tracking_to_world(raw.px, raw.py, raw.pz, raw.qx, raw.qy, raw.qz, raw.qw, grip_pos, grip_rot)) continue;
                 grip_rot = (grip_rot * extra).normalized();
-                scale_reach(side, raw, grip_pos, cfg);
+                // With hand pull the hand goes where the controller really is; the older reach
+                // scaling only applies without it.
+                if (!cfg.hand_pull) scale_reach(side, raw, grip_pos, cfg);
                 // The controller's handle (+X) and the direction from the wrist into the fist (-Z)
                 // match the hand's handle and grip-centre directions.
                 Quat hand_frame = quat_from_frame(side.grip_forward, side.grip_center);
@@ -900,13 +952,21 @@ namespace hsvr
             if (!socket_transform(s.body, side.parent_name, RTS_World, parent_world)) return;
             Xf parent_cs = pose[side.parent];
             // The target in the frame of the physical upper body, placed on the driver's upper body.
-            Xf target_rel = relative(side.target_world, parent_world);
+            // The character may have moved since the view (and so the target) was taken.
+            Xf wanted = side.target_world;
+            wanted.t = wanted.t + s.actor_delta;
+            // Hand pull: the hand body is pulled to a place in the world, so the pose is solved
+            // in the world too, from where the physical shoulder really is.
+            bool pull = side.pull_active && s.have_body_world;
+            Xf shoulder_world;
+            if (pull && !socket_transform(s.body, side.upper_name, RTS_World, shoulder_world)) pull = false;
+            Xf target_rel = relative(wanted, parent_world);
             // Hold assist: the muscles leave the real hand short of where it is sent by a steady
             // amount (sword weight, muscle strength). That steady part is measured in the upper
             // body's frame and added to what is sent, slowly (assist_seconds), within assist_max_cm
             // and assist_max_deg. Fast swings are not changed by it.
             Xf body_hand_now;
-            if (cfg.assist_seconds > 0.0 && socket_transform(s.body, side.hand_name, RTS_World, body_hand_now))
+            if (!pull && cfg.assist_seconds > 0.0 && socket_transform(s.body, side.hand_name, RTS_World, body_hand_now))
             {
                 Xf real_rel = relative(body_hand_now, parent_world);
                 double now = now_seconds();
@@ -943,16 +1003,35 @@ namespace hsvr
                 side.assist_time = 0;
             }
             Xf target = compose(target_rel, parent_cs);
-            auto to_driver = [&](const Vec3& world_dir) { return parent_cs.q.rotate(parent_world.q.inverse().rotate(world_dir)); };
+            Vec3 pull_shoulder;
+            if (pull)
+            {
+                target = relative(wanted, s.body_world);
+                pull_shoulder = relative(shoulder_world, s.body_world).t;
+                // Never pull the hand further than the arm is long (it would drag the body).
+                Vec3 from_shoulder = target.t - pull_shoulder;
+                double far_cm = (side.arm_len > 10.0 ? side.arm_len : 60.0) * 1.03;
+                if (length(from_shoulder) > far_cm) target.t = pull_shoulder + normalized(from_shoulder) * far_cm;
+                side.last_world_target = compose(target, s.body_world).t;
+                side.have_last_world = true;
+            }
+            else
+            {
+                side.have_last_world = false;
+            }
+            auto to_driver = [&](const Vec3& world_dir) {
+                if (pull) return s.body_world.q.inverse().rotate(world_dir);
+                return parent_cs.q.rotate(parent_world.q.inverse().rotate(world_dir));
+            };
 
             Xf upper0 = pose[side.upper], lower0 = pose[side.lower], hand0 = pose[side.hand];
             double a = length(lower0.t - upper0.t), b = length(hand0.t - lower0.t);
             if (a < 1.0 || b < 1.0) return;
-            Vec3 S = upper0.t;
+            Vec3 S = pull ? pull_shoulder : upper0.t;
             // Shoulder reach: like a real shoulder blade, the clavicle swings the shoulder towards a
             // hand that is beyond easy reach, by up to shoulder_reach_cm. The character's arms are
             // shorter than most players', so this lets the in-game hand get closer to the real one.
-            if (side.clavicle >= 0 && cfg.shoulder_reach_cm > 0.0 && !(cfg.arm_scaling && cfg.player_arm_cm > 0.0))
+            if (!pull && side.clavicle >= 0 && cfg.shoulder_reach_cm > 0.0 && !(cfg.arm_scaling && cfg.player_arm_cm > 0.0))
             {
                 Xf clav = pose[side.clavicle];
                 Vec3 bone = S - clav.t;
@@ -1099,17 +1178,423 @@ namespace hsvr
 
             pose[side.upper] = {upper_q, S};
             pose[side.lower] = {lower_q, E};
-            pose[side.hand] = {hand_q, T};
+            // The pose keeps the elbow a little bent (T); the pull takes the hand to the true place.
+            pose[side.hand] = {hand_q, pull ? target.t : T};
             changed[side.upper] = changed[side.lower] = changed[side.hand] = 1;
 
             // How far the physical hand is from where it is sent (for the log).
             Xf body_hand;
             if (socket_transform(s.body, side.hand_name, RTS_World, body_hand))
             {
-                side.last_error_cm = length(body_hand.t - side.target_world.t);
-                side.last_error_deg = quat_angle_deg(body_hand.q, side.target_world.q);
+                side.last_error_cm = length(body_hand.t - wanted.t);
+                side.last_error_deg = quat_angle_deg(body_hand.q, wanted.q);
             }
             (void)anim;
+        }
+
+        // ---- pulling the hands (game thread) ---------------------------------------------------
+        // Half Sword's muscles are the engine's physical animation: for every body part a spring
+        // from the simulated body to its place in the animated pose. The game only uses the part
+        // of that spring that turns a body (orientation strength), so a hand is never pulled to a
+        // place; it ends up wherever the chain of turned bones leaves it, and sags under the sword.
+        // Here the two hand bodies also get the positional part of the same spring (in the world,
+        // not relative to the forearm), with the pose's hand bone written at the controller's
+        // place. The engine keeps its settings per body in an array that is not reflected
+        // (UPhysicalAnimationComponent::DriveData); it is found by its shape, read to learn the
+        // game's own values, and changed only through the engine's own function
+        // ApplyPhysicalAnimationSettings. The game's values come back whenever the pull is off.
+        struct RawBytesArray
+        {
+            uint8_t* data;
+            int32_t num;
+            int32_t max;
+        };
+        struct alignas(16) BodyTargetParams
+        {
+            FName BodyName;
+            uint8_t pad[8];
+            RawXf ReturnValue;
+        };
+
+        struct PullLayout
+        {
+            UObject* pawn = nullptr;
+            UObject* component = nullptr;
+            UFunction* apply = nullptr;
+            UFunction* target_fn = nullptr;
+            bool ok = false;
+            int tries = 0;
+            double next_try = 0;
+            int32_t parms = 0, parm_body = -1, parm_data = -1, size = 0;
+            int32_t f_body = -1, f_local = -1, f_orient = -1, f_angvel = -1, f_pos = -1, f_vel = -1, f_maxlin = -1, f_maxang = -1;
+            size_t drive_offset = 0;
+            uint64_t applies = 0;
+        };
+        PullLayout g_pull;
+        struct PullSide
+        {
+            bool have_written = false;
+            std::vector<uint8_t> written, base;
+        };
+        PullSide g_pull_side[2];
+
+        float pull_get(const uint8_t* entry, int32_t offset)
+        {
+            float v;
+            memcpy(&v, entry + offset, sizeof(v));
+            return v;
+        }
+        void pull_set(uint8_t* entry, int32_t offset, float v) { memcpy(entry + offset, &v, sizeof(v)); }
+        bool pull_same(const uint8_t* a, const uint8_t* b)
+        {
+            const PullLayout& L = g_pull;
+            if ((a[L.f_local] & 1) != (b[L.f_local] & 1)) return false;
+            for (int32_t off : {L.f_orient, L.f_angvel, L.f_pos, L.f_vel, L.f_maxlin, L.f_maxang})
+            {
+                if (pull_get(a, off) != pull_get(b, off)) return false;
+            }
+            return true;
+        }
+
+        void pull_setup()
+        {
+            State& s = g_state;
+            PullLayout& L = g_pull;
+            int tries = L.pawn == s.pawn ? L.tries + 1 : 1;
+            L = PullLayout{};
+            L.pawn = s.pawn;
+            L.tries = tries;
+            L.next_try = now_seconds() + 3.0;
+            for (PullSide& ps : g_pull_side) ps.have_written = false;
+            bool last = tries >= 5;
+            UObject* component = object_property(s.pawn, STR("PhysicalAnimation"));
+            UFunction* apply = component ? component->GetFunctionByNameInChain(STR("ApplyPhysicalAnimationSettings")) : nullptr;
+            if (!apply)
+            {
+                if (last) HSVR_LOG("Pull: the character has no physical animation component to ask; hand pull stays off");
+                return;
+            }
+            for (FProperty* p : apply->ForEachProperty())
+            {
+                std::wstring name = p->GetName();
+                if (name == L"BodyName") L.parm_body = p->GetOffset_Internal();
+                if (name != L"PhysicalAnimationData") continue;
+                L.parm_data = p->GetOffset_Internal();
+                L.size = p->GetSize();
+                if (p->GetClass().GetName() != STR("StructProperty")) continue;
+                UScriptStruct* st = static_cast<FStructProperty*>(p)->GetStruct();
+                if (!st) continue;
+                for (FProperty* q : st->ForEachProperty())
+                {
+                    std::wstring field = q->GetName();
+                    int32_t off = q->GetOffset_Internal();
+                    if (field == L"BodyName") L.f_body = off;
+                    else if (field == L"bIsLocalSimulation") L.f_local = off;
+                    else if (field == L"OrientationStrength") L.f_orient = off;
+                    else if (field == L"AngularVelocityStrength") L.f_angvel = off;
+                    else if (field == L"PositionStrength") L.f_pos = off;
+                    else if (field == L"VelocityStrength") L.f_vel = off;
+                    else if (field == L"MaxLinearForce") L.f_maxlin = off;
+                    else if (field == L"MaxAngularForce") L.f_maxang = off;
+                }
+            }
+            L.parms = apply->GetParmsSize();
+            bool fields = L.f_body >= 0 && L.f_local >= 0 && L.f_orient >= 0 && L.f_angvel >= 0 && L.f_pos >= 0 && L.f_vel >= 0 && L.f_maxlin >= 0 && L.f_maxang >= 0;
+            if (!fields || L.parm_body < 0 || L.parm_data < 0 || L.size < 32 || L.size > 64 || L.parms > 200 || L.parm_data + L.size > L.parms ||
+                L.f_maxang + 4 > L.size || L.f_body + (int32_t)sizeof(FName) > L.size)
+            {
+                if (last) HSVR_LOG("Pull: the engine's muscle settings are not laid out as expected (size %d, call %d bytes); hand pull stays off", L.size, L.parms);
+                return;
+            }
+            FProperty* mesh_property = component->GetPropertyByNameInChain(STR("SkeletalMeshComponent"));
+            if (!mesh_property) return;
+            size_t after_mesh = (size_t)mesh_property->GetOffset_Internal() + sizeof(void*);
+            UObject* driven = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(component) + mesh_property->GetOffset_Internal());
+            if (driven != s.body)
+            {
+                if (last) HSVR_LOG("Pull: the character's muscles do not work on its body mesh; hand pull stays off");
+                return;
+            }
+            // The settings array: one entry per driven body, each starting with a bone's name.
+            auto* base = reinterpret_cast<uint8_t*>(component);
+            for (size_t off = after_mesh; off <= after_mesh + 80 && !L.drive_offset; off += 8)
+            {
+                RawBytesArray arr;
+                if (!safe_copy(&arr, base + off, sizeof(arr))) continue;
+                if (!arr.data || arr.num < 2 || arr.num > 400 || arr.max < arr.num || arr.max > 4096) continue;
+                std::vector<uint8_t> copy((size_t)arr.num * L.size);
+                if (!safe_copy(copy.data(), arr.data, copy.size())) continue;
+                bool all_bones = true, has_hand = false;
+                for (int32_t i = 0; i < arr.num && all_bones; ++i)
+                {
+                    FName name;
+                    memcpy(&name, copy.data() + (size_t)i * L.size + L.f_body, sizeof(FName));
+                    if (driver_bone_index(name) < 0) all_bones = false;
+                    if (memcmp(&name, &s.side[1].hand_name, sizeof(FName)) == 0) has_hand = true;
+                }
+                if (!all_bones || !has_hand) continue;
+                L.drive_offset = off;
+                float multiplier = 1.0f;
+                if (float* m = component->GetValuePtrByPropertyNameInChain<float>(STR("StrengthMultiplyer"))) multiplier = *m;
+                HSVR_LOG("Pull: the game's muscle settings found (%d bodies, at 0x%zX, all strengths times %.2f):", arr.num, off, multiplier);
+                for (int32_t i = 0; i < arr.num; ++i)
+                {
+                    const uint8_t* e = copy.data() + (size_t)i * L.size;
+                    FName name;
+                    memcpy(&name, e + L.f_body, sizeof(FName));
+                    HSVR_LOG("Pull:   %-14ls %s turn %.0f / %.0f, place %.0f / %.0f, limits %.0f / %.0f", name.ToString().c_str(),
+                             (e[L.f_local] & 1) ? "relative to its parent," : "in the world,         ", pull_get(e, L.f_orient), pull_get(e, L.f_angvel), pull_get(e, L.f_pos),
+                             pull_get(e, L.f_vel), pull_get(e, L.f_maxlin), pull_get(e, L.f_maxang));
+                }
+            }
+            if (!L.drive_offset)
+            {
+                if (last) HSVR_LOG("Pull: could not find the game's muscle settings; hand pull stays off");
+                return;
+            }
+            L.component = component;
+            L.apply = apply;
+            UFunction* target_fn = component->GetFunctionByNameInChain(STR("GetBodyTargetTransform"));
+            if (target_fn && target_fn->GetParmsSize() == (int32_t)sizeof(BodyTargetParams)) L.target_fn = target_fn;
+            L.ok = true;
+        }
+
+        // `active` true from inside the mesh tick (after the game's own script has run this frame
+        // and before the engine uses the settings); false to give the game's values back.
+        void pull_update(bool active)
+        {
+            State& s = g_state;
+            PullLayout& L = g_pull;
+            if (!s.pawn || !s.ready) return;
+            Config cfg = config();
+            if (L.pawn != s.pawn || (!L.ok && L.tries < 5 && now_seconds() >= L.next_try))
+            {
+                if (!cfg.hand_pull && L.pawn != s.pawn) return; // never looked, nothing to give back
+                pull_setup();
+            }
+            if (!L.ok)
+            {
+                for (Side& side : s.side) side.pull_active = false;
+                return;
+            }
+            RawBytesArray arr = *reinterpret_cast<RawBytesArray*>(reinterpret_cast<uint8_t*>(L.component) + L.drive_offset);
+            if (!arr.data || arr.num <= 0 || arr.num > 400) return;
+            for (int k = 0; k < 2; ++k)
+            {
+                Side& side = s.side[k];
+                PullSide& ps = g_pull_side[k];
+                uint8_t* entry = nullptr;
+                for (int32_t i = 0; i < arr.num && !entry; ++i)
+                {
+                    uint8_t* e = arr.data + (size_t)i * L.size;
+                    if (memcmp(e + L.f_body, &side.hand_name, sizeof(FName)) == 0) entry = e;
+                }
+                if (!entry)
+                {
+                    side.pull_active = false;
+                    continue;
+                }
+                // Anything other than what we last wrote is the game's own (new) setting.
+                if (!ps.have_written || !pull_same(entry, ps.written.data())) ps.base.assign(entry, entry + L.size);
+                bool wanted_side = side.out_sign > 0 ? cfg.arm_right : cfg.arm_left;
+                bool want = active && cfg.hand_pull && cfg.hand_pull_strength > 0.0 && wanted_side && side.target_valid && s.have_body_world;
+                std::vector<uint8_t> desired = ps.base;
+                if (want)
+                {
+                    double scale = std::max(0.1, std::min(20.0, cfg.hand_turn_scale));
+                    desired[L.f_local] &= 0xFE;
+                    pull_set(desired.data(), L.f_orient, (float)(pull_get(ps.base.data(), L.f_orient) * scale));
+                    pull_set(desired.data(), L.f_angvel, (float)(pull_get(ps.base.data(), L.f_angvel) * std::sqrt(scale)));
+                    pull_set(desired.data(), L.f_pos, (float)cfg.hand_pull_strength);
+                    pull_set(desired.data(), L.f_vel, (float)std::max(0.0, cfg.hand_pull_damping));
+                    pull_set(desired.data(), L.f_maxlin, (float)std::max(0.0, cfg.hand_pull_max_force));
+                }
+                if (!pull_same(entry, desired.data()))
+                {
+                    alignas(16) uint8_t parms[208] = {};
+                    memcpy(parms + L.parm_body, &side.hand_name, sizeof(FName));
+                    memcpy(parms + L.parm_data, desired.data(), L.size);
+                    L.component->ProcessEvent(L.apply, parms);
+                    ++L.applies;
+                }
+                ps.written = desired;
+                ps.have_written = true;
+                side.pull_active = want;
+            }
+        }
+
+        // Once a second: where the engine itself says the hand's spring is anchored, against where
+        // we meant to put it (checks the whole chain from the written pose to the physics).
+        void pull_check()
+        {
+            State& s = g_state;
+            PullLayout& L = g_pull;
+            for (Side& side : s.side)
+            {
+                side.pull_check_cm = -1;
+                if (!L.ok || !L.target_fn || !side.pull_active || !side.have_last_world) continue;
+                BodyTargetParams p{};
+                p.BodyName = side.hand_name;
+                L.component->ProcessEvent(L.target_fn, &p);
+                side.pull_check_cm = length(from_raw(p.ReturnValue).t - side.last_world_target);
+            }
+        }
+
+        // ---- the upper body and head follow the headset ----------------------------------------
+        // Which of the head bone's own axes points up and which forward, from the game's own
+        // animation while the character stands (bone axes line up with the body's directions).
+        void learn_head_axes()
+        {
+            State& s = g_state;
+            if (s.have_head_axes || s.head < 0 || !s.have_body_world || !s.have_animated) return;
+            Xf head_world = compose(from_raw(s.animated[s.head]), s.body_world);
+            Quat inv = head_world.q.inverse();
+            auto snap = [](const Vec3& v, Vec3& axis) {
+                double c[3] = {v.x, v.y, v.z};
+                int best = 0;
+                for (int i = 1; i < 3; ++i)
+                {
+                    if (std::fabs(c[i]) > std::fabs(c[best])) best = i;
+                }
+                double out[3] = {0, 0, 0};
+                out[best] = c[best] < 0 ? -1.0 : 1.0;
+                axis = {out[0], out[1], out[2]};
+                return std::fabs(c[best]);
+            };
+            Vec3 up_axis, forward_axis;
+            if (snap(inv.rotate({0, 0, 1}), up_axis) < 0.8) return;
+            Vec3 forward = inv.rotate(quat_from_yaw_deg(s.actor_yaw).rotate({1, 0, 0}));
+            forward = perpendicular_part(forward, up_axis);
+            if (snap(forward, forward_axis) < 0.6) return;
+            s.head_look = quat_from_frame(forward_axis, cross(up_axis, forward_axis));
+            s.have_head_axes = true;
+            HSVR_LOG("Body: head bone axes learned: forward (%.0f %.0f %.0f), up (%.0f %.0f %.0f)", forward_axis.x, forward_axis.y, forward_axis.z, up_axis.x,
+                     up_axis.y, up_axis.z);
+        }
+
+        // Leans the driver's upper body so its head goes where the headset has gone since
+        // recentering, and turns its head like the headset. The game's muscles then move the
+        // real body after it, with the game's own strength and balance.
+        void apply_head(std::vector<Xf>& pose, std::vector<char>& moved, const Config& cfg)
+        {
+            State& s = g_state;
+            s.head_applied = false;
+            s.lean_cm = 0;
+            if (!cfg.body_follow || s.head < 0 || s.spine_base < 0 || !s.have_body_world || !s.have_view || !s.view.head_valid) return;
+            Quat to_pose = s.body_world.q.inverse();
+            s.lean_cm = length(s.view.lean);
+            Vec3 lean = to_pose.rotate(s.view.lean) * std::max(0.0, std::min(1.5, cfg.lean_follow));
+            Vec3 pivot = pose[s.spine_base].t;
+            Vec3 before_lean = pose[s.head].t - pivot;
+            Vec3 after_lean = before_lean + lean;
+            if (length(before_lean) > 5.0 && length(after_lean) > 5.0)
+            {
+                Vec3 from = normalized(before_lean), to = normalized(after_lean);
+                Vec3 cr = cross(from, to);
+                double sn = length(cr), cs = dot(from, to);
+                if (sn > 1e-6)
+                {
+                    double angle = std::min(std::atan2(sn, cs), std::max(0.0, cfg.lean_max_deg) * kDegToRad);
+                    Quat swing = quat_axis_angle(cr * (1.0 / sn), angle);
+                    for (int32_t i = 0; i < s.bone_count; ++i)
+                    {
+                        if (!s.below_spine[i]) continue;
+                        pose[i].q = (swing * pose[i].q).normalized();
+                        pose[i].t = pivot + swing.rotate(pose[i].t - pivot);
+                        moved[i] = 1;
+                    }
+                }
+            }
+            if (cfg.head_turn && s.have_head_axes)
+            {
+                std::vector<Xf> before(pose);
+                Quat want = (to_pose * s.view.rotation * s.head_look.inverse()).normalized();
+                Quat current = pose[s.head].q;
+                Quat delta = (want * current.inverse()).normalized();
+                if (delta.w < 0) delta = {-delta.x, -delta.y, -delta.z, -delta.w};
+                double angle = 2.0 * std::acos(std::min(1.0, delta.w));
+                double most = std::max(0.0, cfg.head_turn_max_deg) * kDegToRad;
+                if (angle > most && angle > 1e-6) delta = quat_axis_angle(normalized({delta.x, delta.y, delta.z}), most);
+                pose[s.head].q = (delta * current).normalized();
+                moved[s.head] = 1;
+                for (int32_t i = s.head + 1; i < s.bone_count; ++i)
+                {
+                    int32_t parent = s.parents[i];
+                    if (parent < 0 || !s.below_head[parent]) continue;
+                    pose[i] = compose(relative(before[i], before[parent]), pose[parent]);
+                    moved[i] = 1;
+                }
+            }
+            s.head_applied = true;
+        }
+
+        // ---- the character's own head is not drawn in first person -----------------------------
+        struct RawObjectArray
+        {
+            UObject** data;
+            int32_t num;
+            int32_t max;
+        };
+        struct HideBoneParams
+        {
+            FName BoneName;
+            uint8_t PhysBodyOption; // 0 = leave the physics alone
+            uint8_t pad[7];
+        };
+        struct HiddenInGameParams
+        {
+            bool NewHidden;
+            bool PropagateToChildren;
+        };
+
+        void hide_head_tick(const Config& cfg)
+        {
+            State& s = g_state;
+            static UObject* hidden_pawn = nullptr;
+            static double next = 0.0;
+            UObject* body = object_property(s.pawn, STR("Mesh"));
+            UObject* driver = object_property(s.pawn, STR("DriverSkeleton"));
+            bool want = cfg.hide_head && s.pawn && body && driver && cfg.anchor == "head" && !shared().third_person.load() && shared().xr_running.load();
+            double now = now_seconds();
+            bool was = hidden_pawn != nullptr && hidden_pawn == s.pawn;
+            if (hidden_pawn && hidden_pawn != s.pawn) hidden_pawn = nullptr; // the old character is gone or no longer ours
+            if (!want && !was) return;
+            if (want && was && now < next) return; // again now and then: armour put on later
+            next = now + 2.0;
+            if (!s.pawn || !body) return;
+            std::wstring bone_text(cfg.hide_head_bone.begin(), cfg.hide_head_bone.end());
+            FName bone = make_name(bone_text.c_str());
+            std::vector<UObject*> components{body};
+            for (const TCHAR* list : {STR("BlueprintCreatedComponents"), STR("InstanceComponents")})
+            {
+                RawObjectArray* arr = s.pawn->GetValuePtrByPropertyNameInChain<RawObjectArray>(list);
+                if (!arr || !arr->data || arr->num <= 0 || arr->num > 2000) continue;
+                for (int32_t i = 0; i < arr->num; ++i)
+                {
+                    if (arr->data[i] && arr->data[i] != driver && arr->data[i] != body) components.push_back(arr->data[i]);
+                }
+            }
+            int count = 0;
+            for (UObject* component : components)
+            {
+                UFunction* fn = component->GetFunctionByNameInChain(want ? STR("HideBoneByName") : STR("UnHideBoneByName"));
+                if (!fn || fn->GetParmsSize() > (int32_t)sizeof(HideBoneParams)) continue;
+                HideBoneParams p{};
+                p.BoneName = bone;
+                component->ProcessEvent(fn, &p);
+                ++count;
+            }
+            if (UObject* hair = object_property(s.pawn, STR("Hair")))
+            {
+                UFunction* fn = hair->GetFunctionByNameInChain(STR("SetHiddenInGame"));
+                if (fn && fn->GetParmsSize() == (int32_t)sizeof(HiddenInGameParams))
+                {
+                    HiddenInGameParams p{want, false};
+                    hair->ProcessEvent(fn, &p);
+                }
+            }
+            if (want != was) HSVR_LOG(want ? "Body: the character's own head is hidden in first person (%d meshes)" : "Body: the character's head is shown again (%d meshes)", count);
+            hidden_pawn = want ? s.pawn : nullptr;
         }
 
         // ---- recorder: every frame for a few seconds, started with the right trigger ----------
@@ -1204,10 +1689,12 @@ namespace hsvr
         void before_body_update()
         {
             State& s = g_state;
-            if (!s.ready || s.failed || !s.enabled_by_key || s.menu_up || !s.hands_valid) return;
-            if (!s.side[0].target_valid && !s.side[1].target_valid) return;
+            if (!s.ready || s.failed || !s.enabled_by_key || s.menu_up) return;
             Config cfg = config();
             if (!cfg.motion_arms) return;
+            bool arms = s.hands_valid && (s.side[0].target_valid || s.side[1].target_valid);
+            bool body = cfg.body_follow && s.head >= 0 && s.spine_base >= 0;
+            if (!arms && !body) return;
             RawXf* buffer = driver_read_buffer(s.driver, s.bone_count);
             if (!buffer) return;
             bool stale = s.have_animated && s.marker_bone >= 0 && same_raw(buffer[s.marker_bone], s.written_marker);
@@ -1224,29 +1711,46 @@ namespace hsvr
             {
                 ++s.stale_count;
             }
+            // Where the body and the view are right now (the character has already moved this frame).
+            s.have_body_world = component_world(s.body, s.body_world);
+            s.have_view = stereo_head_world(s.view);
+            s.actor_delta = {};
+            Vec3 actor_now;
+            if (s.have_view && actor_location(s.pawn, actor_now))
+            {
+                s.actor_delta = actor_now - s.view.actor_position;
+                if (length(s.actor_delta) > 100.0) s.actor_delta = {}; // a teleport, not a step
+            }
+            pull_update(arms);
+            learn_head_axes();
+
             std::vector<Xf> pose(s.bone_count);
             for (int32_t i = 0; i < s.bone_count; ++i) pose[i] = from_raw(s.animated[i]);
+            // First the upper body and head, then the arms on top of that.
+            std::vector<char> moved(s.bone_count, 0);
+            apply_head(pose, moved, cfg);
+            std::vector<Xf> leaned(pose);
             std::vector<char> changed(s.bone_count, 0);
-            for (Side& side : s.side) solve_side(side, s.animated.data(), pose, changed, cfg);
+            if (arms)
+            {
+                for (Side& side : s.side) solve_side(side, s.animated.data(), pose, changed, cfg);
+            }
             // Carry every bone below a moved one along with it (fingers, weapon bone).
             bool any = false;
             for (int32_t i = 0; i < s.bone_count; ++i)
             {
-                if (changed[i])
-                {
-                    any = true;
-                    continue;
-                }
+                if (changed[i] || moved[i]) any = true;
+                if (changed[i]) continue;
                 int32_t p = s.parents[i];
                 if (p < 0 || !changed[p]) continue;
-                Xf local = relative(from_raw(s.animated[i]), from_raw(s.animated[p]));
+                Xf local = relative(leaned[i], leaned[p]);
                 pose[i] = compose(local, pose[p]);
                 changed[i] = 1;
             }
             if (!any) return;
             for (int32_t i = 0; i < s.bone_count; ++i)
             {
-                if (changed[i]) to_raw(pose[i], buffer[i]);
+                if (changed[i] || moved[i]) to_raw(pose[i], buffer[i]);
             }
             s.written_marker = buffer[s.marker_bone];
             s.written_frame = s.frame;
@@ -1262,6 +1766,17 @@ namespace hsvr
             double now = now_seconds();
             if (now - last < 1.0) return;
             last = now;
+            pull_check();
+            if (cfg.body_follow || cfg.hand_pull)
+            {
+                HeadWorld view;
+                bool have_view = stereo_head_world(view);
+                HSVR_LOG("Body: follow %s | headset %.0f cm from its recentered place | view %.0f cm from the character's real eyes | hand pull right %s left %s "
+                         "(spring anchored %.1f / %.1f cm from the controller; settings written %llu times)",
+                         !cfg.body_follow ? "off in settings" : (s.head_applied ? "on" : (have_view && view.head_valid ? "waiting" : "no first-person view")), s.lean_cm,
+                         have_view ? view.body_gap_cm : -1.0, s.side[1].pull_active ? "on" : "off", s.side[0].pull_active ? "on" : "off", s.side[1].pull_check_cm,
+                         s.side[0].pull_check_cm, (unsigned long long)g_pull.applies);
+            }
             const XrHandRaw& l = s.hands[0];
             const XrHandRaw& r = s.hands[1];
             HSVR_LOG("Arms: %s | controllers L %s R %s (trigger %.2f/%.2f grip %.2f/%.2f) | right hand %s err %.1f cm %.0f deg | left hand %s err %.1f cm %.0f deg | "
@@ -1287,18 +1802,21 @@ namespace hsvr
         ++s.frame;
         s.menu_up = menu_up;
         Config cfg = config();
-        if (s.failed || !cfg.motion_arms)
-        {
-            log_status(cfg);
-            return;
-        }
+        // A new character first: nothing below may touch the old one again.
         if (pawn != s.pawn)
         {
             s.ready = false;
             s.pawn = pawn;
             s.body = s.driver = nullptr;
-            for (Side& side : s.side) side.target_valid = false;
+            for (Side& side : s.side) side.target_valid = side.pull_active = false;
             if (pawn) HSVR_LOG("Arms: new character %ls", pawn->GetFullName().c_str());
+        }
+        hide_head_tick(cfg);
+        if (s.failed || !cfg.motion_arms)
+        {
+            pull_update(false);
+            log_status(cfg);
+            return;
         }
         if (!pawn) return;
         if (!s.ready)
@@ -1324,6 +1842,13 @@ namespace hsvr
         compute_targets();
         recorder_tick();
         if (s.enabled_by_key && !menu_up && s.hands_valid) sync_aim();
+        // The hook that pulls the hands only runs while the arms are driven; otherwise the
+        // game's own muscle settings are put back here.
+        if (!s.enabled_by_key || menu_up || !s.hands_valid || !cfg.hand_pull || (!s.side[0].target_valid && !s.side[1].target_valid))
+        {
+            pull_update(false);
+            s.head_applied = s.head_applied && s.enabled_by_key && !menu_up;
+        }
         log_status(cfg);
     }
 } // namespace hsvr
