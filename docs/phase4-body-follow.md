@@ -47,6 +47,34 @@ head). The first cut of this branch did the same and was never switched on. It n
 like headgear) and never touches a bone. **Never use HideBoneByName on this game's characters.**
 Where the sections below mention `HideBoneByName` or `hide_head_bone`, that is the removed way.
 
+## Eleventh cut (2026-11-16): crouch is the player's own
+
+Matthew on the tenth cut: "crouching breaks in more was then i can type." (No word against the wrists
+or the walking.) Crouch had not been in the self-test. His log during crouches: the game's
+`Is Crouched??` on for long stretches, the view dropping and returning at odd moments, the hips
+pushed up 35 to 48 cm against the game's own crouch animation, consciousness falling from 100 to 50
+within three seconds, the character moved 17 to 37 cm at a time "by something else" a dozen times, and
+hands lost 1 to 5 m away and brought back. From the decompile: the game's crouch is a toggle on the
+button, holding it starts a `Dolphin Dive`, and crouch feeds the hip height and several balance terms.
+
+- `own_crouch` (1): while the body is placed the crouch button (LS on the virtual gamepad) is not passed
+  to the game at all; it toggles `shared().own_crouch`, which lowers the view by `crouch_view_drop_cm`
+  (40) over a quarter of a second. Hip height follows the head as always, so the body crouches with the
+  view. The game's crouch, its dive and its hip animation never start. Real ducking is unchanged.
+- `no_self_hits` (1): what a hand holds no longer collides with the player's own body, through the
+  game's own `CollisionDisablerFunctionLibrary:DisableCollision_SkeletalVsSingleBody(Mesh, Rigid Bones,
+  weapon BaseMesh, -1)` (the game only does this for the hand and forearm; with 1:1 arms and a squat
+  the sword met the knees).
+- Self-test part 10, "crouch button": crouched 9 s with low swings across the knees and a short walk,
+  then up. Measured: view down 40 cm, hips down 40 cm, head 0.0 cm from the headset's place, hands 1.9 /
+  0.1 cm from the controllers, nothing moved the character, weapon held, the game's crouch never on, up
+  again at the end. The consciousness check now looks for a sudden drop (a blow), because the number
+  drifts by itself (100 to 92 over a run, even standing still; cause not known, see below).
+- Passed 34 of 34 (`C:\dev\hsvr-test\surgery\selftest-pass-3.log`).
+- Open: the slow drift of `Consciousness` while the body is placed (about a point every 2 s while the
+  arms work, recovering while walking). It may be the game's stamina model; if Matthew reports fading
+  or passing out for no reason, look at what feeds `Consciousness` in `Willie_BP_C.kismet.txt`.
+
 ## Tenth cut (2026-11-16): wrist turning and a walking rhythm
 
 Matthew on the ninth cut (the first build he got after a passed self-test): "i twisted my wrists but

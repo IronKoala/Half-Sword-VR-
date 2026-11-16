@@ -321,6 +321,8 @@ namespace hsvr
         flag("kinematic_hands", c.kinematic_hands);
         flag("free_wrists", c.free_wrists);
         flag("own_legs", c.own_legs);
+        flag("own_crouch", c.own_crouch);
+        flag("no_self_hits", c.no_self_hits);
         flag("hand_turn_servo", c.hand_turn_servo);
         num("hand_turn_seconds", c.hand_turn_seconds);
         num("hand_turn_mass_kg", c.hand_turn_mass_kg);

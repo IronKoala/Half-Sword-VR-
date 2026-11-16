@@ -559,6 +559,7 @@ namespace hsvr
 
         void before_body_update();
         void before_muscles_update();
+        void no_self_hits_update();
         bool body_set_simulate(const wchar_t* bone, bool simulate);
         // The tick function of the character's physical animation component (its "muscles"). Our
         // settings for the hands are written immediately before it runs: the game's own script
@@ -2780,8 +2781,12 @@ namespace hsvr
             {
                 // The crouch button: the game's crouch state lowers the view (smoothly), so the
                 // player crouches with the character instead of watching it crouch.
+                // With own_crouch the button toggles our own flag (controller_input.cpp); otherwise the
+                // game's crouch state is followed.
                 bool* crouched = s.pawn ? s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Is Crouched??")) : nullptr;
-                double want = active && crouched && *crouched && !r.crouch_held ? std::max(0.0, std::min(70.0, cfg.crouch_view_drop_cm)) : 0.0;
+                bool crouching = cfg.own_crouch ? shared().own_crouch.load() : (crouched && *crouched && !r.crouch_held);
+                if (!active || !s.kin_active) shared().own_crouch.store(false);
+                double want = active && crouching ? std::max(0.0, std::min(70.0, cfg.crouch_view_drop_cm)) : 0.0;
                 double have = (double)shared().view_drop_cm.load();
                 double step = 160.0 * std::max(dt, 0.0);
                 if (!active) have = 0.0;
@@ -2947,8 +2952,12 @@ namespace hsvr
             bool finished = false;
             double start = 0, last = 0;
             int part = -1;
-            TestPart parts[9] = {{"settle", 6}, {"hands still", 6}, {"hands move slowly", 8}, {"fast swings", 8}, {"striking the floor while ducked", 8},
-                                 {"hands still again", 4}, {"twisting the wrists fast", 6}, {"walking", 8}, {"turning", 4}};
+            TestPart parts[10] = {{"settle", 6}, {"hands still", 6}, {"hands move slowly", 8}, {"fast swings", 8}, {"striking the floor while ducked", 8},
+                                  {"hands still again", 4}, {"twisting the wrists fast", 6}, {"walking", 8}, {"turning", 4},
+                                  {"crouch button: crouched, swinging, walking, then up", 12}};
+            double awake_start = -1, awake_min = 1000, awake_ref = -1, awake_drop_max = 0;
+            double crouch_drop_max = 0, crouch_hips_min = 0, crouch_view_end = -1, crouch_head_err_max = 0;
+            bool game_crouched = false;
             double weapon_base_sum = 0;
             int weapon_base_n = 0;
             Vec3 last_actor;
@@ -3004,7 +3013,7 @@ namespace hsvr
             t.last = now;
             double elapsed = now - t.start, begin = 0.0;
             int part = -1;
-            for (int i = 0; i < 9; ++i)
+            for (int i = 0; i < 10; ++i)
             {
                 if (elapsed < begin + t.parts[i].seconds)
                 {
@@ -3094,6 +3103,19 @@ namespace hsvr
                 line(mean(walk, 1) < 6.0 && mean(walk, 0) < 6.0, "walking: hands %.1f / %.1f cm from the controllers on average (limit 6)", mean(walk, 1), mean(walk, 0));
                 line(walk.thrown < 5.0 && walk.undone == 0, "walking: character moved by something else %.0f cm, taken back %d times", walk.thrown, walk.undone);
                 line(turn.steps >= 2, "turning: %d steps taken (at least 2)", turn.steps);
+                {
+                    const TestPart& crouch = t.parts[9];
+                    line(t.crouch_drop_max > 35.0 && t.crouch_drop_max < 45.0, "crouch button: the view went down %.0f cm (40 expected)", t.crouch_drop_max);
+                    line(t.crouch_hips_min < -30.0, "crouch button: the hips went down %.0f cm with it (at least 30)", -t.crouch_hips_min);
+                    line(t.crouch_head_err_max < 3.0, "crouch button: the head stayed at the headset's place (%.1f cm off at most, limit 3)", t.crouch_head_err_max);
+                    line(t.crouch_view_end >= 0 && t.crouch_view_end < 1.0, "crouch button: back up afterwards (view %.0f cm down at the end)", t.crouch_view_end);
+                    line(!t.game_crouched, "crouch button: the game's own crouch stayed out of it");
+                    line(mean(crouch, 1) < 8.0 && mean(crouch, 0) < 8.0, "crouched, swinging and walking: hands %.1f / %.1f cm from the controllers on average (limit 8)", mean(crouch, 1), mean(crouch, 0));
+                    line(crouch.thrown < 5.0 && crouch.undone == 0, "crouched: character moved by something else %.0f cm, taken back %d times", crouch.thrown, crouch.undone);
+                    if (armed) line(crouch.weapon_held, "crouched: weapon still held");
+                    line(t.awake_drop_max < 6.0, "nothing struck the character during the test (largest sudden drop in consciousness %.0f, limit 6; it drifted from %.0f to %.0f at its lowest by itself)",
+                         t.awake_drop_max, t.awake_start, t.awake_min);
+                }
                 line(s.side[0].rescues + s.side[1].rescues == 0, "no hand was lost and had to be brought back (%d times)", s.side[0].rescues + s.side[1].rescues);
                 line(turn.err_max[1] < 8.0 && turn.err_max[0] < 8.0, "turning: hands %.1f / %.1f cm from the controllers at most (limit 8)", turn.err_max[1], turn.err_max[0]);
                 const char* verdict = failures ? "FAILED" : (armed ? "PASSED" : "PASSED WITHOUT A WEAPON (weapon checks not run)");
@@ -3110,7 +3132,7 @@ namespace hsvr
             if (part != t.part)
             {
                 t.part = part;
-                HSVR_LOG("Test: part %d of 9: %s", part + 1, t.parts[part].name);
+                HSVR_LOG("Test: part %d of 10: %s", part + 1, t.parts[part].name);
             }
             shared().selftest_phase.store(part);
             shared().selftest_phase_time.store((float)(elapsed - begin));
@@ -3127,11 +3149,38 @@ namespace hsvr
             {
                 // Walking is done by controller_input.cpp: the virtual gamepad's left stick.
             }
+            else if (part == 9)
+            {
+                // The crouch button's own flag: down for 9 s (the pretend right hand swings low for
+                // part of it and the stick walks, see vr_present.cpp and controller_input.cpp), then up.
+                shared().own_crouch.store(elapsed - begin > 0.5 && elapsed - begin < 9.5);
+                t.crouch_drop_max = std::max(t.crouch_drop_max, (double)shared().view_drop_cm.load());
+                t.crouch_hips_min = std::min(t.crouch_hips_min, s.pelvis_drop);
+                if (elapsed - begin > 11.5) t.crouch_view_end = (double)shared().view_drop_cm.load();
+                if (bool* crouched = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Is Crouched??")))
+                {
+                    if (*crouched) t.game_crouched = true;
+                }
+                Xf head_now;
+                if (s.have_head_target && elapsed - begin > 2.0 && elapsed - begin < 9.0 && socket_transform(s.body, make_name(L"head"), RTS_World, head_now))
+                    t.crouch_head_err_max = std::max(t.crouch_head_err_max, length(head_now.t - s.head_target_world));
+            }
             else if (part == 8)
             {
                 UObject* controller = object_property(s.pawn, STR("Controller"));
                 ue::FRotator* rotation = controller ? controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")) : nullptr;
                 if (rotation) rotation->Yaw = normalize_axis(rotation->Yaw + 60.0 * dt);
+            }
+            if (s.consciousness >= 0)
+            {
+                if (t.awake_start < 0) t.awake_start = t.awake_ref = s.consciousness;
+                t.awake_min = std::min(t.awake_min, s.consciousness);
+                // Consciousness drifts by itself (a point every second or two, down while the arms
+                // work and back up while walking; it did so standing still at the start of every
+                // run). A blow is a sudden drop: more than the drift allows within a moment.
+                double change = s.consciousness - t.awake_ref;
+                t.awake_ref += change > 0 ? change : std::max(change, -2.5 * dt);
+                t.awake_drop_max = std::max(t.awake_drop_max, t.awake_ref - s.consciousness);
             }
             // ---- what is measured ----
             TestPart& p = t.parts[part];
@@ -3409,6 +3458,8 @@ namespace hsvr
                 pull_update(arms);
             }
             s.placed = s.kin_active || s.hold_active;
+            shared().body_placed.store(s.kin_active);
+            if (s.kin_active && cfg.no_self_hits) no_self_hits_update();
             learn_head_axes();
             if (!stale) learn_rest();
 
@@ -3496,6 +3547,63 @@ namespace hsvr
                 set_parms[s_add] = 0;
                 memcpy(set_parms + s_bone, &side.hand_name, sizeof(FName));
                 s.body->ProcessEvent(set_fn, set_parms);
+            }
+        }
+
+        // What the player holds stops colliding with the player's own body, through the game's own
+        // function for it (CollisionDisablerFunctionLibrary, which the game uses for the weapon
+        // against the hand and forearm only). Done once per held object.
+        void no_self_hits_update()
+        {
+            State& s = g_state;
+            static UObject* library = nullptr;
+            static UObject* done[2] = {nullptr, nullptr};
+            static UObject* done_pawn = nullptr;
+            if (done_pawn != s.pawn)
+            {
+                done_pawn = s.pawn;
+                done[0] = done[1] = nullptr;
+            }
+            for (int k = 0; k < 2; ++k)
+            {
+                const TCHAR* property = k ? STR("Weapon R") : STR("Weapon L");
+                UObject* weapon = s.pawn->GetPropertyByNameInChain(property) ? object_property(s.pawn, property) : nullptr;
+                UObject* part = weapon && weapon->GetPropertyByNameInChain(STR("BaseMesh")) ? object_property(weapon, STR("BaseMesh")) : nullptr;
+                if (!part || part == done[k]) continue;
+                done[k] = part;
+                if (!library) library = UObjectGlobals::FindObject(STR("CollisionDisablerFunctionLibrary"), STR("Default__CollisionDisablerFunctionLibrary"));
+                UFunction* fn = library ? library->GetFunctionByNameInChain(STR("DisableCollision_SkeletalVsSingleBody")) : nullptr;
+                FProperty* bones = s.pawn->GetPropertyByNameInChain(STR("Rigid Bones"));
+                if (!fn || !bones || fn->GetParmsSize() > 64)
+                {
+                    HSVR_LOG("Hands: the game's collision switch was not found; the %s weapon can still hit the player's own body", k ? "right" : "left");
+                    continue;
+                }
+                // Parameters in order: the skeletal mesh, its bone names (an array), the single body, a duration (-1 = for good).
+                alignas(16) uint8_t parms[64] = {};
+                int index = 0;
+                bool ok = true;
+                for (FProperty* p : fn->ForEachProperty())
+                {
+                    uint8_t* at = parms + p->GetOffset_Internal();
+                    if (index == 0 && p->GetSize() == 8) memcpy(at, &s.body, 8);
+                    else if (index == 1 && p->GetSize() == 16) memcpy(at, reinterpret_cast<uint8_t*>(s.pawn) + bones->GetOffset_Internal(), 16); // the pawn's own array, borrowed
+                    else if (index == 2 && p->GetSize() == 8) memcpy(at, &part, 8);
+                    else if (index == 3 && p->GetSize() == 4)
+                    {
+                        int32_t forever = -1;
+                        memcpy(at, &forever, 4);
+                    }
+                    else ok = false;
+                    ++index;
+                }
+                if (!ok || index != 4)
+                {
+                    HSVR_LOG("Hands: the game's collision switch does not take the expected parameters; left alone");
+                    continue;
+                }
+                library->ProcessEvent(fn, parms);
+                HSVR_LOG("Hands: what the %s hand holds no longer collides with the player's own body", k ? "right" : "left");
             }
         }
 
@@ -3685,6 +3793,7 @@ namespace hsvr
             s.placed = s.kin_active || s.hold_active;
         }
         if (!s.enabled_by_key || !cfg.kinematic_body || !cfg.body_follow) kinematic_update(false, !s.enabled_by_key ? "VR controls off" : "switched off in the settings");
+        if (!s.kin_active || !s.ready) shared().body_placed.store(false);
         log_status(cfg);
     }
 } // namespace hsvr

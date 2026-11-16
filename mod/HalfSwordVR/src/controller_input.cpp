@@ -970,12 +970,34 @@ namespace hsvr
             pad.rx = axes[2];
             pad.ry = axes[3];
         }
+        if (cfg.own_crouch && shared().body_placed.load() && !vr_off)
+        {
+            // The crouch button (left stick press, LS) toggles the player's own crouch and is not
+            // passed on: the game's crouch would move the character's hips by itself.
+            static bool was_down = false;
+            bool down = (pad.buttons & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
+            if (down && !was_down)
+            {
+                bool now_crouched = !shared().own_crouch.load();
+                shared().own_crouch.store(now_crouched);
+                HSVR_LOG(now_crouched ? "Pad: crouch button: crouching (the view goes down with the body)" : "Pad: crouch button: standing up");
+            }
+            was_down = down;
+            pad.buttons &= (WORD)~XINPUT_GAMEPAD_LEFT_THUMB;
+        }
         if (cfg.dev_selftest && shared().selftest_phase.load() == 7)
         {
             // Self-test, "walking": the left stick forward for 2 s, back for 2 s, twice, through
             // the same virtual gamepad the real controllers use.
             pad.active = true;
             pad.ly = ((int)(shared().selftest_phase_time.load() / 2.0f) % 2 == 0) ? 1.0f : -1.0f;
+        }
+        if (cfg.dev_selftest && shared().selftest_phase.load() == 9)
+        {
+            // Self-test, crouched: a short walk forward and back at half stick.
+            float pt = shared().selftest_phase_time.load();
+            pad.active = true;
+            pad.ly = pt > 6.0f && pt < 7.5f ? 0.5f : (pt >= 7.5f && pt < 9.0f ? -0.5f : 0.0f);
         }
         {
             std::lock_guard<std::mutex> lock(g_pad_mutex);

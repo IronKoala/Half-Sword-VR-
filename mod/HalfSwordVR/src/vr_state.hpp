@@ -94,6 +94,10 @@ namespace hsvr
         std::atomic<bool> vr_controls_off{false};
         // The crouch button: how far the view is lowered right now, cm (game thread writes and reads).
         std::atomic<float> view_drop_cm{0.0f};
+        // The placed body (arm_control.cpp) is active this frame, and the player's own crouch
+        // (toggled by the crouch button, which is then kept from the game).
+        std::atomic<bool> body_placed{false};
+        std::atomic<bool> own_crouch{false};
         // Self-test (dev_selftest): which part of the test is running (-1 = none), seconds into it,
         // and how far the pretend headset is lowered, metres.
         std::atomic<int> selftest_phase{-1};

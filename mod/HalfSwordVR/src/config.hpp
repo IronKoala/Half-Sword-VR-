@@ -213,6 +213,13 @@ namespace hsvr
         bool hand_turn_servo = true;
         double hand_turn_seconds = 0.03;
         double hand_turn_mass_kg = 2.0;
+        // 1 = with the placed body the crouch button is the player's own crouch: it lowers the view
+        // (crouch_view_drop_cm) and the body follows; the game never hears the button, so its own
+        // crouch (a different hip animation, and a dive when the button is held) stays out of it.
+        bool own_crouch = true;
+        // 1 = what the player holds does not collide with the player's own body (the game lets a
+        // sword hit its wielder's legs; with 1:1 arms and a squat that happens constantly).
+        bool no_self_hits = true;
         // 1 = the legs are the mod's own: feet stay planted on the ground and step when the body
         // has moved step_length_cm past them (or turned), lifting step_height_cm.
         bool own_legs = true;

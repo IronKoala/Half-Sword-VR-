@@ -2660,6 +2660,14 @@ float4 PSMain(VSOut i) : SV_Target
                         oz = -0.45f;
                         tilt = (20.0f + 50.0f * std::sin(two_pi * 1.2f * pt)) * (float)kDegToRad;
                     }
+                    else if (phase == 9 && h == 1 && pt > 2.0f && pt < 6.0f)
+                    {
+                        // Crouched: swings across the knees, where a squatting player's own legs are.
+                        ox = 0.10f + 0.35f * std::sin(two_pi * 1.2f * pt);
+                        oy = -0.45f + 0.10f * std::cos(two_pi * 1.2f * pt);
+                        oz = -0.40f;
+                        tilt = (-20.0f + 40.0f * std::sin(two_pi * 1.2f * pt)) * (float)kDegToRad;
+                    }
                     else if (phase == 6)
                     {
                         // Fast wrist work: the handle whipped up and down through 100 degrees.
