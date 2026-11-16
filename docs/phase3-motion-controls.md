@@ -184,3 +184,17 @@ A grip press used by a gesture is not passed on as the game's grab.
 Kick: right B (`kick_on_b`), replacing thrust on B (thrust stays on the right stick press).
 Menu pointer: the spot is held still while the trigger is down (the first test showed clicks
 landing 50 to 100 px from where they started).
+
+### Picking things up and eating (2026-11-16)
+
+Matthew could not pick up a dropped sword. The game's own grab (Grab Left/Right on LB/RB) searches
+for a spot and reaches there with its animated arm, which motion arms override, so the reach never
+lands. Weapons and food are both `ModularWeaponBP_C` (food has `Consumable` set). Now an empty hand
+that squeezes away from a holster spot looks for the nearest such object not in anyone's hands or
+sheaths, measured from the physical hand bone (`hand_r` / `hand_l`) to the object's `Grip`
+component, within `pickup_radius_m` (30 cm). It then calls `Grab Specific Object R H / L H`
+(`BaseMesh`, grip location; 32 bytes of parameters, as logged) and `Pick Up Right / Left Event`,
+and logs what the hand holds afterwards. With nothing in reach, the squeeze goes to the game's own
+grab (enemies, ledges). Food held within 15 cm of the eyes calls `Eat Held Food` (only if it takes no
+parameters), at most every 2 s. Switches: `pickup`, `pickup_radius_m`, `eat_at_mouth`.
+Finger tracking: not started.

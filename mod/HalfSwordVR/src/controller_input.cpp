@@ -612,6 +612,120 @@ namespace hsvr
             return weapon && *weapon;
         }
 
+        // ---- picking things up --------------------------------------------------------------------
+        // Everything that can be held (weapons, and food such as bread or blutwine, which are the
+        // same kind of object with "Consumable" set) is a ModularWeaponBP_C. The game's own grab
+        // reaches with its animated arm towards a spot it searches for; with motion arms the arm is
+        // the player's, so that reach never lands. Instead, an empty hand that squeezes near such an
+        // object asks the game to grab exactly that object (Grab Specific Object R H / L H, the
+        // game's own grab with a given target) and then to pick it up (Pick Up Right / Left Event).
+        struct Vec
+        {
+            double X, Y, Z;
+        };
+        struct SocketParams
+        {
+            FName InSocketName;
+            Vec ReturnValue;
+        };
+        struct LocationParams
+        {
+            Vec ReturnValue;
+        };
+        struct GrabParams
+        {
+            UObject* GrabComponent;
+            Vec NewLocation;
+        };
+
+        bool hand_world(UObject* pawn, int hand, Vec& out)
+        {
+            UObject** mesh = pawn->GetValuePtrByPropertyNameInChain<UObject*>(STR("Mesh"));
+            if (!mesh || !*mesh) return false;
+            UFunction* fn = (*mesh)->GetFunctionByNameInChain(STR("GetSocketLocation"));
+            if (!fn) return false;
+            SocketParams p{};
+            p.InSocketName = FName(hand ? STR("hand_r") : STR("hand_l"), FNAME_Add);
+            (*mesh)->ProcessEvent(fn, &p);
+            out = p.ReturnValue;
+            return true;
+        }
+
+        bool component_world(UObject* component, Vec& out)
+        {
+            UFunction* fn = component ? component->GetFunctionByNameInChain(STR("K2_GetComponentLocation")) : nullptr;
+            if (!fn) return false;
+            LocationParams p{};
+            component->ProcessEvent(fn, &p);
+            out = p.ReturnValue;
+            return true;
+        }
+
+        UObject* object_at(UObject* owner, const TCHAR* name)
+        {
+            UObject** value = owner ? owner->GetValuePtrByPropertyNameInChain<UObject*>(name) : nullptr;
+            return value ? *value : nullptr;
+        }
+
+        // True when a hand picked something up.
+        bool pick_up_near(UObject* pawn, int hand, const Config& cfg)
+        {
+            Vec at{};
+            if (!hand_world(pawn, hand, at)) return false;
+            // Things that are already in someone's hands or sheaths are not on offer.
+            std::vector<UObject*> taken;
+            std::vector<UObject*> fighters;
+            UObjectGlobals::FindAllOf(STR("Willie_BP_C"), fighters);
+            static const TCHAR* held[] = {STR("Weapon R"), STR("Weapon L"), STR("Weapon Slot R 1"), STR("Weapon Slot R 2"),
+                                          STR("Weapon Slot L 1"), STR("Weapon Slot L 2"), STR("Weapon Slot Back")};
+            for (UObject* f : fighters)
+                for (const TCHAR* n : held)
+                    if (UObject* w = object_at(f, n)) taken.push_back(w);
+            std::vector<UObject*> items;
+            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), items);
+            UObject* best = nullptr;
+            UObject* best_component = nullptr;
+            Vec best_at{};
+            double best_d = cfg.pickup_radius_m * 100.0;
+            for (UObject* item : items)
+            {
+                if (std::find(taken.begin(), taken.end(), item) != taken.end()) continue;
+                UObject* grip = object_at(item, STR("Grip"));
+                UObject* base = object_at(item, STR("BaseMesh"));
+                if (!base) continue;
+                Vec where{};
+                if (!component_world(grip ? grip : base, where)) continue;
+                double dx = where.X - at.X, dy = where.Y - at.Y, dz = where.Z - at.Z;
+                double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (d < best_d)
+                {
+                    best_d = d;
+                    best = item;
+                    best_component = base;
+                    best_at = where;
+                }
+            }
+            if (!best)
+            {
+                HSVR_LOG("Gesture: %s hand squeezed; nothing to pick up within %.0f cm (%d things in the level)", hand ? "right" : "left",
+                         cfg.pickup_radius_m * 100.0, (int)items.size());
+                return false;
+            }
+            HSVR_LOG("Gesture: %s hand picks up %ls (%.0f cm away)", hand ? "right" : "left", best->GetFullName().c_str(), best_d);
+            UFunction* grab = pawn->GetFunctionByNameInChain(hand ? STR("Grab Specific Object R H") : STR("Grab Specific Object L H"));
+            if (!grab || grab->GetParmsSize() != (int)sizeof(GrabParams))
+            {
+                HSVR_LOG("Gesture: the game's grab-this-object event is missing or changed; not picked up");
+                return false;
+            }
+            GrabParams params{best_component, best_at};
+            pawn->ProcessEvent(grab, &params);
+            call_event(pawn, hand ? STR("Pick Up Right Event") : STR("Pick Up Left Event"));
+            UObject* now_held = object_at(pawn, hand ? STR("Weapon R") : STR("Weapon L"));
+            HSVR_LOG("Gesture: after picking up, the %s hand holds %ls", hand ? "right" : "left", now_held ? now_held->GetFullName().c_str() : L"nothing (yet)");
+            return true;
+        }
+
         struct GestureState
         {
             bool grip_down[2]{false, false};
@@ -663,9 +777,12 @@ namespace hsvr
                     g.consumed[h] = call_event(pawn, STR("Swap Weapons"));
                     continue;
                 }
-                if (!have_head) continue;
-                const char* zone = holster_zone(hand, head, yaw, cfg);
-                if (!zone) continue;
+                const char* zone = have_head ? holster_zone(hand, head, yaw, cfg) : nullptr;
+                if (!zone)
+                {
+                    if (!full && cfg.pickup) g.consumed[h] = pick_up_near(pawn, h, cfg);
+                    continue;
+                }
                 if (full)
                 {
                     HSVR_LOG("Gesture: %s hand puts its weapon away (%s)", h ? "right" : "left", zone);
@@ -675,6 +792,39 @@ namespace hsvr
                 {
                     HSVR_LOG("Gesture: %s hand draws a weapon (%s)", h ? "right" : "left", zone);
                     g.consumed[h] = call_event(pawn, side == L'R' ? STR("Unsheath R Event") : STR("Unsheath L Event"));
+                }
+            }
+            // Eating: food held up to the mouth (within 15 cm of the eyes) is eaten, once every 2 s.
+            static double next_bite = 0.0;
+            if (active && have_head && cfg.eat_at_mouth && now_seconds() >= next_bite)
+            {
+                for (int h = 0; h < 2; ++h)
+                {
+                    const XrHandRaw& hand = hands[h];
+                    UObject* item = object_at(pawn, h ? STR("Weapon R") : STR("Weapon L"));
+                    if (!hand.valid || !item) continue;
+                    float dx = hand.px - head[0], dy = hand.py - head[1], dz = hand.pz - head[2];
+                    if (dx * dx + dy * dy + dz * dz > 0.15f * 0.15f) continue;
+                    FProperty* consumable = item->GetPropertyByNameInChain(STR("Consumable"));
+                    bool food = false;
+                    if (consumable)
+                    {
+                        auto* flag = static_cast<FBoolProperty*>(consumable);
+                        food = (*(reinterpret_cast<uint8_t*>(item) + consumable->GetOffset_Internal() + flag->GetByteOffset()) & flag->GetFieldMask()) != 0;
+                    }
+                    if (!food) continue;
+                    next_bite = now_seconds() + 2.0;
+                    UFunction* eat = pawn->GetFunctionByNameInChain(STR("Eat Held Food"));
+                    if (eat && eat->GetParmsSize() == 0)
+                    {
+                        HSVR_LOG("Gesture: %s hand holds food to the mouth; eating", h ? "right" : "left");
+                        call_event(pawn, STR("Eat Held Food"));
+                    }
+                    else
+                    {
+                        HSVR_LOG("Gesture: food at the mouth, but Eat Held Food %s; not called", eat ? "takes parameters" : "is missing");
+                    }
+                    break;
                 }
             }
             // Kick on the right controller's B.

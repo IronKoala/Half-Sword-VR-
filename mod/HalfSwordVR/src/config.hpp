@@ -178,6 +178,11 @@ namespace hsvr
         double swap_distance_m = 0.15;
         // B on the right controller kicks.
         bool kick_on_b = true;
+        // An empty hand squeezing near a weapon or food picks it up (within this distance of the hand).
+        bool pickup = true;
+        double pickup_radius_m = 0.30;
+        // Food held up to the mouth is eaten.
+        bool eat_at_mouth = true;
         // The right trigger starts an 8-second arm recording (arms_record_N.csv). Off by default now
         // that the trigger guards.
         bool arms_recorder = false;
