@@ -559,7 +559,13 @@ namespace hsvr
             GetClientRect(ps.window, &client);
             int x = (int)std::lround(u * (float)(client.right - 1));
             int y = (int)std::lround(v * (float)(client.bottom - 1));
-            if (x != ps.last_x || y != ps.last_y)
+            if (ps.clicking)
+            {
+                // Hold the spot still during a click: pulling the trigger moves the controller.
+                x = ps.last_x;
+                y = ps.last_y;
+            }
+            else if (x != ps.last_x || y != ps.last_y)
             {
                 ps.last_x = x;
                 ps.last_y = y;
@@ -576,6 +582,105 @@ namespace hsvr
                 HSVR_LOG("Controller: %s at (%d, %d) on the menu panel", down ? "click" : "release", x, y);
             }
             return true;
+        }
+
+        // ---- body holsters, hand-to-hand swaps and kick -----------------------------------------
+        // Calls the character's own events, so the game's sheathing, drawing and swapping run as
+        // they do on mouse and keyboard (found in the log: all take no parameters).
+        bool call_event(UObject* pawn, const TCHAR* name)
+        {
+            UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
+            if (!fn)
+            {
+                HSVR_LOG("Gesture: %ls not found on the character", name);
+                return false;
+            }
+            alignas(16) uint8_t params[64] = {};
+            if (fn->GetParmsSize() > (int)sizeof(params))
+            {
+                HSVR_LOG("Gesture: %ls takes %d bytes of parameters; not called", name, (int)fn->GetParmsSize());
+                return false;
+            }
+            pawn->ProcessEvent(fn, params);
+            HSVR_LOG("Gesture: called %ls", name);
+            return true;
+        }
+
+        bool holds_weapon(UObject* pawn, int hand)
+        {
+            UObject** weapon = pawn->GetValuePtrByPropertyNameInChain<UObject*>(hand ? STR("Weapon R") : STR("Weapon L"));
+            return weapon && *weapon;
+        }
+
+        struct GestureState
+        {
+            bool grip_down[2]{false, false};
+            bool consumed[2]{false, false}; // this grip press was used by a gesture; keep it from the game
+            bool kick_down = false;
+            const char* last_zone[2]{"", ""};
+        };
+        GestureState g_gesture;
+
+        // Which holster zone a hand is in, relative to the head: "hip" (either side, below the
+        // belt line), "back" (over the shoulder, behind the head), or nullptr.
+        const char* holster_zone(const XrHandRaw& hand, const float head[3], float yaw, const Config& cfg)
+        {
+            float dx = hand.px - head[0], dy = hand.py - head[1], dz = hand.pz - head[2];
+            // Into the head's frame: x right, z backwards (OpenXR), heading `yaw` about +Y.
+            float c = std::cos(yaw), s = std::sin(yaw);
+            float x = c * dx - s * dz;
+            float z = s * dx + c * dz;
+            float side = std::fabs(x);
+            if (dy < -(float)cfg.holster_hip_below_m && dy > -1.0f && side > 0.05f && side < 0.45f && std::fabs(z) < 0.30f) return "hip";
+            if (dy > -0.30f && dy < 0.25f && z > (float)cfg.holster_back_behind_m && side < 0.35f) return "back";
+            return nullptr;
+        }
+
+        void gestures(UObject* pawn, const XrHandRaw hands[2], bool in_menu, const Config& cfg)
+        {
+            GestureState& g = g_gesture;
+            bool active = cfg.controller_gestures && pawn && !in_menu && pawn->GetFunctionByNameInChain(STR("Kick Event"));
+            float head[3];
+            float yaw = 0;
+            bool have_head = vr_head_in_tracking(head, yaw);
+            for (int h = 0; h < 2; ++h)
+            {
+                const XrHandRaw& hand = hands[h];
+                bool down = g.grip_down[h] ? hand.squeeze > 0.4f : hand.squeeze > 0.6f;
+                bool pressed = down && !g.grip_down[h];
+                g.grip_down[h] = down;
+                if (!down) g.consumed[h] = false;
+                if (!active || !pressed || !hand.valid) continue;
+                const wchar_t side = h ? L'R' : L'L';
+                bool full = holds_weapon(pawn, h);
+                // Swap: an empty hand closes on the other hand while that one holds a weapon.
+                const XrHandRaw& other = hands[1 - h];
+                float ddx = hand.px - other.px, ddy = hand.py - other.py, ddz = hand.pz - other.pz;
+                float apart = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+                if (!full && other.valid && apart < (float)cfg.swap_distance_m && holds_weapon(pawn, 1 - h))
+                {
+                    HSVR_LOG("Gesture: %s hand takes the weapon from the other hand (hands %.0f cm apart)", h ? "right" : "left", apart * 100.0f);
+                    g.consumed[h] = call_event(pawn, STR("Swap Weapons"));
+                    continue;
+                }
+                if (!have_head) continue;
+                const char* zone = holster_zone(hand, head, yaw, cfg);
+                if (!zone) continue;
+                if (full)
+                {
+                    HSVR_LOG("Gesture: %s hand puts its weapon away (%s)", h ? "right" : "left", zone);
+                    g.consumed[h] = call_event(pawn, side == L'R' ? STR("R Hand Sheath Start") : STR("L Hand Sheath Start"));
+                }
+                else
+                {
+                    HSVR_LOG("Gesture: %s hand draws a weapon (%s)", h ? "right" : "left", zone);
+                    g.consumed[h] = call_event(pawn, side == L'R' ? STR("Unsheath R Event") : STR("Unsheath L Event"));
+                }
+            }
+            // Kick on the right controller's B.
+            bool kick = hands[1].button_upper;
+            if (active && cfg.kick_on_b && kick && !g.kick_down) call_event(pawn, STR("Kick Event"));
+            g.kick_down = kick;
         }
 
         const char* source_name(Source s)
@@ -642,6 +747,7 @@ namespace hsvr
         PadOut pad;
         if (have) mod_keys_on_controllers(hands, cfg);
         if (have) point_at_panel(hands, cfg, in_menu);
+        if (have) gestures(pawn, hands, in_menu, cfg);
         else vr_set_panel_pointer(-1.0f, -1.0f);
         if (have)
         {
@@ -653,12 +759,12 @@ namespace hsvr
             value[kRStickY] = shape_stick(hands[1].stick_y, cfg);
             value[kLTrigger] = hands[0].trigger;
             value[kRTrigger] = hands[1].trigger;
-            value[kLGrip] = hands[0].squeeze;
-            value[kRGrip] = hands[1].squeeze;
+            value[kLGrip] = g_gesture.consumed[0] ? 0.0f : hands[0].squeeze;
+            value[kRGrip] = g_gesture.consumed[1] ? 0.0f : hands[1].squeeze;
             value[kLLower] = hands[0].button_lower ? 1.0f : 0.0f;
             value[kLUpper] = hands[0].button_upper ? 1.0f : 0.0f;
             value[kRLower] = hands[1].button_lower ? 1.0f : 0.0f;
-            value[kRUpper] = hands[1].button_upper ? 1.0f : 0.0f;
+            value[kRUpper] = (hands[1].button_upper && !cfg.kick_on_b) ? 1.0f : 0.0f;
             value[kLClick] = hands[0].stick_click ? 1.0f : 0.0f;
             value[kRClick] = hands[1].stick_click ? 1.0f : 0.0f;
             value[kLMenu] = (hands[0].menu || hands[1].menu) ? 1.0f : 0.0f;
