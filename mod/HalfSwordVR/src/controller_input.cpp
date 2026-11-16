@@ -970,7 +970,7 @@ namespace hsvr
             pad.rx = axes[2];
             pad.ry = axes[3];
         }
-        if (cfg.dev_selftest && shared().selftest_phase.load() == 6)
+        if (cfg.dev_selftest && shared().selftest_phase.load() == 7)
         {
             // Self-test, "walking": the left stick forward for 2 s, back for 2 s, twice, through
             // the same virtual gamepad the real controllers use.

@@ -206,10 +206,17 @@ namespace hsvr
         // opens an arena): pretend hands hold still, move, swing, strike the floor; the character
         // walks and turns; numbers are checked and written to selftest_result.txt.
         bool dev_selftest = false;
+        // 1 = a physical hand is turned to the controller's rotation by setting its turning speed each
+        // frame (the error closed over hand_turn_seconds), not by the engine's drive, whose torque
+        // limit let a sword's weight leave the hand far behind a twisting wrist. What the hand
+        // holds slows the turning by its mass: about hand_turn_mass_kg halves it.
+        bool hand_turn_servo = true;
+        double hand_turn_seconds = 0.03;
+        double hand_turn_mass_kg = 2.0;
         // 1 = the legs are the mod's own: feet stay planted on the ground and step when the body
         // has moved step_length_cm past them (or turned), lifting step_height_cm.
         bool own_legs = true;
-        double step_length_cm = 20.0;
+        double step_length_cm = 14.0;
         double step_height_cm = 9.0;
         double kinematic_min_consciousness = 15.0;
         // 1 = the hips are lowered and the knees bent so the head can be at the headset's height.

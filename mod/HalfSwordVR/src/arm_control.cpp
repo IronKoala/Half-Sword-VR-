@@ -396,6 +396,8 @@ namespace hsvr
             Vec3 foot_home;
             Quat foot_rest_q;
             bool foot_planted = false, stepping = false;
+            bool gait_step = false; // this step belongs to the walking rhythm (timed by it)
+            Vec3 step_to;           // where the current step lands
             Vec3 foot_at, step_from; // world
             double foot_yaw = 0, step_from_yaw = 0, step_t = 0, step_duration = 0.2;
             // The game's grip joint for what this hand holds (rigid_grip): the component it was last
@@ -415,6 +417,10 @@ namespace hsvr
             double pull_check_cm = -1;  // the engine's own target for the hand versus ours
             // A physical hand that is far from its controller for a moment (caught behind something)
             // is set at the controller for a few frames and then let go again.
+            // Where the hand should be turned to (world), for the turning servo.
+            bool have_turn_target = false;
+            Quat turn_target;
+            double turn_err_deg = 0;
             int lost_frames = 0;
             double rescue_until = 0;
             int rescues = 0;
@@ -508,6 +514,8 @@ namespace hsvr
             Vec3 actor_world;           // the character's position this frame
             bool have_actor_world = false;
             Vec3 step_last_actor, step_velocity;
+            double gait_phase = 0;      // 0..1 over one full stride (left foot swings first, then right)
+            bool gait_moving = false;
             // hold_ground: where the character may be this frame at the most, and what was taken back.
             double ground_time = 0;
             double foreign_cm = 0;      // distance gone beyond its own speed lately
@@ -698,7 +706,7 @@ namespace hsvr
                 side.lower_name = side_name(L"lowerarm", side);
                 side.upper_name = side_name(L"upperarm", side);
                 side.pull_active = side.have_last_world = side.have_prev_wanted = false;
-                side.have_foot_home = side.foot_planted = side.stepping = false;
+                side.have_foot_home = side.foot_planted = side.stepping = side.gait_step = false;
                 side.wrist_freed = false;
                 side.grip_component = nullptr;
                 side.grip_locked = false;
@@ -1328,6 +1336,8 @@ namespace hsvr
                 side.last_error_cm = length(body_hand.t - asked.t);
                 side.last_error_deg = quat_angle_deg(body_hand.q, asked.q);
             }
+            side.turn_target = wanted.q;
+            side.have_turn_target = placed && !s.kin_hands && side.wrist_freed && side.rescue_until == 0.0;
             if (placed && !s.kin_hands && side.wrist_freed)
             {
                 double now = now_seconds();
@@ -2127,51 +2137,137 @@ namespace hsvr
                 }
                 away[k] = length(off);
             }
-            double trigger = speed < 8.0 ? 5.0 : std::max(5.0, cfg.step_length_cm); // standing still: feet come to rest under the body
-            int order[2] = {away[0] >= away[1] ? 0 : 1, away[0] >= away[1] ? 1 : 0};
-            for (int n = 0; n < 2; ++n)
+            // Two ways of stepping. Walking and running: a steady rhythm, like a real gait. The
+            // step rate rises with speed (about 1.7 steps a second at a stroll to 4.5 at a sprint),
+            // the feet take turns, and each lands ahead of the body by half the distance the body
+            // covers while that foot stands. Standing or shuffling: a foot steps only when the
+            // body has moved step_length_cm past it or turned well away. (The first version stepped
+            // every 20 cm whatever the speed: "a lot of steps really quickly", Matthew.)
+            bool moving = s.gait_moving ? speed > 18.0 : speed > 30.0;
+            double rate = std::max(1.7, std::min(4.5, 1.5 + speed / 100.0 * 0.5)); // steps a second
+            Vec3 heading = speed > 1.0 ? s.step_velocity * (1.0 / speed) : Vec3{};
+            if (moving && !s.gait_moving)
             {
-                int k = order[n];
-                Side& side = s.side[k];
-                Side& other = s.side[1 - k];
-                if (side.stepping) continue;
-                bool other_busy = other.stepping && other.step_t < 0.6;
-                bool turned = std::fabs(normalize_axis(s.actor_yaw - side.foot_yaw)) > 35.0;
-                bool overstretched = away[k] > std::max(40.0, cfg.step_length_cm * 2.2);
-                if ((!other_busy && (away[k] > trigger || turned)) || overstretched)
+                // Start with the foot that is further behind.
+                double behind[2] = {dot(home[0] - s.side[0].foot_at, heading), dot(home[1] - s.side[1].foot_at, heading)};
+                s.gait_phase = behind[0] >= behind[1] ? 0.0 : 0.5;
+            }
+            s.gait_moving = moving;
+            if (moving)
+            {
+                s.gait_phase += dt * rate * 0.5;
+                s.gait_phase -= std::floor(s.gait_phase);
+                double lead = std::min(45.0, speed / (2.0 * rate)); // half the ground covered during one stance
+                for (int k = 0; k < 2; ++k)
                 {
-                    side.stepping = true;
-                    side.step_from = side.foot_at;
-                    side.step_from_yaw = side.foot_yaw;
-                    side.step_t = 0;
-                    side.step_duration = std::max(0.13, std::min(0.30, 0.30 - speed / 1500.0));
-                    ++s.steps_taken;
-                    ++s.steps_total;
+                    Side& side = s.side[k];
+                    double begin = k == 0 ? 0.0 : 0.5;
+                    bool swinging = s.gait_phase >= begin && s.gait_phase < begin + 0.5;
+                    Vec3 plain_home = home[k] - s.step_velocity * 0.12; // without the standing-mode lead
+                    if (swinging && !(side.stepping && side.gait_step))
+                    {
+                        side.stepping = true;
+                        side.gait_step = true;
+                        side.step_from = side.foot_at;
+                        side.step_from_yaw = side.foot_yaw;
+                        ++s.steps_taken;
+                        ++s.steps_total;
+                    }
+                    if (side.stepping && side.gait_step)
+                    {
+                        if (swinging)
+                        {
+                            side.step_t = (s.gait_phase - begin) / 0.5;
+                            side.step_to = plain_home + heading * lead;
+                        }
+                        else
+                        {
+                            // The swing is over: the foot stands where it was heading.
+                            side.stepping = false;
+                            side.gait_step = false;
+                            side.foot_at = side.step_to;
+                            side.foot_yaw = s.actor_yaw;
+                        }
+                    }
+                    else if (!side.stepping)
+                    {
+                        // A standing foot left too far behind (a sudden change of direction) steps at once.
+                        Vec3 off = side.foot_at - plain_home;
+                        off.z = 0;
+                        if (length(off) > 80.0)
+                        {
+                            side.foot_at = plain_home;
+                            side.foot_yaw = s.actor_yaw;
+                        }
+                    }
                 }
             }
+            else
+            {
+                double trigger = std::max(5.0, cfg.step_length_cm);
+                int order[2] = {away[0] >= away[1] ? 0 : 1, away[0] >= away[1] ? 1 : 0};
+                for (int n = 0; n < 2; ++n)
+                {
+                    int k = order[n];
+                    Side& side = s.side[k];
+                    Side& other = s.side[1 - k];
+                    if (side.stepping)
+                    {
+                        if (side.gait_step)
+                        {
+                            // Stopped in mid-stride: finish this step by the clock, under the body.
+                            side.gait_step = false;
+                            side.step_duration = 0.18;
+                        }
+                        continue;
+                    }
+                    bool other_busy = other.stepping && other.step_t < 0.6;
+                    bool turned = std::fabs(normalize_axis(s.actor_yaw - side.foot_yaw)) > 35.0;
+                    bool overstretched = away[k] > 45.0;
+                    if ((!other_busy && (away[k] > trigger || turned)) || overstretched)
+                    {
+                        side.stepping = true;
+                        side.gait_step = false;
+                        side.step_from = side.foot_at;
+                        side.step_from_yaw = side.foot_yaw;
+                        side.step_t = 0;
+                        side.step_duration = 0.22;
+                        ++s.steps_taken;
+                        ++s.steps_total;
+                    }
+                }
+                for (Side& side : s.side)
+                {
+                    if (side.stepping && !side.gait_step)
+                    {
+                        side.step_t += dt / side.step_duration;
+                        side.step_to = home[&side - s.side];
+                        if (side.step_t >= 1.0)
+                        {
+                            side.stepping = false;
+                            side.foot_at = side.step_to;
+                            side.foot_yaw = s.actor_yaw;
+                        }
+                    }
+                }
+            }
+            double lift = std::max(0.0, cfg.step_height_cm) * std::min(2.0, 1.0 + speed / 300.0);
             for (int k = 0; k < 2; ++k)
             {
                 Side& side = s.side[k];
+                double ground = home[k].z; // the ground under the character
                 Vec3 at = side.foot_at;
                 if (side.stepping)
                 {
-                    side.step_t += dt / side.step_duration;
-                    double t = std::min(1.0, side.step_t);
+                    double t = std::max(0.0, std::min(1.0, side.step_t));
                     double ease = t * t * (3.0 - 2.0 * t);
-                    at = side.step_from + (home[k] - side.step_from) * ease;
-                    at.z = home[k].z + std::max(0.0, cfg.step_height_cm) * std::sin(kPi * t);
+                    at = side.step_from + (side.step_to - side.step_from) * ease;
+                    at.z = ground + lift * std::sin(kPi * t);
                     side.foot_yaw = side.step_from_yaw + normalize_axis(s.actor_yaw - side.step_from_yaw) * ease;
-                    if (side.step_t >= 1.0)
-                    {
-                        side.stepping = false;
-                        side.foot_at = home[k];
-                        side.foot_yaw = s.actor_yaw;
-                        at = side.foot_at;
-                    }
                 }
                 else
                 {
-                    side.foot_at.z = home[k].z; // the ground under the character
+                    side.foot_at.z = ground;
                     at = side.foot_at;
                 }
                 out[k] = {(quat_from_yaw_deg(side.foot_yaw) * side.foot_rest_q).normalized(), at};
@@ -2840,6 +2936,7 @@ namespace hsvr
             double seconds;
             int frames = 0;
             double err_sum[2] = {0, 0}, err_max[2] = {0, 0};
+            double turn_sum[2] = {0, 0}, turn_max[2] = {0, 0};
             double weapon_dev_max = 0, travelled = 0, thrown = 0;
             int undone = 0, steps = 0;
             bool weapon_held = true;
@@ -2850,8 +2947,8 @@ namespace hsvr
             bool finished = false;
             double start = 0, last = 0;
             int part = -1;
-            TestPart parts[8] = {{"settle", 6}, {"hands still", 6}, {"hands move slowly", 8}, {"fast swings", 8}, {"striking the floor while ducked", 8},
-                                 {"hands still again", 4}, {"walking", 8}, {"turning", 4}};
+            TestPart parts[9] = {{"settle", 6}, {"hands still", 6}, {"hands move slowly", 8}, {"fast swings", 8}, {"striking the floor while ducked", 8},
+                                 {"hands still again", 4}, {"twisting the wrists fast", 6}, {"walking", 8}, {"turning", 4}};
             double weapon_base_sum = 0;
             int weapon_base_n = 0;
             Vec3 last_actor;
@@ -2860,6 +2957,7 @@ namespace hsvr
             int undone_before = 0, steps_before = 0;
             bool placed_all_the_time = true, physical_hands = true, mesh_on_character = true;
             double walk_yaw = 0;
+            double draw_at = 0;
         };
         SelfTest g_test;
 
@@ -2885,12 +2983,28 @@ namespace hsvr
                 t.undone_before = s.ground_undone_total;
                 t.steps_before = s.steps_total;
                 HSVR_LOG("Test: starting (%s)", s.kin_active ? "the body is placed" : "the body was NOT placed after 12 s");
+                t.draw_at = now + 1.5;
+            }
+            if (t.draw_at > 0.0 && now >= t.draw_at)
+            {
+                t.draw_at = 0.0;
+                bool has_weapon = s.pawn->GetPropertyByNameInChain(STR("Weapon R")) && object_property(s.pawn, STR("Weapon R"));
+                if (!has_weapon)
+                {
+                    // An empty right hand: draw from the sheath with the game's own event, if there is one.
+                    UFunction* draw = s.pawn->GetFunctionByNameInChain(STR("Unsheath R Event"));
+                    if (draw && draw->GetParmsSize() == 0)
+                    {
+                        s.pawn->ProcessEvent(draw, nullptr);
+                        HSVR_LOG("Test: the right hand was empty; asked the game to draw a weapon from its sheath");
+                    }
+                }
             }
             double dt = std::min(0.1, now - t.last);
             t.last = now;
             double elapsed = now - t.start, begin = 0.0;
             int part = -1;
-            for (int i = 0; i < 8; ++i)
+            for (int i = 0; i < 9; ++i)
             {
                 if (elapsed < begin + t.parts[i].seconds)
                 {
@@ -2934,32 +3048,57 @@ namespace hsvr
                 const TestPart& swing = t.parts[3];
                 const TestPart& floor = t.parts[4];
                 const TestPart& again = t.parts[5];
-                const TestPart& walk = t.parts[6];
-                const TestPart& turn = t.parts[7];
+                const TestPart& twist = t.parts[6];
+                const TestPart& walk = t.parts[7];
+                const TestPart& turn = t.parts[8];
+                // The character only has a weapon if the player's own save gives it one in the hand
+                // or in a sheath (the test draws it); without one the weapon checks say nothing.
+                bool armed = t.weapon_base_n > 0;
+                if (!armed)
+                {
+                    HSVR_LOG("Test: the character had no weapon in this run; the weapon checks do not count");
+                    report += "NOTE  no weapon in this run: the weapon checks do not count\n";
+                }
                 line(t.placed_all_the_time, "body placed (not simulated) for the whole test");
                 line(t.mesh_on_character, "body mesh rides on the character");
                 line(t.physical_hands, "hands physical (wrists free), not the rigid fallback");
-                line(s.side[1].grip_locked, "weapon fixed rigidly in the right hand (grip joint locked; re-locked %d times)", s.side[1].grip_relocked);
+                if (armed) line(s.side[1].grip_locked, "weapon fixed rigidly in the right hand (grip joint locked; re-locked %d times)", s.side[1].grip_relocked);
                 line(mean(still, 1) >= 0 && mean(still, 1) < 2.5 && mean(still, 0) < 2.5, "hands still: right %.1f cm, left %.1f cm from the controllers on average (limit 2.5)", mean(still, 1), mean(still, 0));
-                line(still.weapon_dev_max < 2.0, "hands still: weapon moved %.1f cm in the hand at most (limit 2)", still.weapon_dev_max);
+                if (armed) line(still.weapon_dev_max < 2.0, "hands still: weapon moved %.1f cm in the hand at most (limit 2)", still.weapon_dev_max);
                 line(slow.err_max[1] < 6.0 && slow.err_max[0] < 6.0, "slow movement: right %.1f cm, left %.1f cm from the controllers at most (limit 6)", slow.err_max[1], slow.err_max[0]);
-                line(slow.weapon_dev_max < 3.0, "slow movement: weapon moved %.1f cm in the hand at most (limit 3)", slow.weapon_dev_max);
+                if (armed) line(slow.weapon_dev_max < 3.0, "slow movement: weapon moved %.1f cm in the hand at most (limit 3)", slow.weapon_dev_max);
                 line(mean(swing, 1) < 12.0, "fast swings: right hand %.1f cm from the controller on average, %.1f at most (limit 12 average)", mean(swing, 1), swing.err_max[1]);
-                line(swing.weapon_dev_max < 6.0 && swing.weapon_held, "fast swings: weapon moved %.1f cm in the hand at most (limit 6), still held: %s", swing.weapon_dev_max, swing.weapon_held ? "yes" : "NO");
+                if (armed) line(swing.weapon_dev_max < 6.0 && swing.weapon_held, "fast swings: weapon moved %.1f cm in the hand at most (limit 6), still held: %s", swing.weapon_dev_max, swing.weapon_held ? "yes" : "NO");
                 line(swing.thrown < 5.0 && swing.undone == 0, "fast swings: character moved by something else %.0f cm, taken back %d times (limit 5 cm, 0 times)", swing.thrown, swing.undone);
                 line(floor.thrown < 5.0 && floor.undone == 0, "striking the floor: character moved by something else %.0f cm, taken back %d times (limit 5 cm, 0 times)", floor.thrown, floor.undone);
-                line(floor.weapon_held, "striking the floor: weapon still held");
+                if (armed) line(floor.weapon_held, "striking the floor: weapon still held");
                 line(floor.err_max[1] > 3.0, "striking the floor: the hand was stopped (%.1f cm short of the controller at most; a hand that passes through the floor reads under 3)", floor.err_max[1]);
                 line(mean(again, 1) < 3.0 && again.weapon_dev_max < 3.0, "after the floor: right hand %.1f cm from the controller on average, weapon %.1f cm out of place (limits 3)", mean(again, 1), again.weapon_dev_max);
+                {
+                    double right = twist.frames ? twist.turn_sum[1] / twist.frames : -1.0, left = twist.frames ? twist.turn_sum[0] / twist.frames : -1.0;
+                    line(right >= 0 && right < 12.0 && left < 12.0, "twisting the wrists (100 degrees, 2.5 times a second): hands %.0f / %.0f degrees behind on average, %.0f / %.0f at most (limit 12 average)",
+                         right, left, twist.turn_max[1], twist.turn_max[0]);
+                    line(twist.err_max[1] < 6.0 && twist.err_max[0] < 6.0, "twisting the wrists: hands stayed in place (%.1f / %.1f cm at most, limit 6)", twist.err_max[1], twist.err_max[0]);
+                    double swing_turn = swing.frames ? swing.turn_sum[1] / swing.frames : -1.0;
+                    line(swing_turn < 12.0, "fast swings: right hand %.0f degrees behind the controller on average, %.0f at most (limit 12 average)", swing_turn, swing.turn_max[1]);
+                }
                 line(walk.travelled > 250.0, "walking: went %.0f cm (at least 250)", walk.travelled);
-                line(walk.steps >= 6, "walking: %d steps taken (at least 6)", walk.steps);
+                {
+                    // A gait, not a patter: at the roughly 4 to 6 m/s the stick gives, 3 to 4.5 steps a second.
+                    double seconds = walk.frames > 0 ? t.parts[7].seconds - 0.75 : 1.0;
+                    double per_second = walk.steps / seconds;
+                    // (The test reverses direction every 2 s, and each restart adds a step or two. The
+                    // first stepper, a new step every 20 cm, made about 10 a second here.)
+                    line(per_second >= 1.5 && per_second <= 7.0, "walking: %.1f steps a second (%d steps; between 1.5 and 7)", per_second, walk.steps);
+                }
                 line(mean(walk, 1) < 6.0 && mean(walk, 0) < 6.0, "walking: hands %.1f / %.1f cm from the controllers on average (limit 6)", mean(walk, 1), mean(walk, 0));
                 line(walk.thrown < 5.0 && walk.undone == 0, "walking: character moved by something else %.0f cm, taken back %d times", walk.thrown, walk.undone);
                 line(turn.steps >= 2, "turning: %d steps taken (at least 2)", turn.steps);
                 line(s.side[0].rescues + s.side[1].rescues == 0, "no hand was lost and had to be brought back (%d times)", s.side[0].rescues + s.side[1].rescues);
                 line(turn.err_max[1] < 8.0 && turn.err_max[0] < 8.0, "turning: hands %.1f / %.1f cm from the controllers at most (limit 8)", turn.err_max[1], turn.err_max[0]);
-                HSVR_LOG("Test: %s (%d failed)", failures ? "FAILED" : "PASSED", failures);
-                report += failures ? "RESULT: FAILED\n" : "RESULT: PASSED\n";
+                const char* verdict = failures ? "FAILED" : (armed ? "PASSED" : "PASSED WITHOUT A WEAPON (weapon checks not run)");
+                HSVR_LOG("Test: %s (%d failed)", verdict, failures);
+                report += std::string("RESULT: ") + verdict + "\n";
                 std::wstring path = mod_dir() + L"selftest_result.txt";
                 if (FILE* file = _wfopen(path.c_str(), L"w"))
                 {
@@ -2971,7 +3110,7 @@ namespace hsvr
             if (part != t.part)
             {
                 t.part = part;
-                HSVR_LOG("Test: part %d of 8: %s", part + 1, t.parts[part].name);
+                HSVR_LOG("Test: part %d of 9: %s", part + 1, t.parts[part].name);
             }
             shared().selftest_phase.store(part);
             shared().selftest_phase_time.store((float)(elapsed - begin));
@@ -2984,11 +3123,11 @@ namespace hsvr
                 shared().selftest_head_y.store(have);
             }
             // ---- what the character is made to do ----
-            if (part == 6)
+            if (part == 7)
             {
                 // Walking is done by controller_input.cpp: the virtual gamepad's left stick.
             }
-            else if (part == 7)
+            else if (part == 8)
             {
                 UObject* controller = object_property(s.pawn, STR("Controller"));
                 ue::FRotator* rotation = controller ? controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")) : nullptr;
@@ -3002,6 +3141,8 @@ namespace hsvr
             {
                 p.err_sum[k] += s.side[k].last_error_cm;
                 p.err_max[k] = std::max(p.err_max[k], s.side[k].last_error_cm);
+                p.turn_sum[k] += s.side[k].last_error_deg;
+                p.turn_max[k] = std::max(p.turn_max[k], s.side[k].last_error_deg);
             }
             if (!s.kin_active) t.placed_all_the_time = false;
             if (part >= 1 && s.kin_active && s.kin_hands) t.physical_hands = false;
@@ -3306,6 +3447,58 @@ namespace hsvr
             record_frame(pose);
         }
 
+        // Turns each physical hand towards its controller's rotation by giving the hand body a
+        // turning speed: the remaining turn divided by hand_turn_seconds, less for a heavy weapon.
+        // Runs right before the physics step. The engine's own turning drive stays on underneath
+        // (it holds the hand between frames) but its torque limit no longer decides how fast a
+        // wrist can turn a sword.
+        void turn_hands(const Config& cfg)
+        {
+            State& s = g_state;
+            if (!cfg.hand_turn_servo || !s.kin_active || s.kin_hands || !s.body) return;
+            UFunction* get_fn = s.body->GetFunctionByNameInChain(STR("GetPhysicsAngularVelocityInRadians"));
+            UFunction* set_fn = s.body->GetFunctionByNameInChain(STR("SetPhysicsAngularVelocityInRadians"));
+            if (!get_fn || !set_fn || get_fn->GetParmsSize() > 64 || set_fn->GetParmsSize() > 64) return;
+            int32_t g_bone = param_offset(get_fn, L"BoneName"), g_ret = param_offset(get_fn, L"ReturnValue");
+            int32_t s_vel = param_offset(set_fn, L"NewAngVel"), s_add = param_offset(set_fn, L"bAddToCurrent"), s_bone = param_offset(set_fn, L"BoneName");
+            if (g_bone < 0 || g_ret < 0 || s_vel < 0 || s_add < 0 || s_bone < 0) return;
+            static double last = 0.0;
+            double now = now_seconds();
+            double dt = last > 0 ? std::min(0.05, now - last) : 0.0;
+            last = now;
+            if (dt <= 0.0) return;
+            for (Side& side : s.side)
+            {
+                if (!side.have_turn_target || !side.pull_active) continue;
+                Xf hand;
+                if (!socket_transform(s.body, side.hand_name, RTS_World, hand)) continue;
+                Quat err = (side.turn_target * hand.q.inverse()).normalized();
+                if (err.w < 0) err = {-err.x, -err.y, -err.z, -err.w};
+                double angle = 2.0 * std::acos(std::min(1.0, err.w));
+                side.turn_err_deg = angle * kRadToDeg;
+                if (angle < 0.01) continue; // half a degree: leave it to the drive
+                Vec3 axis = normalized({err.x, err.y, err.z});
+                double seconds = std::max(dt, cfg.hand_turn_seconds);
+                Vec3 want = axis * std::min(45.0, angle / seconds); // rad/s
+                float* mass = s.pawn->GetValuePtrByPropertyNameInChain<float>(side.out_sign > 0 ? STR("R Weapon Mass") : STR("L Weapon Mass"));
+                double held = mass ? std::max(0.0, (double)*mass) : 0.0;
+                double share = 1.0 / (1.0 + held / std::max(0.2, cfg.hand_turn_mass_kg)); // of the way to that speed, this frame
+                alignas(16) uint8_t get_parms[64] = {};
+                memcpy(get_parms + g_bone, &side.hand_name, sizeof(FName));
+                s.body->ProcessEvent(get_fn, get_parms);
+                ue::FVector have;
+                memcpy(&have, get_parms + g_ret, sizeof(have));
+                Vec3 now_vel{have.X, have.Y, have.Z};
+                Vec3 next = now_vel + (want - now_vel) * share;
+                alignas(16) uint8_t set_parms[64] = {};
+                ue::FVector out{next.x, next.y, next.z};
+                memcpy(set_parms + s_vel, &out, sizeof(out));
+                set_parms[s_add] = 0;
+                memcpy(set_parms + s_bone, &side.hand_name, sizeof(FName));
+                s.body->ProcessEvent(set_fn, set_parms);
+            }
+        }
+
         void before_muscles_update()
         {
             State& s = g_state;
@@ -3316,6 +3509,7 @@ namespace hsvr
                 return;
             }
             pull_update(s.pull_arms);
+            turn_hands(config());
             // The capsule leash's reach again, here as well as in the body's update: the game works
             // out its own value at the end of its script each frame, and that script may run before
             // or after the body's update. Whichever order, ours is then the one its next frame reads.

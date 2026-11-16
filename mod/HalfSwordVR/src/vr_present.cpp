@@ -2660,6 +2660,11 @@ float4 PSMain(VSOut i) : SV_Target
                         oz = -0.45f;
                         tilt = (20.0f + 50.0f * std::sin(two_pi * 1.2f * pt)) * (float)kDegToRad;
                     }
+                    else if (phase == 6)
+                    {
+                        // Fast wrist work: the handle whipped up and down through 100 degrees.
+                        tilt = (30.0f + 50.0f * std::sin(two_pi * 2.5f * pt)) * (float)kDegToRad;
+                    }
                     else if (phase == 4 && h == 1)
                     {
                         // Strike down at the floor twice a second, blade pointing down.

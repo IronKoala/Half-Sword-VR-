@@ -47,6 +47,33 @@ head). The first cut of this branch did the same and was never switched on. It n
 like headgear) and never touches a bone. **Never use HideBoneByName on this game's characters.**
 Where the sections below mention `HideBoneByName` or `hide_head_bone`, that is the removed way.
 
+## Tenth cut (2026-11-16): wrist turning and a walking rhythm
+
+Matthew on the ninth cut (the first build he got after a passed self-test): "i twisted my wrists but
+willies didnt stay in line with mine. walking is unreliable and sporadic, willie some times takes a lot
+of steps really quickly." His log: hands 0.0 to 1 cm from the controllers most of the time, but the
+right hand (holding a weapon) 23 to 67 degrees behind in rotation at moments; up to 10 to 11 steps a
+second.
+
+- **Wrists.** The engine drive's torque limit (the game's 5000 times our 5, times the multiplier 2) is
+  far too small for a real sword: about 18 rad/s^2 on a 1 kg, 90 cm blade. The self-test had not shown
+  it because the arena's sickle is tiny and the pretend swings gentle. Now `hand_turn_servo` (1): right
+  before each physics step the hand body's angular velocity is set towards (remaining turn /
+  `hand_turn_seconds` 0.03), capped at 45 rad/s, taken a share 1 / (1 + weapon mass / `hand_turn_mass_kg`
+  2.0) of the way, with `SetPhysicsAngularVelocityInRadians` on the hand bone (weapon mass from the
+  pawn's `R/L Weapon Mass`). The drive stays on underneath. Self-test, new part "twisting the wrists
+  fast" (100 degrees, 2.5 times a second, with a weapon): 1 to 2 degrees behind on average, 4 at most.
+- **Legs.** The first stepper took a new step every 20 cm whatever the speed. Now a gait: above about
+  30 cm/s a rhythm of 1.7 (stroll) to 4.5 (sprint) steps a second, feet alternating, each landing ahead
+  of the body by half the distance covered during one stance (at most 45 cm), lift growing with speed;
+  below that, a foot steps only when the body is `step_length_cm` (14) past it or turned 35 degrees.
+- **Self-test:** nine parts now; draws a weapon from the sheath with the game's `Unsheath R Event` when
+  the right hand is empty (after Matthew's own session his character spawned empty-handed, and two
+  runs could not check the weapon); reports "PASSED WITHOUT A WEAPON" if there is none. Passed 25 of 25
+  (`C:\dev\hsvr-test\surgery\selftest-pass-2.log`).
+- Note for later: the arena spawns the player with whatever the save has in hand or sheathed; the
+  unattended runs do not seem to change that (five runs kept the sickle; it changed after his session).
+
 ## Ninth cut (2026-11-16): built from the decompile, self-tested
 
 Matthew asked for the game's code to be decompiled rather than guessed at (`docs/game-internals.md`,
