@@ -987,10 +987,16 @@ namespace hsvr
         }
         if (cfg.dev_selftest && shared().selftest_phase.load() == 7)
         {
-            // Self-test, "walking": the left stick forward for 2 s, back for 2 s, twice, through
-            // the same virtual gamepad the real controllers use.
+            // Self-test, "walking": the left stick back and forward, as the test says, through the
+            // same virtual gamepad the real controllers use.
             pad.active = true;
-            pad.ly = ((int)(shared().selftest_phase_time.load() / 2.0f) % 2 == 0) ? 1.0f : -1.0f;
+            pad.ly = shared().selftest_stick_y.load();
+        }
+        if (cfg.dev_selftest && shared().selftest_phase.load() == 10)
+        {
+            // Self-test, the kettle: the test steers by the heading and pushes the stick itself.
+            pad.active = true;
+            pad.ly = shared().selftest_stick_y.load();
         }
         if (cfg.dev_selftest && shared().selftest_phase.load() == 9)
         {

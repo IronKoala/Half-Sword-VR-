@@ -47,6 +47,56 @@ head). The first cut of this branch did the same and was never switched on. It n
 like headgear) and never touches a bone. **Never use HideBoneByName on this game's characters.**
 Where the sections below mention `HideBoneByName` or `hide_head_bone`, that is the removed way.
 
+## Twelfth cut (2026-11-16): what the game's script does to a placed body
+
+Matthew on the eleventh cut: "kicking whilst crouching damages me. i crouch walked into the hanging
+kettle and it messed with the physics. also i held my hand straight but my in game wrist was bent.
+my guess is open XR is mis-angle my controllers 90degress upwards like usual".
+
+Every cause below was read out of the decompiled script (`docs/game-internals.md`, section 12) and
+confirmed by a self-test run; the build passed the self-test twice (39 checks, `selftest-pass-12th.log`).
+
+- **The game drags the character.** Its script sets the capsule's place outright every frame: to the
+  hips and chest, plus the shoulders' lean, a 50 cm "stumble" after each kick, pain stumbles and
+  dodges, once that is more than a reach away which it works out anew every frame (10 cm standing
+  still; the mod's write to `Capsule Max Dislocation` only ever counted while fallen). A kick, a duck
+  or a lean dragged the player 20 to 35 cm a frame. The size-based `hold_ground` caught only the
+  large jumps, and took them back as a teleport, which carried the physical hands along and threw
+  them. Now the character's own tick is wrapped (`PrimaryActorTick`, same vtable swap as the mesh
+  ticks): whatever moved the capsule sideways inside that tick is put back the moment the tick
+  returns, exactly, without teleport. Walking is the movement component's tick and is untouched.
+  The size-based take-back stays as a fallback. Lost: the game's own dodge and stagger steps.
+- **The crouch dislocated the knee.** `Dislocate Bone` judges a joint by how far the bone is bent
+  against its parent and wears the limb down until `Leg R Dislocated` (health 94 to 0 in six frames,
+  nobody near). The mod's crouch bends the knee further than the ragdoll's joint limits ever allow.
+  While the body is placed, `Dislocation Blocked` (the game's own switch) is held on.
+- **Falling.** `Free Fall Rate` rises while the game's foot checks fail and turns any leg contact
+  into landing damage; held at 0 while placed. Landing damage after a real fall is lost.
+- **Bumps.** The body mesh's hit event turns contact force into damage. A placed limb cannot give
+  way, so resting against a loose prop is hundreds of full-force contacts a second. A ProcessEvent
+  pre-callback hands the script a force of zero for contacts with anything that is neither a
+  fighter nor a weapon (`bumps_harmless`).
+- **The collision switches never held.** `CollisionDisablerFunctionLibrary`'s duration is a float;
+  the mod passed the whole number -1, which the game read as "not a number". The held weapon has
+  been colliding with the player's own body in every cut so far. Fixed; also every part in a
+  weapon's `Collision Components Array` is switched, not only `BaseMesh` (the kettle's pot).
+- **Stuck weapons.** The game sticks points and edges into wood, floors and bodies
+  (`Constraint_Weapon_Stuck_BP`). The hand's pull never reaches the force that frees them, so the
+  hand stayed behind. A stuck weapon now comes free (`Release All Jammed Bones`) once the hand has
+  been pulled `stuck_pull_free_cm` (25) away.
+- **Wrist.** The controller's handle and wrist-to-fist axes were assumed. The calibration pose now
+  measures them (arms straight out in front, thumbs up, wrists straight, both grips 2 s) and stores
+  `ctrl_axes_l` / `ctrl_axes_r`. Only Matthew's own pose can confirm this one.
+- `carry_hands`: changes of the character's walking speed are given to the physical hands and what
+  they hold directly. `body_ignores_level` exists but is off (it only let the hands through walls).
+
+Self-test: parts 10 and 11 now kick twice while crouched and crouch-walk into the hanging kettle.
+The walking part goes backwards first: the cellar spawn is at arm's length from a training dummy
+(`BP_Prop_Training_Dummy_001_C`), and walking forward hooked Matthew's sickle on its shield, which
+is the physical hand doing its job. A blow from the kettle itself is reported as a NOTE.
+
+Not covered by any test: enemies hitting the placed body, thrust, jump, two-handed grips.
+
 ## Eleventh cut (2026-11-16): crouch is the player's own
 
 Matthew on the tenth cut: "crouching breaks in more was then i can type." (No word against the wrists

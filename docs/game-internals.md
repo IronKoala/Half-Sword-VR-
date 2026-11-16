@@ -228,3 +228,32 @@ The mod is ready at about 10 s. At 25 s it runs the console command `open`. **Th
 3. **The wrist is `UserConstraint_12` (right) and `UserConstraint_16` (left).**
 4. **The muscles are rotation-only and get re-applied every 1–2 s,** so a mod's PA changes must be re-applied after each refresh, or `Force Refresh Pa Strength` must be watched. The right hand has no PA entry.
 5. **The sword is a separate simulated body on a soft, breakable constraint to `hand_r`.** For a rigid hand, stiffen that joint (lock the angular limits hard, raise the drives) or attach the weapon kinematically to the hand. Expect the 300/500 break thresholds to snap it if the hand is forced hard against a pell.
+
+## 12. What the script does every frame that a placed body must answer (found 2026-11-16)
+
+All in `Willie_BP_C`'s event graph unless said otherwise; offsets are for `tools/study/kx.py`.
+
+- **Capsule leash** (`@636941` to `@641773`): target = lerp(pelvis, spine_05) + `Dodge Vector` x
+  `Dodge Rate` + `Pain Stumble Delayed` (at most 20) + `Stumble Direction` + `Shoulders Dislocation`
+  clamped to 0..25. If the capsule is further from that than `Capsule Max Dislocation`, the capsule
+  is set (no sweep) to within that reach. While not `Fallen` the reach is assigned directly each
+  frame (`@643190`): 10 at rest, up to 75. `Kick Event` adds 50 cm forward to `Stumble Direction`
+  (`@742755`), which fades at rate 5. These two `K2_SetWorldLocation` calls on the capsule are the
+  only places the script moves the character.
+- **Falling** (`@434189`): `Free Fall Rate` rises at 1/s towards distance-from-`Last On Ground
+  Position`/200 while not (`Activate Constraint` or `Ass touching ground` or `Jump Pressed`). At 0.5
+  and above the capsule path changes and leg contacts count as landings.
+- **Body hits** (`BndEvt__BP_ThirdPersonCharacter_Mesh_..._ComponentHitSignature`, `@809686`): stores
+  `Other Actor`, `Other Comp`, `Body Hit Normal Impulse` (clamped to 1500 unless falling), then
+  gates on impulse size. Own actor is ignored. Things tagged `Weapon` are left to the weapon's own
+  handler. A hit by something implementing `BPI_ComplexCollision` makes the OTHER side take the
+  blow (`@797190`): that is how a kick or punch hurts an enemy, so the event must keep firing.
+- **Dislocation** (`Dislocate Bone`): first line returns if `Dislocation Blocked`. Otherwise bend of
+  the bone against its parent times strain; at 0.1 and above the limb's health drops each call and
+  ends in `... Dislocated = true`, health 0.
+- **Stuck weapons**: `ModularWeaponBP_C` spawns `Constraint_Weapon_Stuck_BP_C` actors into `Stuck
+  Constraints Array` (properties `Hit Actor`, `Component 2 (Body)`); `Release All Jammed Bones`
+  releases them all and calls `Temporary Disable Damage` (0.2 s).
+- **`CollisionDisablerFunctionLibrary`**: the last parameter of the `DisableCollision_...` calls is
+  a FloatProperty (seconds; -1 = for good).
+

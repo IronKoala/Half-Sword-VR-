@@ -103,6 +103,7 @@ namespace hsvr
         std::atomic<int> selftest_phase{-1};
         std::atomic<float> selftest_phase_time{0.0f};
         std::atomic<float> selftest_head_y{0.0f};
+        std::atomic<float> selftest_stick_y{0.0f}; // the self-test's own push on the left stick
         // Set by a key to flip between full-resolution mode and the fallback while playing:
         // -1 = follow the settings file, 0 = fallback, 1 = full resolution.
         std::atomic<int> separate_override{-1};

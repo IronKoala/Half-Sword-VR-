@@ -321,6 +321,14 @@ namespace hsvr
         flag("kinematic_hands", c.kinematic_hands);
         flag("free_wrists", c.free_wrists);
         flag("own_legs", c.own_legs);
+        flag("body_ignores_level", c.body_ignores_level);
+        text("ctrl_axes_l", c.ctrl_axes_l);
+        text("ctrl_axes_r", c.ctrl_axes_r);
+        flag("loose_things_pass", c.loose_things_pass);
+        num("stuck_pull_free_cm", c.stuck_pull_free_cm);
+        flag("carry_hands", c.carry_hands);
+        flag("body_passes_itself", c.body_passes_itself);
+        flag("bumps_harmless", c.bumps_harmless);
         flag("own_crouch", c.own_crouch);
         flag("no_self_hits", c.no_self_hits);
         flag("hand_turn_servo", c.hand_turn_servo);

@@ -25,6 +25,7 @@
 #include "vrmath.hpp"
 
 #include <Unreal/FProperty.hpp>
+#include <Unreal/Hooks/Hooks.hpp>
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/Property/FStructProperty.hpp>
 #include <Unreal/UClass.hpp>
@@ -422,6 +423,7 @@ namespace hsvr
             Quat turn_target;
             double turn_err_deg = 0;
             int lost_frames = 0;
+            int behind_frames = 0; // frames in a row the hand has been far from where it is sent
             double rescue_until = 0;
             int rescues = 0;
             bool have_prev_wanted = false;
@@ -511,6 +513,10 @@ namespace hsvr
             bool kin_hands = false;     // the hands are placed too
             int kin_reattached = 0;     // times the body mesh had to be put back on the character
             bool wrist_failed = false;  // the wrists could not be freed on this character: rigid hands
+            double kick_until = 0;      // (unused)
+            bool level_ignored = false; // the body mesh ignores the level's geometry right now
+            int fighters = 0;           // other characters in the level (for the log)
+            double nearest_fighter_cm = -1;
             Vec3 actor_world;           // the character's position this frame
             bool have_actor_world = false;
             Vec3 step_last_actor, step_velocity;
@@ -522,6 +528,12 @@ namespace hsvr
             Vec3 room_step;             // what roomscale moved the character since the last look
             int ground_undone = 0;
             double ground_undone_cm = 0;
+            bool actor_tick_hooked = false; // the character's own tick is wrapped (exact hold_ground)
+            int drag_undone = 0;            // times the game's script moved the character in its tick
+            double drag_undone_cm = 0;
+            int fall_frames = 0;            // frames in which the game took the character for falling
+            int bumps_muted = 0;            // body hits by props or the level kept from the game's damage script
+            double trap_struck_time = -100; // when a loose weapon or trap last cost the character health
             bool have_max_dislocation = false;
             double game_max_dislocation = 10.0;
             double step_time = 0;
@@ -559,6 +571,7 @@ namespace hsvr
 
         void before_body_update();
         void before_muscles_update();
+        void placed_body_facts(bool count);
         void no_self_hits_update();
         bool body_set_simulate(const wchar_t* bone, bool simulate);
         // The tick function of the character's physical animation component (its "muscles"). Our
@@ -621,6 +634,57 @@ namespace hsvr
                 g_fake_vtables[vtable] = fake;
             }
             *reinterpret_cast<void***>(tick) = fake;
+            return true;
+        }
+
+        // ---- the character's own tick -----------------------------------------------------------
+        // The game's script runs in the character's tick. Each frame it sets the capsule's place
+        // outright: to wherever the hips and chest are, plus the shoulders' lean, a stumble after a
+        // kick or a blow, and a dodge, once that is further off than a reach it works out anew every
+        // frame (10 cm standing still). For a ragdoll that is how the character follows its body.
+        // For the placed body, which rides on the capsule, it means a kick, a duck or a lean drags
+        // the player along. The movement component, which does the walking, has its own tick; so
+        // whatever moves the character sideways inside this tick is that dragging, and is put back
+        // the moment the tick returns, before anything is drawn or simulated.
+        ExecuteTickFn g_original_actor_execute = nullptr;
+        void** g_actor_real_vtable = nullptr;
+        void** g_actor_fake_vtable = nullptr;
+        void* g_actor_tick = nullptr;      // the tick function of the character we play
+        UObject* g_actor_tick_pawn = nullptr;
+        bool before_actor_tick(Vec3& at);
+        void after_actor_tick(const Vec3& at);
+        void hit_hook_setup(UObject* pawn);
+
+        void hooked_actor_tick(void* self, float delta, int tick_type, int current_thread, const void* completion)
+        {
+            Vec3 at;
+            bool ours = self == g_actor_tick && GetCurrentThreadId() == g_state.game_thread && before_actor_tick(at);
+            g_original_actor_execute(self, delta, tick_type, current_thread, completion);
+            if (ours && self == g_actor_tick) after_actor_tick(at);
+        }
+
+        bool hook_actor_tick(UObject* actor)
+        {
+            FProperty* property = actor->GetPropertyByNameInChain(STR("PrimaryActorTick"));
+            if (!property) return false;
+            void* tick = reinterpret_cast<uint8_t*>(actor) + property->GetOffset_Internal();
+            void** vtable = *reinterpret_cast<void***>(tick);
+            if (vtable != g_actor_fake_vtable)
+            {
+                if (!in_game_module(vtable[kExecuteTickSlot])) return false;
+                if (g_actor_real_vtable && vtable != g_actor_real_vtable) return false;
+                if (!g_actor_fake_vtable)
+                {
+                    g_actor_real_vtable = vtable;
+                    g_original_actor_execute = reinterpret_cast<ExecuteTickFn>(vtable[kExecuteTickSlot]);
+                    g_actor_fake_vtable = new void*[kTickVtableSlots];
+                    for (int i = 0; i < kTickVtableSlots; ++i) g_actor_fake_vtable[i] = vtable[i];
+                    g_actor_fake_vtable[kExecuteTickSlot] = reinterpret_cast<void*>(&hooked_actor_tick);
+                }
+                *reinterpret_cast<void***>(tick) = g_actor_fake_vtable;
+            }
+            g_actor_tick = tick;
+            g_actor_tick_pawn = actor;
             return true;
         }
 
@@ -764,6 +828,7 @@ namespace hsvr
             s.kin_reattached = 0;
             s.kin_attach_ok = false;
             s.wrist_failed = false;
+            s.level_ignored = false;
             s.have_actor_world = false;
             s.have_max_dislocation = false;
             s.ground_time = 0;
@@ -820,6 +885,13 @@ namespace hsvr
             }
             HSVR_LOG("Arms: ready on %ls (%d meshes follow the arms; arm frames %ls / %ls)", pawn->GetName().c_str(), hooked,
                      s.side[0].parent_name.ToString().c_str(), s.side[1].parent_name.ToString().c_str());
+            {
+                std::lock_guard<std::mutex> lock(g_hook_mutex);
+                s.actor_tick_hooked = hook_actor_tick(pawn);
+            }
+            hit_hook_setup(pawn);
+            HSVR_LOG(s.actor_tick_hooked ? "Room: the character's own tick is wrapped (the game's dragging of the character is undone on the spot)"
+                                         : "Room: the character's own tick could not be wrapped; moves by the game are taken back by their size only");
             s.ready = true;
             return true;
         }
@@ -956,6 +1028,30 @@ namespace hsvr
             snprintf(b, sizeof(b), "%.1f", drop_cm);
             snprintf(c, sizeof(c), "%.1f", side_cm);
             config_store({{"player_arm_cm", a}, {"player_shoulder_drop_cm", b}, {"player_shoulder_side_cm", c}});
+            // How the controllers sit in the hands. In this pose the forearm runs from the shoulder to
+            // the hand, the wrist is straight and the thumb is up: so the direction from the wrist
+            // into the fist is the forearm's, and the handle (towards the thumb) points up. Both are
+            // noted in each controller's own axes and used from now on in place of the assumed ones.
+            // (Matthew: "i held my hand straight but my in game wrist was bent".)
+            for (int k = 0; k < 2; ++k)
+            {
+                const XrHandRaw& hand = k ? r : l;
+                double sign = k ? 1.0 : -1.0;
+                Vec3 shoulder = head + right * (sign * side_cm / 100.0) + Vec3{0, -drop_cm / 100.0, 0} - fwd * kShoulderBackM;
+                Vec3 forearm = normalized(Vec3{hand.px, hand.py, hand.pz} - shoulder);
+                Vec3 up = normalized(perpendicular_part({0, 1, 0}, forearm), {0, 1, 0});
+                Quat inv = Quat{hand.qx, hand.qy, hand.qz, hand.qw}.normalized().inverse();
+                Vec3 fist_xr = inv.rotate(forearm), thumb_xr = inv.rotate(up);
+                // The controller's own axes in the mod's convention (as xr_to_ue_position): forward -z, right x, up y.
+                Vec3 handle{-thumb_xr.z, thumb_xr.x, thumb_xr.y}, fist{-fist_xr.z, fist_xr.x, fist_xr.y};
+                char text[160];
+                snprintf(text, sizeof(text), "%.4f %.4f %.4f %.4f %.4f %.4f", handle.x, handle.y, handle.z, fist.x, fist.y, fist.z);
+                config_store({{k ? "ctrl_axes_r" : "ctrl_axes_l", text}});
+                double handle_off = std::acos(std::max(-1.0, std::min(1.0, handle.x))) * kRadToDeg;
+                double fist_off = std::acos(std::max(-1.0, std::min(1.0, -fist.z))) * kRadToDeg;
+                HSVR_LOG("Arms: %s controller in the hand: handle (%.2f %.2f %.2f), wrist-to-fist (%.2f %.2f %.2f); that is %.0f and %.0f degrees from what was assumed", k ? "right" : "left",
+                         handle.x, handle.y, handle.z, fist.x, fist.y, fist.z, handle_off, fist_off);
+            }
             for (Side& side : s.side) side.have_offset = false;
             HSVR_LOG("Arms: calibrated: your arm %.0f cm (character %.0f / %.0f cm), shoulders %.0f cm below the eyes and %.0f cm to each side", arm_cm,
                      s.side[0].arm_len + length(s.side[0].grip_center), s.side[1].arm_len + length(s.side[1].grip_center), drop_cm, side_cm);
@@ -1017,11 +1113,26 @@ namespace hsvr
                 // The controller's handle (+X) and the direction from the wrist into the fist (-Z)
                 // match the hand's handle and grip-centre directions.
                 Quat hand_frame = quat_from_frame(side.grip_forward, side.grip_center);
-                Quat controller_frame = quat_from_frame({1, 0, 0}, {0, 0, -1});
+                // ... as assumed, or as measured by the calibration (ctrl_axes_l / ctrl_axes_r).
+                Vec3 handle_axis{1, 0, 0}, fist_axis{0, 0, -1};
+                {
+                    const std::string& text = side.out_sign > 0 ? cfg.ctrl_axes_r : cfg.ctrl_axes_l;
+                    double v[6];
+                    if (!text.empty() && sscanf(text.c_str(), "%lf %lf %lf %lf %lf %lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) == 6)
+                    {
+                        Vec3 a{v[0], v[1], v[2]}, b{v[3], v[4], v[5]};
+                        if (length(a) > 0.9 && length(a) < 1.1 && length(b) > 0.9 && length(b) < 1.1 && std::fabs(dot(a, b)) < 0.5)
+                        {
+                            handle_axis = normalized(a);
+                            fist_axis = normalized(b);
+                        }
+                    }
+                }
+                Quat controller_frame = quat_from_frame(handle_axis, fist_axis);
                 Quat hand_rot = (grip_rot * controller_frame * hand_frame.inverse()).normalized();
                 side.target_world.q = hand_rot;
                 side.target_world.t = grip_pos - hand_rot.rotate(side.grip_center);
-                side.blade_world = grip_rot.rotate({1, 0, 0});
+                side.blade_world = grip_rot.rotate(handle_axis);
                 side.target_valid = true;
             }
         }
@@ -1354,6 +1465,96 @@ namespace hsvr
                 }
                 else
                 {
+                    // (For the log: the moment what the hand holds gets stuck, and in what.)
+                    {
+                        static int32_t stuck_was[2] = {0, 0};
+                        int k = side.out_sign > 0 ? 1 : 0;
+                        const TCHAR* held_name = k ? STR("Weapon R") : STR("Weapon L");
+                        UObject* weapon = s.pawn->GetPropertyByNameInChain(held_name) ? object_property(s.pawn, held_name) : nullptr;
+                        FProperty* list = weapon ? weapon->GetPropertyByNameInChain(STR("Stuck Constraints Array")) : nullptr;
+                        struct ObjectArray { UObject** data; int32_t num; int32_t max; };
+                        const ObjectArray* stuck = list ? reinterpret_cast<const ObjectArray*>(reinterpret_cast<uint8_t*>(weapon) + list->GetOffset_Internal()) : nullptr;
+                        int32_t count = stuck && stuck->data ? stuck->num : 0;
+                        if (count > 0 && stuck_was[k] == 0 && count < 32 && stuck->data[count - 1])
+                        {
+                            UObject* joint = stuck->data[count - 1];
+                            UObject* in_actor = joint->GetPropertyByNameInChain(STR("Hit Actor")) ? object_property(joint, STR("Hit Actor")) : nullptr;
+                            UObject* in_part = joint->GetPropertyByNameInChain(STR("Component 2 (Body)")) ? object_property(joint, STR("Component 2 (Body)")) : nullptr;
+                            Xf joint_at;
+                            bool have_at = false;
+                            if (UObject* root = joint->GetPropertyByNameInChain(STR("RootComponent")) ? object_property(joint, STR("RootComponent")) : nullptr)
+                                have_at = component_world(root, joint_at);
+                            HSVR_LOG("Hands: what the %s hand holds got stuck in %ls (%ls, class %ls)%s | hand %.0f cm from the controller", side.label,
+                                     in_actor ? in_actor->GetName().c_str() : L"?", in_part ? in_part->GetName().c_str() : L"?",
+                                     in_actor ? in_actor->GetClassPrivate()->GetName().c_str() : L"?", in_actor == s.pawn ? " - the player's own character" : "", side.last_error_cm);
+                            if (have_at)
+                                HSVR_LOG("Hands:   the place it is stuck is %.0f cm from the hand, %.0f cm above the character's middle", length(joint_at.t - body_hand.t),
+                                         joint_at.t.z - s.actor_world.z);
+                        }
+                        stuck_was[k] = count;
+                    }
+                    // A weapon stuck in something: pulled far enough, it comes free.
+                    if (cfg.stuck_pull_free_cm > 0.0 && side.last_error_cm > cfg.stuck_pull_free_cm)
+                    {
+                        if (++side.behind_frames > 10) // (this runs twice a frame)
+                        {
+                            side.behind_frames = 0;
+                            const TCHAR* stuck_property = side.out_sign > 0 ? STR("Weapon R") : STR("Weapon L");
+                            UObject* weapon = s.pawn->GetPropertyByNameInChain(stuck_property) ? object_property(s.pawn, stuck_property) : nullptr;
+                            FProperty* list = weapon ? weapon->GetPropertyByNameInChain(STR("Stuck Constraints Array")) : nullptr;
+                            int32_t stuck = list ? *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(weapon) + list->GetOffset_Internal() + 8) : 0;
+                            UFunction* release = stuck > 0 ? weapon->GetFunctionByNameInChain(STR("Release All Jammed Bones")) : nullptr;
+                            if (release && release->GetParmsSize() == 0)
+                            {
+                                bool* in_body = weapon->GetValuePtrByPropertyNameInChain<bool>(STR("Stuck In Body"));
+                                weapon->ProcessEvent(release, nullptr);
+                                HSVR_LOG("Hands: what the %s hand holds was stuck in %s (%d places) and the hand had been pulled %.0f cm on; pulled free", side.label,
+                                         in_body && *in_body ? "a body" : "something solid", stuck, side.last_error_cm);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        side.behind_frames = 0;
+                    }
+                    // (For the log: where the hand is when it starts to fall behind.)
+                    {
+                        static double was[2] = {0, 0};
+                        static Vec3 actor_was[2];
+                        int k = side.out_sign > 0 ? 1 : 0;
+                        if (side.have_prev_wanted && ((was[k] <= 30.0 && side.last_error_cm > 30.0) || (was[k] <= 100.0 && side.last_error_cm > 100.0)) &&
+                            log_throttle(k ? "behind_r" : "behind_l", 2.0)) // (it searches the level: seldom)
+                        {
+                            Vec3 off = body_hand.t - side.prev_wanted.t, moved = s.actor_world - actor_was[k];
+                            std::vector<UObject*> things;
+                            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), things);
+                            UObject* nearest = nullptr;
+                            double nearest_cm = 1e9;
+                            for (UObject* thing : things)
+                            {
+                                UObject* base = thing && thing->GetPropertyByNameInChain(STR("BaseMesh")) ? object_property(thing, STR("BaseMesh")) : nullptr;
+                                bool* is_held = thing ? thing->GetValuePtrByPropertyNameInChain<bool>(STR("Is Held")) : nullptr;
+                                Xf where;
+                                if (!base || (is_held && *is_held) || !component_world(base, where)) continue;
+                                double away = length(where.t - body_hand.t);
+                                if (away < nearest_cm) nearest_cm = away, nearest = thing;
+                            }
+                            const TCHAR* held_property = side.out_sign > 0 ? STR("Weapon R") : STR("Weapon L");
+                            UObject* held = s.pawn->GetPropertyByNameInChain(held_property) ? object_property(s.pawn, held_property) : nullptr;
+                            UObject* held_base = held && held->GetPropertyByNameInChain(STR("BaseMesh")) ? object_property(held, STR("BaseMesh")) : nullptr;
+                            float* held_mass = s.pawn->GetValuePtrByPropertyNameInChain<float>(side.out_sign > 0 ? STR("R Weapon Mass") : STR("L Weapon Mass"));
+                            Xf held_at;
+                            bool have_held = held_base && component_world(held_base, held_at);
+                            FProperty* stuck_list = held ? held->GetPropertyByNameInChain(STR("Stuck Constraints Array")) : nullptr;
+                            int32_t stuck_places = stuck_list ? *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(held) + stuck_list->GetOffset_Internal() + 8) : -1;
+                            HSVR_LOG("Hands: the %s hand is falling behind: %.0f cm from the controller (%.0f, %.0f, %.0f in the world) | hand %.0f cm above the character's middle | the character moved (%.1f, %.1f, %.1f) this frame | nearest thing not held: %ls, %.0f cm from the hand | holds %ls (mass %.1f), its middle %.0f cm from the hand and %.0f cm above the character's middle, stuck in %d places",
+                                     side.label, side.last_error_cm, off.x, off.y, off.z, body_hand.t.z - s.actor_world.z, moved.x, moved.y, moved.z,
+                                     nearest ? nearest->GetName().c_str() : L"none", nearest ? nearest_cm : -1.0, held ? held->GetName().c_str() : L"nothing",
+                                     held_mass ? (double)*held_mass : -1.0, have_held ? length(held_at.t - body_hand.t) : -1.0, have_held ? held_at.t.z - s.actor_world.z : 0.0, stuck_places);
+                        }
+                        was[k] = side.last_error_cm;
+                        actor_was[k] = s.actor_world;
+                    }
                     side.lost_frames = side.last_error_cm > 100.0 ? side.lost_frames + 1 : 0;
                     if (side.lost_frames > 20)
                     {
@@ -2275,6 +2476,20 @@ namespace hsvr
             }
         }
 
+        // The body mesh's response to the level's own geometry (collision channel WorldStatic).
+        void body_level_collision(bool collide)
+        {
+            State& s = g_state;
+            UFunction* fn = s.body ? s.body->GetFunctionByNameInChain(STR("SetCollisionResponseToChannel")) : nullptr;
+            if (!fn || fn->GetParmsSize() > 8) return;
+            int32_t channel = param_offset(fn, L"Channel"), response = param_offset(fn, L"NewResponse");
+            if (channel < 0 || response < 0) return;
+            uint8_t parms[8] = {};
+            parms[channel] = 0;                 // ECC_WorldStatic
+            parms[response] = collide ? 2 : 0;  // ECR_Block / ECR_Ignore
+            s.body->ProcessEvent(fn, parms);
+        }
+
         void kinematic_update(bool want, const char* why_not)
         {
             State& s = g_state;
@@ -2323,6 +2538,12 @@ namespace hsvr
                                         : "Body: the body is now placed, not simulated; the hands are physical, loose from the arms and driven to the controllers");
                     s.kin_active = true;
                     s.kin_hands = hands;
+                    if (cfg.body_ignores_level != s.level_ignored)
+                    {
+                        body_level_collision(!cfg.body_ignores_level);
+                        s.level_ignored = cfg.body_ignores_level;
+                        HSVR_LOG(s.level_ignored ? "Body: the placed body no longer collides with the level itself (the capsule does)" : "Body: the body collides with the level again");
+                    }
                 }
                 // The game moves the character after its hips once they are further apart than this
                 // (10 cm by default). The placed body's hips are where the player is; keep it out of reach.
@@ -2335,6 +2556,9 @@ namespace hsvr
                     }
                     *limit = 1000000.0;
                 }
+                // (The game works its leash out anew every frame while standing, so the value above
+                // only counts while fallen; what the leash does is undone in the character's tick.)
+                placed_body_facts(false);
                 // The mesh rides on the character; if anything took it off again, put it back.
                 if (!body_attached_to_capsule())
                 {
@@ -2354,6 +2578,12 @@ namespace hsvr
                 if (s.have_max_dislocation)
                 {
                     if (double* limit = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Capsule Max Dislocation"))) *limit = s.game_max_dislocation;
+                }
+                if (bool* blocked = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Dislocation Blocked"))) *blocked = false;
+                if (s.level_ignored)
+                {
+                    body_level_collision(true);
+                    s.level_ignored = false;
                 }
                 body_set_simulate(L"pelvis", true);
                 s.kin_active = false;
@@ -2952,10 +3182,15 @@ namespace hsvr
             bool finished = false;
             double start = 0, last = 0;
             int part = -1;
-            TestPart parts[10] = {{"settle", 6}, {"hands still", 6}, {"hands move slowly", 8}, {"fast swings", 8}, {"striking the floor while ducked", 8},
+            TestPart parts[11] = {{"settle", 6}, {"hands still", 6}, {"hands move slowly", 8}, {"fast swings", 8}, {"striking the floor while ducked", 8},
                                   {"hands still again", 4}, {"twisting the wrists fast", 6}, {"walking", 8}, {"turning", 4},
-                                  {"crouch button: crouched, swinging, walking, then up", 12}};
-            double awake_start = -1, awake_min = 1000, awake_ref = -1, awake_drop_max = 0;
+                                  {"crouch button: crouched, swinging, kicking, walking, then up", 12},
+                                  {"crouch-walking into the hanging kettle", 14}};
+            bool kicked[2] = {false, false};
+            bool have_kettle = false, reached_kettle = false;
+            Vec3 kettle_at;
+            double kettle_near = 1e9;
+            double awake_start = -1, awake_min = 1000, awake_ref = -1, awake_drop_max = 0, trap_drop_max = 0;
             double crouch_drop_max = 0, crouch_hips_min = 0, crouch_view_end = -1, crouch_head_err_max = 0;
             bool game_crouched = false;
             double weapon_base_sum = 0;
@@ -2967,6 +3202,10 @@ namespace hsvr
             bool placed_all_the_time = true, physical_hands = true, mesh_on_character = true;
             double walk_yaw = 0;
             double draw_at = 0;
+            bool walk_have_start = false, walk_moved = false;
+            Vec3 walk_start;
+            int walk_dir = -1;
+            double walk_leg_start = 0;
         };
         SelfTest g_test;
 
@@ -3013,7 +3252,7 @@ namespace hsvr
             t.last = now;
             double elapsed = now - t.start, begin = 0.0;
             int part = -1;
-            for (int i = 0; i < 10; ++i)
+            for (int i = 0; i < 11; ++i)
             {
                 if (elapsed < begin + t.parts[i].seconds)
                 {
@@ -3098,7 +3337,8 @@ namespace hsvr
                     double per_second = walk.steps / seconds;
                     // (The test reverses direction every 2 s, and each restart adds a step or two. The
                     // first stepper, a new step every 20 cm, made about 10 a second here.)
-                    line(per_second >= 1.5 && per_second <= 7.0, "walking: %.1f steps a second (%d steps; between 1.5 and 7)", per_second, walk.steps);
+                    // (Since the twelfth cut the test reverses about every second instead of every two.)
+                    line(per_second >= 1.5 && per_second <= 8.0, "walking: %.1f steps a second (%d steps; between 1.5 and 8)", per_second, walk.steps);
                 }
                 line(mean(walk, 1) < 6.0 && mean(walk, 0) < 6.0, "walking: hands %.1f / %.1f cm from the controllers on average (limit 6)", mean(walk, 1), mean(walk, 0));
                 line(walk.thrown < 5.0 && walk.undone == 0, "walking: character moved by something else %.0f cm, taken back %d times", walk.thrown, walk.undone);
@@ -3116,6 +3356,30 @@ namespace hsvr
                     line(t.awake_drop_max < 6.0, "nothing struck the character during the test (largest sudden drop in consciousness %.0f, limit 6; it drifted from %.0f to %.0f at its lowest by itself)",
                          t.awake_drop_max, t.awake_start, t.awake_min);
                 }
+                {
+                    const TestPart& kettle = t.parts[10];
+                    if (!t.have_kettle)
+                    {
+                        HSVR_LOG("Test: no hanging kettle in this level; that part does not count");
+                        report += "NOTE  no hanging kettle in this level: that part does not count\n";
+                    }
+                    else
+                    {
+                        line(t.reached_kettle, "kettle: the crouched character walked into it (came within %.0f cm of where it hangs)", t.kettle_near);
+                        line(kettle.thrown < 5.0 && kettle.undone == 0, "kettle: character moved by something else %.0f cm, taken back %d times", kettle.thrown, kettle.undone);
+                        line(mean(kettle, 1) < 6.0 && mean(kettle, 0) < 6.0 && kettle.err_max[1] < 40.0 && kettle.err_max[0] < 40.0,
+                             "kettle: hands %.1f / %.1f cm from the controllers on average, %.0f / %.0f at most (limits 6 and 40)", mean(kettle, 1), mean(kettle, 0), kettle.err_max[1],
+                             kettle.err_max[0]);
+                        if (armed) line(kettle.weapon_held, "kettle: weapon still held");
+                        if (t.trap_drop_max >= 1.0)
+                        {
+                            char text[200];
+                            snprintf(text, sizeof(text), "NOTE  the kettle (a trap) struck the character as it walked into it: consciousness down %.0f\n", t.trap_drop_max);
+                            HSVR_LOG("Test: the kettle (a trap) struck the character as it walked into it: consciousness down %.0f (noted, not a fault)", t.trap_drop_max);
+                            report += text;
+                        }
+                    }
+                }
                 line(s.side[0].rescues + s.side[1].rescues == 0, "no hand was lost and had to be brought back (%d times)", s.side[0].rescues + s.side[1].rescues);
                 line(turn.err_max[1] < 8.0 && turn.err_max[0] < 8.0, "turning: hands %.1f / %.1f cm from the controllers at most (limit 8)", turn.err_max[1], turn.err_max[0]);
                 const char* verdict = failures ? "FAILED" : (armed ? "PASSED" : "PASSED WITHOUT A WEAPON (weapon checks not run)");
@@ -3132,7 +3396,7 @@ namespace hsvr
             if (part != t.part)
             {
                 t.part = part;
-                HSVR_LOG("Test: part %d of 10: %s", part + 1, t.parts[part].name);
+                HSVR_LOG("Test: part %d of 11: %s", part + 1, t.parts[part].name);
             }
             shared().selftest_phase.store(part);
             shared().selftest_phase_time.store((float)(elapsed - begin));
@@ -3147,13 +3411,55 @@ namespace hsvr
             // ---- what the character is made to do ----
             if (part == 7)
             {
-                // Walking is done by controller_input.cpp: the virtual gamepad's left stick.
+                // Walking, through the virtual gamepad's left stick (controller_input.cpp): backwards
+                // first, away from what the character faces at its start, then to and fro between
+                // 2 and 6 m behind the start. (In the cellar the character starts at arm's length
+                // from a training dummy. Walking forward took the weapon hand through the dummy's
+                // shield: a sickle hooked it, stuck, and the hand stayed behind, which is what a
+                // physical hand should do and says nothing about walking.) A leg backwards also
+                // ends after 1.6 s, for a wall.
+                Vec3 here;
+                if (actor_location(s.pawn, here))
+                {
+                    if (!t.walk_have_start)
+                    {
+                        t.walk_have_start = true;
+                        t.walk_start = here;
+                        t.walk_dir = -1;
+                        t.walk_leg_start = elapsed;
+                    }
+                    double away = length(Vec3{here.x - t.walk_start.x, here.y - t.walk_start.y, 0});
+                    if (t.walk_dir < 0 && away < 20.0 && !t.walk_moved) t.walk_leg_start = elapsed; // (the gamepad takes a moment to be noticed)
+                    if (away >= 20.0) t.walk_moved = true;
+                    double leg = elapsed - t.walk_leg_start;
+                    if (t.walk_dir < 0 && (away > 600.0 || leg > 1.6))
+                    {
+                        t.walk_dir = 1;
+                        t.walk_leg_start = elapsed;
+                    }
+                    else if (t.walk_dir > 0 && (away < 200.0 || leg > 1.6))
+                    {
+                        t.walk_dir = -1;
+                        t.walk_leg_start = elapsed;
+                    }
+                    shared().selftest_stick_y.store((float)t.walk_dir);
+                }
             }
             else if (part == 9)
             {
                 // The crouch button's own flag: down for 9 s (the pretend right hand swings low for
                 // part of it and the stick walks, see vr_present.cpp and controller_input.cpp), then up.
                 shared().own_crouch.store(elapsed - begin > 0.5 && elapsed - begin < 9.5);
+                // Two kicks while crouched, by the game's own kick (Matthew: "kicking whilst crouching damages me").
+                for (int n = 0; n < 2; ++n)
+                {
+                    if (!t.kicked[n] && elapsed - begin > (n ? 4.5 : 2.5))
+                    {
+                        t.kicked[n] = true;
+                        UFunction* kick = s.pawn->GetFunctionByNameInChain(STR("Kick Event"));
+                        if (kick && kick->GetParmsSize() == 0) s.pawn->ProcessEvent(kick, nullptr);
+                    }
+                }
                 t.crouch_drop_max = std::max(t.crouch_drop_max, (double)shared().view_drop_cm.load());
                 t.crouch_hips_min = std::min(t.crouch_hips_min, s.pelvis_drop);
                 if (elapsed - begin > 11.5) t.crouch_view_end = (double)shared().view_drop_cm.load();
@@ -3164,6 +3470,53 @@ namespace hsvr
                 Xf head_now;
                 if (s.have_head_target && elapsed - begin > 2.0 && elapsed - begin < 9.0 && socket_transform(s.body, make_name(L"head"), RTS_World, head_now))
                     t.crouch_head_err_max = std::max(t.crouch_head_err_max, length(head_now.t - s.head_target_world));
+            }
+            else if (part == 10)
+            {
+                // Crouched, walk at the hanging kettle (a trap: a weapon-type object on a chain), push
+                // into it for a while, then back off. The stick goes through the virtual gamepad; the
+                // heading is turned at the kettle.
+                double pt = elapsed - begin;
+                shared().own_crouch.store(pt > 0.3 && pt < 12.5);
+                if (!t.have_kettle && pt < 0.5)
+                {
+                    std::vector<UObject*> items;
+                    UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), items);
+                    double best = 1e9;
+                    for (UObject* item : items)
+                    {
+                        Vec3 at;
+                        if (!item || std::wstring(item->GetClassPrivate()->GetName()).find(L"Kettle") == std::wstring::npos || !actor_location(item, at)) continue;
+                        double d = length(at - s.actor_world);
+                        if (d < best)
+                        {
+                            best = d;
+                            t.kettle_at = at;
+                            t.have_kettle = true;
+                        }
+                    }
+                    HSVR_LOG(t.have_kettle ? "Test: the hanging kettle is %.0f cm away" : "Test: no hanging kettle in this level (%.0f)", t.have_kettle ? best : 0.0);
+                }
+                float stick = 0.0f;
+                bool stick_allowed = true;
+                if (t.have_kettle)
+                {
+                    Vec3 to{t.kettle_at.x - s.actor_world.x, t.kettle_at.y - s.actor_world.y, 0};
+                    double d = length(to);
+                    t.kettle_near = std::min(t.kettle_near, d);
+                    if (d < 45.0) t.reached_kettle = true;
+                    UObject* controller = object_property(s.pawn, STR("Controller"));
+                    ue::FRotator* rotation = controller ? controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")) : nullptr;
+                    if (rotation && d > 5.0 && pt < 10.0)
+                    {
+                        double off = normalize_axis(std::atan2(to.y, to.x) * kRadToDeg - rotation->Yaw);
+                        double step = 120.0 * dt; // degrees a second, like a stick turn
+                        rotation->Yaw = normalize_axis(rotation->Yaw + std::max(-step, std::min(step, off)));
+                        if (std::fabs(off) > 30.0) stick_allowed = false; // turn first, then walk
+                    }
+                    stick = pt < 10.0 ? (stick_allowed ? 0.6f : 0.0f) : (pt < 12.5 ? -0.6f : 0.0f); // towards it and into it, then away
+                }
+                shared().selftest_stick_y.store(stick);
             }
             else if (part == 8)
             {
@@ -3180,6 +3533,12 @@ namespace hsvr
                 // run). A blow is a sudden drop: more than the drift allows within a moment.
                 double change = s.consciousness - t.awake_ref;
                 t.awake_ref += change > 0 ? change : std::max(change, -2.5 * dt);
+                if (now_seconds() - s.trap_struck_time < 3.0)
+                {
+                    // The hanging kettle (a trap) or a loose weapon did this: noted, not a fault.
+                    t.trap_drop_max = std::max(t.trap_drop_max, t.awake_ref - s.consciousness);
+                    t.awake_ref = s.consciousness;
+                }
                 t.awake_drop_max = std::max(t.awake_drop_max, t.awake_ref - s.consciousness);
             }
             // ---- what is measured ----
@@ -3371,7 +3730,9 @@ namespace hsvr
                         double extra = length(gone) - length(own) - 1.0;
                         bool teleport = length(gone) > 250.0; // a real teleport (arena start, respawn)
                         s.foreign_cm = teleport ? 0.0 : std::max(0.0, extra);
-                        if (!teleport && s.foreign_cm > 15.0)
+                        // (A long frame explains more: the game's running outpaces the movement
+                        // component's speed by up to a few metres a second.)
+                        if (!teleport && s.foreign_cm > 15.0 + 350.0 * dt)
                         {
                             s.thrown_cm += s.foreign_cm;
                             double undo = std::min(length(gone), s.foreign_cm);
@@ -3426,7 +3787,121 @@ namespace hsvr
                     if (s.have_body_world) s.mesh_off_cm = length(s.body_world.t - s.nominal.t);
                 }
             }
-            if (double* awake = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Consciousness"))) s.consciousness = *awake;
+            {
+                // A body part's health dropping: say at once which, and what the game's own hit
+                // record names as the other thing (for the log; at most 40 lines a session).
+                static UClass* watched_class = nullptr;
+                static std::vector<std::pair<std::wstring, int32_t>> watched;
+                static std::vector<double> last;
+                static int lines = 0;
+                if (watched_class != s.pawn->GetClassPrivate())
+                {
+                    watched_class = s.pawn->GetClassPrivate();
+                    watched.clear();
+                    last.clear();
+                    for (UStruct* type = watched_class; type; type = type->GetSuperStruct())
+                    {
+                        if (std::wstring(type->GetName()) != L"Willie_BP_C") continue;
+                        for (FProperty* p : type->ForEachProperty())
+                        {
+                            std::wstring name = p->GetName();
+                            if (p->GetClass().GetName() != STR("DoubleProperty") || name.find(L"Health") == std::wstring::npos) continue;
+                            watched.emplace_back(name, p->GetOffset_Internal());
+                        }
+                    }
+                }
+                bool first = last.size() != watched.size();
+                if (first) last.assign(watched.size(), 0.0);
+                for (size_t i = 0; i < watched.size(); ++i)
+                {
+                    double value = *reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(s.pawn) + watched[i].second);
+                    if (!first && value < last[i] - 3.0 && lines < 40)
+                    {
+                        ++lines;
+                        UObject* other = s.pawn->GetPropertyByNameInChain(STR("Other Actor")) ? object_property(s.pawn, STR("Other Actor")) : nullptr;
+                        UObject* part = s.pawn->GetPropertyByNameInChain(STR("Other Comp")) ? object_property(s.pawn, STR("Other Comp")) : nullptr;
+                        FName* bone = s.pawn->GetValuePtrByPropertyNameInChain<FName>(STR("Body Hit Bone Name Self"));
+                        for (UStruct* type = other ? other->GetClassPrivate() : nullptr; type; type = type->GetSuperStruct())
+                        {
+                            if (std::wstring(type->GetName()) != L"ModularWeaponBP_C") continue;
+                            bool* is_held = other->GetValuePtrByPropertyNameInChain<bool>(STR("Is Held"));
+                            if (is_held && !*is_held) s.trap_struck_time = now_seconds();
+                            break;
+                        }
+                        double* impulse = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Body Hit Normal Impulse"));
+                        HSVR_LOG("Hit: %ls fell from %.0f to %.0f | the game's last body hit: by %ls (%ls) of class %ls on %ls, impulse %.0f | placed %s, crouched %s",
+                                 watched[i].first.c_str(), last[i], value, other ? other->GetName().c_str() : L"nothing", part ? part->GetName().c_str() : L"-",
+                                 other ? other->GetClassPrivate()->GetName().c_str() : L"-", bone ? bone->ToString().c_str() : L"?",
+                                 impulse ? std::sqrt(impulse[0] * impulse[0] + impulse[1] * impulse[1] + impulse[2] * impulse[2]) : -1.0,
+                                 s.kin_active ? "yes" : "no", shared().own_crouch.load() ? "yes" : "no");
+                    }
+                    last[i] = value;
+                }
+            }
+            if (double* awake = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Consciousness")))
+            {
+                // A sudden drop: something struck the character. Say what hurts and who is near, so
+                // that the log can tell an enemy's blow from the character hurting itself.
+                static double reference = -1.0, reference_time = 0.0;
+                static std::map<std::wstring, double> before;
+                double now_hurt = now_seconds();
+                bool struck = reference >= 0 && *awake < reference - 6.0;
+                if (reference < 0 || now_hurt - reference_time > 1.0 || struck)
+                {
+                    static UClass* listed_class = nullptr;
+                    static std::vector<std::pair<std::wstring, int32_t>> listed;
+                    if (listed_class != s.pawn->GetClassPrivate())
+                    {
+                        listed_class = s.pawn->GetClassPrivate();
+                        listed.clear();
+                        for (UStruct* type = listed_class; type; type = type->GetSuperStruct())
+                        {
+                            if (std::wstring(type->GetName()) != L"Willie_BP_C") continue;
+                            for (FProperty* p : type->ForEachProperty())
+                            {
+                                std::wstring name = p->GetName();
+                                if (p->GetClass().GetName() != STR("DoubleProperty")) continue;
+                                if (name.find(L"Health") == std::wstring::npos && name.find(L"Pain") == std::wstring::npos && name != L"Bleeding") continue;
+                                listed.emplace_back(name, p->GetOffset_Internal());
+                            }
+                        }
+                    }
+                    std::map<std::wstring, double> values;
+                    for (auto& entry : listed) values[entry.first] = *reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(s.pawn) + entry.second);
+                    if (struck)
+                    {
+                        std::wstring changed;
+                        for (auto& entry : values)
+                        {
+                            auto was = before.find(entry.first);
+                            if (was != before.end() && std::fabs(was->second - entry.second) > 0.5)
+                            {
+                                wchar_t text[96];
+                                swprintf(text, 96, L"%ls %.0f -> %.0f; ", entry.first.c_str(), was->second, entry.second);
+                                changed += text;
+                            }
+                        }
+                        std::vector<UObject*> others;
+                        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), others);
+                        double nearest = -1.0;
+                        Vec3 me, at;
+                        actor_location(s.pawn, me);
+                        for (UObject* other : others)
+                        {
+                            if (!other || other == s.pawn || !actor_location(other, at)) continue;
+                            double d = length(at - me);
+                            if (nearest < 0 || d < nearest) nearest = d;
+                        }
+                        HSVR_LOG("Hurt: consciousness fell from %.0f to %.0f within a second | changed: %ls| other characters in the level %d, nearest %.0f cm | kicking: %s, crouched: %s",
+                                 reference, *awake, changed.empty() ? L"(nothing in health or pain) " : changed.c_str(), (int)others.size() - 1, nearest,
+                                 now_hurt < s.kick_until ? "yes" : "no", shared().own_crouch.load() ? "yes" : "no");
+                    }
+                    before.swap(values);
+                    reference = *awake;
+                    reference_time = now_hurt;
+                }
+                s.consciousness = *awake;
+            }
             if (bool* fallen = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Fallen"))) s.fallen = *fallen;
             {
                 double now = now_seconds();
@@ -3503,6 +3978,60 @@ namespace hsvr
         // Runs right before the physics step. The engine's own turning drive stays on underneath
         // (it holds the hand between frames) but its torque limit no longer decides how fast a
         // wrist can turn a sword.
+        // ---- carried along ----------------------------------------------------------------------
+        // Walking moves the character, and the placed body with it, however fast the movement
+        // component likes. The physical hands only follow through their pull to the controllers.
+        // So each change of the character's own speed is given to the hands and to what they hold
+        // as well, directly: seen from the body, walking then does nothing to them, and the pull
+        // only ever has the player's own hand movements to deal with.
+        void carry_hands(const Config& cfg)
+        {
+            State& s = g_state;
+            static UObject* last_pawn = nullptr;
+            static Vec3 last_velocity;
+            if (!cfg.carry_hands || !s.kin_active || s.kin_hands || !s.body)
+            {
+                last_pawn = nullptr;
+                return;
+            }
+            UObject* movement = object_property(s.pawn, STR("CharacterMovement"));
+            ue::FVector* velocity = movement ? movement->GetValuePtrByPropertyNameInChain<ue::FVector>(STR("Velocity")) : nullptr;
+            if (!velocity) return;
+            Vec3 now_velocity{velocity->X, velocity->Y, velocity->Z};
+            Vec3 change = now_velocity - last_velocity;
+            bool usable = last_pawn == s.pawn;
+            last_velocity = now_velocity;
+            last_pawn = s.pawn;
+            if (!usable || length(change) < 0.5 || length(change) > 1500.0) return;
+            UFunction* set_fn = s.body->GetFunctionByNameInChain(STR("SetPhysicsLinearVelocity"));
+            if (!set_fn || set_fn->GetParmsSize() > 64) return;
+            int32_t o_vel = param_offset(set_fn, L"NewVel"), o_add = param_offset(set_fn, L"bAddToCurrent"), o_bone = param_offset(set_fn, L"BoneName");
+            if (o_vel < 0 || o_add < 0 || o_bone < 0) return;
+            ue::FVector add{change.x, change.y, change.z};
+            UObject* carried[2] = {nullptr, nullptr};
+            for (int k = 0; k < 2; ++k)
+            {
+                Side& side = s.side[k];
+                if (!side.pull_active || !side.wrist_freed || side.rescue_until > 0.0) continue;
+                alignas(16) uint8_t parms[64] = {};
+                memcpy(parms + o_vel, &add, sizeof(add));
+                parms[o_add] = 1;
+                memcpy(parms + o_bone, &side.hand_name, sizeof(FName));
+                s.body->ProcessEvent(set_fn, parms);
+                const TCHAR* property = side.out_sign > 0 ? STR("Weapon R") : STR("Weapon L");
+                UObject* weapon = s.pawn->GetPropertyByNameInChain(property) ? object_property(s.pawn, property) : nullptr;
+                UObject* base = weapon && weapon->GetPropertyByNameInChain(STR("BaseMesh")) ? object_property(weapon, STR("BaseMesh")) : nullptr;
+                if (!base || base == carried[0]) continue; // (one weapon in both hands is carried once)
+                carried[k] = base;
+                UFunction* weapon_fn = base->GetFunctionByNameInChain(STR("SetPhysicsLinearVelocity"));
+                if (weapon_fn != set_fn) continue;
+                alignas(16) uint8_t weapon_parms[64] = {};
+                memcpy(weapon_parms + o_vel, &add, sizeof(add));
+                weapon_parms[o_add] = 1;
+                base->ProcessEvent(weapon_fn, weapon_parms);
+            }
+        }
+
         void turn_hands(const Config& cfg)
         {
             State& s = g_state;
@@ -3550,61 +4079,285 @@ namespace hsvr
             }
         }
 
-        // What the player holds stops colliding with the player's own body, through the game's own
-        // function for it (CollisionDisablerFunctionLibrary, which the game uses for the weapon
-        // against the hand and forearm only). Done once per held object.
+        // Collisions the placed body should not have, switched off through the game's own function
+        // library for it (CollisionDisablerFunctionLibrary; the game uses it for a weapon against
+        // the hand and forearm that hold it):
+        //   - the body against itself (a kick while crouched struck the player's own body and hurt);
+        //   - what the player holds against the player's body;
+        //   - loose weapons and traps, held by nobody, against the body other than the hands (a
+        //     placed body cannot give way: the hanging kettle caught against it was thrown about).
+        //     They collide again as soon as somebody holds them.
+        struct NameArray
+        {
+            const FName* data;
+            int32_t num;
+            int32_t max;
+        };
+
+        bool collision_call(const wchar_t* name, std::initializer_list<std::pair<const void*, int32_t>> args)
+        {
+            static UObject* library = nullptr;
+            if (!library) library = UObjectGlobals::FindObject(STR("CollisionDisablerFunctionLibrary"), STR("Default__CollisionDisablerFunctionLibrary"));
+            UFunction* fn = library ? library->GetFunctionByNameInChain(name) : nullptr;
+            if (!fn || fn->GetParmsSize() > 96) return false;
+            alignas(16) uint8_t parms[96] = {};
+            auto arg = args.begin();
+            static std::map<UFunction*, bool> told;
+            bool tell = !told[fn];
+            told[fn] = true;
+            for (FProperty* p : fn->ForEachProperty())
+            {
+                if (arg == args.end() || p->GetSize() != arg->second) return false;
+                if (arg->second == 4)
+                {
+                    // The duration (-1 = for good). It is a number of seconds: a float. (Handed
+                    // over as a whole number until the twelfth cut, the game read "not a number",
+                    // and the switches it was meant to set for good did not hold.)
+                    int32_t whole;
+                    memcpy(&whole, arg->first, 4);
+                    bool is_float = p->GetClass().GetName() == STR("FloatProperty");
+                    float seconds = (float)whole;
+                    memcpy(parms + p->GetOffset_Internal(), is_float ? (const void*)&seconds : (const void*)&whole, 4);
+                    if (tell) HSVR_LOG("Hands: the game's collision switch %ls takes its duration as %ls", name, p->GetClass().GetName().c_str());
+                }
+                else
+                {
+                    memcpy(parms + p->GetOffset_Internal(), arg->first, arg->second);
+                }
+                ++arg;
+            }
+            if (arg != args.end()) return false;
+            library->ProcessEvent(fn, parms);
+            return true;
+        }
+
+        // The parts of a weapon (or trap) that collide: its base mesh and whatever else the game
+        // lists in its "Collision Components Array" (the hanging kettle's pot is such a part).
+        void weapon_parts(UObject* weapon, std::vector<UObject*>& parts)
+        {
+            parts.clear();
+            if (!weapon) return;
+            if (weapon->GetPropertyByNameInChain(STR("BaseMesh")))
+                if (UObject* base = object_property(weapon, STR("BaseMesh"))) parts.push_back(base);
+            if (FProperty* list = weapon->GetPropertyByNameInChain(STR("Collision Components Array")))
+            {
+                struct ObjectArray { UObject** data; int32_t num; int32_t max; };
+                const ObjectArray* more = reinterpret_cast<const ObjectArray*>(reinterpret_cast<uint8_t*>(weapon) + list->GetOffset_Internal());
+                if (more->data && more->num > 0 && more->num <= 32)
+                    for (int32_t i = 0; i < more->num; ++i)
+                        if (more->data[i] && std::find(parts.begin(), parts.end(), more->data[i]) == parts.end()) parts.push_back(more->data[i]);
+            }
+        }
+
         void no_self_hits_update()
         {
             State& s = g_state;
-            static UObject* library = nullptr;
-            static UObject* done[2] = {nullptr, nullptr};
+            Config cfg = config();
             static UObject* done_pawn = nullptr;
+            static bool self_done = false;
+            static UObject* held_done[2] = {nullptr, nullptr};
+            static std::map<UObject*, bool> loose; // a loose thing's body -> collision with our body is off
+            static std::vector<FName> body_bones;  // every rigid bone but the hands
+            static double next_scan = 0.0;
             if (done_pawn != s.pawn)
             {
                 done_pawn = s.pawn;
-                done[0] = done[1] = nullptr;
+                self_done = false;
+                held_done[0] = held_done[1] = nullptr;
+                loose.clear();
+                body_bones.clear();
+                next_scan = 0.0;
             }
+            FProperty* bones_property = s.pawn->GetPropertyByNameInChain(STR("Rigid Bones"));
+            if (!bones_property) return;
+            const NameArray* all = reinterpret_cast<const NameArray*>(reinterpret_cast<uint8_t*>(s.pawn) + bones_property->GetOffset_Internal());
+            if (!all->data || all->num <= 0 || all->num > 200) return;
+            const int32_t forever = -1;
+            if (!self_done)
+            {
+                self_done = true;
+                if (cfg.body_passes_itself)
+                {
+                    bool ok = collision_call(L"DisableCollision_SkeletalVsSkeletal", {{&s.body, 8}, {all, 16}, {&s.body, 8}, {all, 16}, {&forever, 4}});
+                    HSVR_LOG(ok ? "Hands: the player's body no longer collides with itself" : "Hands: the game's collision switch (body against itself) was not found or takes other parameters");
+                }
+                for (int32_t i = 0; i < all->num; ++i)
+                {
+                    if (memcmp(&all->data[i], &s.side[0].hand_name, sizeof(FName)) != 0 && memcmp(&all->data[i], &s.side[1].hand_name, sizeof(FName)) != 0)
+                        body_bones.push_back(all->data[i]);
+                }
+            }
+            UObject* held[2] = {nullptr, nullptr};
             for (int k = 0; k < 2; ++k)
             {
                 const TCHAR* property = k ? STR("Weapon R") : STR("Weapon L");
                 UObject* weapon = s.pawn->GetPropertyByNameInChain(property) ? object_property(s.pawn, property) : nullptr;
-                UObject* part = weapon && weapon->GetPropertyByNameInChain(STR("BaseMesh")) ? object_property(weapon, STR("BaseMesh")) : nullptr;
-                if (!part || part == done[k]) continue;
-                done[k] = part;
-                if (!library) library = UObjectGlobals::FindObject(STR("CollisionDisablerFunctionLibrary"), STR("Default__CollisionDisablerFunctionLibrary"));
-                UFunction* fn = library ? library->GetFunctionByNameInChain(STR("DisableCollision_SkeletalVsSingleBody")) : nullptr;
-                FProperty* bones = s.pawn->GetPropertyByNameInChain(STR("Rigid Bones"));
-                if (!fn || !bones || fn->GetParmsSize() > 64)
-                {
-                    HSVR_LOG("Hands: the game's collision switch was not found; the %s weapon can still hit the player's own body", k ? "right" : "left");
-                    continue;
-                }
-                // Parameters in order: the skeletal mesh, its bone names (an array), the single body, a duration (-1 = for good).
-                alignas(16) uint8_t parms[64] = {};
-                int index = 0;
-                bool ok = true;
-                for (FProperty* p : fn->ForEachProperty())
-                {
-                    uint8_t* at = parms + p->GetOffset_Internal();
-                    if (index == 0 && p->GetSize() == 8) memcpy(at, &s.body, 8);
-                    else if (index == 1 && p->GetSize() == 16) memcpy(at, reinterpret_cast<uint8_t*>(s.pawn) + bones->GetOffset_Internal(), 16); // the pawn's own array, borrowed
-                    else if (index == 2 && p->GetSize() == 8) memcpy(at, &part, 8);
-                    else if (index == 3 && p->GetSize() == 4)
-                    {
-                        int32_t forever = -1;
-                        memcpy(at, &forever, 4);
-                    }
-                    else ok = false;
-                    ++index;
-                }
-                if (!ok || index != 4)
-                {
-                    HSVR_LOG("Hands: the game's collision switch does not take the expected parameters; left alone");
-                    continue;
-                }
-                library->ProcessEvent(fn, parms);
-                HSVR_LOG("Hands: what the %s hand holds no longer collides with the player's own body", k ? "right" : "left");
+                held[k] = weapon;
+                if (!weapon || weapon == held_done[k]) continue;
+                held_done[k] = weapon;
+                std::vector<UObject*> parts;
+                weapon_parts(weapon, parts);
+                bool ok = !parts.empty();
+                for (UObject* part : parts)
+                    ok = collision_call(L"DisableCollision_SkeletalVsSingleBody", {{&s.body, 8}, {all, 16}, {&part, 8}, {&forever, 4}}) && ok;
+                HSVR_LOG(ok ? "Hands: what the %s hand holds no longer collides with the player's own body" : "Hands: the game's collision switch was not found; the %s weapon can still hit the player's own body",
+                         k ? "right" : "left");
             }
+            double now = now_seconds();
+            if (!cfg.loose_things_pass || now < next_scan || body_bones.empty() || !s.have_actor_world) return;
+            next_scan = now + 2.0;
+            NameArray body{body_bones.data(), (int32_t)body_bones.size(), (int32_t)body_bones.size()};
+            std::vector<UObject*> items;
+            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), items);
+            std::map<UObject*, bool> seen;
+            int switched_off = 0, switched_on = 0;
+            for (UObject* item : items)
+            {
+                if (!item || item == held[0] || item == held[1] || !item->GetPropertyByNameInChain(STR("Is Held"))) continue;
+                bool* is_held = item->GetValuePtrByPropertyNameInChain<bool>(STR("Is Held"));
+                Vec3 at;
+                if (!is_held || !actor_location(item, at) || length(at - s.actor_world) > 600.0) continue;
+                std::vector<UObject*> parts;
+                weapon_parts(item, parts);
+                bool want_off = !*is_held;
+                bool counted = false;
+                for (UObject* part : parts)
+                {
+                    auto before = loose.find(part);
+                    bool off = before != loose.end() && before->second;
+                    if (want_off && !off)
+                    {
+                        if (collision_call(L"DisableCollision_SkeletalVsSingleBody", {{&s.body, 8}, {&body, 16}, {&part, 8}, {&forever, 4}}) && !counted) { ++switched_off; counted = true; }
+                    }
+                    else if (!want_off && off)
+                    {
+                        if (collision_call(L"EnableCollision_SkeletalVsSingleBody", {{&s.body, 8}, {&body, 16}, {&part, 8}}) && !counted) { ++switched_on; counted = true; }
+                    }
+                    seen[part] = want_off;
+                }
+            }
+            loose.swap(seen);
+            if (switched_off || switched_on)
+                HSVR_LOG("Hands: %d loose weapon(s) or trap(s) nearby no longer collide with the player's body; %d picked up by somebody collide again", switched_off, switched_on);
+        }
+
+        // ---- bumps ------------------------------------------------------------------------------
+        // The game's script hears of everything the body mesh touches (its hit event) and turns the
+        // force of the contact into damage. A placed limb is moved, not pushed: it cannot give way,
+        // so merely standing against a loose prop is contact after contact at full force. While the
+        // body is placed, the force of a contact with anything that is neither a fighter nor a
+        // weapon is handed to the script as zero; the script then does nothing with it. Blows by
+        // fighters and weapons arrive untouched.
+        std::atomic<UObject*> g_hit_pawn{nullptr};
+        std::atomic<UFunction*> g_hit_event{nullptr};
+        int32_t g_hit_other = -1, g_hit_impulse = -1;
+        bool g_hit_registered = false;
+        std::map<UClass*, bool> g_hit_harmful; // class of the other thing -> a fighter or a weapon
+
+        void on_any_event(UObject* context, UFunction* function, void* parms)
+        {
+            if (!parms || function != g_hit_event.load(std::memory_order_relaxed) || context != g_hit_pawn.load(std::memory_order_relaxed)) return;
+            State& s = g_state;
+            if (GetCurrentThreadId() != s.game_thread || s.pawn != context || !s.kin_active || !config().bumps_harmless) return;
+            UObject* other = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(parms) + g_hit_other);
+            if (other)
+            {
+                UClass* type = other->GetClassPrivate();
+                auto known = g_hit_harmful.find(type);
+                if (known == g_hit_harmful.end())
+                {
+                    bool harmful = false;
+                    for (UStruct* t = type; t && !harmful; t = t->GetSuperStruct())
+                    {
+                        std::wstring name = t->GetName();
+                        harmful = name == L"Willie_BP_C" || name == L"ModularWeaponBP_C";
+                    }
+                    known = g_hit_harmful.emplace(type, harmful).first;
+                }
+                if (known->second) return;
+            }
+            double* impulse = reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(parms) + g_hit_impulse);
+            impulse[0] = impulse[1] = impulse[2] = 0.0;
+            ++s.bumps_muted;
+        }
+
+        void hit_hook_setup(UObject* pawn)
+        {
+            UFunction* fn = pawn->GetFunctionByNameInChain(STR("BndEvt__BP_ThirdPersonCharacter_Mesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"));
+            int32_t other = fn ? param_offset(fn, L"OtherActor") : -1, impulse = fn ? param_offset(fn, L"NormalImpulse") : -1;
+            if (!fn || other < 0 || impulse < 0)
+            {
+                g_hit_event = nullptr;
+                HSVR_LOG("Body: the game's body-hit event was not found; bumping into props can still hurt the placed body");
+                return;
+            }
+            g_hit_other = other;
+            g_hit_impulse = impulse;
+            g_hit_pawn = pawn;
+            g_hit_event = fn;
+            if (!g_hit_registered)
+            {
+                g_hit_registered = true;
+#pragma warning(suppress : 4996)
+                Hook::RegisterProcessEventPreCallback(&on_any_event);
+            }
+            HSVR_LOG("Body: listening to the game's body-hit event (bumps into props and the level do not hurt the placed body)");
+        }
+
+        // What the placed body tells the game's script about itself, again and again (the script
+        // works these out anew as it runs).
+        void placed_body_facts(bool count)
+        {
+            State& s = g_state;
+            // It stands where the player stands: it is not stumbling after a kick ...
+            if (double* stumble = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Stumble Direction")))
+                stumble[0] = stumble[1] = stumble[2] = 0.0;
+            // ... and it is not falling. The game takes the character for falling while its feet's
+            // ground checks fail, and then counts whatever a leg touches as the landing. (Falling
+            // off a ledge is the movement component's business and still happens; only the landing
+            // damage is lost.)
+            if (double* falling = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Free Fall Rate")))
+            {
+                if (count && *falling > 0.001) ++s.fall_frames;
+                *falling = 0.0;
+            }
+            // Its joints cannot be pulled apart. The game judges a joint by how far the bone is
+            // bent against its parent and wears the limb down frame by frame until it is
+            // "dislocated"; the deep knee bend of the mod's own crouch read as a knee coming apart
+            // (right leg from 94 to 0 in six frames, nobody near). The game has a switch for
+            // exactly this, which it uses itself for a moment at a time.
+            if (bool* blocked = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Dislocation Blocked"))) *blocked = true;
+        }
+
+        bool before_actor_tick(Vec3& at)
+        {
+            State& s = g_state;
+            if (!s.ready || s.failed || !s.pawn || s.pawn != g_actor_tick_pawn || !s.kin_active) return false;
+            placed_body_facts(true);
+            return config().hold_ground && actor_location(s.pawn, at);
+        }
+
+        void after_actor_tick(const Vec3& at)
+        {
+            State& s = g_state;
+            Vec3 now;
+            if (!s.pawn || s.pawn != g_actor_tick_pawn || !actor_location(s.pawn, now)) return;
+            Vec3 gone = now - at;
+            gone.z = 0; // height (the floor, a jump) is the game's
+            double d = length(gone);
+            if (d < 0.02) return;
+            UFunction* set_fn = s.pawn->GetFunctionByNameInChain(STR("K2_SetActorLocation"));
+            int32_t o_loc = set_fn ? param_offset(set_fn, L"NewLocation") : -1, o_sweep = set_fn ? param_offset(set_fn, L"bSweep") : -1,
+                    o_tp = set_fn ? param_offset(set_fn, L"bTeleport") : -1;
+            if (!set_fn || o_loc < 0 || o_sweep < 0 || o_tp < 0 || set_fn->GetParmsSize() > 1024) return;
+            alignas(16) uint8_t parms[1024] = {};
+            ue::FVector to{at.x, at.y, now.z};
+            memcpy(parms + o_loc, &to, sizeof(to));
+            parms[o_sweep] = 0; // straight back to where it was a moment ago
+            parms[o_tp] = 0;    // (not a teleport: that would carry the physical hands along)
+            s.pawn->ProcessEvent(set_fn, parms);
+            ++s.drag_undone;
+            s.drag_undone_cm += d;
         }
 
         void before_muscles_update()
@@ -3618,11 +4371,13 @@ namespace hsvr
             }
             pull_update(s.pull_arms);
             turn_hands(config());
+            carry_hands(config());
             // The capsule leash's reach again, here as well as in the body's update: the game works
             // out its own value at the end of its script each frame, and that script may run before
             // or after the body's update. Whichever order, ours is then the one its next frame reads.
             if (s.kin_active)
             {
+                placed_body_facts(false);
                 if (double* limit = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Capsule Max Dislocation")))
                 {
                     if (*limit < 100000.0)
@@ -3676,9 +4431,14 @@ namespace hsvr
                 }
                 HSVR_LOG("Body: %s | right forearm's physics body %.0f cm from where it is drawn (about 13 is normal)", s.hold_active ? "held at its place" : "not held",
                          s.forearm_off_cm);
-                HSVR_LOG("Room: moves by something other than walking taken back this second: %d (%.0f cm)", s.ground_undone, s.ground_undone_cm);
+                HSVR_LOG("Room: moves by something other than walking taken back this second: %d (%.0f cm) | the game's script dragged the character %d times (%.0f cm), each undone on the spot | the game took the character for falling in %d frames | %d bumps into props or the level kept harmless",
+                         s.ground_undone, s.ground_undone_cm, s.drag_undone, s.drag_undone_cm, s.fall_frames, s.bumps_muted);
+                s.bumps_muted = 0;
                 s.ground_undone = 0;
                 s.ground_undone_cm = 0;
+                s.drag_undone = 0;
+                s.drag_undone_cm = 0;
+                s.fall_frames = 0;
                 HSVR_LOG("Pull: hand and body settings written %d times this second (each time means the game had put its own back)", s.pull_applies_second);
                 s.pull_applies_second = 0;
                 HSVR_LOG("Legs: %d steps this second | feet %s | hands %s (wrists free: right %s, left %s)", s.steps_taken,

@@ -220,6 +220,39 @@ namespace hsvr
         // 1 = what the player holds does not collide with the player's own body (the game lets a
         // sword hit its wielder's legs; with 1:1 arms and a squat that happens constantly).
         bool no_self_hits = true;
+        // How each controller really sits in the hand, measured by the calibration (both grips held
+        // 2 s, arms straight out in front, thumbs up, wrists straight): six numbers, the direction
+        // of the handle towards the thumb and the direction from the wrist into the fist, both in
+        // the controller's own axes. Empty = the assumed directions (1 0 0 and 0 0 -1). Written by
+        // the mod.
+        std::string ctrl_axes_l;
+        std::string ctrl_axes_r;
+        // 1 = loose weapons and traps (held by nobody) do not collide with the player's body, only
+        // with the player's hands and what they hold. A placed body cannot give way, so a loose
+        // object caught against it was thrown about (the hanging kettle).
+        bool loose_things_pass = true;
+        // A weapon stuck in something (the game sticks points and edges into wood, floors and
+        // bodies) comes free once the hand that holds it has been pulled this many cm away from
+        // it. 0 = never: only the game's own force threshold frees it, which the hand's pull does
+        // not reach (the hand stayed behind, metres from the controller, when the player walked
+        // off).
+        double stuck_pull_free_cm = 25.0;
+        // 1 = when walking changes the character's speed, the physical hands and what they hold are
+        // given the same change of speed directly, as if standing on a moving floor. Without it the
+        // hands' pull alone had to get a heavy weapon up to walking speed, and the weapon hand was
+        // left a metre and more behind whenever the character set off.
+        bool carry_hands = true;
+        // 1 = the parts of the player's own body do not collide with each other (a kicking leg
+        // passes the hands instead of throwing them).
+        bool body_passes_itself = true;
+        // 1 = while the body is placed, bumping into things that are neither a fighter nor a
+        // weapon (props, the level) does not hurt the player. A placed limb cannot give way, so
+        // the game read a foot nudging a loose prop as blow after blow and broke the leg.
+        bool bumps_harmless = true;
+        // 1 = the body mesh does not collide with the level itself (floor, walls). Off: the placed
+        // parts never collide with the level anyway (neither can move the other), so all this did
+        // was let the physical hands through walls and floors.
+        bool body_ignores_level = false;
         // 1 = the legs are the mod's own: feet stay planted on the ground and step when the body
         // has moved step_length_cm past them (or turned), lifting step_height_cm.
         bool own_legs = true;
