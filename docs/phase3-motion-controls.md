@@ -1,6 +1,6 @@
-# Phase 3: motion controls (the controllers move the arms)
+﻿# Phase 3: motion controls (the controllers move the arms)
 
-Status 2026-11-15: first version built and installed on Matthew's PC; not yet tried in the headset.
+Status 2026-11-16: in use in the headset. Matthew: figure 8s work and it is "better", but the sword is still not exactly where his hand is; a larger rework is expected later (see Open). Parked to move on to the next step.
 Background: `docs/phase2-arm-research.md`.
 
 ## How it works
@@ -38,7 +38,7 @@ injuries and weapon weight still decide how well the real arm follows.
    own hinge axis, which is learned from the game's own animation (logged once per arm). The forearm takes
    `forearm_twist_share` of the hand's roll. Bones below the hand (fingers, `weapon_r`) are carried along.
    Out-of-reach targets are clamped to 99.9 % of the arm length.
-7. **Aim** (`sync_aim`): the pawn's `Aim Vector` (the 2-D aim the mouse normally moves, ±90) is set from
+7. **Aim** (`sync_aim`): the pawn's `Aim Vector` (the 2-D aim the mouse normally moves, Â±90) is set from
    the blade direction relative to the character's facing, so the game's swing speed, stamina and body
    turning follow along (`aim_sync`).
 
@@ -82,7 +82,19 @@ Developer switches: `dev_fake_hands` (pretend controllers circling in front of t
 - `open /Game/Maps/Arenas/Map_Arena_Cellar` (and Slums) from the splash screen loaded the arena but
   spawned no character on 2026-11-15, so the arm code could not be exercised without someone playing.
 
+## Tuning history (headset, 2026-11-15/16)
+
+- First fight: hands within 5 to 10 cm, no crash; fast swings lag 20 to 50 cm.
+- Figure 8 failed: the arm was sent almost straight (targets past the character's reach), so all blade turning fell to the wrist, which stops near 78 degrees of bend. Fix: reach easing (reach_knee, reach_max) and an elbow that swings about the shoulder-hand line to keep wrist bend and roll in range (wrist_bend_limit, twist_limit, elbow_swing_max).
+- Wonky elbow: the hand's roll about the forearm crossed 180 degrees and the forearm flipped in one frame. Fix: roll unwrapped frame to frame and clamped (twist_clamp). Matthew: "WAY better".
+- In-game hand 4 to 6 inches short: shoulder reach (clavicle swings forward, shoulder_reach_cm), then an arm-length calibration (both grips held 2 s, arms straight out; saved as player_arm_cm etc.) that scales reach from the player's shoulder to the character's.
+- Steady 13 cm / 15 to 25 degree gap even at rest (muscles under sword weight): hold assist (assist_*), made gentler after it felt springy.
+- Matthew's goal: keep the game's physics feel; heavy weapons may lag, one-handers should swing about as fast as the controller.
+
 ## Open
+
+- The sword is still not where the real hand is. Candidates for the rework: a lead on fast moves scaled by weapon weight; a direct physics assist on the hand or weapon (option C in the research notes); changing the physical arm itself (bone lengths, constraint drive strength), which affects game balance.
+- efore_body_update runs late on about half the frames (the body updates before the driver has animated), which adds a frame of delay; worth a fix in the rework.
 
 - Not yet tried in the headset: accuracy, feel, whether the muscles are strong enough, elbow look.
 - Buttons are read (trigger, grip) but do nothing yet; grabbing, guard, thrust, two-handed grip and
