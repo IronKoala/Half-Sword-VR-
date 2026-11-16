@@ -195,6 +195,17 @@ namespace hsvr
         // arm is drawn to follow the hand. So a hand can be stopped: when the sword hits something
         // the hand stops with it. If the wrist cannot be freed the hands are placed rigidly instead.
         bool free_wrists = true;
+        // 1 = while the hands are physical, what a hand holds is fixed rigidly in it: the game's grip
+        // joint (soft swing and twist limits, breakable) is locked hard and made unbreakable, and put
+        // back as it was when the body is given back to the game.
+        bool rigid_grip = true;
+        // 1 = a leg that the game is kicking with (Kick Rate R/L) plays the game's kick animation
+        // instead of standing on its planted foot.
+        bool kick_legs = true;
+        // Unattended self-test (with dev_fake_headset=1, dev_fake_hands=1 and a dev_script that
+        // opens an arena): pretend hands hold still, move, swing, strike the floor; the character
+        // walks and turns; numbers are checked and written to selftest_result.txt.
+        bool dev_selftest = false;
         // 1 = the legs are the mod's own: feet stay planted on the ground and step when the body
         // has moved step_length_cm past them (or turned), lifting step_height_cm.
         bool own_legs = true;

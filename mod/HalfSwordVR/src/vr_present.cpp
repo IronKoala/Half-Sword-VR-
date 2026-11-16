@@ -206,7 +206,7 @@ namespace hsvr
                 XrEyeRaw& eye = pose.eye[e];
                 // Eye offset along the head's right axis (rotated by yaw only; good enough for a test).
                 eye.px = sway + side * std::cos(yaw);
-                eye.py = 0.0f;
+                eye.py = cfg.dev_selftest ? shared().selftest_head_y.load() : 0.0f;
                 eye.pz = -side * std::sin(yaw);
                 eye.qx = qx;
                 eye.qy = qy;
@@ -2637,6 +2637,37 @@ float4 PSMain(VSOut i) : SV_Target
                 float ox = 0.22f * side + 0.08f * (float)std::sin(t * 1.3);
                 float oy = -0.30f + 0.08f * (float)std::cos(t * 1.3);
                 float oz = -0.35f;
+                if (config().dev_selftest && shared().selftest_phase.load() >= 0)
+                {
+                    // The self-test's script (arm_control.cpp, "self-test"): offsets from the
+                    // recentred head place, so a lowered pretend head does not carry the hands.
+                    int phase = shared().selftest_phase.load();
+                    float pt = shared().selftest_phase_time.load();
+                    const float two_pi = 6.2831853f;
+                    ox = 0.22f * side;
+                    oy = -0.30f;
+                    oz = -0.40f;
+                    tilt = 40.0f * (float)kDegToRad;
+                    if (phase == 2)
+                    {
+                        ox += 0.10f * std::sin(pt * 1.5f);
+                        oy += 0.10f * std::cos(pt * 1.5f);
+                    }
+                    else if (phase == 3 && h == 1)
+                    {
+                        ox = 0.22f + 0.35f * std::sin(two_pi * 1.2f * pt);
+                        oy = -0.25f + 0.15f * std::cos(two_pi * 1.2f * pt);
+                        oz = -0.45f;
+                        tilt = (20.0f + 50.0f * std::sin(two_pi * 1.2f * pt)) * (float)kDegToRad;
+                    }
+                    else if (phase == 4 && h == 1)
+                    {
+                        // Strike down at the floor twice a second, blade pointing down.
+                        oy = -1.05f - 0.20f * std::sin(two_pi * 2.0f * pt);
+                        oz = -0.45f;
+                        tilt = -75.0f * (float)kDegToRad;
+                    }
+                }
                 // Turn the offset by the recentred heading (about +Y).
                 float cy = std::cos(yaw), sy = std::sin(yaw);
                 XrHandRaw& hand = out[h];

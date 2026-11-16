@@ -94,6 +94,11 @@ namespace hsvr
         std::atomic<bool> vr_controls_off{false};
         // The crouch button: how far the view is lowered right now, cm (game thread writes and reads).
         std::atomic<float> view_drop_cm{0.0f};
+        // Self-test (dev_selftest): which part of the test is running (-1 = none), seconds into it,
+        // and how far the pretend headset is lowered, metres.
+        std::atomic<int> selftest_phase{-1};
+        std::atomic<float> selftest_phase_time{0.0f};
+        std::atomic<float> selftest_head_y{0.0f};
         // Set by a key to flip between full-resolution mode and the fallback while playing:
         // -1 = follow the settings file, 0 = fallback, 1 = full resolution.
         std::atomic<int> separate_override{-1};

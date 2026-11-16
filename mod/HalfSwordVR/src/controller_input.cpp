@@ -970,6 +970,13 @@ namespace hsvr
             pad.rx = axes[2];
             pad.ry = axes[3];
         }
+        if (cfg.dev_selftest && shared().selftest_phase.load() == 6)
+        {
+            // Self-test, "walking": the left stick forward for 2 s, back for 2 s, twice, through
+            // the same virtual gamepad the real controllers use.
+            pad.active = true;
+            pad.ly = ((int)(shared().selftest_phase_time.load() / 2.0f) % 2 == 0) ? 1.0f : -1.0f;
+        }
         {
             std::lock_guard<std::mutex> lock(g_pad_mutex);
             g_pad = pad;

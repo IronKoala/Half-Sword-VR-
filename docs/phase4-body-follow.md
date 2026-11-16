@@ -47,6 +47,56 @@ head). The first cut of this branch did the same and was never switched on. It n
 like headgear) and never touches a bone. **Never use HideBoneByName on this game's characters.**
 Where the sections below mention `HideBoneByName` or `hide_head_bone`, that is the removed way.
 
+## Ninth cut (2026-11-16): built from the decompile, self-tested
+
+Matthew asked for the game's code to be decompiled rather than guessed at (`docs/game-internals.md`,
+raw dumps in `C:\dev\hsvr-study\dumps\study`) and agreed to an unattended self-test: the game starts by
+itself with a pretend headset, no desktop clicks, only when he is not using the PC, and no build
+reaches him before it passes. He refused Claude driving his desktop with mouse and keyboard.
+
+**The self-test** (`dev_selftest=1`, with `dev_fake_headset=1`, `dev_fake_hands=1`, `dev_fake_still=1` and
+`dev_script=25:open /Game/Maps/Arenas/Map_Arena_Cellar;112:quit`): eight parts (settle, hands still, slow
+movement, fast swings, striking the floor while the pretend head ducks 50 cm, still again, walking by the
+virtual gamepad's stick 2 s forward and back twice, turning) and 22 checks, written to the log as "Test:"
+lines and to `Mods\HalfSwordVR\selftest_result.txt`. The script that runs one test and puts Matthew's ini
+back is `tools/selftest.sh`. It cannot judge feel, an enemy's hits, or anything the pretend hands do
+not do.
+
+What the five runs found, each of which would otherwise have been one of Matthew's headset tests:
+
+1. **The hand drive never worked from the mesh's tick.** The game writes its own physical animation
+   settings every frame (about 180 writes a second were needed to keep ours) at a point of the frame after
+   the body mesh's update, so the muscles' own update always got the game's values (no positional
+   strength): the freed hands dropped to the floor, 131 cm from the controllers. Earlier "improvements"
+   from hand pull were the pose, not the drive. Fix: the physical animation component's own tick is
+   hooked and our settings are written immediately before it. Result: hands 0.1 cm from the controllers
+   at rest, 3.0 cm on average and 9.6 at most in fast swings.
+2. **Hands must not be physical before their drive exists.** The game's muscle settings are only found
+   a few seconds after spawn; until then the hands stay placed rigidly.
+3. **`hold_ground` pushed the character through a wall.** A wall stopping the character read as
+   "moved by something else" and was "taken back" into the wall, and the right hand was left 15 m
+   behind. Now only a single-frame move of more than 15 cm beyond what the movement component's own
+   speed explains is taken back, with a sweep. The game's running really is faster than that speed says,
+   so smaller differences must be left alone (a summed version made walking stutter).
+4. **The capsule leash has to be switched off after the game's script as well as before it.**
+   `Capsule Max Dislocation` is now also written in the muscles' tick hook; before that the game nudged
+   the character 16 cm at every change of direction.
+5. **The hand's roll limits must not apply to a freed or placed hand.** The solver's roll clamp left
+   the hands turned 140 degrees from the controllers after a disturbance; the pose's hand bone now takes
+   the controller's rotation exactly.
+
+Also new in this cut, from the decompile's facts: the wrists are freed by name (`UserConstraint_12` right,
+`UserConstraint_16` left, with the body's joint list as fallback); `rigid_grip` locks the game's grip joint
+(`PhysicsConstraint R/L Hand`: soft swing and twist limits, breakable at 300 / 500) hard and unbreakable
+while the hands are physical, so hand and weapon are one object (measured: the weapon did not move in the
+hand at all); `kick_legs` lets a kicking leg play the game's kick animation; a physical hand more than
+1 m from its controller for 20 frames is set at the controller for 0.15 s and let go again (logged).
+
+Passed 22 of 22 on the fifth run (`C:\dev\hsvr-test\surgery\selftest-pass.log`). Not covered by the
+test and so still unknown: how it feels, enemy hits on the placed body, the crouch button's view drop,
+kick, jump (the game's jump works through the capsule leash, which is off, so it probably does nothing),
+real controller noise, two-handed grips.
+
 ## Sixth and seventh cuts (2026-11-16): the Blade and Sorcery structure
 
 Matthew rejected the held body outright: "get rid of the puppeteering entirely. it will NEVER work. how
