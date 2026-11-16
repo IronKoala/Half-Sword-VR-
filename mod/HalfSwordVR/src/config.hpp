@@ -40,7 +40,7 @@ namespace hsvr
         // How solid the panel's menus and HUD are drawn: opacity = brightness x this.
         double ui_opacity_gain = 2.0;
         // Darkness of the sheet behind the panel while a menu is up (0 = none, 1 = solid).
-        double ui_menu_backdrop = 0.92;
+        double ui_menu_backdrop = 1.0;
         // Also use the coverage the game's UI pass leaves in the window's alpha channel. Off by
         // default: the window only has four levels of alpha, which shows as rings on soft overlays,
         // and the dark sheet behind menus already keeps dark menu parts visible.
@@ -244,6 +244,10 @@ namespace hsvr
         // 1 = what the hands hold stays in them until the player lets go (the game's own disarm, which
         // opens the hand when the force on the weapon is too much for the arm, is switched off).
         bool hold_tight = true;
+        // Looking down, the chest leans back out of the view by up to this many cm (reached at 60
+        // degrees down). With the head not drawn, the player otherwise looks straight down the
+        // neck hole into the inside of the chest. A real chest also gets out of the chin's way.
+        double look_down_back_cm = 16.0;
         // A weapon stuck in something (the game sticks points and edges into wood, floors and
         // bodies) comes free once the hand that holds it has been pulled this many cm away from
         // it. 0 = never: only the game's own force threshold frees it, which the hand's pull does

@@ -326,6 +326,7 @@ namespace hsvr
         text("ctrl_axes_r", c.ctrl_axes_r);
         flag("loose_things_pass", c.loose_things_pass);
         flag("hold_tight", c.hold_tight);
+        num("look_down_back_cm", c.look_down_back_cm);
         num("stuck_pull_free_cm", c.stuck_pull_free_cm);
         flag("carry_hands", c.carry_hands);
         flag("body_passes_itself", c.body_passes_itself);

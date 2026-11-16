@@ -2101,7 +2101,7 @@ float4 PSMain(VSOut i) : SV_Target
                     }
                     // A menu (the game is paused or wants a mouse pointer): put a dark sheet behind
                     // the panel so every button can be read whatever is behind it.
-                    if (pointer_showing || game_pointer || shared().game_paused.load()) c.params[3] = (float)cfg.ui_menu_backdrop;
+                    if (menu_showing || shared().game_paused.load()) c.params[3] = (float)cfg.ui_menu_backdrop;
                     ui_acquired = blit_to_swapchain(g.ui, srv, c);
                     if (ui_acquired)
                     {
@@ -2111,6 +2111,32 @@ float4 PSMain(VSOut i) : SV_Target
                             std::lock_guard<std::mutex> lock(g_recenter_mutex);
                             memcpy(pos0, g_recenter_xr_pos, sizeof(pos0));
                             yaw = g_recenter_xr_yaw;
+                        }
+                        {
+                            // A menu opens where the player is looking at that moment and stays
+                            // there until it closes (no recentering to find it).
+                            static bool menu_was = false;
+                            static float menu_pos[3] = {0, 0, 0}, menu_yaw = 0.0f;
+                            static bool menu_placed = false;
+                            bool menu_now = menu_showing || shared().game_paused.load();
+                            if (menu_now && !menu_was && have_item && item.pose.valid)
+                            {
+                                const XrEyeRaw& a = item.pose.eye[0];
+                                const XrEyeRaw& b = item.pose.eye[1];
+                                menu_pos[0] = (a.px + b.px) * 0.5f;
+                                menu_pos[1] = (a.py + b.py) * 0.5f;
+                                menu_pos[2] = (a.pz + b.pz) * 0.5f;
+                                Vec3 fwd_ue = xr_to_ue_rotation(a.qx, a.qy, a.qz, a.qw).rotate({1, 0, 0});
+                                menu_yaw = (float)std::atan2(-fwd_ue.y, fwd_ue.x);
+                                menu_placed = true;
+                            }
+                            if (!menu_now) menu_placed = false;
+                            menu_was = menu_now;
+                            if (menu_now && menu_placed)
+                            {
+                                memcpy(pos0, menu_pos, sizeof(pos0));
+                                yaw = menu_yaw;
+                            }
                         }
                         float d = (float)cfg.ui_distance_m;
                         quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT; // premultiplied
