@@ -162,6 +162,9 @@ namespace hsvr
         double pad_game_deadzone = 0.25;
         // Write the game's input bindings to the log once (to know what each gamepad input does).
         bool log_bindings = true;
+        // The right trigger starts an 8-second arm recording (arms_record_N.csv). Off by default now
+        // that the trigger guards.
+        bool arms_recorder = false;
         // Write "Arms:" lines to the log (once a second): where each hand should be and where it is.
         bool log_arms = true;
         // Developer switches.

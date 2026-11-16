@@ -1144,7 +1144,7 @@ namespace hsvr
             double now = now_seconds();
             if (!g_rec.active)
             {
-                if (now >= g_rec.cooldown_until && s.hands[1].valid && s.hands[1].trigger > 0.7f && !s.menu_up && s.ready)
+                if (config().arms_recorder && now >= g_rec.cooldown_until && s.hands[1].valid && s.hands[1].trigger > 0.7f && !s.menu_up && s.ready)
                 {
                     g_rec.active = true;
                     g_rec.start = now;

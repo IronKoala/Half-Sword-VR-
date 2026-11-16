@@ -302,6 +302,7 @@ namespace hsvr
         num("pad_deadzone", c.pad_deadzone);
         num("pad_game_deadzone", c.pad_game_deadzone);
         flag("log_bindings", c.log_bindings);
+        flag("arms_recorder", c.arms_recorder);
         flag("log_poses", c.log_poses);
         flag("log_input", c.log_input);
         num("capture_seconds", c.capture_seconds);

@@ -138,5 +138,7 @@ Targets: `LSTICK`, `RSTICK`, `LSTICK_X/Y`, `RSTICK_X/Y`, `LT`, `RT`, `A`, `B`, `
 `LS`, `RS`, `START`, `BACK`, `DUP`, `DDOWN`, `DLEFT`, `DRIGHT`. Other keys: `controller_pad` (on/off),
 `pad_deadzone`, `pad_game_deadzone`, `log_bindings`.
 
+The arm recorder no longer starts on the right trigger unless `arms_recorder=1`.
+
 Not tried in the headset yet. Known overlap: the arm-length calibration (both grips held 2 s) also
 grabs with both hands.
