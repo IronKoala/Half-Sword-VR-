@@ -18,6 +18,7 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
+#include "arm_control.hpp"
 #include "config.hpp"
 #include "log.hpp"
 #include "vr_present.hpp"
@@ -397,6 +398,57 @@ namespace hsvr
             }
         }
 
+        // ---- the mod's own keys on the controllers ----------------------------------------------
+        // Y: press = recenter (Home); hold 1 s = show or hide the menu panel (End).
+        // X: hold 1 s = motion arms on or off (Page Up).
+        // A press acts on release, so that a hold does not also do the short action.
+        struct HoldButton
+        {
+            bool down = false;
+            bool long_fired = false;
+            double since = 0.0;
+            // Returns 1 for a short press (on release), 2 once when held for `hold_s`, else 0.
+            int update(bool now_down, double now, double hold_s)
+            {
+                int result = 0;
+                if (now_down && !down)
+                {
+                    since = now;
+                    long_fired = false;
+                }
+                if (now_down && !long_fired && now - since >= hold_s)
+                {
+                    long_fired = true;
+                    result = 2;
+                }
+                if (!now_down && down && !long_fired) result = 1;
+                down = now_down;
+                return result;
+            }
+        };
+        HoldButton g_y_button, g_x_button;
+
+        void mod_keys_on_controllers(const XrHandRaw hands[2], const Config& cfg)
+        {
+            if (!cfg.controller_mod_keys) return;
+            double now = now_seconds();
+            auto& sh = shared();
+            int y = g_y_button.update(hands[0].button_upper, now, 1.0);
+            int x = g_x_button.update(hands[0].button_lower, now, 1.0);
+            if (y == 1)
+            {
+                sh.recenter_requested.store(true);
+                HSVR_LOG("Controller: recenter (Y)");
+            }
+            else if (y == 2)
+            {
+                bool toggled = !sh.ui_toggled.load();
+                sh.ui_toggled.store(toggled);
+                HSVR_LOG("Controller: menu panel %s (Y held)", toggled == cfg.ui_panel_auto ? "always shown" : "hidden during play");
+            }
+            if (x == 2) arm_toggle();
+        }
+
         const char* source_name(Source s)
         {
             static const char* names[] = {"l_stick_x", "l_stick_y", "r_stick_x", "r_stick_y", "l_trigger", "r_trigger", "l_grip", "r_grip",
@@ -459,6 +511,7 @@ namespace hsvr
         XrHandRaw hands[2];
         bool have = g_real_get_state && cfg.controller_pad && vr_controllers_this_tick(hands);
         PadOut pad;
+        if (have) mod_keys_on_controllers(hands, cfg);
         if (have)
         {
             pad.active = true;

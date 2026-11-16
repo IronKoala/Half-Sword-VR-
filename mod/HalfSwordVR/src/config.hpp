@@ -165,6 +165,8 @@ namespace hsvr
         // Keep the game's guard ("R/L Hand Toggle") raised for a hand that holds a weapon, so no
         // button is needed to fight.
         bool auto_guard = true;
+        // The mod's keys on the left controller: Y = recenter, Y held = menu panel, X held = motion arms.
+        bool controller_mod_keys = true;
         // The right trigger starts an 8-second arm recording (arms_record_N.csv). Off by default now
         // that the trigger guards.
         bool arms_recorder = false;

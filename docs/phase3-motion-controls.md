@@ -151,3 +151,11 @@ The arm recorder no longer starts on the right trigger unless `arms_recorder=1`.
 
 Not tried in the headset yet. Known overlap: the arm-length calibration (both grips held 2 s) also
 grabs with both hands.
+
+### No keyboard by default (Matthew, 2026-11-16)
+
+The mod's keys also work from the left controller (`controller_mod_keys=1`): Y press = recenter
+(Home), Y held 1 s = menu panel shown/hidden (End), X held 1 s = motion arms on/off (Page Up). The
+keyboard keys stay as a fallback. Still keyboard-only: Insert (view from the game's camera) and Page
+Down (fallback picture mode), both troubleshooting switches. Still needs the mouse: clicking in the
+game's menus (planned: a pointer from the controller onto the menu panel).
