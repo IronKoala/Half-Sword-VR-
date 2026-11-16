@@ -38,6 +38,12 @@ namespace hsvr
         double body_gap_cm = 0.0; // distance between the view and the character's real eyes
     };
     bool stereo_head_world(HeadWorld& out);
+    // Roomscale: the character has just been moved by `world_delta` (cm) and its heading turned by
+    // `yaw_delta_deg` to follow the player's own steps and turns. The headset's neutral place moves
+    // along, so the view stays exactly where it is. Game thread only.
+    void stereo_consume_room(const Vec3& world_delta, double yaw_delta_deg);
+    // The heading the view calls straight ahead (the character's aim heading), degrees.
+    bool stereo_base_yaw(double& yaw_deg);
 
     bool stereo_tracking_to_world(float px, float py, float pz, float qx, float qy, float qz, float qw, Vec3& pos, Quat& rot);
 

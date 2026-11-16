@@ -312,6 +312,12 @@ namespace hsvr
         num("hand_turn_scale", c.hand_turn_scale);
         num("arm_soft_scale", c.arm_soft_scale);
         flag("own_upper_body", c.own_upper_body);
+        integer("roomscale", c.roomscale);
+        num("roomscale_lean_cm", c.roomscale_lean_cm);
+        num("roomscale_max_speed", c.roomscale_max_speed);
+        num("roomscale_turn_deg", c.roomscale_turn_deg);
+        num("roomscale_turn_speed", c.roomscale_turn_speed);
+        num("roomscale_crouch_cm", c.roomscale_crouch_cm);
         num("chest_turn_max_deg", c.chest_turn_max_deg);
         num("head_pull_strength", c.head_pull_strength);
         num("head_pull_damping", c.head_pull_damping);

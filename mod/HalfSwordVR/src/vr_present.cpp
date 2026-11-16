@@ -2772,6 +2772,19 @@ float4 PSMain(VSOut i) : SV_Target
         HSVR_LOG("Recentered: head at (%.2f, %.2f, %.2f) m, heading %.0f deg", cx, cy, cz, g_recenter.yaw_deg);
     }
 
+    void vr_shift_recenter(const Vec3& d, double yaw_delta_deg)
+    {
+        std::lock_guard<std::mutex> lock(g_recenter_mutex);
+        if (!g_recenter.valid) return;
+        g_recenter.position_cm = g_recenter.position_cm + d;
+        g_recenter.yaw_deg = normalize_axis(g_recenter.yaw_deg + yaw_delta_deg);
+        // The same in OpenXR terms (x right, y up, -z forward, metres; heading positive to the left).
+        g_recenter_xr_pos[0] += (float)(d.y / 100.0);
+        g_recenter_xr_pos[1] += (float)(d.z / 100.0);
+        g_recenter_xr_pos[2] -= (float)(d.x / 100.0);
+        g_recenter_xr_yaw -= (float)(yaw_delta_deg * kDegToRad);
+    }
+
     void vr_render_thread_view_rect(int view_index, int min_x, int min_y, int max_x, int max_y)
     {
         if (view_index < 0 || view_index > 1) return;

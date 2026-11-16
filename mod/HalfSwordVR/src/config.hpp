@@ -169,6 +169,20 @@ namespace hsvr
         double chest_turn_max_deg = 70.0;
         double lean_follow = 1.0;
         double lean_max_deg = 45.0;
+        // Roomscale: the character walks, turns and ducks under the player's real body.
+        // 0 = off (the body only leans). 2 = the character is moved directly under the headset
+        // every frame. 1 = the character is told to walk there with the game's own walking.
+        int roomscale = 2;
+        // The headset may be this far from over the character's feet before the feet follow
+        // (the upper body leans that far), and the fastest the feet follow, cm per second.
+        double roomscale_lean_cm = 8.0;
+        double roomscale_max_speed = 400.0;
+        // The head may look this far to either side before the legs turn after it (0 = no turning),
+        // and the fastest they turn, degrees per second.
+        double roomscale_turn_deg = 25.0;
+        double roomscale_turn_speed = 360.0;
+        // The character crouches while the headset is this far below its recentered height (0 = never).
+        double roomscale_crouch_cm = 25.0;
         // The head body is held at the headset's place (0 strength = only its pose is sent).
         double head_pull_strength = 3000.0;
         double head_pull_damping = 80.0;

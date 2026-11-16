@@ -1767,6 +1767,176 @@ namespace hsvr
             hidden_pawn = want ? s.pawn : nullptr;
         }
 
+        // ---- roomscale: the character walks, turns and ducks under the player --------------------
+        // In Blade & Sorcery (Matthew's reference) the body is always under the player's real
+        // head. Here: when the headset has moved away from over the character's feet, the
+        // character itself is moved there (its capsule, with the game's collision), and the
+        // headset's neutral place is moved back by the same amount, so the view does not change.
+        // The same for turning (the character's aim heading follows the head beyond a free range)
+        // and ducking (the game's crouch).
+        struct RoomState
+        {
+            UObject* pawn = nullptr;
+            UFunction* offset_fn = nullptr;
+            int32_t offset_parms = 0, o_delta = -1, o_sweep = -1, o_teleport = -1;
+            UFunction* input_fn = nullptr;
+            bool tried = false;
+            double last_time = 0;
+            bool have_last_actor = false;
+            Vec3 last_actor;
+            bool crouch_held = false;
+            // For the log.
+            double moved_cm = 0, turned_deg = 0, blocked_cm = 0;
+        };
+        RoomState g_room;
+        struct MovementInputParams
+        {
+            ue::FVector WorldDirection;
+            float ScaleValue;
+            bool bForce;
+        };
+
+        void roomscale_tick(const Config& cfg)
+        {
+            State& s = g_state;
+            RoomState& r = g_room;
+            if (r.pawn != s.pawn)
+            {
+                r = RoomState{};
+                r.pawn = s.pawn;
+            }
+            double now = now_seconds();
+            double dt = r.last_time > 0 ? std::min(0.05, now - r.last_time) : 0.0;
+            r.last_time = now;
+            HeadWorld view;
+            bool active = cfg.roomscale != 0 && cfg.body_follow && cfg.motion_arms && s.pawn && s.ready && s.enabled_by_key && !s.menu_up && stereo_head_world(view) && view.head_valid;
+            if (!active || dt <= 0.0)
+            {
+                r.have_last_actor = false;
+                return;
+            }
+            if (!r.tried)
+            {
+                r.tried = true;
+                UFunction* fn = s.pawn->GetFunctionByNameInChain(STR("K2_AddActorWorldOffset"));
+                if (fn)
+                {
+                    for (FProperty* p : fn->ForEachProperty())
+                    {
+                        std::wstring name = p->GetName();
+                        if (name == L"DeltaLocation" && p->GetSize() == (int32_t)sizeof(ue::FVector)) r.o_delta = p->GetOffset_Internal();
+                        if (name == L"bSweep") r.o_sweep = p->GetOffset_Internal();
+                        if (name == L"bTeleport") r.o_teleport = p->GetOffset_Internal();
+                    }
+                    r.offset_parms = fn->GetParmsSize();
+                    if (r.o_delta >= 0 && r.o_sweep >= 0 && r.o_teleport >= 0 && r.offset_parms <= 1024) r.offset_fn = fn;
+                }
+                UFunction* input = s.pawn->GetFunctionByNameInChain(STR("AddMovementInput"));
+                if (input && input->GetParmsSize() == (int32_t)sizeof(MovementInputParams)) r.input_fn = input;
+                HSVR_LOG("Room: moving the character directly %s, the game's walking %s", r.offset_fn ? "available" : "NOT available", r.input_fn ? "available" : "NOT available");
+            }
+            Vec3 actor;
+            if (!actor_location(s.pawn, actor)) return;
+
+            // ---- steps ----
+            Vec3 away{view.lean.x, view.lean.y, 0}; // the head bone's place relative to over the feet
+            double distance = length(away);
+            double free_cm = std::max(0.0, cfg.roomscale_lean_cm);
+            Vec3 direction = distance > 1e-3 ? away * (1.0 / distance) : Vec3{};
+            if (cfg.roomscale == 2 && r.offset_fn && distance > free_cm)
+            {
+                double step = std::min(distance - free_cm, std::max(0.0, cfg.roomscale_max_speed) * dt);
+                alignas(16) uint8_t parms[1024] = {};
+                ue::FVector delta{direction.x * step, direction.y * step, 0.0};
+                memcpy(parms + r.o_delta, &delta, sizeof(delta));
+                parms[r.o_sweep] = 1; // stop at walls
+                parms[r.o_teleport] = 0;
+                s.pawn->ProcessEvent(r.offset_fn, parms);
+                Vec3 after;
+                if (actor_location(s.pawn, after))
+                {
+                    Vec3 went{after.x - actor.x, after.y - actor.y, 0};
+                    stereo_consume_room(went, 0.0);
+                    r.moved_cm += length(went);
+                    r.blocked_cm += std::max(0.0, step - length(went));
+                    actor = after;
+                }
+            }
+            else if (cfg.roomscale == 1 && r.input_fn)
+            {
+                // The game walks the character; whatever it has moved towards the head since last
+                // frame is taken off the distance.
+                if (r.have_last_actor && distance > 1e-3)
+                {
+                    Vec3 went = actor - r.last_actor;
+                    double towards = std::max(0.0, std::min(dot(went, direction), std::max(0.0, distance - free_cm * 0.5)));
+                    if (towards > 0.0)
+                    {
+                        stereo_consume_room(direction * towards, 0.0);
+                        r.moved_cm += towards;
+                    }
+                }
+                if (distance > free_cm)
+                {
+                    MovementInputParams p{};
+                    p.WorldDirection = {direction.x, direction.y, 0.0};
+                    p.ScaleValue = (float)std::max(0.25, std::min(1.0, (distance - free_cm) / 30.0));
+                    s.pawn->ProcessEvent(r.input_fn, &p);
+                }
+            }
+            r.last_actor = actor;
+            r.have_last_actor = true;
+
+            // ---- turns ----
+            double base_yaw;
+            Vec3 look = view.rotation.rotate({1, 0, 0});
+            if (cfg.roomscale_turn_deg > 0.0 && cfg.heading == "aim" && std::fabs(look.z) < 0.85 && stereo_base_yaw(base_yaw))
+            {
+                double head_yaw = std::atan2(look.y, look.x) * kRadToDeg;
+                double off = normalize_axis(head_yaw - base_yaw);
+                double over = std::fabs(off) - cfg.roomscale_turn_deg;
+                if (over > 0.0)
+                {
+                    double turn = std::min(over, std::max(0.0, cfg.roomscale_turn_speed) * dt) * (off > 0 ? 1.0 : -1.0);
+                    UObject* controller = object_property(s.pawn, STR("Controller"));
+                    ue::FRotator* rotation = controller ? controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")) : nullptr;
+                    if (rotation)
+                    {
+                        rotation->Yaw = normalize_axis(rotation->Yaw + turn);
+                        stereo_consume_room({}, turn);
+                        r.turned_deg += std::fabs(turn);
+                    }
+                }
+            }
+
+            // ---- ducking ----
+            if (cfg.roomscale_crouch_cm > 0.0)
+            {
+                bool want = r.crouch_held ? view.lean.z < -(cfg.roomscale_crouch_cm - 8.0) : view.lean.z < -cfg.roomscale_crouch_cm;
+                if (want != r.crouch_held)
+                {
+                    if (bool* holding = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Crouch Key Holding"))) *holding = want;
+                    r.crouch_held = want;
+                    HSVR_LOG(want ? "Room: ducked %.0f cm, asking the game to crouch" : "Room: standing again (%.0f cm), crouch released", -view.lean.z);
+                }
+            }
+
+            // ---- once a second ----
+            static double next_log = 0.0;
+            if (cfg.log_arms && now >= next_log)
+            {
+                next_log = now + 1.0;
+                bool* crouched = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Is Crouched??"));
+                double* root_height = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Root Height"));
+                double* height_rate = s.pawn->GetValuePtrByPropertyNameInChain<double>(STR("Height Rate"));
+                HSVR_LOG("Room: mode %d | head %.0f cm from over the feet, %.0f cm below standing | this second: feet moved %.0f cm (blocked %.0f), legs turned %.0f deg | "
+                         "crouch asked %s, game says crouched %s, root height %.1f, height rate %.2f",
+                         cfg.roomscale, distance, -view.lean.z, r.moved_cm, r.blocked_cm, r.turned_deg, r.crouch_held ? "yes" : "no", crouched ? (*crouched ? "yes" : "no") : "?",
+                         root_height ? *root_height : -1.0, height_rate ? *height_rate : -1.0);
+                r.moved_cm = r.turned_deg = r.blocked_cm = 0;
+            }
+        }
+
         // ---- recorder: every frame for a few seconds, started with the right trigger ----------
         // Writes Mods\HalfSwordVR\arms_record_<n>.csv. Per arm: how far the physical hand is from
         // where it was sent, and the wrist (hand relative to forearm) as sent and as it really is,
@@ -2020,6 +2190,7 @@ namespace hsvr
             for (Side& side : s.side) learn_grip(side);
         }
         calibrate_tick();
+        roomscale_tick(cfg);
         compute_targets();
         recorder_tick();
         if (s.enabled_by_key && !menu_up && s.hands_valid) sync_aim();

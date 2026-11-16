@@ -432,6 +432,28 @@ namespace hsvr
         return true;
     }
 
+    void stereo_consume_room(const Vec3& world_delta, double yaw_delta_deg)
+    {
+        if (!g_view.valid || !g_view.recenter.valid) return;
+        Config cfg = config();
+        // World movement back into real centimetres in tracking axes (see stereo_tracking_to_world).
+        Quat base = quat_from_yaw_deg(g_view.base_yaw);
+        Quat recenter = quat_from_yaw_deg(g_view.recenter.yaw_deg);
+        Vec3 real = recenter.rotate(base.inverse().rotate(world_delta)) * (1.0 / cfg.world_scale);
+        vr_shift_recenter(real, yaw_delta_deg);
+        g_view.recenter = vr_recenter();
+        g_view.base_yaw = normalize_axis(g_view.base_yaw + yaw_delta_deg);
+        g_view.head_bone = g_view.head_bone - world_delta;
+        g_view.head_lean = g_view.head_lean - world_delta;
+    }
+
+    bool stereo_base_yaw(double& yaw_deg)
+    {
+        if (!g_view.valid) return false;
+        yaw_deg = g_view.base_yaw;
+        return true;
+    }
+
     bool stereo_tracking_to_world(float px, float py, float pz, float qx, float qy, float qz, float qw, Vec3& pos, Quat& rot)
     {
         if (!g_view.valid || !g_view.recenter.valid) return false;

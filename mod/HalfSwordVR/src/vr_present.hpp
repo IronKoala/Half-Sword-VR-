@@ -28,6 +28,10 @@ namespace hsvr
     };
     Recenter vr_recenter();
     void vr_set_recenter_from(const FramePose& pose);
+    // Moves the recentered place by `position_delta_cm` (Unreal axes, real centimetres) and turns
+    // its heading by `yaw_delta_deg`. Used by roomscale: when the character has walked or turned
+    // under the player, the "neutral" place of the headset moves along.
+    void vr_shift_recenter(const Vec3& position_delta_cm, double yaw_delta_deg);
 
     // Where the two controllers will be when the frame the game is about to make is shown
     // (index 0 = left hand, 1 = right). Reads the controller buttons too. Returns false when no
