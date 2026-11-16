@@ -104,6 +104,12 @@ namespace hsvr
         std::atomic<float> selftest_phase_time{0.0f};
         std::atomic<float> selftest_head_y{0.0f};
         std::atomic<float> selftest_stick_y{0.0f}; // the self-test's own push on the left stick
+        // Self-test, hands part: the pretend controllers' grips (0..1), and the right one held at a
+        // place in tracking space (metres) while selftest_hand_set is on, or at the right hip.
+        std::atomic<float> selftest_grip[2] = {0.0f, 0.0f};
+        std::atomic<bool> selftest_hand_set{false};
+        std::atomic<bool> selftest_hand_hip{false};
+        std::atomic<float> selftest_hand_xr[3] = {0.0f, 0.0f, 0.0f};
         // Heights. The tracking origin above the real floor (metres; below 0 = not known), the
         // character's size (1 = the game's standard Willie), its feet below its centre and its
         // standing eye height above its feet (world cm; 0 = not known yet), and what came of them:

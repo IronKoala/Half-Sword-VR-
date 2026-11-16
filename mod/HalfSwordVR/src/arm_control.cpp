@@ -15,6 +15,7 @@
 // run time; if a check fails motion arms switch off and the game runs as before.
 
 #include "arm_control.hpp"
+#include "bs_hands.hpp"
 
 #include "config.hpp"
 #include "log.hpp"
@@ -3270,10 +3271,11 @@ namespace hsvr
             bool finished = false;
             double start = 0, last = 0;
             int part = -1;
-            TestPart parts[11] = {{"settle", 6}, {"hands still", 6}, {"hands move slowly", 8}, {"fast swings", 8}, {"striking the floor while ducked", 8},
+            TestPart parts[12] = {{"settle", 6}, {"hands still", 6}, {"hands move slowly", 8}, {"fast swings", 8}, {"striking the floor while ducked", 8},
                                   {"hands still again", 4}, {"twisting the wrists fast", 6}, {"walking", 8}, {"turning", 4},
                                   {"crouch button: crouched, swinging, kicking, walking, then up", 12},
-                                  {"crouch-walking into the hanging kettle", 14}};
+                                  {"crouch-walking into the hanging kettle", 14},
+                                  {"hands: drop, pick up, hold, sheathe, grab another character, let go, draw", 22}};
             bool kicked[2] = {false, false};
             bool have_kettle = false, reached_kettle = false;
             Vec3 kettle_at;
@@ -3297,8 +3299,191 @@ namespace hsvr
             Vec3 walk_start;
             int walk_dir = -1;
             double walk_leg_start = 0;
+            // Hands part (build 3, hands like Blade & Sorcery).
+            bool h_begun = false, h_drop_checked = false, h_dropped = false, h_pick_checked = false, h_picked = false, h_pick_far = false;
+            bool h_kept = false, h_sheathe_checked = false, h_sheathed = false, h_draw_checked = false, h_drawn = false;
+            bool h_grab_checked = false, h_grabbed = false, h_release_checked = false, h_let_go = false, h_has_target = false;
+            UObject* h_weapon = nullptr;
+            double h_pick_cm = -1;
+            std::string h_sheathe_where, h_grab_bone, h_grab_what;
+            UObject* h_target_mesh = nullptr;
+            std::wstring h_target_bone;
         };
         SelfTest g_test;
+
+        // Self-test, hands part (build 3): the pretend right hand lets go of its weapon in front
+        // (dropped), ducks to it and squeezes (picked up), stands with the grip held (kept), lets go
+        // at the hip (sheathed), walks to another character and squeezes on its arm (grabbed), lets
+        // go (released), and squeezes at the hip (drawn). Grips and the hand's place go to the
+        // pretend controllers (vr_present.cpp); the hand logic is the real one (controller_input.cpp).
+        void selftest_hands(SelfTest& t, double pt, double dt)
+        {
+            State& s = g_state;
+            auto weapon_r = [&]() -> UObject* { return s.pawn->GetPropertyByNameInChain(STR("Weapon R")) ? object_property(s.pawn, STR("Weapon R")) : nullptr; };
+            auto held_name = [&]() -> std::wstring { UObject* w = weapon_r(); return w ? std::wstring(w->GetName()) : std::wstring(L"nothing"); };
+            auto grip = [&](float v) { shared().selftest_grip[1].store(v); };
+            auto hand_to = [&](const Vec3& world) {
+                float xr[3];
+                if (!stereo_world_to_tracking(world, xr)) return;
+                for (int k = 0; k < 3; ++k) shared().selftest_hand_xr[k].store(xr[k]);
+                shared().selftest_hand_set.store(true);
+            };
+            auto palm = [&](Vec3& out) {
+                Xf x;
+                if (!socket_transform(s.body, make_name(L"weapon_rSocket"), RTS_World, x)) return false;
+                out = x.t;
+                return true;
+            };
+            auto thing_at = [&](UObject* item, Vec3& out) {
+                UObject* grip_part = item && item->GetPropertyByNameInChain(STR("Grip")) ? object_property(item, STR("Grip")) : nullptr;
+                return grip_part ? component_location(grip_part, out) : actor_location(item, out);
+            };
+            shared().selftest_hand_set.store(false);
+            shared().selftest_hand_hip.store(false);
+            shared().selftest_stick_y.store(0.0f);
+            if (!t.h_begun)
+            {
+                t.h_begun = true;
+                t.h_weapon = weapon_r();
+                HSVR_LOG("Test: hands part: the right hand holds %ls", held_name().c_str());
+            }
+            // 1. Close on the weapon and let go in front of the body.
+            if (pt < 2.5) grip(pt >= 0.5 && pt < 1.5 ? 1.0f : 0.0f);
+            if (pt >= 2.3 && !t.h_drop_checked)
+            {
+                t.h_drop_checked = true;
+                t.h_dropped = t.h_weapon && !weapon_r();
+                HSVR_LOG("Test: hands: after letting go in front the right hand holds %ls", held_name().c_str());
+            }
+            // 2. Duck, put the hand on the dropped weapon's handle and squeeze.
+            if (pt >= 2.5 && pt < 6.0 && t.h_dropped)
+            {
+                Vec3 at, p;
+                if (!t.h_pick_checked && thing_at(t.h_weapon, at)) hand_to(at);
+                if (pt >= 4.5 && t.h_pick_cm < 0 && palm(p) && thing_at(t.h_weapon, at)) t.h_pick_cm = length(at - p);
+                grip(pt >= 4.6 ? 1.0f : 0.0f);
+            }
+            if (pt >= 5.6 && !t.h_pick_checked && t.h_dropped)
+            {
+                t.h_pick_checked = true;
+                t.h_picked = weapon_r() != nullptr;
+                t.h_pick_far = !t.h_picked && t.h_pick_cm > 40.0;
+                HSVR_LOG("Test: hands: after squeezing on the dropped weapon (%.0f cm from the palm) the right hand holds %ls", t.h_pick_cm, held_name().c_str());
+            }
+            // 3. Stand up with the grip held, carry it to the hip and let go there.
+            if (pt >= 6.0 && pt < 10.5 && t.h_picked)
+            {
+                if (pt >= 7.0) shared().selftest_hand_hip.store(true);
+                grip(pt < 8.5 ? 1.0f : 0.0f);
+                if (pt >= 8.3 && pt < 8.5 && weapon_r()) t.h_kept = true;
+            }
+            if (pt >= 10.5 && !t.h_sheathe_checked && t.h_picked)
+            {
+                t.h_sheathe_checked = true;
+                static const wchar_t* slots[] = {L"Weapon Slot R 1", L"Weapon Slot R 2", L"Weapon Slot L 1", L"Weapon Slot L 2", L"Weapon Slot Back"};
+                for (const wchar_t* slot : slots)
+                {
+                    UObject* in = s.pawn->GetPropertyByNameInChain(slot) ? object_property(s.pawn, slot) : nullptr;
+                    if (in && in == t.h_weapon)
+                    {
+                        std::wstring w(slot);
+                        t.h_sheathe_where = "in " + std::string(w.begin(), w.end());
+                    }
+                }
+                t.h_sheathed = !weapon_r() && !t.h_sheathe_where.empty();
+                if (t.h_sheathe_where.empty()) t.h_sheathe_where = weapon_r() ? "still in the hand" : "in no weapon slot: dropped?";
+                HSVR_LOG("Test: hands: after letting go at the hip the weapon is %s", t.h_sheathe_where.c_str());
+            }
+            // 4. Another character: walk up to it, squeeze on its arm nearest the player, let go.
+            if (pt >= 10.5 && pt < 17.0)
+            {
+                grip(0.0f);
+                if (!t.h_target_mesh && pt < 11.0)
+                {
+                    std::vector<UObject*> others;
+                    UObjectGlobals::FindAllOf(STR("Willie_BP_C"), others);
+                    double best = 400.0;
+                    for (UObject* other : others)
+                    {
+                        Vec3 at;
+                        if (!other || other == s.pawn || !actor_location(other, at)) continue;
+                        double d = length(Vec3{at.x - s.actor_world.x, at.y - s.actor_world.y, 0});
+                        UObject* mesh = object_property(other, STR("Mesh"));
+                        if (d < best && mesh)
+                        {
+                            best = d;
+                            t.h_target_mesh = mesh;
+                        }
+                    }
+                    t.h_has_target = t.h_target_mesh != nullptr;
+                    if (t.h_has_target) HSVR_LOG("Test: hands: another character %.0f cm away; going to grab it", best);
+                }
+                if (t.h_target_mesh)
+                {
+                    Xf shoulder;
+                    bool have_shoulder = socket_transform(s.body, make_name(L"upperarm_r"), RTS_World, shoulder);
+                    double best = 1e9;
+                    Vec3 target;
+                    for (const wchar_t* bone : {L"lowerarm_l", L"lowerarm_r", L"upperarm_l", L"upperarm_r", L"hand_l", L"hand_r"})
+                    {
+                        Xf b;
+                        if (!have_shoulder || !socket_transform(t.h_target_mesh, make_name(bone), RTS_World, b)) continue;
+                        double d = length(b.t - shoulder.t);
+                        if (d < best)
+                        {
+                            best = d;
+                            target = b.t;
+                            if (pt < 14.4) t.h_target_bone = bone;
+                        }
+                    }
+                    if (best < 1e9)
+                    {
+                        Vec3 to{target.x - s.actor_world.x, target.y - s.actor_world.y, 0};
+                        double d = length(to);
+                        UObject* controller = object_property(s.pawn, STR("Controller"));
+                        ue::FRotator* rotation = controller ? controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")) : nullptr;
+                        if (pt < 13.5 && rotation && d > 5.0)
+                        {
+                            double off = normalize_axis(std::atan2(to.y, to.x) * kRadToDeg - rotation->Yaw);
+                            double step = 120.0 * dt;
+                            rotation->Yaw = normalize_axis(rotation->Yaw + std::max(-step, std::min(step, off)));
+                            if (std::fabs(off) < 30.0 && d > 55.0) shared().selftest_stick_y.store(0.5f);
+                        }
+                        if (pt >= 13.5) hand_to(target);
+                        grip(pt >= 14.5 && pt < 16.0 ? 1.0f : 0.0f);
+                    }
+                }
+                if (pt >= 15.5 && !t.h_grab_checked && t.h_target_mesh)
+                {
+                    t.h_grab_checked = true;
+                    bool* grabbed = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Grabbed R"));
+                    UObject* comp = s.pawn->GetPropertyByNameInChain(STR("Grab Component R")) ? object_property(s.pawn, STR("Grab Component R")) : nullptr;
+                    t.h_grabbed = grabbed && *grabbed && comp == t.h_target_mesh;
+                    t.h_grab_bone = std::string(t.h_target_bone.begin(), t.h_target_bone.end());
+                    t.h_grab_what = bs_last_grab();
+                    HSVR_LOG("Test: hands: squeezing on the other character's %s: grabbed %s, the game's grab holds %ls", t.h_grab_bone.c_str(), t.h_grabbed ? "yes" : "NO",
+                             comp ? comp->GetFullName().c_str() : L"nothing");
+                }
+                if (pt >= 16.6 && !t.h_release_checked && t.h_grabbed)
+                {
+                    t.h_release_checked = true;
+                    bool* grabbed = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Grabbed R"));
+                    t.h_let_go = grabbed && !*grabbed;
+                }
+            }
+            // 5. Hand to the hip and squeeze: drawn.
+            if (pt >= 17.0)
+            {
+                shared().selftest_hand_hip.store(pt < 20.5);
+                grip(pt >= 18.5 ? 1.0f : 0.0f);
+                if (pt >= 20.5 && !t.h_draw_checked && t.h_sheathed)
+                {
+                    t.h_draw_checked = true;
+                    t.h_drawn = weapon_r() != nullptr;
+                    HSVR_LOG("Test: hands: after squeezing at the hip the right hand holds %ls", held_name().c_str());
+                }
+            }
+        }
 
         void selftest_tick(const Config& cfg)
         {
@@ -3343,7 +3528,7 @@ namespace hsvr
             t.last = now;
             double elapsed = now - t.start, begin = 0.0;
             int part = -1;
-            for (int i = 0; i < 11; ++i)
+            for (int i = 0; i < 12; ++i)
             {
                 if (elapsed < begin + t.parts[i].seconds)
                 {
@@ -3367,6 +3552,10 @@ namespace hsvr
                 // ---- verdicts ----
                 t.finished = true;
                 shared().selftest_phase.store(-1);
+                shared().selftest_grip[0].store(0.0f);
+                shared().selftest_grip[1].store(0.0f);
+                shared().selftest_hand_set.store(false);
+                shared().selftest_hand_hip.store(false);
                 shared().selftest_head_y.store(0.0f);
                 std::string report;
                 int failures = 0;
@@ -3492,6 +3681,46 @@ namespace hsvr
                         }
                     }
                 }
+                {
+                    // Hands like Blade & Sorcery (build 3).
+                    auto note = [&](const char* text) {
+                        HSVR_LOG("Test: NOTE  %s", text);
+                        report += std::string("NOTE  ") + text + "\n";
+                    };
+                    if (!t.h_weapon)
+                    {
+                        note("hands: the right hand held no weapon when the hands part began: drop, pick-up, hold, sheathe and draw not checked");
+                    }
+                    else
+                    {
+                        line(t.h_dropped, "hands: letting go of the grip in front dropped the weapon");
+                        if (t.h_dropped && t.h_pick_far)
+                        {
+                            char text[200];
+                            snprintf(text, sizeof(text), "hands: the dropped weapon ended up %.0f cm from the palm, out of the pretend hand's reach: pick-up not checked", t.h_pick_cm);
+                            note(text);
+                        }
+                        else if (t.h_dropped)
+                        {
+                            line(t.h_picked, "hands: squeezing next to the dropped weapon picked it up (%.0f cm from the palm)", t.h_pick_cm);
+                        }
+                        if (t.h_picked)
+                        {
+                            line(t.h_kept, "hands: holding the grip kept it in the hand (standing up, carrying it to the hip)");
+                            line(t.h_sheathed, "hands: letting go at the hip put it away (%s)", t.h_sheathe_where.c_str());
+                            if (t.h_sheathed) line(t.h_drawn, "hands: squeezing at the hip drew a weapon again");
+                        }
+                    }
+                    if (!t.h_has_target)
+                    {
+                        note("hands: no other character within 4 m during the hands part: grabbing a person not checked");
+                    }
+                    else
+                    {
+                        line(t.h_grabbed, "hands: squeezing on another character's %s grabbed it (%s)", t.h_grab_bone.c_str(), t.h_grab_what.c_str());
+                        if (t.h_grabbed) line(t.h_let_go, "hands: letting go of the grip released the grab");
+                    }
+                }
                 line(s.side[0].rescues + s.side[1].rescues == 0, "no hand was lost and had to be brought back (%d times)", s.side[0].rescues + s.side[1].rescues);
                 line(turn.err_max[1] < 8.0 && turn.err_max[0] < 8.0, "turning: hands %.1f / %.1f cm from the controllers at most (limit 8)", turn.err_max[1], turn.err_max[0]);
                 if (t.opponent_first >= 0)
@@ -3516,13 +3745,13 @@ namespace hsvr
             if (part != t.part)
             {
                 t.part = part;
-                HSVR_LOG("Test: part %d of 11: %s", part + 1, t.parts[part].name);
+                HSVR_LOG("Test: part %d of 12: %s", part + 1, t.parts[part].name);
             }
             shared().selftest_phase.store(part);
             shared().selftest_phase_time.store((float)(elapsed - begin));
             // The pretend head ducks half a metre for the floor strikes (eased over 0.4 s).
             {
-                float want = part == 4 ? -0.5f : 0.0f;
+                float want = (part == 4 || (part == 11 && elapsed - begin > 2.5 && elapsed - begin < 5.5)) ? -0.5f : 0.0f;
                 float have = shared().selftest_head_y.load();
                 float step = (float)(1.25 * dt);
                 have = have < want ? std::min(want, have + step) : std::max(want, have - step);
@@ -3639,6 +3868,10 @@ namespace hsvr
                     stick = pt < 10.0 ? (stick_allowed ? 0.6f : 0.0f) : (pt < 12.5 ? -0.6f : 0.0f); // towards it and into it, then away
                 }
                 shared().selftest_stick_y.store(stick);
+            }
+            else if (part == 11)
+            {
+                selftest_hands(t, elapsed - begin, dt);
             }
             else if (part == 8)
             {
@@ -4558,6 +4791,26 @@ namespace hsvr
                 memset(raw_parms + event.impulse, 0, 3 * sizeof(double));
                 memset(raw_parms + event.result, 0, event.size - event.result);
                 ++g_own_item_hits;
+                return;
+            }
+            if (function == g_hit_event.load(std::memory_order_relaxed) && context != g_hit_pawn.load(std::memory_order_relaxed) && parms)
+            {
+                // Another character's body hit by the player's own body: a punch, elbow or kick (the
+                // game hurts it by the blow's impulse; nothing of the mod's stands in the way).
+                uint8_t* raw = reinterpret_cast<uint8_t*>(parms);
+                UObject* by = *reinterpret_cast<UObject**>(raw + g_hit_other);
+                if (by && by == g_hit_pawn.load(std::memory_order_relaxed))
+                {
+                    const double* push = reinterpret_cast<const double*>(raw + g_hit_impulse);
+                    double size = std::sqrt(push[0] * push[0] + push[1] * push[1] + push[2] * push[2]);
+                    static double last = 0.0;
+                    double now = now_seconds();
+                    if (now - last > 0.25)
+                    {
+                        last = now;
+                        HSVR_LOG("Punch: the player's body struck %ls, impulse %.0f", context->GetName().c_str(), size);
+                    }
+                }
                 return;
             }
             if (function != g_hit_event.load(std::memory_order_relaxed) || context != g_hit_pawn.load(std::memory_order_relaxed)) return;

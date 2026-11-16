@@ -19,6 +19,7 @@
 #include <Unreal/UObjectGlobals.hpp>
 
 #include "arm_control.hpp"
+#include "bs_hands.hpp"
 #include "config.hpp"
 #include "log.hpp"
 #include "vr_present.hpp"
@@ -754,6 +755,88 @@ namespace hsvr
             return nullptr;
         }
 
+        // ---- hands like Blade & Sorcery (bs_hands) ---------------------------------------------------
+        // Squeeze = the hand closes on what it touches: a weapon or food (picked up), the handle of
+        // a sheathed weapon at the hip or over the shoulder (drawn), the other hand's weapon (taken
+        // over), or anything else the game lets a hand grab, people included (held by the bone
+        // touched). Let go = the hand opens: a grab is let go, a weapon at the hip or behind the
+        // shoulder goes into its sheath, a weapon anywhere else falls.
+        struct BsHandState
+        {
+            bool closed_on_weapon[2]{false, false}; // the grip was squeezed while this hand held a weapon
+        };
+        BsHandState g_bs;
+
+        void bs_grip(UObject* pawn, int h, const XrHandRaw hands[2], bool pressed, const char* zone, const Config& cfg)
+        {
+            const char* side = h ? "right" : "left";
+            const wchar_t letter = h ? L'R' : L'L';
+            bool full = holds_weapon(pawn, h);
+            if (pressed)
+            {
+                g_bs.closed_on_weapon[h] = false;
+                if (full)
+                {
+                    g_bs.closed_on_weapon[h] = true;
+                    HSVR_LOG("Hands: %s grip closed on the weapon it holds%s", side, zone ? " (at a sheath place)" : "");
+                    return;
+                }
+                const XrHandRaw& hand = hands[h];
+                const XrHandRaw& other = hands[1 - h];
+                float ddx = hand.px - other.px, ddy = hand.py - other.py, ddz = hand.pz - other.pz;
+                float apart = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+                if (other.valid && apart < (float)cfg.swap_distance_m && holds_weapon(pawn, 1 - h))
+                {
+                    HSVR_LOG("Hands: %s hand takes the weapon from the other hand (hands %.0f cm apart)", side, apart * 100.0f);
+                    if (call_event(pawn, STR("Swap Weapons"))) g_bs.closed_on_weapon[h] = true;
+                    return;
+                }
+                if (zone)
+                {
+                    HSVR_LOG("Hands: %s hand closes at the %s; drawing a weapon", side, zone);
+                    if (call_event(pawn, letter == L'R' ? STR("Unsheath R Event") : STR("Unsheath L Event"))) g_bs.closed_on_weapon[h] = true;
+                    return;
+                }
+                if (cfg.pickup && pick_up_near(pawn, h, cfg))
+                {
+                    g_bs.closed_on_weapon[h] = true;
+                    return;
+                }
+                bs_grab(pawn, h, cfg.grab_radius_m * 100.0);
+                return;
+            }
+            // Released.
+            if (bs_grabbing(pawn, h))
+            {
+                bs_release(pawn, h);
+                return;
+            }
+            if (!full)
+            {
+                // A weapon that has not arrived yet (drawn or picked up a moment ago) is not dropped.
+                g_bs.closed_on_weapon[h] = false;
+                return;
+            }
+            if (!g_bs.closed_on_weapon[h])
+            {
+                // Holding a weapon the grip never closed on (one the character started with, say):
+                // opening a hand that was not closed lets nothing go.
+                return;
+            }
+            g_bs.closed_on_weapon[h] = false;
+            if (zone)
+            {
+                HSVR_LOG("Hands: %s hand lets go at the %s; putting the weapon away", side, zone);
+                call_event(pawn, letter == L'R' ? STR("R Hand Sheath Start") : STR("L Hand Sheath Start"));
+                return;
+            }
+            UObject* weapon = object_at(pawn, h ? STR("Weapon R") : STR("Weapon L"));
+            bool asked = bs_drop(pawn, h);
+            UObject* after = object_at(pawn, h ? STR("Weapon R") : STR("Weapon L"));
+            HSVR_LOG("Hands: %s hand lets go; %ls %s", side, weapon ? weapon->GetName().c_str() : L"the weapon",
+                     !asked ? "could not be dropped" : (after ? "is STILL in the hand" : "dropped"));
+        }
+
         void gestures(UObject* pawn, const XrHandRaw hands[2], bool in_menu, const Config& cfg)
         {
             GestureState& g = g_gesture;
@@ -766,8 +849,17 @@ namespace hsvr
                 const XrHandRaw& hand = hands[h];
                 bool down = g.grip_down[h] ? hand.squeeze > 0.4f : hand.squeeze > 0.6f;
                 bool pressed = down && !g.grip_down[h];
+                bool released = !down && g.grip_down[h];
                 g.grip_down[h] = down;
                 if (!down) g.consumed[h] = false;
+                if (cfg.bs_hands && active)
+                {
+                    // Hands like Blade & Sorcery: the grip is the hand closing. It never reaches the
+                    // game as its grab key (a tap that toggles); what it means is done here.
+                    if (down) g.consumed[h] = true;
+                    if (hand.valid && (pressed || released)) bs_grip(pawn, h, hands, pressed, have_head ? holster_zone(hand, head, yaw, cfg) : nullptr, cfg);
+                    continue;
+                }
                 if (!active || !pressed || !hand.valid) continue;
                 const wchar_t side = h ? L'R' : L'L';
                 bool full = holds_weapon(pawn, h);
@@ -928,6 +1020,13 @@ namespace hsvr
         if (have) point_at_panel(hands, cfg, in_menu);
         if (have) gestures(pawn, hands, in_menu, cfg);
         else vr_set_panel_pointer(-1.0f, -1.0f);
+        if (!have && cfg.dev_selftest && cfg.dev_fake_hands && shared().selftest_phase.load() == 11)
+        {
+            // Self-test, the hands part: the pretend controllers squeeze and let go as the test
+            // says (vr_present.cpp), through the same hand logic as real ones.
+            XrHandRaw fake[2];
+            if (vr_locate_hands(fake)) gestures(pawn, fake, in_menu, cfg);
+        }
         if (have && !vr_off)
         {
             pad.active = true;
@@ -992,7 +1091,7 @@ namespace hsvr
             pad.active = true;
             pad.ly = shared().selftest_stick_y.load();
         }
-        if (cfg.dev_selftest && shared().selftest_phase.load() == 10)
+        if (cfg.dev_selftest && (shared().selftest_phase.load() == 10 || shared().selftest_phase.load() == 11))
         {
             // Self-test, the kettle: the test steers by the heading and pushes the stick itself.
             pad.active = true;

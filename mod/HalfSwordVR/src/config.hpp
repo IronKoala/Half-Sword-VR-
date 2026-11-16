@@ -350,7 +350,13 @@ namespace hsvr
         double pickup_radius_m = 0.30;
         // Food held up to the mouth is eaten.
         bool eat_at_mouth = true;
-        // A grip squeeze on a hand that holds a weapon is not passed to the game as a grab (which drops it).
+        // Hands like Blade & Sorcery: hold the grip to hold, let go to drop; squeeze on anything
+        // the game lets a hand grab (people too) to hold it; let go of a weapon at the hip or over
+        // the shoulder to sheathe it. The grips then no longer reach the game as its grab key.
+        bool bs_hands = true;
+        // How near the palm something has to be to be grabbed (weapons and food: pickup_radius_m).
+        double grab_radius_m = 0.12;
+        // (bs_hands=0 only:) A grip squeeze on a hand that holds a weapon is not passed to the game as a grab (which drops it).
         bool keep_held_weapon = true;
         // Two grip squeezes within this many seconds on a hand holding a weapon drop it (0 = never).
         double drop_double_squeeze_s = 0.4;

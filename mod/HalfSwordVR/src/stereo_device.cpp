@@ -510,6 +510,23 @@ namespace hsvr
         return true;
     }
 
+    bool stereo_world_to_tracking(const Vec3& pos, float out[3])
+    {
+        // The inverse of stereo_tracking_to_world, for positions (the self-test puts a pretend hand
+        // on something in the world with it).
+        if (!g_view.valid || !g_view.recenter.valid) return false;
+        Config cfg = config();
+        double scale = scale_now(cfg);
+        if (scale <= 0.0) return false;
+        Quat base = quat_from_yaw_deg(g_view.base_yaw);
+        Vec3 relative = base.inverse().rotate(pos - g_view.anchor) * (1.0 / scale);
+        Vec3 real_cm = quat_from_yaw_deg(g_view.recenter.yaw_deg).rotate(relative) + g_view.recenter.position_cm;
+        out[0] = (float)(real_cm.y / 100.0);
+        out[1] = (float)(real_cm.z / 100.0);
+        out[2] = (float)(-real_cm.x / 100.0);
+        return true;
+    }
+
     void stereo_begin_game_frame(double delta_seconds)
     {
         g_game_frame.fetch_add(1);

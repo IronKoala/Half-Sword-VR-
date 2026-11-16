@@ -46,6 +46,8 @@ namespace hsvr
     bool stereo_base_yaw(double& yaw_deg);
 
     bool stereo_tracking_to_world(float px, float py, float pz, float qx, float qy, float qz, float qw, Vec3& pos, Quat& rot);
+    // World position (cm) to tracking space (metres, OpenXR axes): the inverse of the above.
+    bool stereo_world_to_tracking(const Vec3& pos, float out[3]);
 
     // Called once per engine tick on the game thread, before the frame is drawn.
     void stereo_begin_game_frame(double delta_seconds);

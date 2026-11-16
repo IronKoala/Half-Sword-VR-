@@ -2692,6 +2692,14 @@ float4 PSMain(VSOut i) : SV_Target
                         oz = -0.45f;
                         tilt = -75.0f * (float)kDegToRad;
                     }
+                    else if (phase == 11 && h == 1 && shared().selftest_hand_hip.load())
+                    {
+                        // Hands part: the right hand down at the right hip.
+                        ox = 0.25f;
+                        oy = -0.72f;
+                        oz = 0.02f;
+                        tilt = -60.0f * (float)kDegToRad;
+                    }
                 }
                 // Turn the offset by the recentred heading (about +Y).
                 float cy = std::cos(yaw), sy = std::sin(yaw);
@@ -2707,6 +2715,18 @@ float4 PSMain(VSOut i) : SV_Target
                 hand.qz = -std::sin(hy) * std::sin(hx);
                 hand.qw = std::cos(hy) * std::cos(hx);
                 hand.trigger = hand.squeeze = 0.0f;
+                if (config().dev_selftest && shared().selftest_phase.load() == 11)
+                {
+                    // Hands part: grips as the test says; the right hand held at a place the test
+                    // worked out in tracking space (a dropped weapon, another character's arm).
+                    hand.squeeze = shared().selftest_grip[h].load();
+                    if (h == 1 && shared().selftest_hand_set.load())
+                    {
+                        hand.px = shared().selftest_hand_xr[0].load();
+                        hand.py = shared().selftest_hand_xr[1].load();
+                        hand.pz = shared().selftest_hand_xr[2].load();
+                    }
+                }
             }
             return true;
         }
