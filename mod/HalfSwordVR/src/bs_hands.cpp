@@ -289,6 +289,50 @@ namespace hsvr
         return true;
     }
 
+    bool bs_pick_up(UObject* pawn, int hand, UObject* component, double x, double y, double z)
+    {
+        // The game picks a weapon up in its own tick once "Grab R Target Found" is set and the
+        // grab point (GrabPoint R, fixed to the weapon) is within 35 to 50 cm of the palm: it
+        // calls "Set Up Right Hand Weapon(none, that weapon)". Its key search fills those in; here
+        // they are filled in for the weapon the hand closed on. ("Pick Up Right Event", used
+        // before, is the key-release code: on a hand that "Grabbed" something it lets go again.)
+        const wchar_t letter = hand ? L'R' : L'L';
+        std::wstring point_name = std::wstring(L"GrabPoint ") + letter;
+        std::wstring comp_name = std::wstring(L"Grab Component ") + letter;
+        std::wstring bone_name = std::wstring(L"Grab Bone ") + letter;
+        std::wstring found_name = std::wstring(L"Grab ") + letter + L" Target Found";
+        UObject* point = obj(pawn, point_name.c_str());
+        UObject** comp = pawn->GetValuePtrByPropertyNameInChain<UObject*>(comp_name.c_str());
+        FName* bone = pawn->GetValuePtrByPropertyNameInChain<FName>(bone_name.c_str());
+        FProperty* found = pawn->GetPropertyByNameInChain(found_name.c_str());
+        if (!point || !comp || !bone || !found)
+        {
+            HSVR_LOG("Hands: the game's grab target fields were not found; not picked up");
+            return false;
+        }
+        *comp = component;
+        *bone = FName();
+        Call move;
+        if (move.init(point, STR("K2_SetWorldLocation")))
+        {
+            if (V3* at = move.at<V3>(L"NewLocation")) *at = V3{x, y, z};
+            move.run();
+        }
+        Call attach;
+        if (attach.init(point, STR("K2_AttachToComponent")))
+        {
+            if (UObject** parent = attach.at<UObject*>(L"Parent")) *parent = component;
+            for (const wchar_t* rule : {L"LocationRule", L"RotationRule", L"ScaleRule"})
+                if (uint8_t* r = attach.at<uint8_t>(rule)) *r = 1; // keep world
+            if (bool* weld = attach.at<bool>(L"bWeldSimulatedBodies")) *weld = true;
+            attach.run();
+        }
+        auto* flag = static_cast<FBoolProperty*>(found);
+        uint8_t* byte = reinterpret_cast<uint8_t*>(pawn) + found->GetOffset_Internal() + flag->GetByteOffset();
+        *byte |= flag->GetFieldMask();
+        return true;
+    }
+
     void bs_release(UObject* pawn, int hand)
     {
         Call c;

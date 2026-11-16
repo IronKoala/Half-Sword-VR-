@@ -16,6 +16,9 @@ namespace hsvr
     bool bs_grab(RC::Unreal::UObject* pawn, int hand, double radius_cm);
     // The hand holds something by a grab (not a weapon in the hand): the game's "Grabbed R/L".
     bool bs_grabbing(RC::Unreal::UObject* pawn, int hand);
+    // Picks up a loose weapon or food (its BaseMesh, grip place in the world) the way the game's
+    // own grab does: the game finishes it in its tick, a frame later.
+    bool bs_pick_up(RC::Unreal::UObject* pawn, int hand, RC::Unreal::UObject* component, double x, double y, double z);
     // Lets go of a grab (the game's "Release Grab R/L").
     void bs_release(RC::Unreal::UObject* pawn, int hand);
     // Drops the weapon in the hand: the game's own drop (what its grab key does to a full hand),

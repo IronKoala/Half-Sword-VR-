@@ -3461,7 +3461,7 @@ namespace hsvr
                                   {"hands still again", 4}, {"twisting the wrists fast", 6}, {"walking", 8}, {"turning", 4},
                                   {"crouch button: crouched, swinging, kicking, walking, then up", 12},
                                   {"crouch-walking into the hanging kettle", 14}, {"left hand raised above the head and turned (shield up, point out)", 6},
-                                  {"hands: drop, pick up, hold, sheathe, grab another character, let go, draw", 22}};
+                                  {"hands: drop, pick up, hold, sheathe, grab another character, let go, draw", 25}};
             // Build 2: what the hands hold against the controllers (the turn of each in the
             // controller's frame, taken while the hands are still), and how high the shield goes.
             Quat weapon_ref, shield_ref;
@@ -3519,6 +3519,21 @@ namespace hsvr
                 if (!stereo_world_to_tracking(world, xr)) return;
                 for (int k = 0; k < 3; ++k) shared().selftest_hand_xr[k].store(xr[k]);
                 shared().selftest_hand_set.store(true);
+                static double next_log = 0;
+                if (now_seconds() >= next_log)
+                {
+                    // Where the pretend hand is sent, where it lands back in the world, and where the
+                    // palm really is (an arm that cannot reach shows as a gap between the last two).
+                    next_log = now_seconds() + 0.5;
+                    Vec3 back;
+                    Quat unused;
+                    Xf palm_now;
+                    bool have_back = stereo_tracking_to_world(xr[0], xr[1], xr[2], 0, 0, 0, 1, back, unused);
+                    bool have_palm = socket_transform(s.body, make_name(L"weapon_rSocket"), RTS_World, palm_now);
+                    HSVR_LOG("Test: hands: pretend hand sent to (%.0f, %.0f, %.0f), %.0f cm sideways from the character; back in the world %.1f cm off; palm %.0f cm from it",
+                             world.x, world.y, world.z, length(Vec3{world.x - s.actor_world.x, world.y - s.actor_world.y, 0}),
+                             have_back ? length(back - world) : -1.0, have_palm ? length(palm_now.t - world) : -1.0);
+                }
             };
             auto palm = [&](Vec3& out) {
                 Xf x;
@@ -3547,21 +3562,40 @@ namespace hsvr
                 t.h_dropped = t.h_weapon && !weapon_r();
                 HSVR_LOG("Test: hands: after letting go in front the right hand holds %ls", held_name().c_str());
             }
-            // 2. Duck, put the hand on the dropped weapon's handle and squeeze.
-            if (pt >= 2.5 && pt < 6.0 && t.h_dropped)
+            // 2. Walk to where the dropped weapon came to rest (second run: it slid 1 to 1.3 m),
+            // crouch and bend down, put the hand on its handle and squeeze.
+            if (pt >= 2.5 && pt < 9.0 && t.h_dropped)
             {
                 Vec3 at, p;
-                if (!t.h_pick_checked && thing_at(t.h_weapon, at)) hand_to(at);
-                if (pt >= 4.5 && t.h_pick_cm < 0 && palm(p) && thing_at(t.h_weapon, at)) t.h_pick_cm = length(at - p);
-                grip(pt >= 4.6 ? 1.0f : 0.0f);
+                if (pt < 5.5 && thing_at(t.h_weapon, at))
+                {
+                    Vec3 to{at.x - s.actor_world.x, at.y - s.actor_world.y, 0};
+                    double d = length(to);
+                    UObject* controller = object_property(s.pawn, STR("Controller"));
+                    ue::FRotator* rotation = controller ? controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")) : nullptr;
+                    if (rotation && d > 5.0)
+                    {
+                        double off = normalize_axis(std::atan2(to.y, to.x) * kRadToDeg - rotation->Yaw);
+                        double step = 120.0 * dt;
+                        rotation->Yaw = normalize_axis(rotation->Yaw + std::max(-step, std::min(step, off)));
+                        if (std::fabs(off) < 30.0 && d > 45.0) shared().selftest_stick_y.store(0.5f);
+                    }
+                }
+                // Down to the floor as a player would: crouch button and a bend of the head.
+                shared().own_crouch.store(pt >= 5.5 && pt < 8.5);
+                if (pt >= 5.5 && !t.h_pick_checked && thing_at(t.h_weapon, at)) hand_to(at);
+                if (pt >= 7.5 && t.h_pick_cm < 0 && palm(p) && thing_at(t.h_weapon, at)) t.h_pick_cm = length(at - p);
+                grip(pt >= 7.6 ? 1.0f : 0.0f);
             }
-            if (pt >= 5.6 && !t.h_pick_checked && t.h_dropped)
+            if (pt >= 8.6 && !t.h_pick_checked && t.h_dropped)
             {
                 t.h_pick_checked = true;
                 t.h_picked = weapon_r() != nullptr;
                 t.h_pick_far = !t.h_picked && t.h_pick_cm > 40.0;
                 HSVR_LOG("Test: hands: after squeezing on the dropped weapon (%.0f cm from the palm) the right hand holds %ls", t.h_pick_cm, held_name().c_str());
             }
+            // (Everything after the pick-up runs 3 s later than first written: the walk to the weapon.)
+            pt -= 3.0;
             // 3. Stand up with the grip held, carry it to the hip and let go there.
             if (pt >= 6.0 && pt < 10.5 && t.h_picked)
             {
@@ -3607,8 +3641,7 @@ namespace hsvr
                             t.h_target_mesh = mesh;
                         }
                     }
-                    t.h_has_target = t.h_target_mesh != nullptr;
-                    if (t.h_has_target) HSVR_LOG("Test: hands: another character %.0f cm away; going to grab it", best);
+                    if (t.h_target_mesh) HSVR_LOG("Test: hands: another character %.0f cm away; going to grab it", best);
                 }
                 if (t.h_target_mesh)
                 {
@@ -3616,16 +3649,27 @@ namespace hsvr
                     bool have_shoulder = socket_transform(s.body, make_name(L"upperarm_r"), RTS_World, shoulder);
                     double best = 1e9;
                     Vec3 target;
-                    for (const wchar_t* bone : {L"lowerarm_l", L"lowerarm_r", L"upperarm_l", L"upperarm_r", L"hand_l", L"hand_r"})
+                    // (Fourth run: the other character's forearm was at the player's hip, so the
+                    // squeeze there drew a weapon instead, as it should. Only parts above the hips.)
+                    for (const wchar_t* bone : {L"lowerarm_l", L"lowerarm_r", L"upperarm_l", L"upperarm_r", L"hand_l", L"hand_r", L"spine_03", L"neck_01"})
                     {
                         Xf b;
+                        // Once the hand is on its way, the same part to the end (sixth run: a part that
+                        // dipped below the line for a frame let the grip go and grab again).
+                        bool chosen = pt >= 14.4 && !t.h_target_bone.empty();
+                        if (chosen && t.h_target_bone != bone) continue;
                         if (!have_shoulder || !socket_transform(t.h_target_mesh, make_name(bone), RTS_World, b)) continue;
+                        if (!chosen && b.t.z < shoulder.t.z - 30.0) continue;
                         double d = length(b.t - shoulder.t);
                         if (d < best)
                         {
                             best = d;
                             target = b.t;
-                            if (pt < 14.4) t.h_target_bone = bone;
+                            if (pt < 14.4)
+                            {
+                                t.h_target_bone = bone;
+                                t.h_has_target = true;
+                            }
                         }
                     }
                     if (best < 1e9)
@@ -3642,10 +3686,10 @@ namespace hsvr
                             if (std::fabs(off) < 30.0 && d > 55.0) shared().selftest_stick_y.store(0.5f);
                         }
                         if (pt >= 13.5) hand_to(target);
-                        grip(pt >= 14.5 && pt < 16.0 ? 1.0f : 0.0f);
                     }
+                    grip(t.h_has_target && pt >= 14.5 && pt < 16.0 ? 1.0f : 0.0f);
                 }
-                if (pt >= 15.5 && !t.h_grab_checked && t.h_target_mesh)
+                if (pt >= 15.5 && !t.h_grab_checked && t.h_target_mesh && t.h_has_target)
                 {
                     t.h_grab_checked = true;
                     bool* grabbed = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Grabbed R"));
@@ -3905,7 +3949,7 @@ namespace hsvr
                     }
                     if (!t.h_has_target)
                     {
-                        note("hands: no other character within 4 m during the hands part: grabbing a person not checked");
+                        note("hands: no other character within 4 m with an arm or neck above the player's hips during the hands part (knocked down?): grabbing a person not checked");
                     }
                     else
                     {
@@ -3966,7 +4010,7 @@ namespace hsvr
             shared().selftest_phase_time.store((float)(elapsed - begin));
             // The pretend head ducks half a metre for the floor strikes (eased over 0.4 s).
             {
-                float want = (part == 4 || (part == 12 && elapsed - begin > 2.5 && elapsed - begin < 5.5)) ? -0.5f : 0.0f;
+                float want = (part == 4 || (part == 12 && elapsed - begin > 5.5 && elapsed - begin < 8.5)) ? -0.5f : 0.0f;
                 float have = shared().selftest_head_y.load();
                 float step = (float)(1.25 * dt);
                 have = have < want ? std::min(want, have + step) : std::max(want, have - step);
@@ -5063,7 +5107,7 @@ namespace hsvr
                     double size = std::sqrt(push[0] * push[0] + push[1] * push[1] + push[2] * push[2]);
                     static double last = 0.0;
                     double now = now_seconds();
-                    if (now - last > 0.25)
+                    if (now - last > 1.0 && size >= 100.0)
                     {
                         last = now;
                         HSVR_LOG("Punch: the player's body struck %ls, impulse %.0f", context->GetName().c_str(), size);

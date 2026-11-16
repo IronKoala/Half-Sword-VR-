@@ -717,18 +717,10 @@ namespace hsvr
                 return false;
             }
             HSVR_LOG("Gesture: %s hand picks up %ls (%.0f cm away)", hand ? "right" : "left", best->GetFullName().c_str(), best_d);
-            UFunction* grab = pawn->GetFunctionByNameInChain(hand ? STR("Grab Specific Object R H") : STR("Grab Specific Object L H"));
-            if (!grab || grab->GetParmsSize() != (int)sizeof(GrabParams))
-            {
-                HSVR_LOG("Gesture: the game's grab-this-object event is missing or changed; not picked up");
-                return false;
-            }
-            GrabParams params{best_component, best_at};
-            pawn->ProcessEvent(grab, &params);
-            call_event(pawn, hand ? STR("Pick Up Right Event") : STR("Pick Up Left Event"));
-            UObject* now_held = object_at(pawn, hand ? STR("Weapon R") : STR("Weapon L"));
-            HSVR_LOG("Gesture: after picking up, the %s hand holds %ls", hand ? "right" : "left", now_held ? now_held->GetFullName().c_str() : L"nothing (yet)");
-            return true;
+            // The game's own pick-up, finished by the game in its tick (bs_hands.cpp). The old way
+            // (Grab Specific Object, then Pick Up Right Event) let go again at once: that event is
+            // the grab key's release code (self-test, build 3).
+            return bs_pick_up(pawn, hand, best_component, best_at.X, best_at.Y, best_at.Z);
         }
 
         struct GestureState
@@ -793,6 +785,9 @@ namespace hsvr
                 }
                 if (zone)
                 {
+                    // Something to grab right in the palm (a person low down, a prop) comes before
+                    // the sheath (self-test: a knocked-down opponent's neck at the player's hip).
+                    if (bs_grab(pawn, h, cfg.grab_radius_m * 100.0)) return;
                     HSVR_LOG("Hands: %s hand closes at the %s; drawing a weapon", side, zone);
                     if (call_event(pawn, letter == L'R' ? STR("Unsheath R Event") : STR("Unsheath L Event"))) g_bs.closed_on_weapon[h] = true;
                     return;
