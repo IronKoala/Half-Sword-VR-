@@ -47,6 +47,40 @@ head). The first cut of this branch did the same and was never switched on. It n
 like headgear) and never touches a bone. **Never use HideBoneByName on this game's characters.**
 Where the sections below mention `HideBoneByName` or `hide_head_bone`, that is the removed way.
 
+## Build 2 (2026-11-16): the weapon at one angle to the controller, the shield on the hand
+
+Matthew's points 5 ("i hold my controller horizontally and yet the sickle is still at an angle") and
+2 ("i cant raise and angle the shield"). Branch `claude/build2-weapon-shield`, on build 1 (6e9b504).
+
+- **Why the weapon was off.** The right hand's grip frame was measured from the weapon in it: the
+  line from the weapon's root to its `Head`. That line is not the handle (a sickle's head curves
+  away), and across weapons it lay 40 degrees and more apart in the hand (self-test logs: handle
+  (-0.42 0.35 -0.84) against (-0.33 -0.41 -0.85)); the hand was turned to put that line along the
+  controller. On top, the controller's axes came from the calibration pose (`ctrl_axes_l/r`), which
+  measured 19 to 27 degrees and differed by 5 to 15 between his three tries.
+- **Now** (`grip_fixed=1`): the hand's grip comes from its own fingers only (the same in every
+  run: handle (+-0.04 0.88 -0.48)), and the controller's handle direction is its pointing direction
+  turned by **`grip_tilt_deg`** (default 20, near what his calibrations measured) towards the
+  controller's top. The weapon sits in the hand as the game seats it (`Grip R Hand Default Pos`),
+  so the angle between controller and weapon is fixed: one number, the same for every weapon.
+  Bigger tips the blade further forward and down, smaller brings it back and up.
+  `ctrl_axes_l/r` are ignored while grip_fixed is on; the calibration still prints the tilt it
+  measured.
+- **Why the shield would not rise or turn.** `Set Up Left Hand Weapon` (@14076..@14301) joins grip
+  types 6 and 7 (his `Shield_Pavise_Heavy_C` is type 7) to **`lowerarm_l`**, not the hand. In the
+  placed body the forearm is only drawn to the hand's place, so the hand's turn never reached the
+  shield and it sat a forearm below the fist. Not reach, not the arm solver ignoring the hand.
+- **Now** (`shield_on_hand=1`): the joint is bound to the hand bone (`SetConstrainedComponents`,
+  as the game does for grabs), keeping the shield's place at that moment; the hand's pull counts the
+  held mass (`L Weapon Mass`, 2 kg for the pavise) and the wrist servo carries it whole.
+  `shield_straight_wrist=1` instead sets it as the skeleton's reference pose would hold it with a
+  straight wrist; in the self-test that turned the pavise 61 degrees into the character and held
+  the hand 30 cm off, so it is off by default.
+- **Self-test**: part 12 raises the left hand 40 cm over the head and rolls it 35 degrees. New
+  checks: the weapon's turn against its controller (limit 6 degrees), the shield joined to the hand,
+  the shield rising with the hand (80 percent), the shield's turn against its controller (10).
+  `tools/selftest.sh` now builds from its own checkout and quits at 140 s.
+
 ## Thirteenth cut (2026-11-16): the player's height is the character's, and what the hands hold
 
 After the twelfth cut Matthew asked for a point-by-point comparison with Blade & Sorcery and gave

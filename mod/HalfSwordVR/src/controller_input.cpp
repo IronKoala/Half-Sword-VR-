@@ -1020,7 +1020,7 @@ namespace hsvr
         if (have) point_at_panel(hands, cfg, in_menu);
         if (have) gestures(pawn, hands, in_menu, cfg);
         else vr_set_panel_pointer(-1.0f, -1.0f);
-        if (!have && cfg.dev_selftest && cfg.dev_fake_hands && shared().selftest_phase.load() == 11)
+        if (!have && cfg.dev_selftest && cfg.dev_fake_hands && shared().selftest_phase.load() == 12)
         {
             // Self-test, the hands part: the pretend controllers squeeze and let go as the test
             // says (vr_present.cpp), through the same hand logic as real ones.
@@ -1091,7 +1091,7 @@ namespace hsvr
             pad.active = true;
             pad.ly = shared().selftest_stick_y.load();
         }
-        if (cfg.dev_selftest && (shared().selftest_phase.load() == 10 || shared().selftest_phase.load() == 11))
+        if (cfg.dev_selftest && (shared().selftest_phase.load() == 10 || shared().selftest_phase.load() == 12))
         {
             // Self-test, the kettle: the test steers by the heading and pushes the stick itself.
             pad.active = true;

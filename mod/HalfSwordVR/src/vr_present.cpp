@@ -2649,6 +2649,7 @@ float4 PSMain(VSOut i) : SV_Target
                 float ox = 0.22f * side + 0.08f * (float)std::sin(t * 1.3);
                 float oy = -0.30f + 0.08f * (float)std::cos(t * 1.3);
                 float oz = -0.35f;
+                float roll = 0.0f; // about the controller's pointing direction
                 if (config().dev_selftest && shared().selftest_phase.load() >= 0)
                 {
                     // The self-test's script (arm_control.cpp, "self-test"): offsets from the
@@ -2685,6 +2686,17 @@ float4 PSMain(VSOut i) : SV_Target
                         // Fast wrist work: the handle whipped up and down through 100 degrees.
                         tilt = (30.0f + 50.0f * std::sin(two_pi * 2.5f * pt)) * (float)kDegToRad;
                     }
+                    else if (phase == 11 && h == 0)
+                    {
+                        // Build 2: the shield hand raised over the head and turned, the way Matthew
+                        // covers his head and angles a kite shield's point out (eased in over 2 s).
+                        float k = std::min(1.0f, pt / 2.0f);
+                        k = k * k * (3.0f - 2.0f * k);
+                        ox = -0.22f + 0.07f * k;
+                        oy = -0.30f + 0.40f * k;
+                        oz = -0.40f + 0.05f * k;
+                        roll = -35.0f * k * (float)kDegToRad;
+                    }
                     else if (phase == 4 && h == 1)
                     {
                         // Strike down at the floor twice a second, blade pointing down.
@@ -2692,7 +2704,7 @@ float4 PSMain(VSOut i) : SV_Target
                         oz = -0.45f;
                         tilt = -75.0f * (float)kDegToRad;
                     }
-                    else if (phase == 11 && h == 1 && shared().selftest_hand_hip.load())
+                    else if (phase == 12 && h == 1 && shared().selftest_hand_hip.load())
                     {
                         // Hands part: the right hand down at the right hip.
                         ox = 0.25f;
@@ -2714,8 +2726,18 @@ float4 PSMain(VSOut i) : SV_Target
                 hand.qy = std::sin(hy) * std::cos(hx);
                 hand.qz = -std::sin(hy) * std::sin(hx);
                 hand.qw = std::cos(hy) * std::cos(hx);
+                if (roll != 0.0f)
+                {
+                    // Then the roll about the hand's own Z (its pointing axis): q * (0, 0, sin, cos).
+                    float rz = std::sin(roll * 0.5f), rw = std::cos(roll * 0.5f);
+                    float x = hand.qx, y = hand.qy, z = hand.qz, w = hand.qw;
+                    hand.qx = x * rw + y * rz;
+                    hand.qy = y * rw - x * rz;
+                    hand.qz = z * rw + w * rz;
+                    hand.qw = w * rw - z * rz;
+                }
                 hand.trigger = hand.squeeze = 0.0f;
-                if (config().dev_selftest && shared().selftest_phase.load() == 11)
+                if (config().dev_selftest && shared().selftest_phase.load() == 12)
                 {
                     // Hands part: grips as the test says; the right hand held at a place the test
                     // worked out in tracking space (a dropped weapon, another character's arm).
