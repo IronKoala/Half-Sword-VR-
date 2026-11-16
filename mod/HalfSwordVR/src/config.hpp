@@ -237,6 +237,18 @@ namespace hsvr
         // the mod.
         std::string ctrl_axes_l;
         std::string ctrl_axes_r;
+        // Build 2 (Matthew's point 5): the hand, and so what it holds, sits at one fixed angle to
+        // the controller, the same for every weapon (as Blade & Sorcery's fixed grip angle). The
+        // hand's grip is taken from its own fingers, never from the shape of the weapon, and the
+        // calibration's measured axes (ctrl_axes_l/r, too noisy) are not used. grip_tilt_deg is the
+        // one number to adjust: how far the handle is tilted from the controller's pointing
+        // direction towards the controller's top.
+        bool grip_fixed = true;
+        double grip_tilt_deg = 20.0;
+        // Build 2 (Matthew's point 2): a shield the game straps to the forearm is joined to the
+        // hand instead, at the angle a straight wrist gives, so it goes where the hand goes and
+        // turns as the hand turns.
+        bool shield_on_hand = true;
         // 1 = loose weapons and traps (held by nobody) do not collide with the player's body, only
         // with the player's hands and what they hold. A placed body cannot give way, so a loose
         // object caught against it was thrown about (the hanging kettle).
