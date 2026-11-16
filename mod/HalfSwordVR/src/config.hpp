@@ -189,7 +189,17 @@ namespace hsvr
         // 1 = the hands are placed too (exactly at the controllers); only what they hold is physical.
         // 0 = the hands stay simulated on the wrist. That broke in the first test: once the player
         // walked, the hands ended up a metre from the controllers and turned backwards.
-        bool kinematic_hands = true;
+        bool kinematic_hands = false;
+        // Physical hands as in Blade & Sorcery: each hand body is cut loose from the forearm (its
+        // wrist joint is set free) and driven hard towards the controller (hand_pull_* below); the
+        // arm is drawn to follow the hand. So a hand can be stopped: when the sword hits something
+        // the hand stops with it. If the wrist cannot be freed the hands are placed rigidly instead.
+        bool free_wrists = true;
+        // 1 = the legs are the mod's own: feet stay planted on the ground and step when the body
+        // has moved step_length_cm past them (or turned), lifting step_height_cm.
+        bool own_legs = true;
+        double step_length_cm = 20.0;
+        double step_height_cm = 9.0;
         double kinematic_min_consciousness = 15.0;
         // 1 = the hips are lowered and the knees bent so the head can be at the headset's height.
         bool leg_ik = true;
@@ -222,11 +232,11 @@ namespace hsvr
         // the brake, max_force 0 = no limit. The sword's weight still slows the hand, because the
         // pull works on the hand and the sword hangs from it.
         bool hand_pull = true;
-        double hand_pull_strength = 6000.0;
-        double hand_pull_damping = 110.0;
-        double hand_pull_max_force = 12000.0;
+        double hand_pull_strength = 12000.0;
+        double hand_pull_damping = 150.0;
+        double hand_pull_max_force = 30000.0;
         // The hand's own turning strength (wrist) times this, so the blade angle holds better.
-        double hand_turn_scale = 3.0;
+        double hand_turn_scale = 5.0;
         // While a hand is pulled, the turning strength of that arm's other bones times this: the
         // arm follows the hand instead of carrying it (1 = the game's own arm muscles).
         double arm_soft_scale = 0.3;

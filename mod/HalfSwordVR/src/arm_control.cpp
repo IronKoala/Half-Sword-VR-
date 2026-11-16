@@ -389,6 +389,17 @@ namespace hsvr
             // Driver bone indices.
             int32_t clavicle = -1, upper = -1, lower = -1, hand = -1, parent = -1;
             int32_t thigh = -1, calf = -1, foot = -1; // the leg on this side (-1 = not usable)
+            // The mod's own stepping (own_legs). Learned from the standing pose: where the foot
+            // bone rests relative to the character (its position and heading), and how it is turned.
+            bool have_foot_home = false;
+            Vec3 foot_home;
+            Quat foot_rest_q;
+            bool foot_planted = false, stepping = false;
+            Vec3 foot_at, step_from; // world
+            double foot_yaw = 0, step_from_yaw = 0, step_t = 0, step_duration = 0.2;
+            // The wrist joint as the game made it, kept to put it back.
+            bool wrist_freed = false;
+            std::vector<uint8_t> wrist_linear, wrist_angular;
             FName parent_name, hand_name, middle_name, thumb_name, lower_name, upper_name;
             // Hand pull (see "pulling the hands" below).
             bool pull_active = false;
@@ -479,6 +490,13 @@ namespace hsvr
             bool kin_active = false;
             bool kin_hands = false;     // the hands are placed too
             int kin_reattached = 0;     // times the body mesh had to be put back on the character
+            bool wrist_failed = false;  // the wrists could not be freed on this character: rigid hands
+            Vec3 actor_world;           // the character's position this frame
+            bool have_actor_world = false;
+            Vec3 step_last_actor, step_velocity;
+            double step_time = 0;
+            int steps_taken = 0;
+            double thrown_cm = 0;
             bool kin_attach_ok = false;
             int kin_retaken = 0;        // times the game switched simulation back on and we undid it
             double kin_blocked_until = 0;
@@ -645,6 +663,8 @@ namespace hsvr
                 side.lower_name = side_name(L"lowerarm", side);
                 side.upper_name = side_name(L"upperarm", side);
                 side.pull_active = side.have_last_world = side.have_prev_wanted = false;
+                side.have_foot_home = side.foot_planted = side.stepping = false;
+                side.wrist_freed = false;
                 side.middle_name = side_name(L"middle_01", side);
                 side.thumb_name = side_name(L"thumb_01", side);
                 side.have_axes = side.have_hinge = side.have_grip = false;
@@ -696,6 +716,8 @@ namespace hsvr
             s.kin_active = false;
             s.kin_reattached = 0;
             s.kin_attach_ok = false;
+            s.wrist_failed = false;
+            s.have_actor_world = false;
             s.hold_wanted = s.hold_active = s.placed = false;
             s.kin_retaken = 0;
             s.pelvis = s.spine_base >= 0 ? s.parents[s.spine_base] : -1;
@@ -1124,7 +1146,14 @@ namespace hsvr
                     }
                 }
             }
-            Vec3 to_target = target.t - S;
+            // A physical hand (cut loose from the forearm, driven to the controller) leads: the arm
+            // is drawn to where the hand body really is, while the hand bone of the pose carries the
+            // controller's place for the drive to aim at.
+            Vec3 reach_to = target.t;
+            Xf hand_body;
+            if (placed && !s.kin_hands && side.pull_active && side.wrist_freed && socket_transform(s.body, side.hand_name, RTS_World, hand_body))
+                reach_to = relative(hand_body, s.body_world).t;
+            Vec3 to_target = reach_to - S;
             double d = length(to_target);
             Vec3 dir = normalized(to_target, normalized(lower0.t - S));
             // Reach: a straight arm leaves the blade angle to the wrist alone, and the game's wrist
@@ -1547,12 +1576,12 @@ namespace hsvr
                 }
                 else if (body.kind == PullKind::arm)
                 {
-                    want = hand_wanted(body.side) && cfg.arm_soft_scale != 1.0;
+                    want = !s.kin_active && hand_wanted(body.side) && cfg.arm_soft_scale != 1.0;
                     if (want) scale_turn(std::max(0.02, std::min(5.0, cfg.arm_soft_scale)));
                 }
                 else if (body.kind == PullKind::head)
                 {
-                    want = s.head_pull_wanted && cfg.head_pull_strength > 0.0;
+                    want = !s.kin_active && s.head_pull_wanted && cfg.head_pull_strength > 0.0;
                     if (want)
                     {
                         d[L.f_local] &= 0xFE;
@@ -1706,19 +1735,251 @@ namespace hsvr
             return body_attached_to_capsule();
         }
 
+        // ---- physical hands: the wrist joint set free ---------------------------------------------
+        // The engine's own constraint functions (ConstraintInstanceBlueprintLibrary) are used: the
+        // joint between forearm and hand is read, kept, and set free in place and turn; put back
+        // exactly as it was when the body is given back to the game.
+        void copy_params_by_name(UFunction* from_fn, const uint8_t* from, UFunction* to_fn, uint8_t* to)
+        {
+            for (FProperty* p : to_fn->ForEachProperty())
+            {
+                std::wstring name = p->GetName();
+                for (FProperty* q : from_fn->ForEachProperty())
+                {
+                    if (q->GetName() == name && q->GetSize() == p->GetSize()) memcpy(to + p->GetOffset_Internal(), from + q->GetOffset_Internal(), p->GetSize());
+                }
+            }
+        }
+
+        // Returns true when the wrist of `side` is in the wanted state afterwards.
+        bool wrist_set_free(Side& side, bool free)
+        {
+            State& s = g_state;
+            if (!free && !side.wrist_freed) return true;
+            static UObject* library = nullptr;
+            if (!library) library = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__ConstraintInstanceBlueprintLibrary"));
+            UFunction* by_name = s.body ? s.body->GetFunctionByNameInChain(STR("GetConstraintByName")) : nullptr;
+            if (!library || !by_name) return false;
+            UFunction* get_lin = library->GetFunctionByNameInChain(STR("GetLinearLimits"));
+            UFunction* set_lin = library->GetFunctionByNameInChain(STR("SetLinearLimits"));
+            UFunction* get_ang = library->GetFunctionByNameInChain(STR("GetAngularLimits"));
+            UFunction* set_ang = library->GetFunctionByNameInChain(STR("SetAngularLimits"));
+            if (!get_lin || !set_lin || !get_ang || !set_ang) return false;
+            constexpr int32_t kMax = 256;
+            for (UFunction* fn : {by_name, get_lin, set_lin, get_ang, set_ang})
+            {
+                if (fn->GetParmsSize() > kMax) return false;
+            }
+            int32_t n_name = param_offset(by_name, L"ConstraintName"), n_ret = param_offset(by_name, L"ReturnValue");
+            int32_t accessor_size = 0;
+            for (FProperty* p : by_name->ForEachProperty())
+            {
+                if (p->GetName() == L"ReturnValue") accessor_size = p->GetSize();
+            }
+            if (n_name < 0 || n_ret < 0 || accessor_size <= 0) return false;
+            alignas(16) uint8_t found[kMax] = {};
+            memcpy(found + n_name, &side.hand_name, sizeof(FName));
+            s.body->ProcessEvent(by_name, found);
+            const uint8_t* accessor = found + n_ret;
+            auto put_accessor = [&](UFunction* fn, uint8_t* parms) {
+                int32_t at = param_offset(fn, L"Accessor");
+                if (at < 0) return false;
+                memcpy(parms + at, accessor, accessor_size);
+                return true;
+            };
+            auto motions = [&](UFunction* fn, const uint8_t* parms) {
+                std::string text;
+                for (FProperty* p : fn->ForEachProperty())
+                {
+                    if (p->GetName().find(L"Motion") != std::wstring::npos) text += std::to_string((int)parms[p->GetOffset_Internal()]) + " ";
+                }
+                return text;
+            };
+            if (free && !side.wrist_freed)
+            {
+                alignas(16) uint8_t lin[kMax] = {}, ang[kMax] = {};
+                if (!put_accessor(get_lin, lin) || !put_accessor(get_ang, ang)) return false;
+                library->ProcessEvent(get_lin, lin);
+                library->ProcessEvent(get_ang, ang);
+                HSVR_LOG("Hands: %s wrist joint as the game made it: place %s(0 free, 1 limited, 2 locked), turn %s", side.label, motions(get_lin, lin).c_str(),
+                         motions(get_ang, ang).c_str());
+                // A real wrist is locked in place. All free means the joint was not found (the
+                // engine then answers with zeros), and nothing would be freed.
+                bool held = false;
+                for (FProperty* p : get_lin->ForEachProperty())
+                {
+                    if (p->GetName().find(L"Motion") != std::wstring::npos && lin[p->GetOffset_Internal()] != 0) held = true;
+                }
+                if (!held)
+                {
+                    HSVR_LOG("Hands: no %s wrist joint found under the hand bone's name", side.label);
+                    return false;
+                }
+                side.wrist_linear.assign(lin, lin + get_lin->GetParmsSize());
+                side.wrist_angular.assign(ang, ang + get_ang->GetParmsSize());
+            }
+            if (side.wrist_linear.empty() || side.wrist_angular.empty()) return false;
+            alignas(16) uint8_t lin[kMax] = {}, ang[kMax] = {};
+            copy_params_by_name(get_lin, side.wrist_linear.data(), set_lin, lin);
+            copy_params_by_name(get_ang, side.wrist_angular.data(), set_ang, ang);
+            if (!put_accessor(set_lin, lin) || !put_accessor(set_ang, ang)) return false;
+            if (free)
+            {
+                for (UFunction* fn : {set_lin, set_ang})
+                {
+                    uint8_t* parms = fn == set_lin ? lin : ang;
+                    for (FProperty* p : fn->ForEachProperty())
+                    {
+                        if (p->GetName().find(L"Motion") != std::wstring::npos) parms[p->GetOffset_Internal()] = 0; // free
+                    }
+                }
+            }
+            library->ProcessEvent(set_lin, lin);
+            library->ProcessEvent(set_ang, ang);
+            // Read back: did it take?
+            alignas(16) uint8_t check[kMax] = {};
+            put_accessor(get_lin, check);
+            library->ProcessEvent(get_lin, check);
+            bool is_free = true;
+            for (FProperty* p : get_lin->ForEachProperty())
+            {
+                if (p->GetName().find(L"Motion") != std::wstring::npos && check[p->GetOffset_Internal()] != 0) is_free = false;
+            }
+            if (free && !is_free) return false;
+            side.wrist_freed = free;
+            HSVR_LOG(free ? "Hands: %s hand cut loose from the forearm (wrist joint free)" : "Hands: %s wrist joint put back as the game made it", side.label);
+            return true;
+        }
+
+        // ---- the mod's own legs: planted feet that step ---------------------------------------------
+        // Without the ragdoll nothing moves the legs (the game's legs only stepped because its
+        // physics made them). Each foot stays where it stands on the ground; when the body has moved
+        // step_length_cm past it, or turned well away from it, the foot lifts and steps to its place
+        // under the body, a little ahead in the direction of travel. One foot at a time, unless a
+        // leg would be overstretched. `out` is each foot bone's place in the world.
+        void step_feet(const Config& cfg, Xf out[2])
+        {
+            State& s = g_state;
+            double now = now_seconds();
+            double dt = s.step_time > 0 ? std::min(0.05, now - s.step_time) : 0.0;
+            s.step_time = now;
+            Vec3 moved = s.actor_world - s.step_last_actor;
+            s.step_last_actor = s.actor_world;
+            moved.z = 0;
+            if (dt > 0 && length(moved) < 100.0)
+            {
+                double alpha = 1.0 - std::exp(-dt / 0.1);
+                s.step_velocity = s.step_velocity + (moved * (1.0 / dt) - s.step_velocity) * alpha;
+            }
+            else
+            {
+                s.step_velocity = {};
+            }
+            double speed = length(s.step_velocity);
+            Xf actor_frame{quat_from_yaw_deg(s.actor_yaw), s.actor_world};
+            Vec3 home[2];
+            double away[2] = {0, 0};
+            for (int k = 0; k < 2; ++k)
+            {
+                Side& side = s.side[k];
+                home[k] = compose(Xf{Quat{}, side.foot_home}, actor_frame).t + s.step_velocity * 0.12;
+                Vec3 off = side.foot_at - home[k];
+                off.z = 0;
+                if (!side.foot_planted || length(off) > 130.0)
+                {
+                    side.foot_at = home[k];
+                    side.foot_yaw = s.actor_yaw;
+                    side.foot_planted = true;
+                    side.stepping = false;
+                    off = {};
+                }
+                away[k] = length(off);
+            }
+            double trigger = speed < 8.0 ? 5.0 : std::max(5.0, cfg.step_length_cm); // standing still: feet come to rest under the body
+            int order[2] = {away[0] >= away[1] ? 0 : 1, away[0] >= away[1] ? 1 : 0};
+            for (int n = 0; n < 2; ++n)
+            {
+                int k = order[n];
+                Side& side = s.side[k];
+                Side& other = s.side[1 - k];
+                if (side.stepping) continue;
+                bool other_busy = other.stepping && other.step_t < 0.6;
+                bool turned = std::fabs(normalize_axis(s.actor_yaw - side.foot_yaw)) > 35.0;
+                bool overstretched = away[k] > std::max(40.0, cfg.step_length_cm * 2.2);
+                if ((!other_busy && (away[k] > trigger || turned)) || overstretched)
+                {
+                    side.stepping = true;
+                    side.step_from = side.foot_at;
+                    side.step_from_yaw = side.foot_yaw;
+                    side.step_t = 0;
+                    side.step_duration = std::max(0.13, std::min(0.30, 0.30 - speed / 1500.0));
+                    ++s.steps_taken;
+                }
+            }
+            for (int k = 0; k < 2; ++k)
+            {
+                Side& side = s.side[k];
+                Vec3 at = side.foot_at;
+                if (side.stepping)
+                {
+                    side.step_t += dt / side.step_duration;
+                    double t = std::min(1.0, side.step_t);
+                    double ease = t * t * (3.0 - 2.0 * t);
+                    at = side.step_from + (home[k] - side.step_from) * ease;
+                    at.z = home[k].z + std::max(0.0, cfg.step_height_cm) * std::sin(kPi * t);
+                    side.foot_yaw = side.step_from_yaw + normalize_axis(s.actor_yaw - side.step_from_yaw) * ease;
+                    if (side.step_t >= 1.0)
+                    {
+                        side.stepping = false;
+                        side.foot_at = home[k];
+                        side.foot_yaw = s.actor_yaw;
+                        at = side.foot_at;
+                    }
+                }
+                else
+                {
+                    side.foot_at.z = home[k].z; // the ground under the character
+                    at = side.foot_at;
+                }
+                out[k] = {(quat_from_yaw_deg(side.foot_yaw) * side.foot_rest_q).normalized(), at};
+            }
+        }
+
         void kinematic_update(bool want, const char* why_not)
         {
             State& s = g_state;
             if (!s.body) return;
             if (want)
             {
-                bool hands = config().kinematic_hands;
+                Config cfg = config();
+                // Physical hands need their wrists free; without that they are placed rigidly.
+                bool want_rigid_hands = cfg.kinematic_hands || !cfg.free_wrists || s.wrist_failed;
+                bool hands = s.kin_active ? s.kin_hands : want_rigid_hands;
+                if (s.kin_active && want_rigid_hands != s.kin_hands && (want_rigid_hands || (!s.side[0].wrist_freed && !s.side[1].wrist_freed))) hands = want_rigid_hands;
                 // The game may switch simulation back on (its own script); look every frame.
                 bool game_took_it = s.kin_active && (body_simulating(L"spine_03") || body_simulating(L"thigh_r") || body_simulating(L"lowerarm_r") ||
-                                                     (hands && (body_simulating(L"hand_r") || body_simulating(L"hand_l"))));
+                                                     (s.kin_hands && (body_simulating(L"hand_r") || body_simulating(L"hand_l"))));
                 if (!s.kin_active || game_took_it || hands != s.kin_hands)
                 {
                     if (!body_set_simulate(L"pelvis", false)) return;
+                    if (!hands)
+                    {
+                        bool freed = wrist_set_free(s.side[0], true);
+                        freed = wrist_set_free(s.side[1], true) && freed;
+                        if (!freed)
+                        {
+                            wrist_set_free(s.side[0], false);
+                            wrist_set_free(s.side[1], false);
+                            hands = true;
+                            s.wrist_failed = true;
+                            HSVR_LOG("Hands: the wrist joints could not be set free; the hands are placed rigidly at the controllers instead");
+                        }
+                    }
+                    else
+                    {
+                        wrist_set_free(s.side[0], false);
+                        wrist_set_free(s.side[1], false);
+                    }
                     if (!hands)
                     {
                         body_set_simulate(L"hand_r", true);
@@ -1726,7 +1987,7 @@ namespace hsvr
                     }
                     if (game_took_it) ++s.kin_retaken;
                     else HSVR_LOG(hands ? "Body: the body is now placed, not simulated, hands included (only what the hands hold stays physical)"
-                                        : "Body: the body is now placed, not simulated (hands and weapons stay physical)");
+                                        : "Body: the body is now placed, not simulated; the hands are physical, loose from the arms and driven to the controllers");
                     s.kin_active = true;
                     s.kin_hands = hands;
                 }
@@ -1742,6 +2003,8 @@ namespace hsvr
             }
             else if (s.kin_active)
             {
+                wrist_set_free(s.side[0], false);
+                wrist_set_free(s.side[1], false);
                 body_set_simulate(L"pelvis", true);
                 s.kin_active = false;
                 HSVR_LOG("Body: the body is given back to the game's simulation (%s)", why_not);
@@ -1758,7 +2021,9 @@ namespace hsvr
 
         // The hips have just been moved by the pelvis drop; put this leg's foot back where the
         // game's animation had it by bending the knee (in the direction the animation bends it).
-        void solve_leg(const Side& side, std::vector<Xf>& pose, const std::vector<Xf>& before, const Quat& to_pose)
+        // `foot_target` is where the foot bone goes (pose space); `knee_forward`, when given, is the
+        // way the knee points (the foot's heading), else the animation's own knee direction is kept.
+        void solve_leg(const Side& side, std::vector<Xf>& pose, const std::vector<Xf>& before, const Quat& to_pose, const Xf& foot_target, const Vec3* knee_forward)
         {
             State& s = g_state;
             if (side.thigh < 0) return;
@@ -1766,10 +2031,10 @@ namespace hsvr
             Vec3 hip = pose[side.thigh].t;
             double a = length(knee0 - hip0), b = length(foot0 - knee0);
             if (a < 1.0 || b < 1.0) return;
-            Vec3 to_foot = foot0 - hip;
+            Vec3 to_foot = foot_target.t - hip;
             double d = std::max(std::fabs(a - b) + 0.5, std::min(length(to_foot), (a + b) * 0.999));
             Vec3 dir = normalized(to_foot, {0, 0, -1});
-            Vec3 pole = perpendicular_part(knee0 - hip0, normalized(foot0 - hip0, dir));
+            Vec3 pole = knee_forward ? *knee_forward : perpendicular_part(knee0 - hip0, normalized(foot0 - hip0, dir));
             if (length(pole) < 0.5) pole = to_pose.rotate(quat_from_yaw_deg(s.actor_yaw).rotate({1, 0, 0})); // a straight leg: knees go forward
             pole = perpendicular_part(pole, dir);
             if (length(pole) < 1e-3) return;
@@ -1780,7 +2045,7 @@ namespace hsvr
             Vec3 foot = hip + dir * d;
             pose[side.thigh] = {(quat_between(normalized(knee0 - hip0), normalized(knee - hip)) * before[side.thigh].q).normalized(), hip};
             pose[side.calf] = {(quat_between(normalized(foot0 - knee0), normalized(foot - knee)) * before[side.calf].q).normalized(), knee};
-            pose[side.foot] = {before[side.foot].q, foot};
+            pose[side.foot] = {foot_target.q, foot};
         }
 
         // ---- the upper body and head follow the headset ----------------------------------------
@@ -1831,6 +2096,20 @@ namespace hsvr
             {
                 if (s.below_spine[i]) s.rest[i] = relative(compose(from_raw(s.animated[i]), s.body_world), frame);
             }
+            Vec3 actor;
+            if (actor_location(s.pawn, actor))
+            {
+                Xf actor_frame{quat_from_yaw_deg(s.actor_yaw), actor};
+                for (Side& side : s.side)
+                {
+                    if (side.foot < 0) continue;
+                    Xf home = relative(compose(from_raw(s.animated[side.foot]), s.body_world), actor_frame);
+                    side.foot_home = home.t;
+                    side.foot_rest_q = home.q;
+                    side.have_foot_home = true;
+                    HSVR_LOG("Legs: %s foot rests %.0f cm forward, %.0f cm to the side, %.0f cm below the character's centre", side.label, home.t.x, home.t.y, -home.t.z);
+                }
+            }
             s.have_rest = true;
             Vec3 lean = s.rest[s.head].t;
             HSVR_LOG("Body: upper body shape taken from the game's standing pose (head %.0f cm above the lowest spine bone, %.0f cm forward, %.0f cm to the side)",
@@ -1873,19 +2152,35 @@ namespace hsvr
                     double disc = along * along - (dot(rel, rel) - torso * torso);
                     double drop = disc > 0.0 ? along - std::sqrt(disc) : along;
                     drop = std::max(-75.0, std::min(4.0, drop));
-                    if (std::fabs(drop) > 0.2)
+                    bool own_legs = cfg.own_legs && s.have_actor_world && s.side[0].have_foot_home && s.side[1].have_foot_home;
+                    if (std::fabs(drop) > 0.2 || own_legs)
                     {
                         std::vector<Xf> before(pose);
                         for (int32_t i = 0; i < s.bone_count; ++i)
                         {
                             if (s.below_pelvis[i]) pose[i].t = pose[i].t + up * drop;
                         }
-                        for (const Side& side : s.side) solve_leg(side, pose, before, to_pose);
+                        Xf feet[2];
+                        if (own_legs) step_feet(cfg, feet);
+                        for (int k = 0; k < 2; ++k)
+                        {
+                            const Side& side = s.side[k];
+                            if (side.foot < 0) continue;
+                            if (own_legs)
+                            {
+                                Vec3 knee_forward = to_pose.rotate(quat_from_yaw_deg(side.foot_yaw).rotate({1, 0, 0}));
+                                solve_leg(side, pose, before, to_pose, relative(feet[k], s.body_world), &knee_forward);
+                            }
+                            else
+                            {
+                                solve_leg(side, pose, before, to_pose, before[side.foot], nullptr);
+                            }
+                        }
                         for (int32_t i = 0; i < s.bone_count; ++i)
                         {
                             if (!s.leg_below[i]) continue;
                             bool solved = false;
-                            for (const Side& side : s.side) solved = solved || (side.thigh >= 0 && (i == side.calf || i == side.foot));
+                            for (const Side& side2 : s.side) solved = solved || (side2.thigh >= 0 && (i == side2.calf || i == side2.foot));
                             if (solved) continue;
                             int32_t parent = s.parents[i];
                             pose[i] = compose(relative(before[i], before[parent]), pose[parent]); // toes, twist bones
@@ -2376,6 +2671,22 @@ namespace hsvr
             if (s.have_view && actor_location(s.pawn, actor_now))
             {
                 s.actor_delta = actor_now - s.view.actor_position;
+                if (s.have_actor_world)
+                {
+                    Vec3 jump = actor_now - s.actor_world;
+                    if (length(jump) > 20.0 && length(jump) < 2000.0)
+                    {
+                        s.thrown_cm += length(jump);
+                        UObject* movement = object_property(s.pawn, STR("CharacterMovement"));
+                        ue::FVector* velocity = movement ? movement->GetValuePtrByPropertyNameInChain<ue::FVector>(STR("Velocity")) : nullptr;
+                        uint8_t* mode = movement ? movement->GetValuePtrByPropertyNameInChain<uint8_t>(STR("MovementMode")) : nullptr;
+                        if (log_throttle("thrown", 0.25))
+                            HSVR_LOG("Room: the character moved %.0f cm in one frame (not by walking): its movement says speed (%.0f, %.0f, %.0f) cm/s, mode %d (1 walking, 3 falling)",
+                                     length(jump), velocity ? velocity->X : 0.0, velocity ? velocity->Y : 0.0, velocity ? velocity->Z : 0.0, mode ? (int)*mode : -1);
+                    }
+                }
+                s.actor_world = actor_now;
+                s.have_actor_world = true;
                 if (length(s.actor_delta) > 100.0) s.actor_delta = {}; // a teleport, not a step
             }
             s.head_pull_wanted = body && s.have_body_world && s.have_view && s.view.head_valid;
@@ -2414,11 +2725,11 @@ namespace hsvr
             }
             if (s.kin_active)
             {
-                // The placed body has no springs anywhere: the game's own muscle settings stay as
-                // they are (they do nothing to bodies that are not simulated).
+                // The placed body has no springs anywhere. The one driven thing is a physical hand
+                // (as in Blade & Sorcery): its drive to the controller is the hand's entry here.
                 s.head_pull_wanted = false;
                 s.hold_wanted = false;
-                pull_update(false);
+                pull_update(arms && !s.kin_hands);
             }
             else
             {
@@ -2501,6 +2812,10 @@ namespace hsvr
                 }
                 HSVR_LOG("Body: %s | right forearm's physics body %.0f cm from where it is drawn (about 13 is normal)", s.hold_active ? "held at its place" : "not held",
                          s.forearm_off_cm);
+                HSVR_LOG("Legs: %d steps this second | feet %s | hands %s (wrists free: right %s, left %s)", s.steps_taken,
+                         cfg.own_legs && s.side[0].have_foot_home ? "the mod's own" : "the game's animation", s.kin_active ? (s.kin_hands ? "placed rigidly" : "physical, driven to the controllers") : "the game's",
+                         s.side[1].wrist_freed ? "yes" : "no", s.side[0].wrist_freed ? "yes" : "no");
+                s.steps_taken = 0;
                 HSVR_LOG("Body: mesh %s the character (put back %d times)", s.body && s.pawn && body_attached_to_capsule() ? "rides on" : "is NOT attached to", s.kin_reattached);
                 HSVR_LOG("Body: %s (the game switched simulation back on %d times) | hips moved %.0f cm for the head's height | body mesh %.0f cm from its place over the feet | "
                          "consciousness %.0f, the game says fallen: %s",

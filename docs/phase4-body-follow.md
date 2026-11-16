@@ -47,6 +47,47 @@ head). The first cut of this branch did the same and was never switched on. It n
 like headgear) and never touches a bone. **Never use HideBoneByName on this game's characters.**
 Where the sections below mention `HideBoneByName` or `hide_head_bone`, that is the removed way.
 
+## Sixth and seventh cuts (2026-11-16): the Blade and Sorcery structure
+
+Matthew rejected the held body outright: "get rid of the puppeteering entirely. it will NEVER work. how
+does Blade and sorcery do-it thats how we should do it". **Rule: no springs, pulls, holds or muscle
+targets anywhere in the player's body.** He also refused self-testing in the flat window ("no desktop
+mode it takes 2-3x times longer then me doing it"): he tests, in the headset.
+
+Sixth cut (2ddc977), tested: `kinematic_body` again, done the standard way: bodies stop simulating
+(hands included) **and the mesh is re-attached to the capsule** (`K2_AttachToComponent` snap, then
+`K2_SetRelativeLocationAndRotation` to `BaseTranslationOffset` / `BaseRotationOffset`). That fixed the
+fourth cut's failure: the log showed "mesh rides on the character", the forearm's physics body 11 to
+14 cm from where it is drawn (normal), hands 0.0 to 0.1 cm from the controllers for the whole run. The
+missing re-attach was why the kinematic parts had been left behind. Matthew's verdict on what remains:
+"i walk: willie glides. i swing and hit the sword Pell the i get thrown across the room. i move my hand
+and the weapon bounces around like crazy and doesn't feel like its in my hand but instead just floating
+near it and there no physicality to it at all." The log shows him launched 4.4 m and 6.7 m within one
+second each, with no stick input and no roomscale movement.
+
+Seventh cut (this one): the two things Blade and Sorcery has that the sixth lacked.
+
+- **Physical hands** (`kinematic_hands` 0, `free_wrists` 1). The wrist joint (constraint named after
+  the hand bone) is read and set free in place and turn through the engine's
+  `ConstraintInstanceBlueprintLibrary` (`GetConstraintByName` on the mesh, then `Get/SetLinearLimits`,
+  `Get/SetAngularLimits`; the original values are kept and put back when the body is given back). The
+  hand bodies simulate again and are driven to the controller by the physical animation drive on the
+  hand only (`hand_pull_strength` 12000, damping 150, `hand_pull_max_force` 30000, turning strength
+  times `hand_turn_scale` 5): strong but stoppable, so a blocked sword stops the hand. The arm (still
+  kinematic) is drawn to where the hand body really is; the pose's hand bone carries the controller's
+  place as the drive's target. If the wrist cannot be freed (joint not found, functions missing) the
+  hands fall back to rigid placement and the log says so.
+- **Own legs** (`own_legs` 1, `step_length_cm` 20, `step_height_cm` 9). Feet are planted in the world
+  and step (one at a time unless overstretched) when the body has moved past them or turned more than
+  35 degrees; the step lands under the body plus 0.12 s of travel. Foot rest place and rotation come from
+  the standing pose. Legs are solved with the two-bone IK, knees along the foot's heading.
+- A log line when the character moves more than 20 cm in one frame, with the movement component's
+  velocity and mode, to find what throws him.
+
+Log: `Hands: right wrist joint as the game made it: place 2 2 2 ...`, `Hands: right hand cut loose
+from the forearm`, `Legs: N steps this second | feet the mod's own | hands physical ...`,
+`Room: the character moved N cm in one frame ...`.
+
 ## Fifth cut (2026-11-16): the held body (replaces the kinematic body)
 
 Fourth test (kinematic body, hands simulated): standing still the hands were about 3 cm off; then the
