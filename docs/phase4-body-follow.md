@@ -3,6 +3,45 @@
 Status 2026-11-16: written and compiled, **not yet run in the game**. Branch `claude/body-follow`, on top of
 `claude/controller-input`. Background: `docs/phase3-motion-controls.md`, `docs/phase2-arm-research.md`.
 
+## Second cut (2026-11-16, after the first headset test): the player first
+
+Matthew after the first cut: "its better but doesn't seem like the solution. im still just a puppeteer
+instead of actually being the player character ... im controling a thing that controls willie, this
+isnt how VR games work". The log of that test agreed: everything worked as built (spring anchored 0.0 cm
+from the controller, no faults), yet the hand was 3 to 5 cm off at rest and 10 to 20 cm in swings, and
+the real head 10 to 25 cm from the view. Facts learned from the "Pull:" lines: the game drives 22 bodies,
+all in the world (not relative to the parent), turning strength 894 to 1000 (legs about 1900), damping a
+tenth of that, torque limit five times the strength (MaxAngularForce 4470 to 5000), no positional
+strength at all, and it writes these settings again every frame (so the mod writes after it every frame).
+
+The second cut turns the chain around, as VR physics games do. The sections below describe the first
+cut; these points replace what they say where they differ:
+
+- **Hands**: `hand_pull_strength` 6000, damping 110, `hand_pull_max_force` 12000 (the weight knob: a
+  one-hander keeps up, heavy weapons drag), `hand_turn_scale` 3 now also scales the wrist's torque
+  limit. New `arm_soft_scale` 0.3: while a hand is pulled, that arm's clavicle, upper arm and forearm
+  turn with 0.3 of the game's strength, so the arm follows the hand instead of carrying it.
+- **Head**: the head body is held at the headset's place (`head_pull_strength` 3000, damping 80,
+  `head_pull_max_force` 20000, which is well under the body's weight so it cannot lift the body).
+- **View**: `view_follow_seconds` 0. The view is placed on the character's real eyes when recentering
+  (and at spawn) and from then on is the headset one to one on the character's position; it only gives
+  way beyond `view_leash_cm` 40. It must not drift towards the real head while the head is pulled to
+  the view: a steady sag would make both sink for ever.
+- **Upper body** (`own_upper_body` 1): the game's upper-body animation is not used. The shape of the
+  bones from `spine_01` up is taken once from the standing pose after spawn ("Body: upper body shape
+  taken ..."), kept upright in the world on the game's hips, turned to a chest heading that follows the
+  headset loosely (free within 25 degrees, at most `chest_turn_max_deg` 70 from the legs), and leaned
+  so the head is at the headset. Fingers and the weapon bone keep the game's animation.
+- **Aim** (`aim_sync` now 0): the game's aim is no longer fed from the blade, so the game does not turn
+  or pose the body by itself. To check in play: whether damage, stamina or swing sounds depended on it.
+- The hand error in the "Arms:" line is now measured against the previous frame's target (what the
+  physics has had time to reach); before it included one frame of hand travel.
+- New "Body:" status line: how far the real head is from the headset's place, whether it is held, the
+  leash, the chest turn, and how far the body mesh's own frame is tilted (to learn whether that frame
+  follows the simulated hips).
+
+Head hiding is still off; with the head held at the headset it is recommended, and is Matthew's call.
+
 ## What was wrong, and why
 
 Matthew's three complaints after phase 3: the character moves without him and not with him, the hand

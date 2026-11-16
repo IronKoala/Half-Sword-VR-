@@ -105,7 +105,7 @@ namespace hsvr
         int toggle_arms_key = 0x21;
         // 1 = also feed the game's own aim (where the mouse would point the sword) from the
         // controller, so that the game's swing speed, stamina and body turning follow along.
-        bool aim_sync = true;
+        bool aim_sync = false;
         double aim_scale = 1.0;   // aim degrees per degree of blade direction
         bool aim_invert_y = false;
         // Where the elbow points while the hand is placed: a mix of down, out to the side and back.
@@ -156,14 +156,23 @@ namespace hsvr
         // 1 = the view is the player's own head and the character's head and upper body are sent
         // after it; 0 = the view rides on the character's head bone as before.
         bool body_follow = true;
-        // The view drifts back to the character's real head over this many seconds (0 = never),
-        // and is never further from it than view_leash_cm.
-        double view_follow_seconds = 2.0;
-        double view_leash_cm = 30.0;
-        // How much of the headset's movement the upper body leans after (1 = all), the most it
-        // leans, and whether the head turns with the headset (and how far from the body's own pose).
+        // The view is the headset, placed on the character when recentering. It only gives way
+        // when the character's real head is further from it than view_leash_cm (a knock-down).
+        // view_follow_seconds > 0 also lets it drift back to the real head over that time.
+        double view_follow_seconds = 0.0;
+        double view_leash_cm = 40.0;
+        // 1 = the upper body is built from the headset and hands alone (a fixed standing shape,
+        // turned and leaned to put the head at the headset); the game's own upper-body animation
+        // is not used. 0 = the game's animation, leaned after the headset.
+        bool own_upper_body = true;
+        // How far the chest may turn away from the legs, and the most the upper body leans.
+        double chest_turn_max_deg = 70.0;
         double lean_follow = 1.0;
-        double lean_max_deg = 35.0;
+        double lean_max_deg = 45.0;
+        // The head body is held at the headset's place (0 strength = only its pose is sent).
+        double head_pull_strength = 3000.0;
+        double head_pull_damping = 80.0;
+        double head_pull_max_force = 20000.0;
         bool head_turn = true;
         double head_turn_max_deg = 75.0;
         // 1 = the character's own head is not drawn in first person. Off by default: Matthew had an
@@ -175,11 +184,14 @@ namespace hsvr
         // the brake, max_force 0 = no limit. The sword's weight still slows the hand, because the
         // pull works on the hand and the sword hangs from it.
         bool hand_pull = true;
-        double hand_pull_strength = 1500.0;
-        double hand_pull_damping = 60.0;
-        double hand_pull_max_force = 0.0;
+        double hand_pull_strength = 6000.0;
+        double hand_pull_damping = 110.0;
+        double hand_pull_max_force = 12000.0;
         // The hand's own turning strength (wrist) times this, so the blade angle holds better.
-        double hand_turn_scale = 2.0;
+        double hand_turn_scale = 3.0;
+        // While a hand is pulled, the turning strength of that arm's other bones times this: the
+        // arm follows the hand instead of carrying it (1 = the game's own arm muscles).
+        double arm_soft_scale = 0.3;
         // Controller sticks and buttons play the game through a virtual gamepad (see
         // controller_input.hpp). pad_map lists "controller input=gamepad input" pairs.
         bool controller_pad = true;

@@ -33,6 +33,7 @@ namespace hsvr
         Vec3 actor_position;      // the character's position when the view was taken, world, cm
         bool head_valid = false;  // the three below are set (settings key body_follow)
         Vec3 lean;                // where the head bone should be relative to its neutral place, world axes, cm
+        Vec3 head_bone;           // where the character's head bone belongs for this view, world, cm
         Quat rotation;            // the headset's rotation in the world (X forward, Z up)
         double body_gap_cm = 0.0; // distance between the view and the character's real eyes
     };

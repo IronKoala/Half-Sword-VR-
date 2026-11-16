@@ -41,6 +41,7 @@ namespace hsvr
             Vec3 actor_position; // the character's position when this view was taken
             bool head_valid = false;
             Vec3 head_lean;      // how far the head bone should be from its neutral place, world axes, cm
+            Vec3 head_bone;      // where the head bone belongs for this view, world
             Quat head_rotation;  // the headset's rotation in the world (X forward, Z up)
             double body_gap_cm = 0.0;
         };
@@ -112,7 +113,8 @@ namespace hsvr
                     Vec3 moved = base.rotate(recenter_inverse.rotate(mid_cm - g_view.recenter.position_cm) * cfg.world_scale);
                     Quat head_rotation = (base * recenter_inverse * xr_to_ue_rotation(mid.qx, mid.qy, mid.qz, mid.qw)).normalized();
                     Vec3 eyes_now = head_rotation.rotate(eye_offset); // head bone to between the eyes
-                    Vec3 raw = player.head_position + eyes_now - player.actor_position - moved;
+                    // The offset is kept in the character's heading frame, so it turns with the character.
+                    Vec3 raw = base.inverse().rotate(player.head_position + eyes_now - player.actor_position - moved);
                     auto size = [](const Vec3& v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); };
                     if (!g_have_smoothed || !g_was_body_follow || recentered || size(raw - g_smoothed_offset) > 150.0)
                     {
@@ -132,7 +134,8 @@ namespace hsvr
                         if (gap > leash) g_smoothed_offset = g_smoothed_offset + delta * ((gap - leash) / gap);
                     }
                     g_view.body_gap_cm = size(raw - g_smoothed_offset);
-                    g_view.anchor = player.actor_position + g_smoothed_offset;
+                    g_view.anchor = player.actor_position + base.rotate(g_smoothed_offset);
+                    g_view.head_bone = g_view.anchor + moved - eyes_now;
                     g_view.head_valid = true;
                     g_view.head_rotation = head_rotation;
                     // Neutral: the headset at its recentered place, looking straight ahead.
@@ -423,6 +426,7 @@ namespace hsvr
         out.actor_position = g_view.actor_position;
         out.head_valid = g_view.head_valid;
         out.lean = g_view.head_lean;
+        out.head_bone = g_view.head_bone;
         out.rotation = g_view.head_rotation;
         out.body_gap_cm = g_view.body_gap_cm;
         return true;

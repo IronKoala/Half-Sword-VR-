@@ -311,6 +311,12 @@ namespace hsvr
         num("hand_pull_damping", c.hand_pull_damping);
         num("hand_pull_max_force", c.hand_pull_max_force);
         num("hand_turn_scale", c.hand_turn_scale);
+        num("arm_soft_scale", c.arm_soft_scale);
+        flag("own_upper_body", c.own_upper_body);
+        num("chest_turn_max_deg", c.chest_turn_max_deg);
+        num("head_pull_strength", c.head_pull_strength);
+        num("head_pull_damping", c.head_pull_damping);
+        num("head_pull_max_force", c.head_pull_max_force);
         flag("controller_pad", c.controller_pad);
         text("pad_map", c.pad_map);
         num("pad_deadzone", c.pad_deadzone);
