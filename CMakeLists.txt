@@ -19,5 +19,7 @@ FetchContent_Declare(openxr
   GIT_TAG release-1.1.38
   GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(openxr)
+# The SDK forces the DLL C runtime (/MD) on its static loader; match ours (/MT).
+set_target_properties(openxr_loader PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_subdirectory(tools/xrtest)
