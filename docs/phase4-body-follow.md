@@ -47,6 +47,37 @@ head). The first cut of this branch did the same and was never switched on. It n
 like headgear) and never touches a bone. **Never use HideBoneByName on this game's characters.**
 Where the sections below mention `HideBoneByName` or `hide_head_bone`, that is the removed way.
 
+## Fifth cut (2026-11-16): the held body (replaces the kinematic body)
+
+Fourth test (kinematic body, hands simulated): standing still the hands were about 3 cm off; then the
+arms broke. Matthew: "pressing the grip broke the arms", "it locked the arms into place even when i
+walked away, when i did walk away it caused the arms to flail about like crazy", and, when told the
+grip looked like a coincidence, "when i was standing still and i pressed grip it did break the arms, i
+could see it". Take his word over the log: the first grip press (44.86 s) came 0.4 s after the hand
+springs switched on (44.45 s; the muscle settings are only found about 3 s after spawn), nothing was
+sent to the game on grip (controller thread checked), and from then on hand errors rose to 20 to 135 cm
+with the hands turned backwards, growing with the distance walked. The body mesh component was frozen
+where it stood when the bodies went kinematic ("body mesh N cm from its place over the feet" grew to
+10 m). Reading: the kinematic parts did not follow the character in the physics, so the simulated hands
+hung from forearm bodies left behind while their springs pulled them to the controllers. Why the engine
+left them behind is not known (its own source says kinematic bodies follow the pose each frame).
+**Do not use kinematic bodies on this character again without proving in the log that they move.**
+
+`body_hold` (1, with `kinematic_body` now 0): nothing is switched to kinematic. Every body the game
+drives (22) keeps simulating and gets, through the same `ApplyPhysicalAnimationSettings` path that held
+the head within millimetres in the second test: world space, position strength `hold_strength` 20000,
+damping `hold_damping` 200, `hold_max_force` 0 (none), turning strength times `hold_turn_scale` 5 with
+no torque limit. The feet get the turning part only (a stiff spring pressing a foot into the floor
+would fight the floor). The pose is built exactly as for the kinematic body (legs from the game's
+animation over the capsule, hips lowered with knee IK, own upper body, arms from this frame's shoulder,
+hand at the controller). Given back to the game's values when knocked out (consciousness under 15), with
+the VR controls off, or without a first-person view.
+
+New log lines: `Grip: right grip pressed | hands off their targets ... | body held | hand pull ...` on
+every press and release; `Body: held at its place | right forearm's physics body N cm from where it is
+drawn (about 13 is normal)` once a second (centre of mass against the drawn bone: proves the physics is
+where the picture is); the controller thread's `Pad: the real gamepad 0 now reads ...`.
+
 ## Fourth cut (2026-11-16): the placed body
 
 Third test (roomscale build): the capsule move and the crouch guess worked (`Crouch Key Holding` makes
