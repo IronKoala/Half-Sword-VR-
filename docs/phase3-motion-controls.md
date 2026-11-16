@@ -101,3 +101,42 @@ Developer switches: `dev_fake_hands` (pretend controllers circling in front of t
   walking still use mouse and keyboard.
 - Two-handed grip: the left hand follows its own controller even when the game puts it on the hilt.
 - Physics assist for tip accuracy (option C in the research notes) only if the muscles prove too weak.
+
+## Sticks and buttons (virtual gamepad), 2026-11-16
+
+Half Sword already plays with a gamepad, so the mod hands the game one made from the controllers
+(`controller_input.cpp`). The game exe delay-loads `XINPUT1_4.dll` and imports `XInputGetState` by
+ordinal 2; the mod points that import slot at its own function, which answers pad 0 with the
+controllers mapped by `pad_map` (a real pad on pad 0 is merged in). Nothing is sent to Windows.
+If the engine stops asking about pad 0 while the controllers are on, the mod pulses
+`XInput.ForceControllerStateUpdate` for one frame.
+
+The game's own gamepad bindings (read from `Default__InputSettings`, logged as "Bindings:" lines):
+left stick move; right stick X turn, Y look up/down; LT/RT guard left/right (also "Left/Right Arm
+Axis"); LB grab left (also Slomo), RB grab right; A jump/talk; X swap hands; B camera lock;
+Y undress; left stick press crouch; right stick press thrust; Start pause; D-pad up inventory,
+down change camera. Run has no gamepad binding (Left Shift only).
+
+Default `pad_map` (controller -> gamepad):
+
+| Controller | Gamepad | Game action |
+| --- | --- | --- |
+| Left stick | Left stick | Walk |
+| Right stick left/right | Right stick X | Turn (smooth) |
+| Left / right trigger | LT / RT | Guard left / right |
+| Left / right grip | LB / RB | Grab left / right (LB also slow motion) |
+| A | A | Jump, talk |
+| B, right stick press | Right stick press | Thrust |
+| X | X | Swap hands |
+| Y | D-pad up | Inventory |
+| Left stick press | Left stick press | Crouch |
+| Left menu button | Start | Pause |
+
+Sources: `l_stick`, `r_stick`, `l_stick_x/y`, `r_stick_x/y`, `l_trigger`, `r_trigger`, `l_grip`,
+`r_grip`, `l_lower` (X), `l_upper` (Y), `r_lower` (A), `r_upper` (B), `l_click`, `r_click`, `l_menu`.
+Targets: `LSTICK`, `RSTICK`, `LSTICK_X/Y`, `RSTICK_X/Y`, `LT`, `RT`, `A`, `B`, `X`, `Y`, `LB`, `RB`,
+`LS`, `RS`, `START`, `BACK`, `DUP`, `DDOWN`, `DLEFT`, `DRIGHT`. Other keys: `controller_pad` (on/off),
+`pad_deadzone`, `pad_game_deadzone`, `log_bindings`.
+
+Not tried in the headset yet. Known overlap: the arm-length calibration (both grips held 2 s) also
+grabs with both hands.

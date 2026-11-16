@@ -152,6 +152,16 @@ namespace hsvr
         double hand_pitch = 0.0;
         double hand_yaw = 0.0;
         double hand_roll = 0.0;
+        // Controller sticks and buttons play the game through a virtual gamepad (see
+        // controller_input.hpp). pad_map lists "controller input=gamepad input" pairs.
+        bool controller_pad = true;
+        std::string pad_map = "l_stick=LSTICK r_stick_x=RSTICK_X l_trigger=LT r_trigger=RT l_grip=LB r_grip=RB r_lower=A r_upper=RS r_click=RS l_lower=X l_upper=DUP l_click=LS l_menu=START";
+        // Stick movement below this is ignored; above it the stick is scaled so that the game's own
+        // gamepad dead zone (pad_game_deadzone) does not swallow small pushes.
+        double pad_deadzone = 0.12;
+        double pad_game_deadzone = 0.25;
+        // Write the game's input bindings to the log once (to know what each gamepad input does).
+        bool log_bindings = true;
         // Write "Arms:" lines to the log (once a second): where each hand should be and where it is.
         bool log_arms = true;
         // Developer switches.

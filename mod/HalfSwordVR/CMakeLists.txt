@@ -3,6 +3,7 @@ add_library(${TARGET} SHARED
     src/dllmain.cpp
     src/arm_control.cpp
     src/config.cpp
+    src/controller_input.cpp
     src/engine_slot.cpp src/engine_texture.cpp
     src/input_watch.cpp
     src/log.cpp

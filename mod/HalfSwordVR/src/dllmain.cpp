@@ -27,6 +27,7 @@
 
 #include "arm_control.hpp"
 #include "config.hpp"
+#include "controller_input.hpp"
 #include "engine_slot.hpp"
 #include "input_watch.hpp"
 #include "log.hpp"
@@ -845,6 +846,7 @@ namespace
         }
 
         watch_input();
+        hsvr::controller_input_log_bindings();
         {
             UObject* pawn = nullptr;
             find_pawn_mesh(&pawn);
@@ -868,6 +870,7 @@ namespace
                 menu = shared.game_paused.load();
             }
             hsvr::arm_game_tick(pawn, menu);
+            if (const char* command = hsvr::controller_input_tick(menu)) run_console_command(std::string(command));
         }
 
         hsvr::Config cfg = hsvr::config();
@@ -947,6 +950,7 @@ class HalfSwordVR : public CppUserModBase
         {
             hsvr::stereo_set_anchor_provider(&provide_anchor);
             hsvr::vr_install_present_hook();
+            hsvr::controller_input_install();
         }
         Hook::RegisterEngineTickPreCallback(
                 [](auto&, UEngine* engine, float delta_seconds, bool) {

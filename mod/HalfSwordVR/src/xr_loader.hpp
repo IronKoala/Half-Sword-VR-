@@ -51,6 +51,7 @@ namespace hsvr
     X(GetActionStatePose)                 \
     X(GetActionStateBoolean)              \
     X(GetActionStateFloat)                \
+    X(GetActionStateVector2f)             \
     X(GetCurrentInteractionProfile)
 
     struct XrApi

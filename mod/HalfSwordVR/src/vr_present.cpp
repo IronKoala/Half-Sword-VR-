@@ -330,9 +330,15 @@ namespace hsvr
             XrAction grip_pose = XR_NULL_HANDLE;
             XrAction trigger = XR_NULL_HANDLE;
             XrAction squeeze = XR_NULL_HANDLE;
+            XrAction stick = XR_NULL_HANDLE;
+            XrAction stick_click = XR_NULL_HANDLE;
+            XrAction button_lower = XR_NULL_HANDLE;
+            XrAction button_upper = XR_NULL_HANDLE;
+            XrAction menu = XR_NULL_HANDLE;
             XrPath hand_path[2]{XR_NULL_PATH, XR_NULL_PATH};
             XrSpace grip_space[2]{XR_NULL_HANDLE, XR_NULL_HANDLE};
             XrHandRaw last[2];
+            double last_read_time = -1.0; // game thread only
         };
         HandActions g_hands;
 
@@ -357,25 +363,25 @@ namespace hsvr
             return action;
         }
 
-        void suggest_profile(const char* profile, const char* trigger_input, const char* squeeze_input)
+        // One binding: an action and the input it reads, without the "/user/hand/<side>" part.
+        struct Bind
+        {
+            XrAction action;
+            const char* input;
+        };
+
+        bool suggest_bindings(const char* profile, const std::vector<Bind>& left, const std::vector<Bind>& right)
         {
             std::vector<XrActionSuggestedBinding> bindings;
             const char* sides[2] = {"left", "right"};
-            std::string paths[6];
-            int n = 0;
+            const std::vector<Bind>* lists[2] = {&left, &right};
             for (int h = 0; h < 2; ++h)
             {
-                paths[n] = std::string("/user/hand/") + sides[h] + "/input/grip/pose";
-                bindings.push_back({g_hands.grip_pose, to_path(paths[n++].c_str())});
-                if (trigger_input)
+                for (const Bind& bind : *lists[h])
                 {
-                    paths[n] = std::string("/user/hand/") + sides[h] + trigger_input;
-                    bindings.push_back({g_hands.trigger, to_path(paths[n++].c_str())});
-                }
-                if (squeeze_input)
-                {
-                    paths[n] = std::string("/user/hand/") + sides[h] + squeeze_input;
-                    bindings.push_back({g_hands.squeeze, to_path(paths[n++].c_str())});
+                    if (bind.action == XR_NULL_HANDLE) continue;
+                    std::string path = std::string("/user/hand/") + sides[h] + bind.input;
+                    bindings.push_back({bind.action, to_path(path.c_str())});
                 }
             }
             XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
@@ -384,6 +390,23 @@ namespace hsvr
             suggested.suggestedBindings = bindings.data();
             XrResult r = xr.SuggestInteractionProfileBindings(g_instance, &suggested);
             if (XR_FAILED(r)) HSVR_LOG("OpenXR: controller bindings for %s not accepted: %s", profile, xr_result_name(r));
+            return XR_SUCCEEDED(r);
+        }
+
+        // Suggests the full set (poses, trigger, grip, stick and buttons) for a controller type.
+        // If the runtime turns that down, the earlier small set (poses, trigger, grip) is tried, so
+        // that the motion arms keep working even if the buttons cannot be had.
+        void suggest_profile(const char* profile, const char* trigger_input, const char* squeeze_input, const std::vector<Bind>& extra_left,
+                             const std::vector<Bind>& extra_right)
+        {
+            std::vector<Bind> base{{g_hands.grip_pose, "/input/grip/pose"}};
+            if (trigger_input) base.push_back({g_hands.trigger, trigger_input});
+            if (squeeze_input) base.push_back({g_hands.squeeze, squeeze_input});
+            std::vector<Bind> left = base, right = base;
+            left.insert(left.end(), extra_left.begin(), extra_left.end());
+            right.insert(right.end(), extra_right.begin(), extra_right.end());
+            if (suggest_bindings(profile, left, right)) return;
+            if (suggest_bindings(profile, base, base)) HSVR_LOG("OpenXR: %s: only hand poses, trigger and grip bound (no stick or buttons)", profile);
         }
 
         // Called once, right after the session is made (bindings must be in before attaching).
@@ -408,11 +431,29 @@ namespace hsvr
             g_hands.grip_pose = make_action("hand_pose", "Hand pose", XR_ACTION_TYPE_POSE_INPUT);
             g_hands.trigger = make_action("trigger", "Trigger", XR_ACTION_TYPE_FLOAT_INPUT);
             g_hands.squeeze = make_action("squeeze", "Grip", XR_ACTION_TYPE_FLOAT_INPUT);
+            g_hands.stick = make_action("stick", "Thumbstick", XR_ACTION_TYPE_VECTOR2F_INPUT);
+            g_hands.stick_click = make_action("stick_click", "Thumbstick press", XR_ACTION_TYPE_BOOLEAN_INPUT);
+            g_hands.button_lower = make_action("button_lower", "Lower face button (A, X)", XR_ACTION_TYPE_BOOLEAN_INPUT);
+            g_hands.button_upper = make_action("button_upper", "Upper face button (B, Y)", XR_ACTION_TYPE_BOOLEAN_INPUT);
+            g_hands.menu = make_action("menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT);
             if (g_hands.grip_pose == XR_NULL_HANDLE) return;
-            suggest_profile("/interaction_profiles/valve/index_controller", "/input/trigger/value", "/input/squeeze/value");
-            suggest_profile("/interaction_profiles/oculus/touch_controller", "/input/trigger/value", "/input/squeeze/value");
-            suggest_profile("/interaction_profiles/htc/vive_controller", "/input/trigger/value", "/input/squeeze/click");
-            suggest_profile("/interaction_profiles/khr/simple_controller", "/input/select/click", nullptr);
+            const XrAction stick = g_hands.stick, click = g_hands.stick_click, lower = g_hands.button_lower, upper = g_hands.button_upper,
+                           menu = g_hands.menu;
+            suggest_profile("/interaction_profiles/valve/index_controller", "/input/trigger/value", "/input/squeeze/value",
+                            {{stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"}, {upper, "/input/b/click"}},
+                            {{stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"}, {upper, "/input/b/click"}});
+            suggest_profile("/interaction_profiles/oculus/touch_controller", "/input/trigger/value", "/input/squeeze/value",
+                            {{stick, "/input/thumbstick"},
+                             {click, "/input/thumbstick/click"},
+                             {lower, "/input/x/click"},
+                             {upper, "/input/y/click"},
+                             {menu, "/input/menu/click"}},
+                            {{stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"}, {upper, "/input/b/click"}});
+            suggest_profile("/interaction_profiles/htc/vive_controller", "/input/trigger/value", "/input/squeeze/click",
+                            {{stick, "/input/trackpad"}, {click, "/input/trackpad/click"}, {upper, "/input/menu/click"}},
+                            {{stick, "/input/trackpad"}, {click, "/input/trackpad/click"}, {upper, "/input/menu/click"}});
+            suggest_profile("/interaction_profiles/khr/simple_controller", "/input/select/click", nullptr, {{menu, "/input/menu/click"}},
+                            {{menu, "/input/menu/click"}});
             XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
             attach.countActionSets = 1;
             attach.actionSets = &g_hands.set;
@@ -436,7 +477,31 @@ namespace hsvr
                 }
             }
             g_hands.ready.store(true);
-            HSVR_LOG("OpenXR: controller actions ready (hand poses, trigger, grip)");
+            HSVR_LOG("OpenXR: controller actions ready (hand poses, trigger, grip, thumbstick, buttons)");
+        }
+
+        bool read_bool_action(XrSession session, XrAction action, int hand)
+        {
+            if (action == XR_NULL_HANDLE || !xr.GetActionStateBoolean) return false;
+            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+            info.action = action;
+            info.subactionPath = g_hands.hand_path[hand];
+            XrActionStateBoolean state{XR_TYPE_ACTION_STATE_BOOLEAN};
+            if (XR_FAILED(xr.GetActionStateBoolean(session, &info, &state)) || !state.isActive) return false;
+            return state.currentState != XR_FALSE;
+        }
+
+        void read_vector2_action(XrSession session, XrAction action, int hand, float& x, float& y)
+        {
+            x = y = 0.0f;
+            if (action == XR_NULL_HANDLE || !xr.GetActionStateVector2f) return;
+            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+            info.action = action;
+            info.subactionPath = g_hands.hand_path[hand];
+            XrActionStateVector2f state{XR_TYPE_ACTION_STATE_VECTOR2F};
+            if (XR_FAILED(xr.GetActionStateVector2f(session, &info, &state)) || !state.isActive) return;
+            x = state.currentState.x;
+            y = state.currentState.y;
         }
 
         float read_float_action(XrSession session, XrAction action, int hand)
@@ -2596,10 +2661,26 @@ float4 PSMain(VSOut i) : SV_Target
             }
             hand.trigger = read_float_action(session, g_hands.trigger, h);
             hand.squeeze = read_float_action(session, g_hands.squeeze, h);
+            read_vector2_action(session, g_hands.stick, h, hand.stick_x, hand.stick_y);
+            hand.stick_click = read_bool_action(session, g_hands.stick_click, h);
+            hand.button_lower = read_bool_action(session, g_hands.button_lower, h);
+            hand.button_upper = read_bool_action(session, g_hands.button_upper, h);
+            hand.menu = read_bool_action(session, g_hands.menu, h);
             out[h] = hand;
             any = any || hand.valid;
         }
+        g_hands.last_read_time = now_seconds();
         return any;
+    }
+
+    bool vr_controllers_this_tick(XrHandRaw out[2])
+    {
+        if (config().dev_fake_hands || g_fake_headset || !g_hands.ready.load() || !shared().xr_running.load()) return false;
+        // Read already this tick (by the arms)? Then use that, so both see the same buttons.
+        if (now_seconds() - g_hands.last_read_time > 0.004) vr_locate_hands(g_hands.last);
+        out[0] = g_hands.last[0];
+        out[1] = g_hands.last[1];
+        return true;
     }
 
     Recenter vr_recenter()

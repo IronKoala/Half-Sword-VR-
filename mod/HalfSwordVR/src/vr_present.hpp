@@ -34,6 +34,10 @@ namespace hsvr
     // controller is known (no session yet, or none tracked).
     bool vr_locate_hands(XrHandRaw out[2]);
 
+    // The controllers' sticks and buttons for this game tick (reuses vr_locate_hands' reading
+    // when that already ran this tick). Returns false when there are no real controllers to read.
+    bool vr_controllers_this_tick(XrHandRaw out[2]);
+
     // ---- Render thread ----------------------------------------------------------------------
     // The scene for one eye has been drawn into this rectangle of the engine's render target.
     void vr_render_thread_view_rect(int view_index, int min_x, int min_y, int max_x, int max_y);

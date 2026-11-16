@@ -297,6 +297,11 @@ namespace hsvr
         num("hand_yaw", c.hand_yaw);
         num("hand_roll", c.hand_roll);
         flag("log_arms", c.log_arms);
+        flag("controller_pad", c.controller_pad);
+        text("pad_map", c.pad_map);
+        num("pad_deadzone", c.pad_deadzone);
+        num("pad_game_deadzone", c.pad_game_deadzone);
+        flag("log_bindings", c.log_bindings);
         flag("log_poses", c.log_poses);
         flag("log_input", c.log_input);
         num("capture_seconds", c.capture_seconds);

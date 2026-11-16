@@ -40,7 +40,13 @@ namespace hsvr
         bool position_tracked = false;
         float px = 0, py = 0, pz = 0;
         float qx = 0, qy = 0, qz = 0, qw = 1;
-        float trigger = 0, squeeze = 0; // 0..1, for the log for now
+        float trigger = 0, squeeze = 0; // 0..1
+        // Thumbstick (or trackpad), -1..1, +x right, +y forward.
+        float stick_x = 0, stick_y = 0;
+        bool stick_click = false;
+        bool button_lower = false; // A on the right hand, X on the left (Touch); A on Index
+        bool button_upper = false; // B / Y; the menu button on a Vive wand
+        bool menu = false;         // the left Touch controller's menu button
     };
 
     struct VrShared
