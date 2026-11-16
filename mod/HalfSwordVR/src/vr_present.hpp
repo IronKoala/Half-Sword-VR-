@@ -38,6 +38,11 @@ namespace hsvr
     // when that already ran this tick). Returns false when there are no real controllers to read.
     bool vr_controllers_this_tick(XrHandRaw out[2]);
 
+    // The menu panel as last shown, and the controller pointer's spot on it (u, v in 0..1 from the
+    // top left; negative = no pointer drawn).
+    PanelGeometry vr_panel_geometry();
+    void vr_set_panel_pointer(float u, float v);
+
     // ---- Render thread ----------------------------------------------------------------------
     // The scene for one eye has been drawn into this rectangle of the engine's render target.
     void vr_render_thread_view_rect(int view_index, int min_x, int min_y, int max_x, int max_y);

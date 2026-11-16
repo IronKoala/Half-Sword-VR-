@@ -225,6 +225,9 @@ namespace hsvr
         Recenter g_recenter;
         float g_recenter_xr_pos[3]{0, 0, 0};
         float g_recenter_xr_yaw = 0.0f;
+        std::mutex g_panel_mutex;
+        PanelGeometry g_panel;
+        std::atomic<float> g_pointer_u{-1.0f}, g_pointer_v{-1.0f};
 
         const char* xr_result_name(XrResult r)
         {
@@ -335,6 +338,8 @@ namespace hsvr
             XrAction button_lower = XR_NULL_HANDLE;
             XrAction button_upper = XR_NULL_HANDLE;
             XrAction menu = XR_NULL_HANDLE;
+            XrAction aim_pose = XR_NULL_HANDLE;
+            XrSpace aim_space[2]{XR_NULL_HANDLE, XR_NULL_HANDLE};
             XrPath hand_path[2]{XR_NULL_PATH, XR_NULL_PATH};
             XrSpace grip_space[2]{XR_NULL_HANDLE, XR_NULL_HANDLE};
             XrHandRaw last[2];
@@ -436,24 +441,26 @@ namespace hsvr
             g_hands.button_lower = make_action("button_lower", "Lower face button (A, X)", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_hands.button_upper = make_action("button_upper", "Upper face button (B, Y)", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_hands.menu = make_action("menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT);
+            g_hands.aim_pose = make_action("aim_pose", "Pointer", XR_ACTION_TYPE_POSE_INPUT);
             if (g_hands.grip_pose == XR_NULL_HANDLE) return;
             const XrAction stick = g_hands.stick, click = g_hands.stick_click, lower = g_hands.button_lower, upper = g_hands.button_upper,
-                           menu = g_hands.menu;
+                           menu = g_hands.menu, aim = g_hands.aim_pose;
             suggest_profile("/interaction_profiles/valve/index_controller", "/input/trigger/value", "/input/squeeze/value",
-                            {{stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"}, {upper, "/input/b/click"}},
-                            {{stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"}, {upper, "/input/b/click"}});
+                            {{aim, "/input/aim/pose"}, {stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"}, {upper, "/input/b/click"}},
+                            {{aim, "/input/aim/pose"}, {stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"}, {upper, "/input/b/click"}});
             suggest_profile("/interaction_profiles/oculus/touch_controller", "/input/trigger/value", "/input/squeeze/value",
-                            {{stick, "/input/thumbstick"},
+                            {{aim, "/input/aim/pose"},
+                             {stick, "/input/thumbstick"},
                              {click, "/input/thumbstick/click"},
                              {lower, "/input/x/click"},
                              {upper, "/input/y/click"},
                              {menu, "/input/menu/click"}},
-                            {{stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"}, {upper, "/input/b/click"}});
+                            {{aim, "/input/aim/pose"}, {stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"}, {upper, "/input/b/click"}});
             suggest_profile("/interaction_profiles/htc/vive_controller", "/input/trigger/value", "/input/squeeze/click",
-                            {{stick, "/input/trackpad"}, {click, "/input/trackpad/click"}, {upper, "/input/menu/click"}},
-                            {{stick, "/input/trackpad"}, {click, "/input/trackpad/click"}, {upper, "/input/menu/click"}});
-            suggest_profile("/interaction_profiles/khr/simple_controller", "/input/select/click", nullptr, {{menu, "/input/menu/click"}},
-                            {{menu, "/input/menu/click"}});
+                            {{aim, "/input/aim/pose"}, {stick, "/input/trackpad"}, {click, "/input/trackpad/click"}, {upper, "/input/menu/click"}},
+                            {{aim, "/input/aim/pose"}, {stick, "/input/trackpad"}, {click, "/input/trackpad/click"}, {upper, "/input/menu/click"}});
+            suggest_profile("/interaction_profiles/khr/simple_controller", "/input/select/click", nullptr, {{aim, "/input/aim/pose"}, {menu, "/input/menu/click"}},
+                            {{aim, "/input/aim/pose"}, {menu, "/input/menu/click"}});
             XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
             attach.countActionSets = 1;
             attach.actionSets = &g_hands.set;
@@ -474,6 +481,11 @@ namespace hsvr
                 {
                     HSVR_LOG("OpenXR: could not make the %s hand space: %s", h ? "right" : "left", xr_result_name(r));
                     return;
+                }
+                if (g_hands.aim_pose != XR_NULL_HANDLE)
+                {
+                    space_info.action = g_hands.aim_pose;
+                    if (XR_FAILED(xr.CreateActionSpace(session, &space_info, &g_hands.aim_space[h]))) g_hands.aim_space[h] = XR_NULL_HANDLE;
                 }
             }
             g_hands.ready.store(true);
@@ -2065,6 +2077,16 @@ float4 PSMain(VSOut i) : SV_Target
                     c.params[1] = cfg.ui_use_alpha ? 2.0f : 1.0f;
                     c.params[2] = (float)cfg.ui_opacity_gain;
                     c.cursor[0] = -1.0f;
+                    {
+                        float pu = g_pointer_u.load(), pv = g_pointer_v.load();
+                        if (pu >= 0.0f && pv >= 0.0f)
+                        {
+                            c.cursor[0] = pu;
+                            c.cursor[1] = pv;
+                            c.cursor[2] = (float)g.ui_copy_width / (float)std::max<UINT>(1, g.ui_copy_height);
+                            c.cursor[3] = 0.008f;
+                        }
+                    }
                     // A menu (the game is paused or wants a mouse pointer): put a dark sheet behind
                     // the panel so every button can be read whatever is behind it.
                     if (pointer_showing || game_pointer || shared().game_paused.load()) c.params[3] = (float)cfg.ui_menu_backdrop;
@@ -2089,6 +2111,17 @@ float4 PSMain(VSOut i) : SV_Target
                         float aspect = (float)g.ui_copy_height / (float)std::max<UINT>(1, g.ui_copy_width);
                         quad.size = {(float)cfg.ui_width_m, (float)cfg.ui_width_m * aspect};
                         layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+                        {
+                            std::lock_guard<std::mutex> lock(g_panel_mutex);
+                            g_panel.shown = true;
+                            g_panel.shown_at = now_seconds();
+                            g_panel.cx = quad.pose.position.x;
+                            g_panel.cy = quad.pose.position.y;
+                            g_panel.cz = quad.pose.position.z;
+                            g_panel.yaw = yaw;
+                            g_panel.width = quad.size.width;
+                            g_panel.height = quad.size.height;
+                        }
                     }
                 }
 
@@ -2666,11 +2699,40 @@ float4 PSMain(VSOut i) : SV_Target
             hand.button_lower = read_bool_action(session, g_hands.button_lower, h);
             hand.button_upper = read_bool_action(session, g_hands.button_upper, h);
             hand.menu = read_bool_action(session, g_hands.menu, h);
+            hand.aim_valid = false;
+            if (g_hands.aim_space[h] != XR_NULL_HANDLE)
+            {
+                XrSpaceLocation aim{XR_TYPE_SPACE_LOCATION};
+                if (XR_SUCCEEDED(xr.LocateSpace(g_hands.aim_space[h], local, time, &aim)) && (aim.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
+                    (aim.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+                {
+                    hand.aim_valid = true;
+                    hand.ax = aim.pose.position.x;
+                    hand.ay = aim.pose.position.y;
+                    hand.az = aim.pose.position.z;
+                    hand.aqx = aim.pose.orientation.x;
+                    hand.aqy = aim.pose.orientation.y;
+                    hand.aqz = aim.pose.orientation.z;
+                    hand.aqw = aim.pose.orientation.w;
+                }
+            }
             out[h] = hand;
             any = any || hand.valid;
         }
         g_hands.last_read_time = now_seconds();
         return any;
+    }
+
+    PanelGeometry vr_panel_geometry()
+    {
+        std::lock_guard<std::mutex> lock(g_panel_mutex);
+        return g_panel;
+    }
+
+    void vr_set_panel_pointer(float u, float v)
+    {
+        g_pointer_u.store(u);
+        g_pointer_v.store(v);
     }
 
     bool vr_controllers_this_tick(XrHandRaw out[2])

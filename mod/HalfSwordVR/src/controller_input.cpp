@@ -18,6 +18,7 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
+#include "arm_control.hpp"
 #include "config.hpp"
 #include "log.hpp"
 #include "vr_present.hpp"
@@ -397,6 +398,186 @@ namespace hsvr
             }
         }
 
+        // ---- the mod's own keys on the controllers ----------------------------------------------
+        // Y: press = recenter (Home); hold 1 s = show or hide the menu panel (End).
+        // X: hold 1 s = motion arms on or off (Page Up).
+        // A press acts on release, so that a hold does not also do the short action.
+        struct HoldButton
+        {
+            bool down = false;
+            bool long_fired = false;
+            double since = 0.0;
+            // Returns 1 for a short press (on release), 2 once when held for `hold_s`, else 0.
+            int update(bool now_down, double now, double hold_s)
+            {
+                int result = 0;
+                if (now_down && !down)
+                {
+                    since = now;
+                    long_fired = false;
+                }
+                if (now_down && !long_fired && now - since >= hold_s)
+                {
+                    long_fired = true;
+                    result = 2;
+                }
+                if (!now_down && down && !long_fired) result = 1;
+                down = now_down;
+                return result;
+            }
+        };
+        HoldButton g_y_button, g_x_button;
+
+        void mod_keys_on_controllers(const XrHandRaw hands[2], const Config& cfg)
+        {
+            if (!cfg.controller_mod_keys) return;
+            double now = now_seconds();
+            auto& sh = shared();
+            int y = g_y_button.update(hands[0].button_upper, now, 1.0);
+            int x = g_x_button.update(hands[0].button_lower, now, 1.0);
+            if (y == 1)
+            {
+                sh.recenter_requested.store(true);
+                HSVR_LOG("Controller: recenter (Y)");
+            }
+            else if (y == 2)
+            {
+                bool toggled = !sh.ui_toggled.load();
+                sh.ui_toggled.store(toggled);
+                HSVR_LOG("Controller: menu panel %s (Y held)", toggled == cfg.ui_panel_auto ? "always shown" : "hidden during play");
+            }
+            if (x == 2) arm_toggle();
+        }
+
+        // ---- pointing at the menu panel --------------------------------------------------------
+        // While a menu is up, the right controller (or the left, if the right is not tracked)
+        // points at the panel; the spot is drawn on the panel, the game window's mouse pointer is
+        // moved to the same place, and the trigger clicks there. Only the game's own window gets
+        // the click, and only while it is the window in front.
+        struct V3
+        {
+            float x, y, z;
+        };
+        V3 rotate(float qx, float qy, float qz, float qw, V3 v)
+        {
+            // v + 2w(q x v) + 2 q x (q x v)
+            V3 t{2 * (qy * v.z - qz * v.y), 2 * (qz * v.x - qx * v.z), 2 * (qx * v.y - qy * v.x)};
+            return {v.x + qw * t.x + (qy * t.z - qz * t.y), v.y + qw * t.y + (qz * t.x - qx * t.z), v.z + qw * t.z + (qx * t.y - qy * t.x)};
+        }
+
+        struct WindowFind
+        {
+            HWND best = nullptr;
+            LONG best_area = 0;
+        };
+        BOOL CALLBACK find_game_window(HWND hwnd, LPARAM param)
+        {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid != GetCurrentProcessId() || !IsWindowVisible(hwnd)) return TRUE;
+            RECT r{};
+            GetClientRect(hwnd, &r);
+            LONG area = (r.right - r.left) * (r.bottom - r.top);
+            auto* find = reinterpret_cast<WindowFind*>(param);
+            if (area > find->best_area)
+            {
+                find->best_area = area;
+                find->best = hwnd;
+            }
+            return TRUE;
+        }
+
+        struct PointerState
+        {
+            HWND window = nullptr;
+            double window_checked = -10.0;
+            bool clicking = false;
+            int last_x = -1, last_y = -1;
+            bool was_pointing = false;
+        };
+        PointerState g_pointer;
+
+        // Returns true while the controller is pointing at the panel during a menu.
+        bool point_at_panel(const XrHandRaw hands[2], const Config& cfg, bool in_menu)
+        {
+            PointerState& ps = g_pointer;
+            auto& sh = shared();
+            bool menu = in_menu || sh.game_wants_pointer.load() || sh.game_paused.load();
+            PanelGeometry panel = vr_panel_geometry();
+            double now = now_seconds();
+            bool panel_up = panel.shown && now - panel.shown_at < 0.25;
+            int hand = hands[1].aim_valid ? 1 : hands[0].aim_valid ? 0 : -1;
+            float u = -1, v = -1;
+            if (cfg.controller_pointer && menu && panel_up && hand >= 0)
+            {
+                const XrHandRaw& hr = hands[hand];
+                V3 dir = rotate(hr.aqx, hr.aqy, hr.aqz, hr.aqw, {0, 0, -1});
+                V3 normal{std::sin(panel.yaw), 0, std::cos(panel.yaw)};
+                V3 right{std::cos(panel.yaw), 0, -std::sin(panel.yaw)};
+                float facing = dir.x * normal.x + dir.y * normal.y + dir.z * normal.z;
+                if (facing < -0.05f)
+                {
+                    V3 to{panel.cx - hr.ax, panel.cy - hr.ay, panel.cz - hr.az};
+                    float t = (to.x * normal.x + to.y * normal.y + to.z * normal.z) / facing;
+                    if (t > 0.0f && t < 10.0f)
+                    {
+                        V3 hit{hr.ax + dir.x * t - panel.cx, hr.ay + dir.y * t - panel.cy, hr.az + dir.z * t - panel.cz};
+                        float lx = hit.x * right.x + hit.y * right.y + hit.z * right.z;
+                        float ly = hit.y;
+                        float cu = lx / panel.width + 0.5f, cv = 0.5f - ly / panel.height;
+                        if (cu >= 0.0f && cu <= 1.0f && cv >= 0.0f && cv <= 1.0f)
+                        {
+                            u = cu;
+                            v = cv;
+                        }
+                    }
+                }
+            }
+            vr_set_panel_pointer(u, v);
+            bool pointing = u >= 0.0f;
+            if (pointing != ps.was_pointing)
+            {
+                ps.was_pointing = pointing;
+                HSVR_LOG(pointing ? "Controller: pointing at the menu panel (%s hand)" : "Controller: no longer pointing at the menu panel",
+                         hand == 1 ? "right" : "left");
+            }
+            if (!pointing)
+            {
+                if (ps.clicking && ps.window) PostMessageW(ps.window, WM_LBUTTONUP, 0, MAKELPARAM(ps.last_x, ps.last_y));
+                ps.clicking = false;
+                return false;
+            }
+            if (!ps.window || now - ps.window_checked > 2.0 || !IsWindow(ps.window))
+            {
+                ps.window_checked = now;
+                WindowFind find;
+                EnumWindows(&find_game_window, reinterpret_cast<LPARAM>(&find));
+                ps.window = find.best;
+            }
+            if (!ps.window || GetForegroundWindow() != ps.window) return true;
+            RECT client{};
+            GetClientRect(ps.window, &client);
+            int x = (int)std::lround(u * (float)(client.right - 1));
+            int y = (int)std::lround(v * (float)(client.bottom - 1));
+            if (x != ps.last_x || y != ps.last_y)
+            {
+                ps.last_x = x;
+                ps.last_y = y;
+                POINT screen{x, y};
+                ClientToScreen(ps.window, &screen);
+                SetCursorPos(screen.x, screen.y);
+            }
+            float trigger = hands[hand].trigger;
+            bool down = ps.clicking ? trigger > 0.4f : trigger > 0.6f;
+            if (down != ps.clicking)
+            {
+                ps.clicking = down;
+                PostMessageW(ps.window, down ? WM_LBUTTONDOWN : WM_LBUTTONUP, down ? MK_LBUTTON : 0, MAKELPARAM(x, y));
+                HSVR_LOG("Controller: %s at (%d, %d) on the menu panel", down ? "click" : "release", x, y);
+            }
+            return true;
+        }
+
         const char* source_name(Source s)
         {
             static const char* names[] = {"l_stick_x", "l_stick_y", "r_stick_x", "r_stick_y", "l_trigger", "r_trigger", "l_grip", "r_grip",
@@ -459,6 +640,9 @@ namespace hsvr
         XrHandRaw hands[2];
         bool have = g_real_get_state && cfg.controller_pad && vr_controllers_this_tick(hands);
         PadOut pad;
+        if (have) mod_keys_on_controllers(hands, cfg);
+        if (have) point_at_panel(hands, cfg, in_menu);
+        else vr_set_panel_pointer(-1.0f, -1.0f);
         if (have)
         {
             pad.active = true;

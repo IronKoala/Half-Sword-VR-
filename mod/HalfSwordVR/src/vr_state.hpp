@@ -47,6 +47,21 @@ namespace hsvr
         bool button_lower = false; // A on the right hand, X on the left (Touch); A on Index
         bool button_upper = false; // B / Y; the menu button on a Vive wand
         bool menu = false;         // the left Touch controller's menu button
+        // Aim pose (the pointing ray: -Z forward out of the controller), tracking space.
+        bool aim_valid = false;
+        float ax = 0, ay = 0, az = 0;
+        float aqx = 0, aqy = 0, aqz = 0, aqw = 1;
+    };
+
+    // Where the menu panel was last shown, in tracking space (OpenXR LOCAL, metres). The panel
+    // faces +Z of its own frame, which is turned by `yaw` about +Y.
+    struct PanelGeometry
+    {
+        bool shown = false;
+        float cx = 0, cy = 0, cz = 0;
+        float yaw = 0;
+        float width = 1, height = 1;
+        double shown_at = -1.0; // now_seconds() when it was last shown
     };
 
     struct VrShared
