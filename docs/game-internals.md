@@ -16,7 +16,7 @@ dump, so any claim can be checked.
 - `tools/study/kgrep.py FILE REGEX` searches every function.
 - To dump again, set `dev_study=1` in the ini. The code is `mod/HalfSwordVR/src/study_dump.cpp` on this branch, and it writes to `Mods\HalfSwordVR\study`.
 
-**Why it's a live dump:** the pak index is AES-encrypted. The key is not stored in the shipping exe as plain bytes, and it isn't loaded by simple immediate moves either: about 200k candidates were tested against the index and none matched. So offline extraction would need the key pulled from process memory. The live dump made that unnecessary.
+**Why it's a live dump:** the game's pak files are encrypted, so the logic was read from the running game.
 
 ## 1. The overall design: three skeletons and a capsule
 
