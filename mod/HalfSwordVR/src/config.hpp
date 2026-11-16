@@ -166,8 +166,9 @@ namespace hsvr
         double lean_max_deg = 35.0;
         bool head_turn = true;
         double head_turn_max_deg = 75.0;
-        // 1 = the character's own head is not drawn in first person (no more inside of the head).
-        bool hide_head = true;
+        // 1 = the character's own head is not drawn in first person. Off by default: Matthew had an
+        // earlier version of head hiding removed, so it is his to switch on.
+        bool hide_head = false;
         std::string hide_head_bone = "head";
         // Hand pull: besides turning each arm bone towards its pose (all the game's muscles do),
         // each hand is pulled to the place of its controller. Strength is the spring, damping

@@ -40,7 +40,7 @@ Four parts, each with its own switch in `HalfSwordVR.ini`.
    `lean_max_deg`), and the head bone is turned like the headset (`head_turn`, at most
    `head_turn_max_deg` from the game's own pose). The game's muscles move the real body after it, so
    balance and strength stay the game's.
-3. **The character's own head is not drawn in first person** (`hide_head`): `HideBoneByName` on every
+3. **The character's own head can be left undrawn in first person** (`hide_head`, off by default because Matthew had an earlier head-hiding version removed; his to switch on): `HideBoneByName` on every
    skinned mesh of the pawn (`hide_head_bone`, default `head`) and the hair hidden; shown again in the
    third-person view.
 4. **The hands are pulled to the controllers** (`hand_pull`, "pulling the hands" in `arm_control.cpp`).
