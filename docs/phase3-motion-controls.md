@@ -198,3 +198,7 @@ and logs what the hand holds afterwards. With nothing in reach, the squeeze goes
 grab (enemies, ledges). Food held within 15 cm of the eyes calls `Eat Held Food` (only if it takes no
 parameters), at most every 2 s. Switches: `pickup`, `pickup_radius_m`, `eat_at_mouth`.
 Finger tracking: not started.
+
+### Dropped weapons (2026-11-16)
+
+Matthew lost two weapons. The 07:4x log shows one: the right hand drew a sword (59.5 s), the right grip was squeezed away from a holster spot at 62.1 s and went to the game as Grab Right (RB), and from then on the hand was empty. The game's grab on a hand that holds a weapon lets go of it. Now a grip squeeze on a hand holding a weapon is kept from the game (`keep_held_weapon=1`), and logged.
