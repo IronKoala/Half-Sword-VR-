@@ -304,6 +304,7 @@ namespace hsvr
         flag("log_bindings", c.log_bindings);
         flag("auto_guard", c.auto_guard);
         flag("controller_mod_keys", c.controller_mod_keys);
+        flag("controller_pointer", c.controller_pointer);
         flag("arms_recorder", c.arms_recorder);
         flag("log_poses", c.log_poses);
         flag("log_input", c.log_input);

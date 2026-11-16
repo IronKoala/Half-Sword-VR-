@@ -167,6 +167,8 @@ namespace hsvr
         bool auto_guard = true;
         // The mod's keys on the left controller: Y = recenter, Y held = menu panel, X held = motion arms.
         bool controller_mod_keys = true;
+        // While a menu is up, point a controller at the menu panel and pull the trigger to click.
+        bool controller_pointer = true;
         // The right trigger starts an 8-second arm recording (arms_record_N.csv). Off by default now
         // that the trigger guards.
         bool arms_recorder = false;

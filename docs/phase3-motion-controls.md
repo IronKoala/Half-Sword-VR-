@@ -157,5 +157,11 @@ grabs with both hands.
 The mod's keys also work from the left controller (`controller_mod_keys=1`): Y press = recenter
 (Home), Y held 1 s = menu panel shown/hidden (End), X held 1 s = motion arms on/off (Page Up). The
 keyboard keys stay as a fallback. Still keyboard-only: Insert (view from the game's camera) and Page
-Down (fallback picture mode), both troubleshooting switches. Still needs the mouse: clicking in the
-game's menus (planned: a pointer from the controller onto the menu panel).
+Down (fallback picture mode), both troubleshooting switches.
+
+Menus: while a menu is up (paused, main menu, or the game wants a mouse pointer), the right
+controller's aim ray (OpenXR `/input/aim/pose`; the left one if the right is not tracked) is
+intersected with the menu panel; a dot is drawn there (the panel shader's cursor), the Windows
+pointer is moved to the matching spot of the game window (`SetCursorPos`, only while the game
+window is in front), and the trigger posts `WM_LBUTTONDOWN` / `WM_LBUTTONUP` to the game's window.
+Switch: `controller_pointer`.
