@@ -47,6 +47,43 @@ head). The first cut of this branch did the same and was never switched on. It n
 like headgear) and never touches a bone. **Never use HideBoneByName on this game's characters.**
 Where the sections below mention `HideBoneByName` or `hide_head_bone`, that is the removed way.
 
+## Fourth cut (2026-11-16): the placed body
+
+Third test (roomscale build): the capsule move and the crouch guess worked (`Crouch Key Holding` makes
+the game crouch, `Root Height` 85 standing, 27 to 50 crouched; it sometimes stays crouched after
+release), but the head was often 10 to 50 cm from the headset and the hands 15 to 30 cm off. Matthew:
+"i dont know what to do or say so you can wrap your head around it ... how am i currently controlling
+willie?" Told plainly that every part of Willie was a goal a self-balancing muscle ragdoll chases, and
+that Blade & Sorcery instead treats the player as the truth and draws the body to fit, he answered
+"yes": that is the difference he feels. **The player's body must not be a creature that chases him.**
+
+`kinematic_body` (1): `SetAllBodiesBelowSimulatePhysics(pelvis, false)` on the body mesh, then `true`
+again for `hand_r` and `hand_l`. Kinematic bodies follow the pose exactly every frame, so the head is at
+the headset and the shoulders are where the pose puts them, with no muscles in between. The hands stay
+simulated: the wrist joint holds them at the end of the forearm and the game's wrist muscle (times
+`hand_turn_scale`) and the grip carry the weapon, so weight shows in the blade's angle, not in the
+hand's place. Every frame the mod checks `IsSimulatingPhysics(spine_03 / thigh_r)` and undoes it if the
+game switched simulation back on (counted in the log).
+
+- Legs: the game's own leg animation (driver skeleton), set over the capsule: bones outside the upper
+  body are taken as posed at the mesh's nominal place (`BaseTranslationOffset` / `BaseRotationOffset`
+  on the actor) and converted to wherever the body mesh really is (logged; it used to ride on the
+  simulated hips).
+- `leg_ik` (1): the hips are lowered (up to 75 cm) or raised (4 cm) so the fixed-length upper body puts
+  the head at the headset's height, and each knee bends (two-bone IK in the animation's own knee
+  direction) to keep the foot where the animation had it.
+- Given back to the simulation: consciousness below `kinematic_min_consciousness` (15), VR controls off
+  (Page Up / X held), no first-person view. The pawn's `Fallen` flag is only logged for now.
+- Unknown until tested: whether hits still hurt a body that is not thrown about, whether the game's
+  script fights the switch, how the game's leg animation looks without its physics, arms passing
+  through walls (kinematic arms do not stop at them).
+
+Page Up / X held now also sets `shared().vr_controls_off`: every VR control from both threads is off and
+the game plays with mouse and keyboard as it does flat (Matthew needed this to recover lost weapons).
+
+Log: `Body: placed, not simulated (the game switched simulation back on N times) | hips moved N cm ... |
+body mesh N cm from its place over the feet | consciousness N, the game says fallen: ...`.
+
 ## Third cut (2026-11-16): roomscale, Blade and Sorcery as the reference
 
 After the second cut Matthew: "you're not getting it". Asked directly, he named Blade & Sorcery as the
