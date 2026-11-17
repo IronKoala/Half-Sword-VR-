@@ -476,6 +476,9 @@ namespace hsvr
             // made: p0, r0) to the weapon at the grip point.
             UObject* joint = nullptr;
             UObject* joint_base = nullptr;
+            // The second hand's own grip on the weapon (the hold layer): a joint from the weapon to the
+            // hand, free while the hand is drawn onto the hold, locked once it is there.
+            UObject* hand_joint = nullptr;
             Vec3 joint_p0;
             Quat joint_r0;
             // The weapon's own handle lined up with the controller (B&S: no extra tilt): the weapon's
@@ -2010,7 +2013,7 @@ namespace hsvr
                         pull_set(d, L.f_pos, (float)(cfg.hand_pull_strength * carry));
                         pull_set(d, L.f_vel, (float)(std::max(0.0, cfg.hand_pull_damping) * carry));
                         pull_set(d, L.f_maxlin, (float)(std::max(0.0, cfg.hand_pull_max_force) * carry));
-                        if (s.side[body.side].weapon_driven && !s.side[body.side].second_hand && (!cfg.hold_layer || s.side[body.side].hold_locked))
+                        if (s.side[body.side].weapon_driven && (cfg.hold_layer ? s.side[body.side].hold_locked : !s.side[body.side].second_hand))
                         {
                             // B&S: the hand is not driven while it holds a weapon; the weapon is. (The hold
                             // layer: once the hand is locked on the hold. Run 37: driven as well, it held the
@@ -5201,6 +5204,13 @@ namespace hsvr
 
         void joint_release(Side& side)
         {
+            if (side.hand_joint)
+            {
+                named(side.hand_joint, L"BreakConstraint", {});
+                named(side.hand_joint, L"K2_DestroyComponent", {{L"Object", bytes<UObject*>(side.hand_joint)}});
+                HSVR_LOG("Weapon: %s hand's grip joint on the weapon removed", side.label);
+            }
+            side.hand_joint = nullptr;
             if (side.joint)
             {
                 named(side.joint, L"BreakConstraint", {});
@@ -5281,6 +5291,65 @@ namespace hsvr
             side.joint_p0 = hand.t;
             side.joint_r0 = hand.q;
             HSVR_LOG("Weapon: %s hand's pull is now an engine joint (solved in every physics step)", side.label);
+            return true;
+        }
+
+        // The second hand's grip: a joint from the weapon to the hand (as the game joins the right
+        // hand to its weapon), free at first, the hand and the handle it closes on not colliding with
+        // each other (as with the game's own grip joint; run 39: the left hand stayed 9 cm off the
+        // handle). Locked once the hand is on the hold.
+        void hand_joint_place_and_join(Side& side, UObject* joint, UObject* base, uint8_t motion)
+        {
+            State& s = g_state;
+            Xf hand;
+            if (socket_transform(s.body, side.hand_name, RTS_World, hand))
+            {
+                NamedCall place;
+                if (place.init(joint, L"K2_SetWorldLocation"))
+                {
+                    place.set(L"NewLocation", ue::FVector{hand.t.x, hand.t.y, hand.t.z});
+                    place.set<bool>(L"bTeleport", true);
+                    place.run();
+                }
+            }
+            named(joint, L"SetDisableCollision", {{L"bDisableCollision", bytes<bool>(true)}});
+            for (const wchar_t* fn : {L"SetLinearXLimit", L"SetLinearYLimit", L"SetLinearZLimit"})
+                named(joint, fn, {{L"ConstraintType", bytes<uint8_t>(motion)}, {L"LimitSize", bytes<float>(0.0f)}});
+            named(joint, L"SetAngularSwing1Limit", {{L"MotionType", bytes<uint8_t>(motion)}, {L"Swing1LimitAngle", bytes<float>(0.0f)}});
+            named(joint, L"SetAngularSwing2Limit", {{L"MotionType", bytes<uint8_t>(motion)}, {L"Swing2LimitAngle", bytes<float>(0.0f)}});
+            named(joint, L"SetAngularTwistLimit", {{L"ConstraintType", bytes<uint8_t>(motion)}, {L"TwistLimitAngle", bytes<float>(0.0f)}});
+            NamedCall join;
+            if (join.init(joint, L"SetConstrainedComponents"))
+            {
+                join.set<UObject*>(L"Component1", base);
+                join.set<FName>(L"BoneName1", FName());
+                join.set<UObject*>(L"Component2", s.body);
+                join.set<FName>(L"BoneName2", side.hand_name);
+                join.run();
+            }
+        }
+
+        bool hand_joint_make(Side& side, UObject* base)
+        {
+            State& s = g_state;
+            static UObject* constraint_class = nullptr;
+            if (!constraint_class) constraint_class = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+            NamedCall add;
+            if (!constraint_class || !add.init(s.pawn, L"AddComponentByClass")) return false;
+            add.set<UObject*>(L"Class", constraint_class);
+            add.set<bool>(L"bManualAttachment", true);
+            {
+                alignas(16) double xf[12] = {0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0};
+                int32_t at = param_offset(add.fn, L"RelativeTransform");
+                if (at >= 0) memcpy(add.buf + at, xf, sizeof(xf));
+            }
+            add.set<bool>(L"bDeferredFinish", false);
+            add.run();
+            UObject* joint = add.get<UObject*>(L"ReturnValue");
+            if (!joint) return false;
+            hand_joint_place_and_join(side, joint, base, 0);
+            side.hand_joint = joint;
+            HSVR_LOG("Weapon: %s hand's grip joint on the weapon made (free until the hand is on the hold)", side.label);
             return true;
         }
 
@@ -5680,14 +5749,22 @@ namespace hsvr
                             side.hold_world.t = weapon_xf.t + weapon_xf.q.rotate(side.joint_f1 * weapon_xf.s);
                             side.have_hold_world = true;
                             side.ctrl_speed = length(v_target);
-                            if (!side.second_hand && !side.hold_locked)
+                            if (side.second_hand && !side.hand_joint && !side.hold_locked) hand_joint_make(side, base);
+                            if (!side.hold_locked && (!side.second_hand || side.hand_joint))
                             {
                                 // Where the hand should sit on the hold, against where it is.
                                 Quat hq = (side.hold_world.q * quat_from_frame(Vec3{1, 0, 0}, Vec3{0, 0, -1}) * quat_from_frame(side.grip_forward, side.grip_center).inverse()).normalized();
                                 Vec3 ht = side.hold_world.t - hq.rotate(side.grip_center);
                                 bool there = length(ht - hand.t) < 2.0 && quat_angle_deg(hq, hand.q) < 8.0;
                                 side.hold_settle = there ? side.hold_settle + 1 : 0;
-                                if (side.hold_settle >= 5)
+                                if (side.hold_settle >= 5 && side.second_hand)
+                                {
+                                    // Locked where the hand is now (on the hold): joined again from here.
+                                    hand_joint_place_and_join(side, side.hand_joint, base, 2);
+                                    side.hold_locked = true;
+                                    HSVR_LOG("Weapon: %s hand is on the hold (second hand); its grip joint is locked there", side.label);
+                                }
+                                else if (side.hold_settle >= 5)
                                 {
                                     const TCHAR* jp = side.out_sign > 0 ? STR("PhysicsConstraint R Hand") : STR("PhysicsConstraint L Hand");
                                     UObject* grip_joint = s.pawn->GetPropertyByNameInChain(jp) ? object_property(s.pawn, jp) : nullptr;
