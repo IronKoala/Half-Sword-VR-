@@ -3568,7 +3568,8 @@ namespace hsvr
             bool finished = false;
             double start = 0, last = 0;
             int part = -1;
-            TestPart parts[13] = { // (hands part: 28 s, with the second-hand check){"settle", 6}, {"hands still", 6}, {"hands move slowly", 8}, {"fast swings", 8}, {"striking the floor while ducked", 8},
+            // (hands part: 28 s, with the second-hand check)
+            TestPart parts[13] = {{"settle", 6}, {"hands still", 6}, {"hands move slowly", 8}, {"fast swings", 8}, {"striking the floor while ducked", 8},
                                   {"hands still again", 4}, {"twisting the wrists fast", 6}, {"walking", 8}, {"turning", 4},
                                   {"crouch button: crouched, swinging, kicking, walking, then up", 12},
                                   {"crouch-walking into the hanging kettle", 14}, {"left hand raised above the head and turned (shield up, point out)", 6},
