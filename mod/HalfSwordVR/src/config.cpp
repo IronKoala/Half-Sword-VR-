@@ -145,9 +145,21 @@ namespace hsvr
         FILE* f = _wfopen(ini_path().c_str(), L"r");
         if (!f) return false;
         std::map<std::string, std::string> kv;
-        char line[512];
-        while (fgets(line, sizeof(line), f))
+        // Lines of any length (a dev_script can be long): read in pieces up to the end of the line.
+        char chunk[512];
+        std::string line;
+        bool more = true;
+        while (more)
         {
+            line.clear();
+            more = false;
+            while (fgets(chunk, sizeof(chunk), f))
+            {
+                more = true;
+                line += chunk;
+                if (!line.empty() && line.back() == '\n') break;
+            }
+            if (!more) break;
             std::string s = trim(line);
             if (s.empty() || s[0] == ';' || s[0] == '#' || s[0] == '[') continue;
             size_t eq = s.find('=');

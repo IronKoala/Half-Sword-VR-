@@ -41,7 +41,7 @@ Unattended version: `dev_script` can switch the test with the mod's own steps `h
 `open <arena>` on its own gives no character: the arena's level manager only keeps spawn points that match the mode the menus set on the game instance (GI_Settings). The step `hsvr.set <Name>=<value>` writes one of those variables first, as the Free Mode button and the Jester's Fight button do. An easy one-on-one fight:
 
 ```
-dev_script=40:hsvr.set Current Play Mode=1; 40:hsvr.set Free Mode Activated=true; 40:hsvr.set Current Game Mode enum=1; 40:hsvr.set Free Mode Foes Amount=1; 40:hsvr.set FreeMode Foes Amount Random=false; 40:hsvr.set Free Mode Tier=0; 40:hsvr.set FreeMode Tier Random=false; 40:hsvr.set Free Mode Carnage=false; 40:hsvr.set Free Mode Brawling=false; 40:hsvr.set Free Mode Blossfechten=false; 40:hsvr.set FreeMode Multiplayer=false; 45:open /Game/Maps/Arenas/Map_Arena_Yard
+dev_script=40:hsvr.set Current Play Mode=1; 40:hsvr.set Free Mode Activated=true; 40:hsvr.set Current Game Mode Enum=1; 40:hsvr.set Free Mode Foes Amount=1; 40:hsvr.set FreeMode Foes Amount Random=false; 40:hsvr.set Free Mode Tier=0; 40:hsvr.set FreeMode Tier Random=false; 40:hsvr.set Free Mode Carnage=false; 40:hsvr.set Free Mode Brawling=false; 40:hsvr.set Free Mode Blossfechten=false; 40:hsvr.set FreeMode Multiplayer=false; 45:open /Game/Maps/Arenas/Map_Arena_Yard
 ```
 
 The game saves by itself when the fight starts, so the save is left in Free Mode, as after pressing Free Mode and Fight by hand. Back the save up first if that matters.

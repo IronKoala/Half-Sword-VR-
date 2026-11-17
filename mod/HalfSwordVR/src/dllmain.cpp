@@ -625,7 +625,7 @@ namespace
 
     // dev_script step "hsvr.set <Name>=<value>": writes one variable of the game instance (GI_Settings
     // in Half Sword), the way the menus do before a fight is opened. <Name> is the variable's name as
-    // the Blueprint shows it; a name the engine stores with a suffix ("<Name>_12_ABC...") also matches.
+    // the Blueprint shows it, any case; a name the engine stores with a suffix ("<Name>_12_ABC...") also matches.
     // Yes/no, byte, enum and whole-number variables only.
     void script_set_game_instance(const std::string& step)
     {
@@ -655,7 +655,9 @@ namespace
             for (FProperty* property : level->ForEachProperty())
             {
                 auto property_name = property->GetName();
-                if (property_name == wanted || property_name.rfind(wanted_prefix, 0) == 0)
+                // Case is ignored: the editor shows names as typed, and they are easy to mistype.
+                if (_wcsicmp(property_name.c_str(), wanted.c_str()) == 0 ||
+                    _wcsnicmp(property_name.c_str(), wanted_prefix.c_str(), wanted_prefix.size()) == 0)
                 {
                     found = property;
                     break;
