@@ -295,18 +295,6 @@ namespace
         bool ReturnValue;
     };
 
-    void set_simulate(UObject* mesh, bool simulate)
-    {
-        UFunction* fn = mesh->GetFunctionByNameInChain(STR("SetSimulatePhysics"));
-        if (!fn)
-        {
-            HSVR_LOG("Physics test: SetSimulatePhysics not found on the character's mesh");
-            return;
-        }
-        SimulatePhysicsParams p{simulate};
-        mesh->ProcessEvent(fn, &p);
-    }
-
     int is_simulating(UObject* mesh, const std::string& bone)
     {
         UFunction* fn = mesh->GetFunctionByNameInChain(STR("IsSimulatingPhysics"));
@@ -315,6 +303,30 @@ namespace
         p.BoneName = bone_fname(bone);
         mesh->ProcessEvent(fn, &p);
         return p.ReturnValue ? 1 : 0;
+    }
+
+    // SetSimulatePhysics on a skeletal mesh only changes the bodies whose physics asset entry is
+    // "Default"; bodies set to "Simulated" in the asset keep simulating (run 4 on 2026-11-17: the
+    // pelvis and hand_r still simulated in the same tick). SetAllBodiesSimulatePhysics changes every
+    // body regardless, so it is called after it. Each step is logged with what the pelvis reads after.
+    void set_simulate(UObject* mesh, bool simulate, bool report = false)
+    {
+        UFunction* whole = mesh->GetFunctionByNameInChain(STR("SetSimulatePhysics"));
+        UFunction* every_body = mesh->GetFunctionByNameInChain(STR("SetAllBodiesSimulatePhysics"));
+        if (whole)
+        {
+            SimulatePhysicsParams p{simulate};
+            mesh->ProcessEvent(whole, &p);
+        }
+        int after_whole = report ? is_simulating(mesh, "pelvis") : -1;
+        if (every_body)
+        {
+            SimulatePhysicsParams p{simulate};
+            mesh->ProcessEvent(every_body, &p);
+        }
+        if (report)
+            HSVR_LOG("Physics test: set %d: SetSimulatePhysics %s, pelvis then %d; SetAllBodiesSimulatePhysics %s, pelvis then %d", (int)simulate,
+                     whole ? "called" : "not found", after_whole, every_body ? "called" : "not found", is_simulating(mesh, "pelvis"));
     }
 
     // TEST ONLY (dev_player_physics_off): physics off on the player's own body, to see what the
@@ -362,7 +374,7 @@ namespace
         {
             if (switched_off == mesh)
             {
-                set_simulate(mesh, true);
+                set_simulate(mesh, true, true);
                 HSVR_LOG("Physics test: physics back ON for your character (may differ from the game's own setup; restart the fight to be sure)");
             }
             else
@@ -373,7 +385,7 @@ namespace
         }
         if (want_off && switched_off != mesh)
         {
-            set_simulate(mesh, false);
+            set_simulate(mesh, false, true);
             switched_off = mesh;
             HSVR_LOG("Physics test: physics OFF for your character (%ls)", pawn->GetFullName().c_str());
         }
@@ -389,7 +401,9 @@ namespace
         if (pelvis == 1 || hand == 1)
         {
             HSVR_LOG("Physics test: the game switched physics back on; switching it off again");
-            set_simulate(mesh, false);
+            static int reports_left = 5;
+            set_simulate(mesh, false, reports_left > 0);
+            if (reports_left > 0) --reports_left;
         }
     }
 
