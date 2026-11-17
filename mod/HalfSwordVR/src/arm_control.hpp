@@ -21,4 +21,8 @@ namespace hsvr
 
     // Flips motion arms on or off while playing (a key).
     void arm_toggle();
+
+    // A hand closes on a thing to pick it up (hand 1 = right): where its controller's grip is on
+    // that thing now, before the game's pick-up moves it (the hold layer holds it there).
+    void arm_note_touch(int hand, RC::Unreal::UObject* component);
 } // namespace hsvr

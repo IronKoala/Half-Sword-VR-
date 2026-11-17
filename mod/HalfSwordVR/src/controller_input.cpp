@@ -721,6 +721,7 @@ namespace hsvr
             // The game's own pick-up, finished by the game in its tick (bs_hands.cpp). The old way
             // (Grab Specific Object, then Pick Up Right Event) let go again at once: that event is
             // the grab key's release code (self-test, build 3).
+            arm_note_touch(hand, best_component);
             return bs_pick_up(pawn, hand, best_component, best_at.X, best_at.Y, best_at.Z);
         }
 

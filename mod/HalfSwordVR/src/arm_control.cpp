@@ -479,6 +479,11 @@ namespace hsvr
             // The second hand's own grip on the weapon (the hold layer): a joint from the weapon to the
             // hand, free while the hand is drawn onto the hold, locked once it is there.
             UObject* hand_joint = nullptr;
+            // Where this hand touched a thing it picked up, in that thing's frame (the hold layer).
+            int touch_seen = 0;
+            UObject* touch_comp = nullptr;
+            Vec3 touch_local;
+            double touch_time = -1e9;
             Vec3 joint_p0;
             Quat joint_r0;
             // The weapon's own handle lined up with the controller (B&S: no extra tilt): the weapon's
@@ -503,6 +508,11 @@ namespace hsvr
             // there (made anew at that place) and locked, so the hand is one piece with the weapon
             // where it holds it (B&S draws the hand on the weapon; a pulled hand trailed it 13 cm).
             bool hold_locked = false;
+            // The weapon is caught on something and the hand was pulled off the controller with it: the
+            // hand lets go of its lock and goes back to the controller; the weapon is still held by the
+            // pull (at the arm's strength) and the hand takes it again once it is free.
+            bool hold_slipped = false;
+            double slip_since = -1.0; // (when the hand was first pulled that far: it has to last)
             int hold_settle = 0; // the weapon's handle against the controller's, this frame (-1 = not lined up)
             // For the log.
             double last_error_cm = 0, last_error_deg = 0;
@@ -1258,7 +1268,7 @@ namespace hsvr
                 side.target_world.t = grip_pos - hand_rot.rotate(side.grip_center);
                 side.ctrl_grip_pos = grip_pos;
                 side.ctrl_hand = side.target_world;
-                if (cfg.hold_layer && side.weapon_driven && side.have_hold_world && !side.hold_locked) // (once locked on, the hand goes to the controller and the weapon with it: self-test run 32)
+                if (cfg.hold_layer && side.weapon_driven && side.have_hold_world && !side.hold_locked && !side.hold_slipped) // (once locked on, the hand goes to the controller and the weapon with it: self-test run 32)
                 {
                     // The hold layer: the hand is drawn (and pulled) onto the weapon where it holds it,
                     // the fist on the hold frame as it would be on the controller.
@@ -3719,7 +3729,26 @@ namespace hsvr
                 }
                 // Down to the floor as a player would: crouch button and a bend of the head.
                 shared().own_crouch.store(pt >= 5.5 && pt < 8.5);
-                if (pt >= 5.5 && !t.h_pick_checked && thing_at(t.h_weapon, at))
+                // (The aim is kept from the squeeze on: run 42, following the held weapon, the hand and
+                // the weapon chased each other 130 cm away.)
+                static Vec3 aim_kept;
+                if (pt >= 5.5 && !t.h_pick_checked && pt >= 7.6)
+                {
+                    hand_to(aim_kept);
+                    // Where the hand is on the handle as the grip closes (its controller's grip point, as
+                    // in play), before the game's pick-up moves the weapon: the hold should be there.
+                    static bool expect_taken = false;
+                    if (pt < 7.65) expect_taken = false;
+                    UObject* pommel = t.h_weapon->GetPropertyByNameInChain(STR("Pommel")) ? object_property(t.h_weapon, STR("Pommel")) : nullptr;
+                    UObject* gr = handle_end(t.h_weapon);
+                    Vec3 pa, pb;
+                    if (!expect_taken && config().hold_layer && pommel && gr && component_location(pommel, pa) && component_location(gr, pb) && length(pb - pa) > 8.0)
+                    {
+                        expect_taken = true;
+                        t.h_expect_along = dot(s.side[1].ctrl_grip_pos - pa, normalized(pb - pa));
+                    }
+                }
+                if (pt >= 5.5 && pt < 7.6 && !t.h_pick_checked && thing_at(t.h_weapon, at))
                 {
                     // (The hold layer: 6 cm from the game's grip point towards the pommel, to see the
                     // weapon taken where the hand is rather than at the game's own grip.)
@@ -3730,8 +3759,8 @@ namespace hsvr
                     {
                         Vec3 u = normalized(pb - pa);
                         at = pb - u * 6.0;
-                        t.h_expect_along = dot(at - pa, u);
                     }
+                    aim_kept = at;
                     hand_to(at);
                 }
                 if (pt >= 7.5 && t.h_pick_cm < 0 && palm(p) && thing_at(t.h_weapon, at)) t.h_pick_cm = length(at - p);
@@ -5620,10 +5649,24 @@ namespace hsvr
                                 u = weapon_xf.q.rotate(along);
                             }
                             Vec3 fist = side.ctrl_grip_pos;
+                            const char* taken = "";
+                            if (side.touch_comp == base && now_seconds() - side.touch_time < 3.0)
+                            {
+                                // Picked up: where the hand touched it, before the game's pick-up moved it.
+                                fist = weapon_xf.t + weapon_xf.q.rotate(side.touch_local * weapon_xf.s);
+                                taken = " (where the hand touched it)";
+                            }
+                            else if (lo > -1e8 && length(perpendicular_part(fist - a, u)) > 12.0)
+                            {
+                                // The hand is not at the handle (a draw: the game hands the weapon over from
+                                // its sheath): held at the game's own grip point.
+                                fist = pb;
+                                taken = " (the game's grip: the hand was not at the handle)";
+                            }
                             double t_along = std::max(lo, std::min(hi, dot(fist - a, u)));
                             Vec3 point = a + u * t_along;
                             Vec3 F = side.ctrl_world.rotate(Vec3{1, 0, 0});
-                            bool reversed = dot(u, F) < 0.0;
+                            bool reversed = dot(u, F) < 0.0 && strstr(taken, "game's grip") == nullptr; // (a draw: the right way round)
                             Vec3 H = reversed ? u * -1.0 : u;
                             Vec3 cr{F.y * H.z - F.z * H.y, F.z * H.x - F.x * H.z, F.x * H.y - F.y * H.x};
                             double ang = std::atan2(length(cr), dot(F, H));
@@ -5636,14 +5679,15 @@ namespace hsvr
                             side.hold_along = t_along;
                             side.have_hold_world = false;
                             side.hold_locked = false;
+                            side.hold_slipped = false;
                             side.hold_settle = 0;
                             side.have_prev_drive_target = false; // (no speed from before the grab: it read as a throw)
                             side.ctrl_speed = 0.0;
                             if (joint_make(side, base, hold))
                             {
                                 side.handle_aligned = true;
-                                HSVR_LOG("Weapon: %s hand holds it by %s, %.0f cm along it, %.1f cm from the hand%s; the handle was %.0f degrees off the controller's",
-                                         side.label, source, t_along, length(point - fist), reversed ? " (reversed)" : "", ang * kRadToDeg);
+                                HSVR_LOG("Weapon: %s hand holds it by %s, %.0f cm along it%s, %.1f cm from the hand%s; the handle was %.0f degrees off the controller's",
+                                         side.label, source, t_along, taken, length(point - side.ctrl_grip_pos), reversed ? " (reversed)" : "", ang * kRadToDeg);
                             }
                         }
                         else if (joint_make(side, base, at_fist) && !side.second_hand && cfg.align_handle)
@@ -5749,8 +5793,32 @@ namespace hsvr
                             side.hold_world.t = weapon_xf.t + weapon_xf.q.rotate(side.joint_f1 * weapon_xf.s);
                             side.have_hold_world = true;
                             side.ctrl_speed = length(v_target);
+                            {
+                                Vec3 fist_now = hand.t + hand.q.rotate(side.grip_center);
+                                Vec3 fist_ctrl = side.ctrl_hand.t + side.ctrl_hand.q.rotate(side.grip_center);
+                                bool pulled_far = side.hold_locked && length(fist_now - fist_ctrl) > 20.0;
+                                if (!pulled_far) side.slip_since = -1.0;
+                                else if (side.slip_since < 0.0) side.slip_since = now_seconds();
+                                // (A quarter of a second: a fast swing is not a catch. Run 46: the self-test's
+                                // jump of the controller read as one.)
+                                if (pulled_far && now_seconds() - side.slip_since > 0.25)
+                                {
+                                    side.slip_since = -1.0;
+                                    side.hold_locked = false;
+                                    side.hold_slipped = true;
+                                    side.hold_settle = 0;
+                                    if (side.hand_joint) hand_joint_place_and_join(side, side.hand_joint, base, 0);
+                                    HSVR_LOG("Weapon: %s hand pulled %.0f cm off its controller with the weapon (caught on something): the hand lets go of its lock and goes back; the weapon is still pulled",
+                                             side.label, length(fist_now - fist_ctrl));
+                                }
+                                if (side.hold_slipped && length(side.hold_world.t - side.ctrl_grip_pos) < 6.0)
+                                {
+                                    side.hold_slipped = false;
+                                    HSVR_LOG("Weapon: %s the weapon is free again; the hand takes it again", side.label);
+                                }
+                            }
                             if (side.second_hand && !side.hand_joint && !side.hold_locked) hand_joint_make(side, base);
-                            if (!side.hold_locked && (!side.second_hand || side.hand_joint))
+                            if (!side.hold_locked && !side.hold_slipped && (!side.second_hand || side.hand_joint))
                             {
                                 // Where the hand should sit on the hold, against where it is.
                                 Quat hq = (side.hold_world.q * quat_from_frame(Vec3{1, 0, 0}, Vec3{0, 0, -1}) * quat_from_frame(side.grip_forward, side.grip_center).inverse()).normalized();
@@ -6602,5 +6670,16 @@ namespace hsvr
         if (!s.enabled_by_key || !cfg.kinematic_body || !cfg.body_follow) kinematic_update(false, !s.enabled_by_key ? "VR controls off" : "switched off in the settings");
         if (!s.kin_active || !s.ready) shared().body_placed.store(false);
         log_status(cfg);
+    }
+    void arm_note_touch(int hand, UObject* component)
+    {
+        Side& side = g_state.side[hand ? 1 : 0];
+        Xf at;
+        if (!component || !component_world(component, at)) return;
+        // (Taken here, as the grip closes: a frame later the game had already moved the weapon to its
+        // own grip point, run 44.)
+        side.touch_comp = component;
+        side.touch_local = at.q.inverse().rotate(side.ctrl_grip_pos - at.t) * (1.0 / at.s);
+        side.touch_time = now_seconds();
     }
 } // namespace hsvr
