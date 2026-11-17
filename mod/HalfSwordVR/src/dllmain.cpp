@@ -26,6 +26,7 @@
 #include <Unreal/UObjectGlobals.hpp>
 
 #include "config.hpp"
+#include "controllers.hpp"
 #include "engine_slot.hpp"
 #include "input_watch.hpp"
 #include "log.hpp"
@@ -202,6 +203,168 @@ namespace
             }
         }
         return true;
+    }
+
+    // ---- Phase 2: controllers in the log, and the player physics test -------------------------
+    FName bone_fname(const std::string& text)
+    {
+        static std::map<std::string, FName> cache;
+        auto it = cache.find(text);
+        if (it != cache.end()) return it->second;
+        std::wstring wide(text.begin(), text.end());
+        FName name(wide.c_str(), FNAME_Add);
+        cache.emplace(text, name);
+        return name;
+    }
+
+    bool bone_location(UObject* mesh, const std::string& bone, hsvr::Vec3& out)
+    {
+        if (!mesh) return false;
+        UFunction* socket_fn = mesh->GetFunctionByNameInChain(STR("GetSocketLocation"));
+        if (!socket_fn) return false;
+        SocketLocationParams socket{};
+        socket.InSocketName = bone_fname(bone);
+        mesh->ProcessEvent(socket_fn, &socket);
+        out = {socket.ReturnValue.X, socket.ReturnValue.Y, socket.ReturnValue.Z};
+        return true;
+    }
+
+    // Once a second: where each controller is (relative to the headset, and in the game world),
+    // how far that is from the character's hand bone, and what the buttons and sticks read.
+    void log_controllers(const hsvr::Config& cfg)
+    {
+        if (!cfg.log_controllers) return;
+        static double last = 0.0;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+        hsvr::ControllerState s = hsvr::controllers_state();
+        if (!s.active)
+        {
+            HSVR_LOG_EVERY(10.0, "Controllers: not read yet (headset session not running, or no action set)");
+            return;
+        }
+        UObject* mesh = find_pawn_mesh();
+        const char* names[2] = {"left", "right"};
+        const std::string* bones[2] = {&cfg.hand_bone_left, &cfg.hand_bone_right};
+        for (int h = 0; h < 2; ++h)
+        {
+            const hsvr::HandState& hand = s.hand[h];
+            char where[256] = "not tracked";
+            if (hand.grip_valid)
+            {
+                int n = 0;
+                if (s.head_valid)
+                {
+                    // Offset from the point between the eyes, in the head's heading: forward, right, up (cm).
+                    hsvr::Quat head_rotation = hsvr::xr_to_ue_rotation(s.head.qx, s.head.qy, s.head.qz, s.head.qw);
+                    hsvr::Quat heading = hsvr::quat_from_yaw_deg(hsvr::quat_yaw_deg(head_rotation));
+                    hsvr::Vec3 rel = heading.inverse().rotate(hsvr::xr_to_ue_position(hand.grip.px, hand.grip.py, hand.grip.pz, 100.0) -
+                                                              hsvr::xr_to_ue_position(s.head.px, s.head.py, s.head.pz, 100.0));
+                    n += snprintf(where + n, sizeof(where) - n, "from head fwd %.0f right %.0f up %.0f cm", rel.x, rel.y, rel.z);
+                }
+                hsvr::Vec3 world;
+                hsvr::Quat world_rotation;
+                if (hsvr::stereo_tracking_to_world(hand.grip, world, world_rotation))
+                {
+                    hsvr::Rot r = hsvr::quat_to_rot(world_rotation);
+                    n += snprintf(where + n, sizeof(where) - n, ", world (%.0f, %.0f, %.0f) rot p%.0f y%.0f r%.0f", world.x, world.y, world.z, r.pitch, r.yaw, r.roll);
+                    hsvr::Vec3 bone;
+                    if (bone_location(mesh, *bones[h], bone))
+                    {
+                        hsvr::Vec3 d = world - bone;
+                        n += snprintf(where + n, sizeof(where) - n, ", %.0f cm from %s", std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z), bones[h]->c_str());
+                    }
+                }
+            }
+            HSVR_LOG("Controller %s%s: %s | trigger %.2f grip %.2f stick %.2f %.2f%s%s%s%s", names[h], s.focused ? "" : " (no input focus)", where,
+                     hand.trigger, hand.squeeze, hand.stick_x, hand.stick_y, hand.stick_click ? " [stick]" : "", hand.primary ? " [A/X]" : "",
+                     hand.secondary ? " [B/Y]" : "", hand.menu ? " [menu]" : "");
+        }
+    }
+
+    struct SimulatePhysicsParams
+    {
+        bool bSimulate;
+    };
+
+    struct IsSimulatingParams
+    {
+        FName BoneName;
+        bool ReturnValue;
+    };
+
+    void set_simulate(UObject* mesh, bool simulate)
+    {
+        UFunction* fn = mesh->GetFunctionByNameInChain(STR("SetSimulatePhysics"));
+        if (!fn)
+        {
+            HSVR_LOG("Physics test: SetSimulatePhysics not found on the character's mesh");
+            return;
+        }
+        SimulatePhysicsParams p{simulate};
+        mesh->ProcessEvent(fn, &p);
+    }
+
+    int is_simulating(UObject* mesh, const std::string& bone)
+    {
+        UFunction* fn = mesh->GetFunctionByNameInChain(STR("IsSimulatingPhysics"));
+        if (!fn) return -1;
+        IsSimulatingParams p{};
+        p.BoneName = bone_fname(bone);
+        mesh->ProcessEvent(fn, &p);
+        return p.ReturnValue ? 1 : 0;
+    }
+
+    // TEST ONLY (dev_player_physics_off): physics off on the player's own body, to see what the
+    // game does without its ragdoll. Only the pawn the player controls is touched; the enemies run
+    // the same Blueprint and are left alone.
+    void player_physics_test(const hsvr::Config& cfg)
+    {
+        static UObject* switched_off = nullptr; // the mesh we turned physics off on
+        static UObject* checked_pawn = nullptr;
+        static bool pawn_is_willie = false;
+        UObject* pawn = nullptr;
+        UObject* mesh = find_pawn_mesh(&pawn);
+        if (pawn != checked_pawn)
+        {
+            checked_pawn = pawn;
+            pawn_is_willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
+        }
+        bool want_off = cfg.dev_player_physics_off && mesh && pawn_is_willie;
+        if (switched_off && (switched_off != mesh || !want_off))
+        {
+            if (switched_off == mesh)
+            {
+                set_simulate(mesh, true);
+                HSVR_LOG("Physics test: physics back ON for your character (may differ from the game's own setup; restart the fight to be sure)");
+            }
+            else
+            {
+                HSVR_LOG("Physics test: your character changed; the new one keeps its physics until the test applies again");
+            }
+            switched_off = nullptr;
+        }
+        if (want_off && switched_off != mesh)
+        {
+            set_simulate(mesh, false);
+            switched_off = mesh;
+            HSVR_LOG("Physics test: physics OFF for your character (%ls)", pawn->GetFullName().c_str());
+        }
+        if (!switched_off) return;
+        static double last = 0.0;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+        // Watch whether the game turns physics back on by itself.
+        int pelvis = is_simulating(mesh, "pelvis");
+        int hand = is_simulating(mesh, cfg.hand_bone_right);
+        HSVR_LOG("Physics test: simulating now: pelvis %d, %s %d (1 = physics on, -1 = unknown)", pelvis, cfg.hand_bone_right.c_str(), hand);
+        if (pelvis == 1 || hand == 1)
+        {
+            HSVR_LOG("Physics test: the game switched physics back on; switching it off again");
+            set_simulate(mesh, false);
+        }
     }
 
     struct ConsoleCommandParams
@@ -846,6 +1009,8 @@ namespace
         watch_input();
 
         hsvr::Config cfg = hsvr::config();
+        log_controllers(cfg);
+        player_physics_test(cfg);
         if (g_console_done)
         {
             apply_picture_settings(cfg);

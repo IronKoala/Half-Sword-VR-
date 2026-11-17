@@ -36,6 +36,7 @@ namespace hsvr
             Vec3 anchor;           // world position of the point between the eyes at recenter pose
             double base_yaw = 0.0; // world heading that "straight ahead" maps to
             Recenter recenter;
+            double cm_per_metre = 100.0; // world centimetres per real metre (last seen)
         };
         FrameView g_view;
         bool g_have_smoothed = false;
@@ -238,6 +239,7 @@ namespace hsvr
                 Config cfg = config();
                 const XrEyeRaw eye = eye_for_view(ViewIndex);
                 double cm_per_metre = (WorldToMeters > 1.0f ? (double)WorldToMeters : 100.0) * cfg.world_scale;
+                g_view.cm_per_metre = cm_per_metre;
                 Quat recenter_inverse = quat_from_yaw_deg(g_view.recenter.yaw_deg).inverse();
                 Vec3 eye_real_cm = xr_to_ue_position(eye.px, eye.py, eye.pz, 100.0);
                 Vec3 relative = recenter_inverse.rotate(eye_real_cm - g_view.recenter.position_cm) * (cm_per_metre / 100.0);
@@ -347,6 +349,20 @@ namespace hsvr
             vr_set_separate_target_mode(want_separate);
             HSVR_LOG(want_separate ? "Eyes are drawn into their own target at headset resolution" : "Eyes are drawn side by side through the game window");
         }
+    }
+
+    bool stereo_tracking_to_world(const XrPoseRaw& pose, Vec3& location, Quat& rotation)
+    {
+        if (!g_view.valid || !g_view.recenter.valid) return false;
+        // Exactly the placement the eyes get in CalculateStereoViewOffset.
+        Quat recenter_inverse = quat_from_yaw_deg(g_view.recenter.yaw_deg).inverse();
+        Vec3 real_cm = xr_to_ue_position(pose.px, pose.py, pose.pz, 100.0);
+        Vec3 relative = recenter_inverse.rotate(real_cm - g_view.recenter.position_cm) * (g_view.cm_per_metre / 100.0);
+        Quat relative_rotation = recenter_inverse * xr_to_ue_rotation(pose.qx, pose.qy, pose.qz, pose.qw);
+        Quat base = quat_from_yaw_deg(g_view.base_yaw);
+        location = g_view.anchor + base.rotate(relative);
+        rotation = (base * relative_rotation).normalized();
+        return true;
     }
 
     bool stereo_separate_target()

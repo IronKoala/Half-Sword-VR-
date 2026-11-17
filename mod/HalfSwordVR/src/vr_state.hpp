@@ -22,6 +22,13 @@ namespace hsvr
         float angle_left = -0.78f, angle_right = 0.78f, angle_up = 0.78f, angle_down = -0.78f;
     };
 
+    // A position and orientation in tracking space (OpenXR LOCAL space, metres), as the runtime gave it.
+    struct XrPoseRaw
+    {
+        float px = 0, py = 0, pz = 0;
+        float qx = 0, qy = 0, qz = 0, qw = 1;
+    };
+
     // The pose a frame is rendered with. Travels with the frame from the game thread to xrEndFrame.
     struct FramePose
     {

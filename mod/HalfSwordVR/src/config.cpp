@@ -104,6 +104,16 @@ namespace hsvr
                 d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.near_clip_cm, d.gamma_mode, d.ui_panel, d.ui_panel_auto,
                 d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, d.ui_opacity_gain, d.ui_menu_backdrop, d.ui_use_alpha, d.mirror_window, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key, (unsigned)d.toggle_view_key, (unsigned)d.toggle_mode_key,
                 d.predict_frames, d.pose_max_age, d.separate_render_target, d.sharpen, d.screen_percentage, d.extra_commands.c_str(), d.fix_clouds, d.cloud_mode, d.light_samples, d.idle_helper, d.log_poses, d.log_input, d.capture_seconds, d.stereo_slot_offset, d.dev_fake_headset);
+        fprintf(f,
+                "; Controllers: write their positions and buttons to the log once a second.\n"
+                "log_controllers=%d\n"
+                "hand_bone_left=%s\n"
+                "hand_bone_right=%s\n"
+                "; 1 = short buzz when a trigger is pulled all the way (vibration check).\n"
+                "haptics_test=%d\n"
+                "; TEST ONLY: 1 = physics off on your own character's body. Restart the fight after switching back.\n"
+                "dev_player_physics_off=%d\n",
+                d.log_controllers, d.hand_bone_left.c_str(), d.hand_bone_right.c_str(), d.haptics_test, d.dev_player_physics_off);
         fclose(f);
     }
 
@@ -212,6 +222,11 @@ namespace hsvr
         num("dev_fake_pitch", c.dev_fake_pitch);
         num("dev_fake_scale", c.dev_fake_scale);
         text("dev_script", c.dev_script);
+        flag("log_controllers", c.log_controllers);
+        text("hand_bone_left", c.hand_bone_left);
+        text("hand_bone_right", c.hand_bone_right);
+        flag("haptics_test", c.haptics_test);
+        flag("dev_player_physics_off", c.dev_player_physics_off);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;
