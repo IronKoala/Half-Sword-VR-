@@ -341,6 +341,8 @@ namespace hsvr
             XrAction button_lower = XR_NULL_HANDLE;
             XrAction button_upper = XR_NULL_HANDLE;
             XrAction menu = XR_NULL_HANDLE;
+            XrAction button_x = XR_NULL_HANDLE;
+            XrAction button_y = XR_NULL_HANDLE;
             XrAction aim_pose = XR_NULL_HANDLE;
             XrSpace aim_space[2]{XR_NULL_HANDLE, XR_NULL_HANDLE};
             XrPath hand_path[2]{XR_NULL_PATH, XR_NULL_PATH};
@@ -444,10 +446,48 @@ namespace hsvr
             g_hands.button_lower = make_action("button_lower", "Lower face button (A, X)", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_hands.button_upper = make_action("button_upper", "Upper face button (B, Y)", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_hands.menu = make_action("menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT);
+            g_hands.button_x = make_action("button_x", "Right X (Steam Frame)", XR_ACTION_TYPE_BOOLEAN_INPUT);
+            g_hands.button_y = make_action("button_y", "Right Y (Steam Frame)", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_hands.aim_pose = make_action("aim_pose", "Pointer", XR_ACTION_TYPE_POSE_INPUT);
             if (g_hands.grip_pose == XR_NULL_HANDLE) return;
             const XrAction stick = g_hands.stick, click = g_hands.stick_click, lower = g_hands.button_lower, upper = g_hands.button_upper,
                            menu = g_hands.menu, aim = g_hands.aim_pose;
+            {
+                // The Steam Frame's own bindings (SteamVR knows them as valve/frame_controller). Under
+                // the Touch bindings SteamVR folds the right X and Y into B, and the left D-pad into
+                // X (down) and Y (up, left, right), so the right X could not be told apart. Here the
+                // left D-pad keeps those places (down = the mod's "X", up/left/right = its "Y"),
+                // the left View button is the menu (Start) as Touch's menu was, and the right X and Y
+                // are their own buttons. If the runtime turns these down, the Touch bindings below
+                // are used as before.
+                if (!config().frame_bindings) goto touch_only;
+                {
+                const XrAction bx = g_hands.button_x, by = g_hands.button_y;
+                std::vector<Bind> base{{g_hands.grip_pose, "/input/grip/pose"}, {g_hands.trigger, "/input/trigger/value"}};
+                std::vector<Bind> left = base, right = base;
+                std::vector<Bind> l_extra{{aim, "/input/aim/pose"}, {stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/dpad_down/click"},
+                                          {upper, "/input/dpad_up/click"}, {upper, "/input/dpad_left/click"}, {upper, "/input/dpad_right/click"}, {menu, "/input/view/click"}};
+                std::vector<Bind> r_extra{{aim, "/input/aim/pose"}, {stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"},
+                                          {upper, "/input/b/click"}, {bx, "/input/x/click"}, {by, "/input/y/click"}};
+                left.insert(left.end(), l_extra.begin(), l_extra.end());
+                right.insert(right.end(), r_extra.begin(), r_extra.end());
+                bool done = false;
+                for (const char* grip : {"/input/squeeze/value", "/input/grip/value"})
+                {
+                    std::vector<Bind> l = left, rr = right;
+                    l.push_back({g_hands.squeeze, grip});
+                    rr.push_back({g_hands.squeeze, grip});
+                    if (suggest_bindings("/interaction_profiles/valve/frame_controller", l, rr))
+                    {
+                        HSVR_LOG("OpenXR: Steam Frame bindings in (grip read from %s): right X and Y are their own buttons", grip);
+                        done = true;
+                        break;
+                    }
+                }
+                if (!done) HSVR_LOG("OpenXR: Steam Frame bindings not accepted; the Frame plays through the Touch bindings (right X and Y count as B)");
+                }
+            touch_only:;
+            }
             suggest_profile("/interaction_profiles/valve/index_controller", "/input/trigger/value", "/input/squeeze/value",
                             {{aim, "/input/aim/pose"}, {stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"}, {upper, "/input/b/click"}},
                             {{aim, "/input/aim/pose"}, {stick, "/input/thumbstick"}, {click, "/input/thumbstick/click"}, {lower, "/input/a/click"}, {upper, "/input/b/click"}});
@@ -2839,6 +2879,8 @@ float4 PSMain(VSOut i) : SV_Target
             hand.button_lower = read_bool_action(session, g_hands.button_lower, h);
             hand.button_upper = read_bool_action(session, g_hands.button_upper, h);
             hand.menu = read_bool_action(session, g_hands.menu, h);
+            hand.button_x = g_hands.button_x != XR_NULL_HANDLE && read_bool_action(session, g_hands.button_x, h);
+            hand.button_y = g_hands.button_y != XR_NULL_HANDLE && read_bool_action(session, g_hands.button_y, h);
             hand.aim_valid = false;
             if (g_hands.aim_space[h] != XR_NULL_HANDLE)
             {

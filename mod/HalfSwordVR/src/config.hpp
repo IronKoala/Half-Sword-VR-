@@ -372,14 +372,16 @@ namespace hsvr
         // right stick click = kick, right stick up = jump, right stick down tapped = crouch (view and
         // body together), held for the game's own 0.2 s = the game's prone (lie down standing still,
         // dive when moving). Turning stays on the right stick's left and right. A = taunt (the game's
-        // Talk key only; no longer jump), X tapped = slow motion (X held 1 s still switches VR
-        // controls off). No thrust button: a thrust is the hand pushed forward.
+        // Talk key only; no longer jump), the right controller's X (Steam Frame) = slow motion. No thrust button: a thrust is the hand pushed forward.
         bool stick_layout = true;
         // Matthew (2026-11-17): start using the keyboard and the game plays with
         // mouse and keyboard; start using the controllers (a button, trigger, grip or stick, not
         // X or Y, which are the mod's own keys) and it plays with the 6DoF controllers again. The
         // picture stays in the headset. The mouse never switches (Matthew works menus with it on VR controls).
         bool auto_input_switch = true;
+        // The Steam Frame controllers' own bindings (needed for the right X; slow motion). 0 = the
+        // Touch bindings SteamVR used before, should the hand or weapon angles feel different.
+        bool frame_bindings = true;
         // An empty hand squeezing near a weapon or food picks it up (within this distance of the hand).
         bool pickup = true;
         double pickup_radius_m = 0.30;

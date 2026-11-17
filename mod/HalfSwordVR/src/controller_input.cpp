@@ -453,7 +453,6 @@ namespace hsvr
                 HSVR_LOG("Controller: menu panel %s (Y held)", toggled == cfg.ui_panel_auto ? "always shown" : "hidden during play");
             }
             if (x == 2) arm_toggle();
-            if (x == 1) g_x_tapped = true;
         }
 
         // ---- pointing at the menu panel --------------------------------------------------------
@@ -970,10 +969,13 @@ namespace hsvr
                 call_input_event(pawn, a ? STR("InpActEvt_Talk_K2Node_InputActionEvent_33") : STR("InpActEvt_Talk_K2Node_InputActionEvent_34"));
                 if (a) HSVR_LOG("Pad: A: taunt");
             }
-            // Slow motion: X tapped (on letting go, so it never collides with X held 1 s).
-            if (g_x_tapped)
+            // Slow motion: the right controller's own X (Steam Frame), on pressing it.
+            static bool x_was = false;
+            bool x_now = hands[1].button_x;
+            bool x_pressed = x_now && !x_was;
+            x_was = x_now;
+            if (x_pressed)
             {
-                g_x_tapped = false;
                 bool ok = call_input_event(pawn, STR("InpActEvt_SloMo_K2Node_InputActionEvent_8"));
                 bool* on = pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Slomo Active"));
                 HSVR_LOG("Pad: X tapped: slow motion %s", !ok ? "event NOT found" : (on && *on ? "on" : "off (or not allowed: the game needs consciousness over 50 and stamina)"));
@@ -1083,7 +1085,7 @@ namespace hsvr
             bool ours = front_process == GetCurrentProcessId();
             for (int vk = 1; vk < 255; ++vk)
             {
-                if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2 /* the mouse never switches (Matthew: menus) */ || vk == VK_PACKET || vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN /* Alt-Tab and Windows */ || vk == 0x21 /* Page Up */ || vk == cfg.recenter_key || vk == cfg.toggle_ui_key || vk == cfg.toggle_view_key || vk == cfg.toggle_mode_key) continue;
+                if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2 /* the mouse never switches (Matthew: menus) */ || vk == VK_ESCAPE || vk == VK_TAB /* Matthew: Escape, Alt and Tab stay out */ || vk == VK_PACKET || vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN /* Alt-Tab and Windows */ || vk == 0x21 /* Page Up */ || vk == cfg.recenter_key || vk == cfg.toggle_ui_key || vk == cfg.toggle_view_key || vk == cfg.toggle_mode_key) continue;
                 bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
                 if (down && !key_was[vk] && ours)
                 {
@@ -1103,7 +1105,7 @@ namespace hsvr
                     else if (c.squeeze > 0.6f) what = "a grip";
                     else if (std::fabs(c.stick_x) > 0.6f || std::fabs(c.stick_y) > 0.6f) what = "a stick";
                     else if (c.stick_click) what = "a stick click";
-                    else if (h == 1 && (c.button_lower || c.button_upper)) what = "A or B";
+                    else if (h == 1 && (c.button_lower || c.button_upper || c.button_x || c.button_y)) what = "a button on the right controller";
                     else continue;
                     controller = true;
                 }

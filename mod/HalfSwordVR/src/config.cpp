@@ -377,6 +377,7 @@ namespace hsvr
         flag("kick_on_b", c.kick_on_b);
         flag("stick_layout", c.stick_layout);
         flag("auto_input_switch", c.auto_input_switch);
+        flag("frame_bindings", c.frame_bindings);
         flag("pickup", c.pickup);
         num("pickup_radius_m", c.pickup_radius_m);
         flag("eat_at_mouth", c.eat_at_mouth);

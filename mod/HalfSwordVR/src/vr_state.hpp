@@ -47,6 +47,9 @@ namespace hsvr
         bool button_lower = false; // A on the right hand, X on the left (Touch); A on Index
         bool button_upper = false; // B / Y; the menu button on a Vive wand
         bool menu = false;         // the left Touch controller's menu button
+        // The Steam Frame's right controller has A, B, X and Y; with its own bindings these are
+        // its X and Y (always false on other controllers, and on the Frame under Touch bindings).
+        bool button_x = false, button_y = false;
         // Aim pose (the pointing ray: -Z forward out of the controller), tracking space.
         bool aim_valid = false;
         float ax = 0, ay = 0, az = 0;
