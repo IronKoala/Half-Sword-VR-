@@ -483,7 +483,10 @@ namespace hsvr
             bool handle_aligned = false;
             Quat weapon_from_ctrl;
             bool second_hand = false; // this hand holds the other hand's weapon as its second hand
-            double handle_off_deg = -1.0; // the weapon's handle against the controller's, this frame (-1 = not lined up)
+            double handle_off_deg = -1.0;
+            // The joint's point on the weapon (weapon space): where the fist was when it was made.
+            Vec3 joint_f1;
+            Vec3 ctrl_grip_pos; // this frame's controller grip point in the world // the weapon's handle against the controller's, this frame (-1 = not lined up)
             // For the log.
             double last_error_cm = 0, last_error_deg = 0;
             double last_reach = 0;    // controller distance from the shoulder / arm length
@@ -1215,15 +1218,17 @@ namespace hsvr
                 Quat hand_rot = (grip_rot * controller_frame * hand_frame.inverse()).normalized();
                 side.target_world.q = hand_rot;
                 side.target_world.t = grip_pos - hand_rot.rotate(side.grip_center);
+                side.ctrl_grip_pos = grip_pos;
                 if (side.handle_aligned && side.weapon_driven && !side.second_hand)
                 {
                     // Holding a weapon lined up on the controller: the hand is where the weapon puts it
                     // (its handle along the controller's, the fist at the controller's grip point), and
                     // the arm is drawn to that hand (self-test run 19: drawn to the unturned hand, the
                     // arm and the hand were 13 cm apart in motion).
-                    Quat hq = (grip_rot * side.weapon_from_ctrl * side.hand_in_weapon.q).normalized();
-                    side.target_world.q = hq;
-                    side.target_world.t = grip_pos - hq.rotate(side.grip_center);
+                    Quat wq = (grip_rot * side.weapon_from_ctrl).normalized();
+                    Vec3 wt = grip_pos - wq.rotate(side.joint_f1); // the weapon where the joint puts it
+                    side.target_world.q = (wq * side.hand_in_weapon.q).normalized();
+                    side.target_world.t = wt + wq.rotate(side.hand_in_weapon.t);
                 }
                 side.blade_world = grip_rot.rotate(handle_axis);
                 side.target_valid = true;
@@ -5171,12 +5176,17 @@ namespace hsvr
                 }
                 Xf hand, weapon_xf;
                 if (!socket_transform(s.body, side.hand_name, RTS_World, hand) || !component_world(base, weapon_xf)) continue;
-                if (base != side.drive_base)
+                if (!side.second_hand)
                 {
-                    // The hand's place on the weapon, as the game's (locked) grip holds it now.
+                    // The hand's place on the weapon, as the game's (locked) grip holds it now, every
+                    // frame: the game may set the hand on the weapon anew after it is taken (self-test
+                    // run 21: 10 cm and 16 degrees from how it was when taken, steadily).
                     Quat inv = weapon_xf.q.inverse();
                     side.hand_in_weapon.q = (inv * hand.q).normalized();
                     side.hand_in_weapon.t = inv.rotate(hand.t - weapon_xf.t) * (1.0 / weapon_xf.s);
+                }
+                if (base != side.drive_base)
+                {
                     side.drive_base = base;
                     side.have_prev_drive_target = false;
                     HSVR_LOG("Weapon: %s hand's weapon %ls is now pulled to the controller (B&S hold); hand %.1f cm from the weapon's root", side.label,
@@ -5258,7 +5268,11 @@ namespace hsvr
                     {
                         joint_release(side);
                         side.handle_aligned = false;
-                        if (joint_make(side, base, hand) && !side.second_hand && cfg.align_handle)
+                        Xf at_fist;
+                        at_fist.q = weapon_xf.q;
+                        at_fist.t = hand.t + hand.q.rotate(side.grip_center);
+                        side.joint_f1 = weapon_xf.q.inverse().rotate(at_fist.t - weapon_xf.t) * (1.0 / weapon_xf.s);
+                        if (joint_make(side, base, at_fist) && !side.second_hand && cfg.align_handle)
                         {
                             // Line the weapon's own handle up with the controller's (B&S: the grip point's
                             // axis along the controller's, no tilt). The handle is the weapon's long axis:
@@ -5342,19 +5356,19 @@ namespace hsvr
                         named(side.joint, L"SetAngularDriveParams", {{L"PositionStrength", bytes<float>((float)kr)}, {L"VelocityStrength", bytes<float>((float)cr)}, {L"InForceLimit", bytes<float>((float)t_max)}});
                         // Where the hand should be: at the controller, turned so the weapon's handle lies along
                         // the controller's (when lined up), or as the controller turns the hand.
-                        Xf aim = target;
-                        if (side.handle_aligned)
-                        {
-                            Quat want_weapon = (side.ctrl_world * side.weapon_from_ctrl).normalized();
-                            aim.q = (want_weapon * side.hand_in_weapon.q).normalized();
-                            Vec3 fist = target.t + target.q.rotate(side.grip_center); // the controller's grip point
-                            aim.t = fist - aim.q.rotate(side.grip_center);
-                        }
+                        // The joint holds the weapon itself: its point (where the fist took it) at the
+                        // controller's grip point, the weapon turned so its handle lies along the
+                        // controller's (when lined up), or as the controller turns the hand on it.
+                        // Willie's hand rides on it where the game's grip puts it.
+                        const Xf& aim = target;
+                        Vec3 fist = side.ctrl_grip_pos; // the controller's grip point
+                        Quat want_weapon = side.handle_aligned ? (side.ctrl_world * side.weapon_from_ctrl).normalized()
+                                                               : (side.second_hand ? weapon_xf.q : (target.q * side.hand_in_weapon.q.inverse()).normalized());
                         // Targets in the joint's world frame (where it was made).
                         Quat r0i = side.joint_r0.inverse();
-                        Vec3 pos = r0i.rotate(aim.t - side.joint_p0);
+                        Vec3 pos = r0i.rotate(fist - side.joint_p0);
                         Vec3 vel = r0i.rotate(v_target);
-                        Quat q_rel = (r0i * aim.q).normalized();
+                        Quat q_rel = (r0i * want_weapon).normalized();
                         Rot rr = quat_to_rot(q_rel);
                         Vec3 wrev = r0i.rotate(w_target) * (1.0 / (2.0 * kPi)); // revolutions a second
                         named(side.joint, L"SetLinearPositionTarget", {{L"InPosTarget", bytes(ue::FVector{pos.x, pos.y, pos.z})}});
@@ -5377,6 +5391,29 @@ namespace hsvr
                         }
                         if (log_throttle(side.out_sign > 0 ? "wd-r" : "wd-l", 1.0))
                         {
+                            // What holds the hand where it is (self-test run 20: the hand 10 cm / 15 deg off the
+                            // lined-up handle, cause unknown): the hand against the weapon now versus when it was
+                            // taken (the game's grip joint should keep it), the wrist gap to the forearm, and how
+                            // hard the pull joint is pulling (at its cap = something is holding the weapon back).
+                            Quat inv_w = weapon_xf.q.inverse();
+                            Vec3 hiw_t = inv_w.rotate(hand.t - weapon_xf.t) * (1.0 / weapon_xf.s);
+                            Quat hiw_q = (inv_w * hand.q).normalized();
+                            double slip_cm = length(hiw_t - side.hand_in_weapon.t), slip_deg = quat_angle_deg(hiw_q, side.hand_in_weapon.q);
+                            Xf fore;
+                            double wrist_gap = socket_transform(s.body, side.lower_name, RTS_World, fore) ? length(hand.t - fore.t) : -1.0;
+                            Vec3 lin_f{0, 0, 0}, ang_f{0, 0, 0};
+                            {
+                                NamedCall f;
+                                if (f.init(side.joint, L"GetConstraintForce"))
+                                {
+                                    f.run();
+                                    ue::FVector a = f.get<ue::FVector>(L"OutLinearForce"), b = f.get<ue::FVector>(L"OutAngularForce");
+                                    lin_f = {a.X, a.Y, a.Z};
+                                    ang_f = {b.X, b.Y, b.Z};
+                                }
+                            }
+                            HSVR_LOG("Weapon: %s diagnosis: hand against the weapon %.1f cm and %.0f deg off how it was taken | hand %.1f cm from the forearm bone | pull joint force %.0f N (cap %.0f), torque %.1f N m (cap %.0f)",
+                                     side.label, slip_cm, slip_deg, wrist_gap, length(lin_f) / 100.0, f_max / 100.0, length(ang_f) / 1.0e4, t_max / 1.0e4);
                             double handle_off = side.handle_off_deg;
                             HSVR_LOG("Weapon: %s (joint%s): %.1f kg, grip %.1f cm and %.0f deg from where it should be, handle %.0f deg off the controller's%s (at rest a hanging %.1f kg would sag %.1f cm) | "
                                      "arm strength %.0f%% of its best this life (the game's own muscles) | caps %.0f N, %.0f N m",
