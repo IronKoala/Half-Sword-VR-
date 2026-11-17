@@ -945,6 +945,101 @@ namespace hsvr
             g.kick_down = kick;
         }
 
+        // ---- Matthew's stick layout (stick_layout) -------------------------------------------------
+        // Calls a no-parameter-that-matters event of the character (the game's input events take
+        // the key that fired them, which they only store).
+        bool call_input_event(UObject* pawn, const TCHAR* name)
+        {
+            UFunction* fn = pawn->GetFunctionByNameInChain(name);
+            if (!fn || fn->GetParmsSize() > 64) return false;
+            alignas(16) uint8_t params[64] = {};
+            pawn->ProcessEvent(fn, params);
+            return true;
+        }
+
+        void stick_layout_tick(UObject* pawn, const XrHandRaw hands[2], PadOut& pad, const Config& cfg)
+        {
+            static bool sprint_down = false, kick_down = false, up_held = false, down_held = false, prone_sent = false;
+            static double down_since = 0.0;
+            double now = now_seconds();
+            // Sprint: the left stick held in, as the game's Run key (Left Shift) held.
+            bool sprint = hands[0].stick_click;
+            if (sprint != sprint_down)
+            {
+                sprint_down = sprint;
+                // (Its two input events: _4 is the press, _5 the release, as with the other keys.)
+                bool ok = call_input_event(pawn, sprint ? STR("InpActEvt_Run_K2Node_InputActionEvent_4") : STR("InpActEvt_Run_K2Node_InputActionEvent_5"));
+                HSVR_LOG("Pad: left stick click: sprint %s%s", sprint ? "on" : "off", ok ? "" : " (the game's Run event was NOT found)");
+            }
+            // Kick: the right stick pressed in.
+            bool kick = hands[1].stick_click;
+            if (kick && !kick_down) call_event(pawn, STR("Kick Event"));
+            kick_down = kick;
+            // The right stick up and down (left and right turn; only a push that is mostly up or
+            // down counts, so turning never jumps or crouches).
+            float x = hands[1].stick_x, y = hands[1].stick_y;
+            bool up = up_held ? y > 0.5f && y > std::fabs(x) : y > 0.7f && y > std::fabs(x);
+            bool down = down_held ? y < -0.5f && -y > std::fabs(x) : y < -0.7f && -y > std::fabs(x);
+            // Jump: the game's jump button (A) while the stick is held up.
+            if (up) pad.buttons |= XINPUT_GAMEPAD_A;
+            if (up != up_held) HSVR_LOG(up ? "Pad: right stick up: jump" : "Pad: right stick back from up");
+            up_held = up;
+            // Crouch and prone, by how long the stick is held down: under the game's own 0.2 s it is a
+            // tap (crouch), held that long the game's own hold (prone).
+            if (down && !down_held)
+            {
+                down_since = now;
+                prone_sent = false;
+            }
+            bool placed = cfg.own_crouch && shared().body_placed.load();
+            if (down && !prone_sent && now - down_since >= 0.2)
+            {
+                prone_sent = true;
+                // What the game does when its crouch key is still held after 0.2 s (its delayed
+                // callback, entered here after checking the script there starts as read: "return
+                // unless Crouch Key Holding"): standing still it lies down ("Rest"), moving it dives.
+                bool* holding = pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Crouch Key Holding"));
+                UFunction* graph = pawn->GetFunctionByNameInChain(STR("ExecuteUbergraph_Willie_BP"));
+                const int32_t entry = 118040;
+                bool ok = false;
+                if (holding && graph && graph->GetParmsSize() == 4)
+                {
+                    auto& script = graph->GetScript();
+                    ok = entry < script.Num() && script.GetData()[entry] == 0x4F; // EX_PopExecutionFlowIfNot
+                }
+                if (ok)
+                {
+                    if (placed) shared().own_crouch.store(false);
+                    *holding = true;
+                    int32_t param = entry;
+                    pawn->ProcessEvent(graph, &param);
+                    bool* rest = pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Rest"));
+                    bool* dive = pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Dolphin Dive"));
+                    HSVR_LOG("Pad: right stick held down: the game's prone (lying %s, diving %s)", rest && *rest ? "yes" : "no", dive && *dive ? "yes" : "no");
+                }
+                else
+                {
+                    HSVR_LOG("Pad: right stick held down: the game's prone code is not where it was (game updated?); nothing done");
+                }
+            }
+            if (!down && down_held && !prone_sent)
+            {
+                if (placed)
+                {
+                    bool now_crouched = !shared().own_crouch.load();
+                    shared().own_crouch.store(now_crouched);
+                    HSVR_LOG(now_crouched ? "Pad: right stick down: crouching (the view goes down with the body)" : "Pad: right stick down: standing up");
+                }
+                else
+                {
+                    // Not placed (VR arms off, knocked out): the game's own crouch toggle.
+                    if (bool* crouched = pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Is Crouched??"))) *crouched = !*crouched;
+                    HSVR_LOG("Pad: right stick down: the game's own crouch toggled");
+                }
+            }
+            down_held = down;
+        }
+
         const char* source_name(Source s)
         {
             static const char* names[] = {"l_stick_x", "l_stick_y", "r_stick_x", "r_stick_y", "l_trigger", "r_trigger", "l_grip", "r_grip",
@@ -1064,6 +1159,7 @@ namespace hsvr
             pad.rx = axes[2];
             pad.ry = axes[3];
         }
+        if (have && !vr_off && cfg.stick_layout && pawn && !in_menu) stick_layout_tick(pawn, hands, pad, cfg);
         if (cfg.own_crouch && shared().body_placed.load() && !vr_off)
         {
             // The crouch button (left stick press, LS) toggles the player's own crouch and is not

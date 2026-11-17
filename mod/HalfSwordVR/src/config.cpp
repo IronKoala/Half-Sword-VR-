@@ -375,6 +375,7 @@ namespace hsvr
         num("holster_back_behind_m", c.holster_back_behind_m);
         num("swap_distance_m", c.swap_distance_m);
         flag("kick_on_b", c.kick_on_b);
+        flag("stick_layout", c.stick_layout);
         flag("pickup", c.pickup);
         num("pickup_radius_m", c.pickup_radius_m);
         flag("eat_at_mouth", c.eat_at_mouth);
