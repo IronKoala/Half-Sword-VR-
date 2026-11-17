@@ -38,12 +38,12 @@ The ini is only written with these lines when it is first created. On an existin
 
 Unattended version: `dev_script` can switch the test with the mod's own steps `hsvr.physics_off 1` and `hsvr.physics_off 0`, next to engine console commands such as `open <map>`, so a timed run can load a fight, record a while with physics on (`log_body=1`), switch it off, and record again.
 
-`open <arena>` on its own gives no character: the arena's level manager only keeps spawn points that match the mode the menus set on the game instance (GI_Settings). The step `hsvr.set <Name>=<value>` writes one of those variables first, as the Free Mode button and the Jester's Fight button do. An easy one-on-one fight:
+`open <arena>` on its own gives no character: the arena's level manager only keeps spawn points that match the mode the menus set on the game instance (GI_Settings). The step `hsvr.set <Name>=<value>` writes one of those variables first, as the Free Mode button and the Jester's Fight button do. The arena's game manager loads the save again when the map starts (GI_Settings "Load Game"), which would undo them, so the Fight button saves first; `hsvr.call Save Game` does the same (`hsvr.call` calls a game instance function without parameters). An easy one-on-one fight:
 
 ```
-dev_script=40:hsvr.set Current Play Mode=1; 40:hsvr.set Free Mode Activated=true; 40:hsvr.set Current Game Mode Enum=1; 40:hsvr.set Free Mode Foes Amount=1; 40:hsvr.set FreeMode Foes Amount Random=false; 40:hsvr.set Free Mode Tier=0; 40:hsvr.set FreeMode Tier Random=false; 40:hsvr.set Free Mode Carnage=false; 40:hsvr.set Free Mode Brawling=false; 40:hsvr.set Free Mode Blossfechten=false; 40:hsvr.set FreeMode Multiplayer=false; 45:open /Game/Maps/Arenas/Map_Arena_Yard
+dev_script=40:hsvr.set Current Play Mode=1; 40:hsvr.set Free Mode Activated=true; 40:hsvr.set Current Game Mode Enum=1; 40:hsvr.set Free Mode Foes Amount=1; 40:hsvr.set FreeMode Foes Amount Random=false; 40:hsvr.set Free Mode Tier=0; 40:hsvr.set FreeMode Tier Random=false; 40:hsvr.set Free Mode Carnage=false; 40:hsvr.set Free Mode Brawling=false; 40:hsvr.set Free Mode Blossfechten=false; 40:hsvr.set FreeMode Multiplayer=false; 40:hsvr.set Current Combat Mode=1; 40:hsvr.set Current Lose Condition=0; 42:hsvr.call Save Game; 45:open /Game/Maps/Arenas/Map_Arena_Yard
 ```
 
-The game saves by itself when the fight starts, so the save is left in Free Mode, as after pressing Free Mode and Fight by hand. Back the save up first if that matters.
+This saves the game, so the save is left in Free Mode, as after pressing Free Mode and Fight by hand. Back the save up first if that matters.
 
 **What this answers:** whether physics can be switched off for the player alone without the game breaking, and what Phase 3 has to replace.

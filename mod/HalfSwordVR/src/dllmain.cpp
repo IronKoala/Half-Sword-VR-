@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -702,6 +703,34 @@ namespace
         HSVR_LOG("Script: hsvr.set: %ls is a %ls, which this step does not write", found->GetName().c_str(), type.c_str());
     }
 
+    // dev_script step "hsvr.call <Function>": calls a function of the game instance that takes no
+    // parameters, e.g. GI_Settings "Save Game", which the Fight button calls before opening the arena
+    // (the arena's game manager loads the save again on BeginPlay, undoing hsvr.set otherwise).
+    void script_call_game_instance(const std::string& step)
+    {
+        std::string name_text = step;
+        while (!name_text.empty() && name_text.back() == ' ') name_text.pop_back();
+        std::wstring wanted(name_text.begin(), name_text.end());
+        UObject* viewport = object_property(g_engine, STR("GameViewport"));
+        UObject* game_instance = object_property(viewport, STR("GameInstance"));
+        if (!game_instance)
+        {
+            HSVR_LOG("Script: hsvr.call: no game instance yet");
+            return;
+        }
+        UFunction* function = game_instance->GetFunctionByNameInChain(wanted.c_str());
+        if (!function)
+        {
+            HSVR_LOG("Script: hsvr.call: %ls has no function \"%s\"", game_instance->GetFullName().c_str(), name_text.c_str());
+            return;
+        }
+        // Zeroed room for the parameter block; the functions this is meant for have none.
+        alignas(16) static uint8_t parameters[1024];
+        memset(parameters, 0, sizeof(parameters));
+        game_instance->ProcessEvent(function, parameters);
+        HSVR_LOG("Script: called %ls on the game instance", function->GetFullName().c_str());
+    }
+
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -751,6 +780,11 @@ namespace
             if (entry.command.rfind("hsvr.set ", 0) == 0)
             {
                 script_set_game_instance(entry.command.substr(9));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.call ", 0) == 0)
+            {
+                script_call_game_instance(entry.command.substr(10));
                 continue;
             }
             run_console_command(entry.command);
