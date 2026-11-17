@@ -89,6 +89,9 @@ namespace hsvr
         // The equipment screen (the tavern's UI_Tavern_Inventory) is up: it shows the character behind
         // it, so no dark sheet is drawn behind the menu panel (Matthew, 2026-11-17).
         std::atomic<bool> menu_shows_character{false};
+        // The left hand holds the right hand's weapon as its second hand (its grip closed on the
+        // weapon's handle); the weapon pull gives it a joint of its own where it took hold.
+        std::atomic<bool> left_second_hand{false};
         std::atomic<bool> menu_up{true};
         // The game has asked for a mouse pointer (it does in menus, not in a fight).
         std::atomic<bool> game_wants_pointer{false};

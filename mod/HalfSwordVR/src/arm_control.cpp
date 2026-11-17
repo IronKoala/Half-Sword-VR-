@@ -1950,7 +1950,7 @@ namespace hsvr
                         pull_set(d, L.f_pos, (float)(cfg.hand_pull_strength * carry));
                         pull_set(d, L.f_vel, (float)(std::max(0.0, cfg.hand_pull_damping) * carry));
                         pull_set(d, L.f_maxlin, (float)(std::max(0.0, cfg.hand_pull_max_force) * carry));
-                        if (s.side[body.side].weapon_driven)
+                        if (s.side[body.side].weapon_driven && !s.side[body.side].second_hand)
                         {
                             // B&S: the hand is not driven while it holds a weapon; the weapon is.
                             pull_set(d, L.f_pos, 0.0f);
@@ -4889,7 +4889,7 @@ namespace hsvr
             if (dt <= 0.0) return;
             for (Side& side : s.side)
             {
-                if (!side.have_turn_target || !side.pull_active || side.weapon_driven) continue;
+                if (!side.have_turn_target || !side.pull_active || (side.weapon_driven && !side.second_hand)) continue;
                 Xf hand;
                 if (!socket_transform(s.body, side.hand_name, RTS_World, hand)) continue;
                 Quat err = (side.turn_target * hand.q.inverse()).normalized();
@@ -5138,8 +5138,7 @@ namespace hsvr
             UObject* right_weapon = s.pawn && s.pawn->GetPropertyByNameInChain(STR("Weapon R")) ? object_property(s.pawn, STR("Weapon R")) : nullptr;
             // The left hand on the right hand's weapon (the game's offhand joint, put on by the left
             // grip): both hands then pull it, as in B&S's two-handed hold.
-            bool* offhand_flag = s.pawn ? s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("L Hand In Offhand Attached")) : nullptr;
-            bool two_handed = cfg.weapon_joint && offhand_flag && *offhand_flag && right_weapon && s.side[1].weapon_driven;
+            bool two_handed = cfg.weapon_joint && shared().left_second_hand.load() && right_weapon && s.side[1].weapon_driven;
             for (Side& side : s.side)
             {
                 const TCHAR* property = side.out_sign > 0 ? STR("Weapon R") : STR("Weapon L");
@@ -5147,8 +5146,8 @@ namespace hsvr
                 bool second = side.out_sign < 0 && two_handed;
                 if (second) weapon = right_weapon;
                 UObject* base = weapon && weapon->GetPropertyByNameInChain(STR("BaseMesh")) ? object_property(weapon, STR("BaseMesh")) : nullptr;
-                bool want = cfg.weapon_drive && s.kin_active && !s.kin_hands && s.body && side.pull_active && side.target_valid && side.grip_locked && side.wrist_freed &&
-                            base && side.held_carry <= 1.0 && side.rescue_until <= 0.0 && !(side.out_sign < 0 && weapon == right_weapon && !second);
+                bool want = cfg.weapon_drive && s.kin_active && !s.kin_hands && s.body && side.pull_active && side.target_valid && (side.grip_locked || second) &&
+                            side.wrist_freed && base && side.held_carry <= 1.0 && side.rescue_until <= 0.0 && !(side.out_sign < 0 && weapon == right_weapon && !second);
                 if (second != side.second_hand && side.joint) joint_release(side); // the joint is made anew for the new role
                 side.second_hand = second;
                 if (!want)
@@ -5255,24 +5254,50 @@ namespace hsvr
                             // axis along the controller's, no tilt). The handle is the weapon's long axis:
                             // the one it is easiest to turn about, pointing from the hand to the weapon's
                             // middle (towards the blade or head).
-                            int axis_i = -1;
-                            double least = 1e30;
-                            const double mom[3] = {inertia_local.x, inertia_local.y, inertia_local.z};
-                            for (int i = 0; i < 3; ++i)
-                                if (mom[i] > 0.0 && mom[i] < least) least = mom[i], axis_i = i;
-                            if (axis_i >= 0)
+                            // The handle as the game made the weapon: from its pommel to its right-hand grip
+                            // point (towards the blade or head), as the Chasms VR Framework takes a game's
+                            // own grip line. Without those parts, the weapon's long axis (the one it is
+                            // easiest to turn about).
+                            Vec3 L{0, 0, 0};
+                            const char* source = "";
                             {
-                                Vec3 along{axis_i == 0 ? 1.0 : 0.0, axis_i == 1 ? 1.0 : 0.0, axis_i == 2 ? 1.0 : 0.0};
-                                if (dot(along, weapon_xf.q.inverse().rotate(com - hand.t)) < 0.0) along = along * -1.0;
-                                Vec3 L = weapon_xf.q.rotate(along);
+                                UObject* pommel = weapon->GetPropertyByNameInChain(STR("Pommel")) ? object_property(weapon, STR("Pommel")) : nullptr;
+                                UObject* gr = weapon->GetPropertyByNameInChain(STR("Grip R Hand Default Pos")) ? object_property(weapon, STR("Grip R Hand Default Pos")) : nullptr;
+                                Vec3 a, b;
+                                if (pommel && gr && component_location(pommel, a) && component_location(gr, b) && length(b - a) > 2.0)
+                                {
+                                    L = normalized(b - a);
+                                    source = "the game's pommel to grip line";
+                                }
+                            }
+                            if (length(L) < 0.5)
+                            {
+                                int axis_i = -1;
+                                double least = 1e30;
+                                const double mom[3] = {inertia_local.x, inertia_local.y, inertia_local.z};
+                                for (int i = 0; i < 3; ++i)
+                                    if (mom[i] > 0.0 && mom[i] < least) least = mom[i], axis_i = i;
+                                if (axis_i >= 0)
+                                {
+                                    Vec3 along{axis_i == 0 ? 1.0 : 0.0, axis_i == 1 ? 1.0 : 0.0, axis_i == 2 ? 1.0 : 0.0};
+                                    if (dot(along, weapon_xf.q.inverse().rotate(com - hand.t)) < 0.0) along = along * -1.0;
+                                    L = weapon_xf.q.rotate(along);
+                                    source = "its long axis";
+                                }
+                            }
+                            if (length(L) > 0.5)
+                            {
                                 Vec3 F = side.ctrl_world.rotate(Vec3{1, 0, 0}); // the controller's handle direction
+                                // Held the other way round (a reversed grip) when that is the nearer turn.
+                                bool reversed = dot(L, F) < 0.0;
+                                if (reversed) F = F * -1.0;
                                 Vec3 cr{L.y * F.z - L.z * F.y, L.z * F.x - L.x * F.z, L.x * F.y - L.y * F.x};
                                 double ang = std::atan2(length(cr), dot(L, F));
                                 Quat turn = length(cr) > 1e-9 ? quat_axis_angle(normalized(cr), ang) : Quat{0, 0, 0, 1};
                                 side.weapon_from_ctrl = (side.ctrl_world.inverse() * turn * weapon_xf.q).normalized();
                                 side.handle_aligned = true;
-                                HSVR_LOG("Weapon: %s: the weapon's handle (its long axis, local %c) was %.0f degrees off the controller's; lined up with it", side.label,
-                                         "xyz"[axis_i], ang * kRadToDeg);
+                                HSVR_LOG("Weapon: %s: the weapon's handle (%s) was %.0f degrees off the controller's%s; lined up with it", side.label, source, ang * kRadToDeg,
+                                         reversed ? " (held reversed)" : "");
                             }
                         }
                     }

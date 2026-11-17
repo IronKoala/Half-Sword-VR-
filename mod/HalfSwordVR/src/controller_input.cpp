@@ -776,23 +776,39 @@ namespace hsvr
                     HSVR_LOG("Hands: %s grip closed on the weapon it holds%s", side, zone ? " (at a sheath place)" : "");
                     return;
                 }
-                // The second hand on a weapon (a two-hander, or one-handed in both hands): the empty
-                // left hand closes on the right hand's weapon at the place the game keeps for the
-                // second hand ("Grip L Hand Off Hand"); the game's own offhand attach does the rest.
+                // The second hand on a weapon: the empty left hand closes on the right hand's weapon
+                // anywhere along its handle (within offhand_radius_m of the line from its pommel to
+                // its right-hand grip point, as the game made the weapon), and holds it just where it
+                // took it (B&S and the Chasms VR Framework: the hand neither snaps nor moves the
+                // weapon); the weapon pull gives that hand a joint of its own there (arm_control.cpp).
                 if (h == 0)
                 {
                     UObject* weapon = object_at(pawn, STR("Weapon R"));
-                    UObject* spot = weapon ? object_at(weapon, STR("Grip L Hand Off Hand")) : nullptr;
-                    Vec palm{}, at{};
-                    if (spot && hand_world(pawn, 0, palm) && component_world(spot, at))
+                    UObject* pommel = weapon ? object_at(weapon, STR("Pommel")) : nullptr;
+                    UObject* grip = weapon ? object_at(weapon, STR("Grip R Hand Default Pos")) : nullptr;
+                    if (!grip && weapon) grip = object_at(weapon, STR("Grip"));
+                    Vec palm{}, a{}, b{};
+                    if (pommel && grip && hand_world(pawn, 0, palm) && component_world(pommel, a) && component_world(grip, b))
                     {
-                        double d = std::sqrt((palm.X - at.X) * (palm.X - at.X) + (palm.Y - at.Y) * (palm.Y - at.Y) + (palm.Z - at.Z) * (palm.Z - at.Z));
-                        if (d <= cfg.offhand_radius_m * 100.0 && call_event(pawn, STR("Attach L Hand To Offhand Position")))
+                        // Out past the right hand too (towards the blade: a half-sword hold), by half a handle.
+                        double ux = b.X - a.X, uy = b.Y - a.Y, uz = b.Z - a.Z;
+                        double len = std::sqrt(ux * ux + uy * uy + uz * uz);
+                        if (len > 2.0)
                         {
-                            g_bs.offhand = true;
-                            g_bs.offhand_since = now_seconds();
-                            HSVR_LOG("Hands: left hand takes the weapon as its second hand (%.0f cm from the place for it)", d);
-                            return;
+                            ux /= len, uy /= len, uz /= len;
+                            double along = (palm.X - a.X) * ux + (palm.Y - a.Y) * uy + (palm.Z - a.Z) * uz;
+                            double clamped = std::max(-5.0, std::min(len * 1.5, along));
+                            double px = a.X + ux * clamped - palm.X, py = a.Y + uy * clamped - palm.Y, pz = a.Z + uz * clamped - palm.Z;
+                            double d = std::sqrt(px * px + py * py + pz * pz);
+                            if (d <= cfg.offhand_radius_m * 100.0)
+                            {
+                                g_bs.offhand = true;
+                                g_bs.offhand_since = now_seconds();
+                                shared().left_second_hand.store(true);
+                                HSVR_LOG("Hands: left hand takes the weapon's handle %.0f cm from it, %.0f cm along it from the pommel (handle %.0f cm to the right hand's grip); held where it took it",
+                                         d, along, len);
+                                return;
+                            }
                         }
                     }
                 }
@@ -827,7 +843,7 @@ namespace hsvr
             if (h == 0 && g_bs.offhand)
             {
                 g_bs.offhand = false;
-                call_event(pawn, STR("Release Offhand"));
+                shared().left_second_hand.store(false);
                 HSVR_LOG("Hands: left hand lets go of the weapon's handle");
                 return;
             }
@@ -882,7 +898,17 @@ namespace hsvr
                 call_event(pawn, STR("Release Offhand"));
                 HSVR_LOG("Hands: the game put the left hand on the weapon by itself; taken off (squeeze the left grip there to hold it two-handed)");
             }
-            if (attached && !*attached && now_seconds() - g_bs.offhand_since > 1.0) g_bs.offhand = false;
+            // (The left hand's own hold is the mod's, not the game's offhand joint: every game attach is taken off.)
+            if (attached && *attached && g_bs.offhand && now_seconds() >= next_release)
+            {
+                next_release = now_seconds() + 0.5;
+                call_event(pawn, STR("Release Offhand"));
+            }
+            if (!object_at(pawn, STR("Weapon R")) && g_bs.offhand)
+            {
+                g_bs.offhand = false;
+                shared().left_second_hand.store(false);
+            }
         }
 
         void gestures(UObject* pawn, const XrHandRaw hands[2], bool in_menu, const Config& cfg)
