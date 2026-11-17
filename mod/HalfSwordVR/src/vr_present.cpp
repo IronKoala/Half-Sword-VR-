@@ -328,6 +328,8 @@ namespace hsvr
         // One action set with a grip pose, trigger and squeeze for each hand. Bindings are
         // suggested for the common controller types; SteamVR maps whichever controllers are in
         // use (the Steam Frame's included) onto one of them.
+        bool g_has_frame_extension = false;
+
         struct HandActions
         {
             std::atomic<bool> ready{false};
@@ -2589,6 +2591,10 @@ float4 PSMain(VSOut i) : SV_Target
             for (auto& e : exts)
             {
                 if (strcmp(e.extensionName, XR_KHR_D3D12_ENABLE_EXTENSION_NAME) == 0) has_d3d12 = true;
+                // The Steam Frame controllers' own interaction profile is behind this extension
+                // (without it SteamVR answers its paths with XR_ERROR_PATH_UNSUPPORTED: first headset
+                // run with build 3).
+                if (strcmp(e.extensionName, "XR_VALVE_frame_controller_interaction") == 0) g_has_frame_extension = true;
             }
             if (!has_d3d12)
             {
@@ -2597,13 +2603,15 @@ float4 PSMain(VSOut i) : SV_Target
             }
         }
 
-        const char* extensions[] = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
+        const char* extensions[2] = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME, "XR_VALVE_frame_controller_interaction"};
+        uint32_t extension_count = (g_has_frame_extension && cfg.frame_bindings) ? 2u : 1u;
+        HSVR_LOG("OpenXR: Steam Frame controller extension %s", g_has_frame_extension ? (cfg.frame_bindings ? "offered and switched on" : "offered, left off (frame_bindings=0)") : "not offered by this runtime");
         XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
         strncpy(ici.applicationInfo.applicationName, "Half Sword VR", XR_MAX_APPLICATION_NAME_SIZE - 1);
         ici.applicationInfo.applicationVersion = 1;
         strncpy(ici.applicationInfo.engineName, "HalfSwordVR mod", XR_MAX_ENGINE_NAME_SIZE - 1);
         ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
-        ici.enabledExtensionCount = 1;
+        ici.enabledExtensionCount = extension_count;
         ici.enabledExtensionNames = extensions;
         XrResult r = xr.CreateInstance(&ici, &g_instance);
         if (XR_FAILED(r))
