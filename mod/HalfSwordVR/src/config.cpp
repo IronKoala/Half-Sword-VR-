@@ -390,6 +390,7 @@ namespace hsvr
         num("wd_rot_spring", c.wd_rot_spring);
         num("wd_rot_damper", c.wd_rot_damper);
         num("wd_rot_max_nm", c.wd_rot_max_nm);
+        num("wd_damping_ratio", c.wd_damping_ratio);
         num("offhand_radius_m", c.offhand_radius_m);
         flag("keep_held_weapon", c.keep_held_weapon);
         num("drop_double_squeeze_s", c.drop_double_squeeze_s);

@@ -339,8 +339,15 @@ namespace hsvr
         // pull is off). The values are B&S's player values (Creature_PlayerDefaultMale): position
         // 5000 N/m, 100 N s/m, 3000 N at most; rotation 1000 N m/rad, 50 N m s/rad, 250 N m at most.
         bool weapon_drive = true;
-        double wd_pos_spring = 5000.0, wd_pos_damper = 100.0, wd_pos_max_n = 3000.0;
-        double wd_rot_spring = 1000.0, wd_rot_damper = 50.0, wd_rot_max_nm = 250.0;
+        double wd_pos_spring = 5000.0, wd_pos_damper = 100.0, wd_pos_max_n = 400.0;
+        double wd_rot_spring = 1000.0, wd_rot_damper = 50.0, wd_rot_max_nm = 40.0;
+        // (2026-11-17, Matthew: "still bouncy and it felt weightless". B&S's damper left the pull
+        // under-damped on a 2.7 kg sword (it swung 29 cm / 58 degrees past and back), and B&S's caps
+        // (3000 N, 250 N m) let it accelerate at about 80 g, so it never trailed the hand. Damping is
+        // now at least this fraction of critical for each weapon's own mass and inertia (1 = settles
+        // without overshoot; the B&S damper is used if it is stronger), and the caps are about what
+        // a real arm (400 N) and wrist (40 N m) can give.)
+        double wd_damping_ratio = 1.0;
         double hand_pull_strength = 12000.0;
         double hand_pull_damping = 150.0;
         double hand_pull_max_force = 30000.0;

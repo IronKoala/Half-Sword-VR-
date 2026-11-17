@@ -5057,7 +5057,8 @@ namespace hsvr
                 Vec3 v = get_vec(s.body, lin_get, &side.hand_name);
                 Vec3 w = get_vec(base, ang_get, nullptr);
                 // ---- place: a spring from the controller to the grip point (cm, kg, s) ----
-                double k = cfg.wd_pos_spring, c = cfg.wd_pos_damper, f_max = cfg.wd_pos_max_n * 100.0; // N -> kg cm/s^2
+                double k = cfg.wd_pos_spring, f_max = cfg.wd_pos_max_n * 100.0; // N -> kg cm/s^2
+                double c = std::max(cfg.wd_pos_damper, cfg.wd_damping_ratio * 2.0 * std::sqrt(k * m_total)); // no overshoot for this weight
                 Vec3 e = target.t - hand.t;
                 double kd = dt * dt * k / m_total, cd = dt * c / m_total;
                 Vec3 v_new = (v + e * (dt * k / m_total) + v_target * (kd + cd)) * (1.0 / (1.0 + kd + cd));
@@ -5078,7 +5079,8 @@ namespace hsvr
                 Vec3 r_perp = r_hand - axis * dot(r_hand, axis);
                 inertia += 1.0 * dot(r_perp, r_perp);
                 inertia = std::max(inertia, 500.0); // at least a small object's (0.05 kg m^2)
-                double kr = cfg.wd_rot_spring * 1.0e4, cr = cfg.wd_rot_damper * 1.0e4, t_max = cfg.wd_rot_max_nm * 1.0e4; // N m -> kg cm^2/s^2
+                double kr = cfg.wd_rot_spring * 1.0e4, t_max = cfg.wd_rot_max_nm * 1.0e4; // N m -> kg cm^2/s^2
+                double cr = std::max(cfg.wd_rot_damper * 1.0e4, cfg.wd_damping_ratio * 2.0 * std::sqrt(kr * inertia));
                 double kdr = dt * dt * kr / inertia, cdr = dt * cr / inertia;
                 Vec3 w_new = (w + axis * (angle * dt * kr / inertia) + w_target * (kdr + cdr)) * (1.0 / (1.0 + kdr + cdr));
                 Vec3 dw = w_new - w;
