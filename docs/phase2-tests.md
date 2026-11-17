@@ -47,3 +47,11 @@ dev_script=40:hsvr.set Current Play Mode=1; 40:hsvr.set Free Mode Activated=true
 This saves the game, so the save is left in Free Mode, as after pressing Free Mode and Fight by hand. Back the save up first if that matters.
 
 **What this answers:** whether physics can be switched off for the player alone without the game breaking, and what Phase 3 has to replace.
+
+### Result (unattended, 2026-11-17, game build 26737211)
+
+- `SetSimulatePhysics(false)` on the character's mesh does nothing: the pelvis still simulates in the same frame. `SetAllBodiesSimulatePhysics(false)` switches every body off, so the test calls both and logs the pelvis after each.
+- With every body off, the game never turned physics back on while he was alive (90 checks, one a second).
+- The body freezes standing in the pose it had, while the collision capsule keeps moving under the opponent's pushes. Nothing fell, sank or slid. The opponent stood face to face with him and no damage showed (no red screen, no death).
+- Physics back on recovered him at once: he moved and fought normally.
+- An idle character at the easiest tier is killed in about 33 s, so the unattended script switches physics off about 3 s after the spawn.
