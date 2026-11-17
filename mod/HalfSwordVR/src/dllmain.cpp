@@ -623,6 +623,83 @@ namespace
         bool done = false;
     };
 
+    // dev_script step "hsvr.set <Name>=<value>": writes one variable of the game instance (GI_Settings
+    // in Half Sword), the way the menus do before a fight is opened. <Name> is the variable's name as
+    // the Blueprint shows it; a name the engine stores with a suffix ("<Name>_12_ABC...") also matches.
+    // Yes/no, byte, enum and whole-number variables only.
+    void script_set_game_instance(const std::string& step)
+    {
+        size_t equals = step.find('=');
+        if (equals == std::string::npos)
+        {
+            HSVR_LOG("Script: hsvr.set needs <Name>=<value>: %s", step.c_str());
+            return;
+        }
+        std::string name_text = step.substr(0, equals);
+        while (!name_text.empty() && name_text.back() == ' ') name_text.pop_back();
+        std::string value_text = step.substr(equals + 1);
+        std::wstring wanted(name_text.begin(), name_text.end());
+        std::wstring wanted_prefix = wanted + STR("_");
+
+        UObject* viewport = object_property(g_engine, STR("GameViewport"));
+        UObject* game_instance = object_property(viewport, STR("GameInstance"));
+        if (!game_instance)
+        {
+            HSVR_LOG("Script: hsvr.set: no game instance yet");
+            return;
+        }
+        UClass* game_class = game_instance->GetClassPrivate();
+        FProperty* found = nullptr;
+        for (UStruct* level = game_class; level && !found; level = level->GetSuperStruct())
+        {
+            for (FProperty* property : level->ForEachProperty())
+            {
+                auto property_name = property->GetName();
+                if (property_name == wanted || property_name.rfind(wanted_prefix, 0) == 0)
+                {
+                    found = property;
+                    break;
+                }
+            }
+        }
+        if (!found)
+        {
+            HSVR_LOG("Script: hsvr.set: %ls has no variable \"%s\". Its variables:", game_instance->GetFullName().c_str(), name_text.c_str());
+            for (FProperty* property : game_class->ForEachProperty())
+                HSVR_LOG("  %ls (%ls)", property->GetName().c_str(), property->GetClass().GetName().c_str());
+            return;
+        }
+        auto type = found->GetClass().GetName();
+        uint8_t* address = reinterpret_cast<uint8_t*>(game_instance) + found->GetOffset_Internal();
+        if (type == STR("BoolProperty"))
+        {
+            auto* flag = static_cast<FBoolProperty*>(found);
+            uint8_t* byte = address + flag->GetByteOffset();
+            bool before = (*byte & flag->GetFieldMask()) != 0;
+            bool value = value_text.find("true") != std::string::npos || atoi(value_text.c_str()) != 0;
+            if (value) *byte |= flag->GetFieldMask();
+            else *byte &= ~flag->GetFieldMask();
+            HSVR_LOG("Script: game instance %ls (yes/no) was %d, now %d", found->GetName().c_str(), (int)before, (int)value);
+            return;
+        }
+        if (type == STR("ByteProperty") || type == STR("EnumProperty") || type == STR("IntProperty"))
+        {
+            int32_t size = found->GetSize();
+            if (size != 1 && size != 4)
+            {
+                HSVR_LOG("Script: hsvr.set: %ls is %ls of %d bytes, not written", found->GetName().c_str(), type.c_str(), size);
+                return;
+            }
+            int64_t value = atoll(value_text.c_str());
+            int64_t before = size == 1 ? (int64_t)*address : (int64_t)*reinterpret_cast<int32_t*>(address);
+            if (size == 1) *address = (uint8_t)value;
+            else *reinterpret_cast<int32_t*>(address) = (int32_t)value;
+            HSVR_LOG("Script: game instance %ls (%ls) was %lld, now %lld", found->GetName().c_str(), type.c_str(), (long long)before, (long long)value);
+            return;
+        }
+        HSVR_LOG("Script: hsvr.set: %ls is a %ls, which this step does not write", found->GetName().c_str(), type.c_str());
+    }
+
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -667,6 +744,11 @@ namespace
             if (entry.command.rfind("hsvr.physics_off ", 0) == 0)
             {
                 g_physics_override = atoi(entry.command.c_str() + 17) != 0 ? 1 : 0;
+                continue;
+            }
+            if (entry.command.rfind("hsvr.set ", 0) == 0)
+            {
+                script_set_game_instance(entry.command.substr(9));
                 continue;
             }
             run_console_command(entry.command);
