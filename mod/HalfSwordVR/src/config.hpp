@@ -206,6 +206,10 @@ namespace hsvr
         // opens an arena): pretend hands hold still, move, swing, strike the floor; the character
         // walks and turns; numbers are checked and written to selftest_result.txt.
         bool dev_selftest = false;
+        // Which parts of the self-test to run, by number (1 to 13, comma separated; empty = all). The
+        // settle part always runs; a part left out takes no time and its checks are not judged.
+        // The game is closed as soon as the test is done.
+        std::string dev_selftest_parts;
         // Self-test only: the character is made this size when it appears (0 = left as it is).
         double dev_character_scale = 0.0;
         // 1 = the player's height is the character's height: the world is scaled so that the

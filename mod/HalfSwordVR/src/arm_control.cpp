@@ -3606,6 +3606,7 @@ namespace hsvr
             bool h_begun = false, h_drop_checked = false, h_dropped = false, h_pick_checked = false, h_picked = false, h_pick_far = false;
             bool h_no_free_sheath = false, h_grip_locked_before = false;
             int wd_frames = 0, wd_measured = 0;
+            bool skipped[13] = {};
             // The hold layer's own checks: the weapon taken where the hand touched its handle (not at
             // the game's grip point), and a second hand on it.
             double h_expect_along = -1e9, h_got_along = -1e9;
@@ -3941,6 +3942,23 @@ namespace hsvr
                 if (waiting_since == 0.0) waiting_since = now;
                 if (!s.kin_active && now - waiting_since < 12.0) return;
                 t.start = t.last = now;
+                if (!cfg.dev_selftest_parts.empty())
+                {
+                    // Only the parts asked for (dev_selftest_parts): the others take no time.
+                    bool want[14] = {};
+                    const std::string& list = cfg.dev_selftest_parts;
+                    for (size_t i = 0; i < list.size();)
+                    {
+                        size_t j = list.find(',', i);
+                        if (j == std::string::npos) j = list.size();
+                        int n = atoi(list.substr(i, j - i).c_str());
+                        if (n >= 1 && n <= 13) want[n] = true;
+                        i = j + 1;
+                    }
+                    for (int i = 1; i < 13; ++i)
+                        if (!want[i + 1]) t.parts[i].seconds = 0.0, t.skipped[i] = true;
+                    HSVR_LOG("Test: only parts %s run (and the settle part)", list.c_str());
+                }
                 t.thrown_before = s.thrown_cm;
                 t.undone_before = s.ground_undone_total;
                 t.steps_before = s.steps_total;
@@ -3989,6 +4007,7 @@ namespace hsvr
             {
                 // ---- verdicts ----
                 t.finished = true;
+                shared().selftest_finished.store(true);
                 shared().selftest_phase.store(-1);
                 shared().selftest_grip[0].store(0.0f);
                 shared().selftest_grip[1].store(0.0f);
@@ -4008,11 +4027,13 @@ namespace hsvr
                     // arm's reach is noted, not failed: it may have blocked a hand or struck.
                     static const struct { const char* starts; int part; } kParts[] = {
                         {"hands still", 1}, {"slow movement", 2}, {"fast swings", 3}, {"striking the floor", 4}, {"after the floor", 5}, {"twisting", 6},
-                        {"walking", 7}, {"turning", 8}, {"crouch", 9}, {"kettle", 10}, {"weapon angle", 2}, {"shield", 11}, {"no hand was lost", -1}, {"nothing struck", -1}};
+                        {"walking", 7}, {"turning", 8}, {"crouch", 9}, {"kettle", 10}, {"weapon angle", 2}, {"shield", 11}, {"no hand was lost", -1}, {"nothing struck", -1},
+                        {"standing", 1}, {"handle lined", 1}, {"B&S hold", 1}, {"hands:", 12}, {"hold layer", 12}, {"crouched", 9}};
                     double near_cm = 1e9;
                     for (const auto& entry : kParts)
                     {
                         if (strncmp(text, entry.starts, strlen(entry.starts)) != 0) continue;
+                        if (entry.part >= 0 && t.skipped[entry.part]) return; // a part not run this time
                         near_cm = entry.part < 0 ? t.opponent_nearest : t.parts[entry.part].other_min;
                         break;
                     }

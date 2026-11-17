@@ -119,7 +119,8 @@ namespace hsvr
         std::atomic<bool> selftest_hand_set{false};
         std::atomic<bool> selftest_hand_hip{false};
         std::atomic<float> selftest_hand_xr[3] = {0.0f, 0.0f, 0.0f};
-        std::atomic<bool> selftest_lhand_set{false}; // the left one too (the second-hand check)
+        std::atomic<bool> selftest_lhand_set{false};
+        std::atomic<bool> selftest_finished{false}; // the self-test has written its result: the game may close // the left one too (the second-hand check)
         std::atomic<float> selftest_lhand_xr[3] = {0.0f, 0.0f, 0.0f};
         // Heights. The tracking origin above the real floor (metres; below 0 = not known), the
         // character's size (1 = the game's standard Willie), its feet below its centre and its

@@ -468,6 +468,17 @@ namespace
             }
             if (!entries.empty()) HSVR_LOG("Script: %d timed step(s) from the settings file (dev_script)", (int)entries.size());
         }
+        if (hsvr::config().dev_selftest && hsvr::shared().selftest_finished.load())
+        {
+            static bool quit = false;
+            if (!quit)
+            {
+                quit = true;
+                HSVR_LOG("Script: the self-test is done; closing the game");
+                run_console_command("quit");
+            }
+            return;
+        }
         if (entries.empty()) return;
         double now = (double)(GetTickCount64() - start) / 1000.0;
         for (ScriptEntry& entry : entries)

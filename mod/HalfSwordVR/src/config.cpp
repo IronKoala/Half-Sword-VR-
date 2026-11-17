@@ -343,6 +343,7 @@ namespace hsvr
         flag("rigid_grip", c.rigid_grip);
         flag("kick_legs", c.kick_legs);
         flag("dev_selftest", c.dev_selftest);
+        text("dev_selftest_parts", c.dev_selftest_parts);
         num("dev_character_scale", c.dev_character_scale);
         flag("height_match", c.height_match);
         num("player_eye_cm", c.player_eye_cm);
