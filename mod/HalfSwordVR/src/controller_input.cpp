@@ -432,6 +432,7 @@ namespace hsvr
             }
         };
         HoldButton g_y_button, g_x_button;
+        bool g_x_tapped = false; // X pressed and let go within the hold time: slow motion (stick_layout)
 
         void mod_keys_on_controllers(const XrHandRaw hands[2], const Config& cfg)
         {
@@ -452,6 +453,7 @@ namespace hsvr
                 HSVR_LOG("Controller: menu panel %s (Y held)", toggled == cfg.ui_panel_auto ? "always shown" : "hidden during play");
             }
             if (x == 2) arm_toggle();
+            if (x == 1) g_x_tapped = true;
         }
 
         // ---- pointing at the menu panel --------------------------------------------------------
@@ -959,7 +961,23 @@ namespace hsvr
 
         void stick_layout_tick(UObject* pawn, const XrHandRaw hands[2], PadOut& pad, const Config& cfg)
         {
-            static bool sprint_down = false, kick_down = false, up_held = false, down_held = false, prone_sent = false;
+            static bool sprint_down = false, kick_down = false, up_held = false, down_held = false, prone_sent = false, a_down = false;
+            // Taunt: A is the game's Talk key alone (held, the game's own give-up hold as before).
+            bool a = hands[1].button_lower;
+            if (a != a_down)
+            {
+                a_down = a;
+                call_input_event(pawn, a ? STR("InpActEvt_Talk_K2Node_InputActionEvent_33") : STR("InpActEvt_Talk_K2Node_InputActionEvent_34"));
+                if (a) HSVR_LOG("Pad: A: taunt");
+            }
+            // Slow motion: X tapped (on letting go, so it never collides with X held 1 s).
+            if (g_x_tapped)
+            {
+                g_x_tapped = false;
+                bool ok = call_input_event(pawn, STR("InpActEvt_SloMo_K2Node_InputActionEvent_8"));
+                bool* on = pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Slomo Active"));
+                HSVR_LOG("Pad: X tapped: slow motion %s", !ok ? "event NOT found" : (on && *on ? "on" : "off (or not allowed: the game needs consciousness over 50 and stamina)"));
+            }
             static double down_since = 0.0;
             double now = now_seconds();
             // Sprint: the left stick held in, as the game's Run key (Left Shift) held.
@@ -980,9 +998,13 @@ namespace hsvr
             float x = hands[1].stick_x, y = hands[1].stick_y;
             bool up = up_held ? y > 0.5f && y > std::fabs(x) : y > 0.7f && y > std::fabs(x);
             bool down = down_held ? y < -0.5f && -y > std::fabs(x) : y < -0.7f && -y > std::fabs(x);
-            // Jump: the game's jump button (A) while the stick is held up.
-            if (up) pad.buttons |= XINPUT_GAMEPAD_A;
-            if (up != up_held) HSVR_LOG(up ? "Pad: right stick up: jump" : "Pad: right stick back from up");
+            // Jump: the game's own Jump key events (pressed while the stick is up, let go when it
+            // comes back; the game jumps on the let-go). Not the gamepad's A, which is also Talk.
+            if (up != up_held)
+            {
+                call_input_event(pawn, up ? STR("InpActEvt_Jump_K2Node_InputActionEvent_14") : STR("InpActEvt_Jump_K2Node_InputActionEvent_15"));
+                HSVR_LOG(up ? "Pad: right stick up: jump (held)" : "Pad: right stick back from up: jump");
+            }
             up_held = up;
             // Crouch and prone, by how long the stick is held down: under the game's own 0.2 s it is a
             // tap (crouch), held that long the game's own hold (prone).
@@ -1160,6 +1182,7 @@ namespace hsvr
             pad.ry = axes[3];
         }
         if (have && !vr_off && cfg.stick_layout && pawn && !in_menu) stick_layout_tick(pawn, hands, pad, cfg);
+        else g_x_tapped = false;
         if (cfg.own_crouch && shared().body_placed.load() && !vr_off)
         {
             // The crouch button (left stick press, LS) toggles the player's own crouch and is not

@@ -345,7 +345,7 @@ namespace hsvr
         // controller_input.hpp). pad_map lists "controller input=gamepad input" pairs.
         bool controller_pad = true;
         // (2026-11-17: the stick clicks are no longer passed on as LS / RS; stick_layout below.)
-        std::string pad_map = "l_stick=LSTICK r_stick_x=RSTICK_X l_grip=LB r_grip=RB r_lower=A l_menu=START";
+        std::string pad_map = "l_stick=LSTICK r_stick_x=RSTICK_X l_grip=LB r_grip=RB l_menu=START";
         // Stick movement below this is ignored; above it the stick is scaled so that the game's own
         // gamepad dead zone (pad_game_deadzone) does not swallow small pushes.
         double pad_deadzone = 0.12;
@@ -371,7 +371,9 @@ namespace hsvr
         // Matthew's layout (2026-11-17): left stick click = sprint (held, as the game's Run key),
         // right stick click = kick, right stick up = jump, right stick down tapped = crouch (view and
         // body together), held for the game's own 0.2 s = the game's prone (lie down standing still,
-        // dive when moving). Turning stays on the right stick's left and right.
+        // dive when moving). Turning stays on the right stick's left and right. A = taunt (the game's
+        // Talk key only; no longer jump), X tapped = slow motion (X held 1 s still switches VR
+        // controls off). No thrust button: a thrust is the hand pushed forward.
         bool stick_layout = true;
         // An empty hand squeezing near a weapon or food picks it up (within this distance of the hand).
         bool pickup = true;
