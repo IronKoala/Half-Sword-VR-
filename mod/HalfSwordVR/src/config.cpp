@@ -376,6 +376,7 @@ namespace hsvr
         num("swap_distance_m", c.swap_distance_m);
         flag("kick_on_b", c.kick_on_b);
         flag("stick_layout", c.stick_layout);
+        flag("auto_input_switch", c.auto_input_switch);
         flag("pickup", c.pickup);
         num("pickup_radius_m", c.pickup_radius_m);
         flag("eat_at_mouth", c.eat_at_mouth);

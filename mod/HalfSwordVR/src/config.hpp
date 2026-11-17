@@ -375,6 +375,11 @@ namespace hsvr
         // Talk key only; no longer jump), X tapped = slow motion (X held 1 s still switches VR
         // controls off). No thrust button: a thrust is the hand pushed forward.
         bool stick_layout = true;
+        // Matthew (2026-11-17): start using the keyboard and the game plays with
+        // mouse and keyboard; start using the controllers (a button, trigger, grip or stick, not
+        // X or Y, which are the mod's own keys) and it plays with the 6DoF controllers again. The
+        // picture stays in the headset. The mouse never switches (Matthew works menus with it on VR controls).
+        bool auto_input_switch = true;
         // An empty hand squeezing near a weapon or food picks it up (within this distance of the hand).
         bool pickup = true;
         double pickup_radius_m = 0.30;

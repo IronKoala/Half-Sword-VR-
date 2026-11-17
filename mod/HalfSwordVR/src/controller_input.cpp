@@ -1062,6 +1062,67 @@ namespace hsvr
             down_held = down;
         }
 
+        // ---- switching between mouse and keyboard and the controllers (auto_input_switch) --------
+        // A keyboard key (never the mouse: Matthew works menus with it while on VR controls) newly
+        // pressed while the game's window is in front, other than the
+        // mod's own keys, hands play to mouse and keyboard. A controller button (not X or Y),
+        // trigger or grip pressed past 60 %, or a stick pushed past 60 %, hands it back. After a
+        // switch the other side is not listened to for a second, so the hand that just let go of
+        // one cannot flip it straight back.
+        void auto_input_switch(const XrHandRaw* hands, bool have, const Config& cfg)
+        {
+            static bool key_was[256] = {};
+            static double quiet_until = 0.0;
+            double now = now_seconds();
+            bool vr_off = shared().vr_controls_off.load();
+            bool keyboard = false;
+            int which = 0;
+            HWND front = GetForegroundWindow();
+            DWORD front_process = 0;
+            if (front) GetWindowThreadProcessId(front, &front_process);
+            bool ours = front_process == GetCurrentProcessId();
+            for (int vk = 1; vk < 255; ++vk)
+            {
+                if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2 /* the mouse never switches (Matthew: menus) */ || vk == VK_PACKET || vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN /* Alt-Tab and Windows */ || vk == 0x21 /* Page Up */ || vk == cfg.recenter_key || vk == cfg.toggle_ui_key || vk == cfg.toggle_view_key || vk == cfg.toggle_mode_key) continue;
+                bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+                if (down && !key_was[vk] && ours)
+                {
+                    keyboard = true;
+                    which = vk;
+                }
+                key_was[vk] = down;
+            }
+            bool controller = false;
+            const char* what = "";
+            if (have && hands)
+            {
+                for (int h = 0; h < 2 && !controller; ++h)
+                {
+                    const XrHandRaw& c = hands[h];
+                    if (c.trigger > 0.6f) what = "a trigger";
+                    else if (c.squeeze > 0.6f) what = "a grip";
+                    else if (std::fabs(c.stick_x) > 0.6f || std::fabs(c.stick_y) > 0.6f) what = "a stick";
+                    else if (c.stick_click) what = "a stick click";
+                    else if (h == 1 && (c.button_lower || c.button_upper)) what = "A or B";
+                    else continue;
+                    controller = true;
+                }
+            }
+            if (now < quiet_until) return;
+            if (keyboard && !vr_off)
+            {
+                arm_toggle();
+                quiet_until = now + 1.0;
+                HSVR_LOG("Input: key 0x%02X pressed: playing with mouse and keyboard (the controllers take over again when used)", which);
+            }
+            else if (controller && vr_off)
+            {
+                arm_toggle();
+                quiet_until = now + 1.0;
+                HSVR_LOG("Input: %s used on a controller: playing with the 6DoF controllers again", what);
+            }
+        }
+
         const char* source_name(Source s)
         {
             static const char* names[] = {"l_stick_x", "l_stick_y", "r_stick_x", "r_stick_y", "l_trigger", "r_trigger", "l_grip", "r_grip",
@@ -1127,6 +1188,16 @@ namespace hsvr
 
         XrHandRaw hands[2];
         bool have = g_real_get_state && cfg.controller_pad && vr_controllers_this_tick(hands);
+        if (cfg.auto_input_switch && !cfg.dev_fake_hands)
+        {
+            auto_input_switch(have ? hands : nullptr, have, cfg);
+            if (shared().vr_controls_off.load() != vr_off)
+            {
+                vr_off = shared().vr_controls_off.load();
+                cfg = config();
+                if (vr_off) cfg.auto_guard = cfg.controller_gestures = cfg.kick_on_b = cfg.pickup = cfg.eat_at_mouth = false;
+            }
+        }
         PadOut pad;
         if (have) mod_keys_on_controllers(hands, cfg);
         if (have) point_at_panel(hands, cfg, in_menu);
