@@ -5261,7 +5261,10 @@ namespace hsvr
                         named(side.joint, L"SetAngularOrientationTarget", {{L"InPosTarget", bytes(ue::FRotator{rr.pitch, rr.yaw, rr.roll})}});
                         named(side.joint, L"SetAngularVelocityTarget", {{L"InVelTarget", bytes(ue::FVector{wrev.x, wrev.y, wrev.z})}});
                         Vec3 e = target.t - hand.t;
-                        double angle = 2.0 * std::acos(std::min(1.0, std::fabs(err0.w)));
+                        // (Measured hand against target: the weapon-frame estimate above read a steady 15
+                        // degrees that the self-test's own hand-to-controller check did not see.)
+                        Quat herr = (target.q * hand.q.inverse()).normalized();
+                        double angle = 2.0 * std::acos(std::min(1.0, std::fabs(herr.w)));
                         side.drive_err_cm = length(e);
                         side.drive_err_deg = angle * kRadToDeg;
                         if (log_throttle(side.out_sign > 0 ? "wd-r" : "wd-l", 1.0))
