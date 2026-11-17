@@ -717,6 +717,90 @@ namespace
         HSVR_LOG("Script: hsvr.set: %ls is a %ls, which this step does not write", found->GetName().c_str(), type.c_str());
     }
 
+    // dev_script step "hsvr.dump": writes every reflected variable of the player's character, its
+    // components, its animation Blueprint, its class defaults, the controller and the game instance to
+    // the log ("Dump <object>: <name> (<type>) = <value>"), to read the values the game really runs
+    // with (Blueprint defaults could not be decoded from the pak). Read only.
+    void dump_value(const std::wstring& label, const std::wstring& path, FProperty* property, const uint8_t* address, int depth)
+    {
+        auto type = property->GetClass().GetName();
+        wchar_t value[256] = L"?";
+        if (type == STR("BoolProperty"))
+        {
+            auto* flag = static_cast<FBoolProperty*>(property);
+            swprintf(value, 256, L"%d", (address[flag->GetByteOffset()] & flag->GetFieldMask()) != 0 ? 1 : 0);
+        }
+        else if (type == STR("FloatProperty")) swprintf(value, 256, L"%g", (double)*reinterpret_cast<const float*>(address));
+        else if (type == STR("DoubleProperty")) swprintf(value, 256, L"%g", *reinterpret_cast<const double*>(address));
+        else if (type == STR("IntProperty")) swprintf(value, 256, L"%d", *reinterpret_cast<const int32_t*>(address));
+        else if (type == STR("Int64Property")) swprintf(value, 256, L"%lld", (long long)*reinterpret_cast<const int64_t*>(address));
+        else if (type == STR("ByteProperty") || (type == STR("EnumProperty") && property->GetSize() == 1)) swprintf(value, 256, L"%d", (int)*address);
+        else if (type == STR("NameProperty")) swprintf(value, 256, L"%ls", reinterpret_cast<const FName*>(address)->ToString().c_str());
+        else if (type == STR("ObjectProperty") || type == STR("ClassProperty"))
+        {
+            UObject* object = *reinterpret_cast<UObject* const*>(address);
+            swprintf(value, 256, L"%ls", object ? object->GetFullName().c_str() : L"none");
+        }
+        else if (type == STR("ArrayProperty")) swprintf(value, 256, L"%d entries", reinterpret_cast<const RawArray*>(address)->Num);
+        else if (type == STR("StructProperty") && depth < 3)
+        {
+            UScriptStruct* inner = static_cast<FStructProperty*>(property)->GetStruct();
+            if (inner)
+            {
+                for (FProperty* member : inner->ForEachProperty())
+                    dump_value(label, path + property->GetName() + STR("."), member, address + member->GetOffset_Internal(), depth + 1);
+                return;
+            }
+        }
+        HSVR_LOG("Dump %ls: %ls%ls (%ls) = %ls", label.c_str(), path.c_str(), property->GetName().c_str(), type.c_str(), value);
+    }
+
+    void dump_object(const std::wstring& label, UObject* object)
+    {
+        if (!object)
+        {
+            HSVR_LOG("Dump %ls: none", label.c_str());
+            return;
+        }
+        HSVR_LOG("Dump %ls: %ls", label.c_str(), object->GetFullName().c_str());
+        const uint8_t* base = reinterpret_cast<const uint8_t*>(object);
+        for (UStruct* level = object->GetClassPrivate(); level; level = level->GetSuperStruct())
+            for (FProperty* property : level->ForEachProperty())
+                dump_value(label, L"", property, base + property->GetOffset_Internal(), 0);
+    }
+
+    void script_dump()
+    {
+        UObject* pawn = nullptr;
+        UObject* mesh = find_pawn_mesh(&pawn);
+        UObject* controller = find_player_controller();
+        UObject* viewport = object_property(g_engine, STR("GameViewport"));
+        dump_object(STR("game instance"), object_property(viewport, STR("GameInstance")));
+        dump_object(STR("controller"), controller);
+        if (!pawn)
+        {
+            HSVR_LOG("Dump: no player character");
+            return;
+        }
+        dump_object(STR("character"), pawn);
+        dump_object(STR("character defaults"), pawn->GetClassPrivate()->GetClassDefaultObject());
+        dump_object(STR("animation"), object_property(mesh, STR("AnimScriptInstance")));
+        // Components: every object variable of the character that points at an object it owns.
+        for (UStruct* level = pawn->GetClassPrivate(); level; level = level->GetSuperStruct())
+        {
+            for (FProperty* property : level->ForEachProperty())
+            {
+                if (property->GetClass().GetName() != STR("ObjectProperty")) continue;
+                UObject* component = *reinterpret_cast<UObject* const*>(reinterpret_cast<const uint8_t*>(pawn) + property->GetOffset_Internal());
+                if (!component) continue;
+                // Owned by the character (components and other sub-objects), not things it points at.
+                if (component->GetOuterPrivate() != pawn) continue;
+                dump_object(STR("part ") + property->GetName(), component);
+            }
+        }
+        HSVR_LOG("Dump: done");
+    }
+
     // dev_script step "hsvr.call <Function>": calls a function of the game instance that takes no
     // parameters, e.g. GI_Settings "Save Game", which the Fight button calls before opening the arena
     // (the arena's game manager loads the save again on BeginPlay, undoing hsvr.set otherwise).
@@ -794,6 +878,11 @@ namespace
             if (entry.command.rfind("hsvr.set ", 0) == 0)
             {
                 script_set_game_instance(entry.command.substr(9));
+                continue;
+            }
+            if (entry.command == "hsvr.dump")
+            {
+                script_dump();
                 continue;
             }
             if (entry.command.rfind("hsvr.call ", 0) == 0)
