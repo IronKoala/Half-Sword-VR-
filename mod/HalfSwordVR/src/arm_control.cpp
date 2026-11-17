@@ -1090,6 +1090,17 @@ namespace hsvr
             double side_cm = (dot(dr, right) - dot(dl, right)) * 0.5 * 100.0;
             double drop_cm = -(dl.y + dr.y) * 0.5 * 100.0;
             double arm_cm = ((dot(dl, fwd) + dot(dr, fwd)) * 0.5 + kShoulderBackM) * 100.0;
+            // The pose itself: both arms straight out in front, level with each other, each hand in front
+            // of its own shoulder (so no other way of holding both grips, a two-handed hold among them,
+            // can be taken for it).
+            double level_cm = std::fabs(dl.y - dr.y) * 100.0;
+            bool in_front = dot(dl, fwd) > 0.35 && dot(dr, fwd) > 0.35 && dot(dl, right) < -0.05 && dot(dr, right) > 0.05;
+            if (!in_front || level_cm > 10.0)
+            {
+                HSVR_LOG("Arms: calibration not taken: both grips held, but not in the pose (hands %.0f cm apart in height, %s); hold both arms straight out in front at shoulder height",
+                         level_cm, in_front ? "in front" : "not both out in front of their own shoulders");
+                return;
+            }
             if (arm_cm < 40.0 || arm_cm > 95.0 || side_cm < 8.0 || side_cm > 35.0 || drop_cm < 5.0 || drop_cm > 50.0)
             {
                 HSVR_LOG("Arms: calibration ignored (arm %.0f cm, shoulders %.0f cm to each side, %.0f cm below the eyes): hold both arms straight out in front "
@@ -1132,19 +1143,10 @@ namespace hsvr
                 if (origin >= 0.0f)
                 {
                     double eye_cm = (origin + head.y) * 100.0;
-                    double before = config().player_eye_cm;
-                    if (before > 0.0 && std::fabs(eye_cm - before) > 0.15 * before)
-                    {
-                        // Not standing straight (crouched, leaning): the eye height is kept as it was.
-                        HSVR_LOG("Arms: your eyes read %.0f cm above the floor, more than 15%% from the %.0f cm stored: not standing straight? kept %.0f cm", eye_cm, before, before);
-                    }
-                    else
-                    {
-                        char text[32];
-                        snprintf(text, sizeof(text), "%.1f", eye_cm);
-                        config_store({{"player_eye_cm", text}});
-                        HSVR_LOG("Arms: your eyes are %.0f cm above the floor standing (stored as player_eye_cm)", eye_cm);
-                    }
+                    char text[32];
+                    snprintf(text, sizeof(text), "%.1f", eye_cm);
+                    config_store({{"player_eye_cm", text}});
+                    HSVR_LOG("Arms: your eyes are %.0f cm above the floor standing (stored as player_eye_cm)", eye_cm);
                 }
             }
             for (Side& side : s.side) side.have_offset = false;
