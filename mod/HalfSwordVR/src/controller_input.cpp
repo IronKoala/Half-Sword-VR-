@@ -935,6 +935,26 @@ namespace hsvr
             float head[3];
             float yaw = 0;
             bool have_head = vr_head_in_tracking(head, yaw);
+            if (have_head)
+            {
+                // The holsters hang on a body anchor that follows the head's turn half a second behind
+                // and holds still while a hand is at a holster (the Chasms VR Framework, shock2quest), so
+                // looking round does not swing the hip and back places away from the hands.
+                static float anchor = 0.0f;
+                static double last = 0.0;
+                static bool have_anchor = false;
+                double now = now_seconds();
+                double dt = last > 0.0 ? std::min(0.1, now - last) : 0.0;
+                last = now;
+                if (!have_anchor) anchor = yaw, have_anchor = true;
+                bool at_zone = (hands[0].valid && holster_zone(hands[0], head, anchor, cfg)) || (hands[1].valid && holster_zone(hands[1], head, anchor, cfg));
+                if (!at_zone && dt > 0.0)
+                {
+                    float diff = std::remainder(yaw - anchor, 6.2831853f);
+                    anchor += diff * (float)(1.0 - std::exp(-dt / 0.5));
+                }
+                yaw = anchor;
+            }
             for (int h = 0; h < 2; ++h)
             {
                 const XrHandRaw& hand = hands[h];

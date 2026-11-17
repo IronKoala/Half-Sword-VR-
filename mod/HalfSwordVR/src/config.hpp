@@ -249,6 +249,14 @@ namespace hsvr
         // While a weapon is pulled by the joint, its own handle (long axis) is lined up with the
         // controller's grip axis when it is taken, as B&S does.
         bool align_handle = true;
+        // The hold layer (2026-11-17, after the Chasms VR Framework and B&S): one joint per hand from
+        // the controller's grip to the point on the weapon's handle the hand took; Willie's hand is
+        // pulled onto that point (its own pull, light), the game's hand-to-weapon joint is let go
+        // loose for the player (the game still has it, so it knows what is held), and the game's own
+        // disarm rule (force on the hold against arm tonus, consciousness, pain, grip) is applied to
+        // the hold joint. Releases faster than throw_speed_ms are throws (x throw_boost).
+        bool hold_layer = true;
+        double throw_speed_ms = 2.0, throw_boost = 2.0;
         // Build 2 (Matthew's point 2): a shield the game straps to the forearm is joined to the
         // hand instead, at the angle a straight wrist gives, so it goes where the hand goes and
         // turns as the hand turns.

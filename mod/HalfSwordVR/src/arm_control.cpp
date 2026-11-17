@@ -486,7 +486,15 @@ namespace hsvr
             double handle_off_deg = -1.0;
             // The joint's point on the weapon (weapon space): where the fist was when it was made.
             Vec3 joint_f1;
-            Vec3 ctrl_grip_pos; // this frame's controller grip point in the world // the weapon's handle against the controller's, this frame (-1 = not lined up)
+            Vec3 ctrl_grip_pos; // this frame's controller grip point in the world
+            // The hold layer: the hold frame on the weapon (local: joint_f1 and this turn), its place
+            // in the world this frame, how far along the handle from the pommel it is, and the
+            // controller's speed (for throws) and the disarm count.
+            Quat hold_local_q;
+            Xf hold_world;
+            bool have_hold_world = false;
+            double hold_along = 0, ctrl_speed = 0;
+            int disarm_frames = 0; // the weapon's handle against the controller's, this frame (-1 = not lined up)
             // For the log.
             double last_error_cm = 0, last_error_deg = 0;
             double last_reach = 0;    // controller distance from the shoulder / arm length
@@ -1240,7 +1248,15 @@ namespace hsvr
                 side.target_world.q = hand_rot;
                 side.target_world.t = grip_pos - hand_rot.rotate(side.grip_center);
                 side.ctrl_grip_pos = grip_pos;
-                if (side.handle_aligned && side.weapon_driven && !side.second_hand)
+                if (cfg.hold_layer && side.weapon_driven && side.have_hold_world)
+                {
+                    // The hold layer: the hand is drawn (and pulled) onto the weapon where it holds it,
+                    // the fist on the hold frame as it would be on the controller.
+                    Quat hq = (side.hold_world.q * hand_frame.inverse()).normalized();
+                    side.target_world.q = hq;
+                    side.target_world.t = side.hold_world.t - hq.rotate(side.grip_center);
+                }
+                else if (side.handle_aligned && side.weapon_driven && !side.second_hand)
                 {
                     // Holding a weapon lined up on the controller: the hand is where the weapon puts it
                     // (its handle along the controller's, the fist at the controller's grip point), and
@@ -1986,7 +2002,7 @@ namespace hsvr
                         pull_set(d, L.f_pos, (float)(cfg.hand_pull_strength * carry));
                         pull_set(d, L.f_vel, (float)(std::max(0.0, cfg.hand_pull_damping) * carry));
                         pull_set(d, L.f_maxlin, (float)(std::max(0.0, cfg.hand_pull_max_force) * carry));
-                        if (s.side[body.side].weapon_driven && !s.side[body.side].second_hand)
+                        if (s.side[body.side].weapon_driven && !s.side[body.side].second_hand && !cfg.hold_layer)
                         {
                             // B&S: the hand is not driven while it holds a weapon; the weapon is.
                             pull_set(d, L.f_pos, 0.0f);
@@ -2503,6 +2519,7 @@ namespace hsvr
                      target.t.y - s.actor_world.y, target.t.z - s.actor_world.z, length(hand.t - s.actor_world));
         }
 
+        void grip_loose(Side& side); // (the hold layer, below)
         void grip_lock_update(Side& side, bool want)
         {
             State& s = g_state;
@@ -3971,7 +3988,7 @@ namespace hsvr
                 if (armed && cfg.weapon_drive)
                     line(t.wd_measured > 0 && t.wd_frames * 10 >= t.wd_measured * 9, "B&S hold: the weapon itself was pulled to the controller in %d of %d measured frames (at least 90%%)",
                          t.wd_frames, t.wd_measured);
-                if (armed) line(t.h_begun ? t.h_grip_locked_before : s.side[1].grip_locked, "weapon fixed rigidly in the right hand before the hands part (grip joint locked; re-locked %d times)", s.side[1].grip_relocked);
+                if (armed && !cfg.hold_layer) line(t.h_begun ? t.h_grip_locked_before : s.side[1].grip_locked, "weapon fixed rigidly in the right hand before the hands part (grip joint locked; re-locked %d times)", s.side[1].grip_relocked);
                 line(mean(still, 1) >= 0 && mean(still, 1) < 2.5 && mean(still, 0) < 2.5, "hands still: right %.1f cm, left %.1f cm from the controllers on average (limit 2.5)", mean(still, 1), mean(still, 0));
                 {
                     // A standing player's eyes are the character's eyes: the hips need not be moved to
@@ -4793,7 +4810,11 @@ namespace hsvr
                 s.hold_wanted = cfg.body_hold && !cfg.kinematic_body && s.head_pull_wanted && s.have_nominal && s.have_rest && !knocked_out;
             }
             for (Side& side : s.side) shield_to_hand(side, cfg);
-            for (Side& side : s.side) grip_lock_update(side, cfg.rigid_grip && s.kin_active);
+            for (Side& side : s.side)
+            {
+                if (cfg.hold_layer && side.weapon_driven && !side.second_hand) grip_loose(side);
+                else grip_lock_update(side, cfg.rigid_grip && s.kin_active);
+            }
             if (s.kin_active)
             {
                 // The placed body has no springs anywhere. The one driven thing is a physical hand
@@ -4925,7 +4946,7 @@ namespace hsvr
             if (dt <= 0.0) return;
             for (Side& side : s.side)
             {
-                if (!side.have_turn_target || !side.pull_active || (side.weapon_driven && !side.second_hand)) continue;
+                if (!side.have_turn_target || !side.pull_active || (side.weapon_driven && !side.second_hand && !cfg.hold_layer)) continue;
                 Xf hand;
                 if (!socket_transform(s.body, side.hand_name, RTS_World, hand)) continue;
                 Quat err = (side.turn_target * hand.q.inverse()).normalized();
@@ -4961,7 +4982,7 @@ namespace hsvr
                 const TCHAR* held_property = side.out_sign > 0 ? STR("Weapon R") : STR("Weapon L");
                 UObject* weapon = s.pawn->GetPropertyByNameInChain(held_property) ? object_property(s.pawn, held_property) : nullptr;
                 UObject* base = weapon && weapon->GetPropertyByNameInChain(STR("BaseMesh")) ? object_property(weapon, STR("BaseMesh")) : nullptr;
-                if (!base || !side.grip_locked || base->GetFunctionByNameInChain(STR("SetPhysicsAngularVelocityInRadians")) != set_fn) continue;
+                if (!base || !side.grip_locked || cfg.hold_layer || base->GetFunctionByNameInChain(STR("SetPhysicsAngularVelocityInRadians")) != set_fn) continue;
                 const Side& other = s.side[side.out_sign > 0 ? 0 : 1];
                 const TCHAR* other_property = side.out_sign > 0 ? STR("Weapon L") : STR("Weapon R");
                 if (side.out_sign < 0 && other.grip_locked && s.pawn->GetPropertyByNameInChain(other_property) && object_property(s.pawn, other_property) == weapon)
@@ -5163,6 +5184,83 @@ namespace hsvr
             return true;
         }
 
+        // The game's own hand-to-weapon joint, let go loose for the player (the hold layer holds the
+        // weapon). Written after the game's script each frame, as it sets the joint up again often.
+        void grip_loose(Side& side)
+        {
+            State& s = g_state;
+            const TCHAR* property = side.out_sign > 0 ? STR("PhysicsConstraint R Hand") : STR("PhysicsConstraint L Hand");
+            UObject* joint = s.pawn && s.pawn->GetPropertyByNameInChain(property) ? object_property(s.pawn, property) : nullptr;
+            if (!joint) return;
+            for (const wchar_t* fn : {L"SetLinearXLimit", L"SetLinearYLimit", L"SetLinearZLimit"})
+                named(joint, fn, {{L"ConstraintType", bytes<uint8_t>(0)}, {L"LimitSize", bytes<float>(0.0f)}});
+            named(joint, L"SetAngularSwing1Limit", {{L"MotionType", bytes<uint8_t>(0)}, {L"Swing1LimitAngle", bytes<float>(0.0f)}});
+            named(joint, L"SetAngularSwing2Limit", {{L"MotionType", bytes<uint8_t>(0)}, {L"Swing2LimitAngle", bytes<float>(0.0f)}});
+            named(joint, L"SetAngularTwistLimit", {{L"ConstraintType", bytes<uint8_t>(0)}, {L"TwistLimitAngle", bytes<float>(0.0f)}});
+            named(joint, L"SetLinearPositionDrive", {{L"bEnableDriveX", bytes<bool>(false)}, {L"bEnableDriveY", bytes<bool>(false)}, {L"bEnableDriveZ", bytes<bool>(false)}});
+            named(joint, L"SetLinearVelocityDrive", {{L"bEnableDriveX", bytes<bool>(false)}, {L"bEnableDriveY", bytes<bool>(false)}, {L"bEnableDriveZ", bytes<bool>(false)}});
+            named(joint, L"SetOrientationDriveSLERP", {{L"bEnableSLERP", bytes<bool>(false)}});
+            named(joint, L"SetAngularVelocityDriveSLERP", {{L"bEnableSLERP", bytes<bool>(false)}});
+            named(joint, L"SetOrientationDriveTwistAndSwing", {{L"bEnableTwistDrive", bytes<bool>(false)}, {L"bEnableSwingDrive", bytes<bool>(false)}});
+            named(joint, L"SetAngularVelocityDriveTwistAndSwing", {{L"bEnableTwistDrive", bytes<bool>(false)}, {L"bEnableSwingDrive", bytes<bool>(false)}});
+            side.grip_locked = true; // (held: by the hold layer)
+        }
+
+        // The game's own disarm rule (Willie_BP event graph @360369..@362250), applied to the hold joint:
+        // the force on the hold against arm tonus x body tonus x grip x consciousness x pain x
+        // reverse-grip x lawnmower x muscle growth (at least the arm's health while it grabs), plus
+        // 500 for grip types 6 and 7; not while the game blocks the drop, nor in a two-handed hold.
+        void hold_disarm(Side& side, double f_cap)
+        {
+            State& s = g_state;
+            const bool r = side.out_sign > 0;
+            auto d = [&](const TCHAR* n, double def) {
+                double* v = s.pawn->GetPropertyByNameInChain(n) ? s.pawn->GetValuePtrByPropertyNameInChain<double>(n) : nullptr;
+                return v ? *v : def;
+            };
+            auto b = [&](const TCHAR* n) {
+                bool* v = s.pawn->GetValuePtrByPropertyNameInChain<bool>(n);
+                return v && *v;
+            };
+            uint8_t* grip_type = s.pawn->GetValuePtrByPropertyNameInChain<uint8_t>(r ? STR("R_GripType_Current") : STR("L_GripType_Current"));
+            int gt = grip_type ? *grip_type : 0;
+            double pain = d(STR("Pain"), 0.0);
+            double pain_mul = 1.0 + std::max(0.0, std::min(1.0, (pain - 5.0) / 5.0));
+            double rigidity = d(STR("Hands Rigidity (Gauntlets)"), 0.95);
+            double grip_mul = b(STR("Mordhau Grip")) ? 5.0 : (b(STR("L Hand In Offhand Attached")) ? 3.0 + std::max(0.0, std::min(1.0, (rigidity - 0.666) / 0.334)) : 1.0);
+            double rev = b(r ? STR("R Reverse Grip Switching") : STR("L Reverse Grip Switching")) ? 0.1 : 1.0;
+            double lawn = 1.0 - 0.5 * std::max(0.0, std::min(1.0, d(STR("Lawnmower Rate"), 0.0)));
+            double muscle = std::max(0.5, 1.0 + 0.5 * d(STR("Muscle Rate"), 0.0));
+            double threshold = d(r ? STR("Arm R Tonus") : STR("Arm L Tonus"), 100.0) * d(STR("All Body Tonus"), 1.0) * grip_mul * d(STR("Consciousness"), 100.0) * 0.01 * pain_mul * rev * lawn * muscle;
+            if (b(r ? STR("Grabbed R") : STR("Grabbed L"))) threshold = std::max(threshold, d(r ? STR("Arm_R Health") : STR("Arm_L Health"), 0.0));
+            if (gt == 6 || gt == 7) threshold += 500.0;
+            double force = 0.0;
+            NamedCall f;
+            if (side.joint && f.init(side.joint, L"GetConstraintForce"))
+            {
+                f.run();
+                ue::FVector v = f.get<ue::FVector>(L"OutLinearForce");
+                force = std::sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
+            }
+            bool blocked = b(r ? STR("R Hand Block Drop") : STR("L Hand Block Drop")) && !config().hold_tight;
+            static double next_log[2] = {0, 0};
+            int k = r ? 1 : 0;
+            if (now_seconds() >= next_log[k])
+            {
+                next_log[k] = now_seconds() + 1.0;
+                HSVR_LOG("Weapon: %s disarm rule: force on the hold %.0f, the game's threshold %.0f (grip type %d, consciousness %.0f, pain %.0f)", side.label, force, threshold, gt,
+                         d(STR("Consciousness"), 100.0), pain);
+            }
+            side.disarm_frames = (force > threshold && !blocked) ? side.disarm_frames + 1 : 0;
+            if (side.disarm_frames >= 3)
+            {
+                side.disarm_frames = 0;
+                HSVR_LOG("Weapon: %s hand is disarmed: %.0f on the hold beat the game's %.0f", side.label, force, threshold);
+                bs_drop(s.pawn, r ? 1 : 0);
+            }
+            (void)f_cap;
+        }
+
         void weapon_drive(const Config& cfg)
         {
             log_physics_rate();
@@ -5189,6 +5287,21 @@ namespace hsvr
                 if (!want)
                 {
                     if (side.weapon_driven) HSVR_LOG("Weapon: %s hand drives itself again (its weapon is no longer pulled to the controller)", side.label);
+                    if (cfg.hold_layer && side.weapon_driven && !side.second_hand && side.joint_base && side.ctrl_speed > cfg.throw_speed_ms * 100.0)
+                    {
+                        // Let go while the controller moved fast: a throw (B&S: x2 the weapon's own speed).
+                        NamedCall get, set;
+                        if (get.init(side.joint_base, L"GetPhysicsLinearVelocity") && set.init(side.joint_base, L"SetPhysicsLinearVelocity"))
+                        {
+                            get.run();
+                            ue::FVector v = get.get<ue::FVector>(L"ReturnValue");
+                            ue::FVector out{v.X * cfg.throw_boost, v.Y * cfg.throw_boost, v.Z * cfg.throw_boost};
+                            set.set(L"NewVel", out);
+                            set.run();
+                            HSVR_LOG("Weapon: %s hand threw it (controller at %.1f m/s): its speed x%.1f", side.label, side.ctrl_speed / 100.0, cfg.throw_boost);
+                        }
+                    }
+                    side.have_hold_world = false;
                     joint_release(side);
                     side.weapon_driven = false;
                     side.drive_base = nullptr;
@@ -5293,7 +5406,63 @@ namespace hsvr
                         at_fist.q = weapon_xf.q;
                         at_fist.t = hand.t + hand.q.rotate(side.grip_center);
                         side.joint_f1 = weapon_xf.q.inverse().rotate(at_fist.t - weapon_xf.t) * (1.0 / weapon_xf.s);
-                        if (joint_make(side, base, at_fist) && !side.second_hand && cfg.align_handle)
+                        if (cfg.hold_layer)
+                        {
+                            // The handle: the game's pommel to right-hand grip line, else the weapon's long
+                            // axis through its middle. The hold is the point on it nearest the controller's
+                            // grip (the fist), from 5 cm past the pommel to half a handle past the grip
+                            // (towards the blade, a half-sword hold), turned so the handle runs along the
+                            // controller's grip axis, the nearer way round (a reversed grip), with the
+                            // controller's own roll about it.
+                            Vec3 a = com, u{0, 0, 0};
+                            double lo = -1e9, hi = 1e9;
+                            const char* source = "its long axis";
+                            UObject* pommel = weapon->GetPropertyByNameInChain(STR("Pommel")) ? object_property(weapon, STR("Pommel")) : nullptr;
+                            UObject* gr = weapon->GetPropertyByNameInChain(STR("Grip R Hand Default Pos")) ? object_property(weapon, STR("Grip R Hand Default Pos")) : nullptr;
+                            Vec3 pa, pb;
+                            if (pommel && gr && component_location(pommel, pa) && component_location(gr, pb) && length(pb - pa) > 2.0)
+                            {
+                                a = pa;
+                                u = normalized(pb - pa);
+                                lo = -5.0;
+                                hi = length(pb - pa) * 1.5;
+                                source = "the game's pommel to grip line";
+                            }
+                            else
+                            {
+                                int axis_i = -1;
+                                double least = 1e30;
+                                const double mom[3] = {inertia_local.x, inertia_local.y, inertia_local.z};
+                                for (int i = 0; i < 3; ++i)
+                                    if (mom[i] > 0.0 && mom[i] < least) least = mom[i], axis_i = i;
+                                Vec3 along{axis_i == 0 ? 1.0 : 0.0, axis_i == 1 ? 1.0 : 0.0, axis_i == 2 ? 1.0 : 0.0};
+                                if (axis_i < 0) along = {0, 0, 1};
+                                u = weapon_xf.q.rotate(along);
+                            }
+                            Vec3 fist = side.ctrl_grip_pos;
+                            double t_along = std::max(lo, std::min(hi, dot(fist - a, u)));
+                            Vec3 point = a + u * t_along;
+                            Vec3 F = side.ctrl_world.rotate(Vec3{1, 0, 0});
+                            bool reversed = dot(u, F) < 0.0;
+                            Vec3 H = reversed ? u * -1.0 : u;
+                            Vec3 cr{F.y * H.z - F.z * H.y, F.z * H.x - F.x * H.z, F.x * H.y - F.y * H.x};
+                            double ang = std::atan2(length(cr), dot(F, H));
+                            Quat turn = length(cr) > 1e-9 ? quat_axis_angle(normalized(cr), ang) : Quat{0, 0, 0, 1};
+                            Xf hold;
+                            hold.q = (turn * side.ctrl_world).normalized(); // the hold frame: its X along the handle
+                            hold.t = point;
+                            side.joint_f1 = weapon_xf.q.inverse().rotate(point - weapon_xf.t) * (1.0 / weapon_xf.s);
+                            side.hold_local_q = (weapon_xf.q.inverse() * hold.q).normalized();
+                            side.hold_along = t_along;
+                            side.have_hold_world = false;
+                            if (joint_make(side, base, hold))
+                            {
+                                side.handle_aligned = true;
+                                HSVR_LOG("Weapon: %s hand holds it by %s, %.0f cm along it, %.1f cm from the hand%s; the handle was %.0f degrees off the controller's",
+                                         side.label, source, t_along, length(point - fist), reversed ? " (reversed)" : "", ang * kRadToDeg);
+                            }
+                        }
+                        else if (joint_make(side, base, at_fist) && !side.second_hand && cfg.align_handle)
                         {
                             // Line the weapon's own handle up with the controller's (B&S: the grip point's
                             // axis along the controller's, no tilt). The handle is the weapon's long axis:
@@ -5370,7 +5539,10 @@ namespace hsvr
                             k *= 2.0;
                             c *= 1.5;
                             f_max *= 2.0;
-                            if (side.second_hand) kr = cr = t_max = 0.0;
+                            // The front hand (further along the handle, towards the blade) turns it (B&S AutoFront).
+                            const Side& other = s.side[side.out_sign > 0 ? 0 : 1];
+                            bool front = cfg.hold_layer ? side.hold_along >= other.hold_along : !side.second_hand;
+                            if (!front) kr = cr = t_max = 0.0;
                             else kr *= 2.0, cr *= 2.0, t_max *= 2.0;
                         }
                         named(side.joint, L"SetLinearDriveParams", {{L"PositionStrength", bytes<float>((float)k)}, {L"VelocityStrength", bytes<float>((float)c)}, {L"InForceLimit", bytes<float>((float)f_max)}});
@@ -5385,6 +5557,15 @@ namespace hsvr
                         Vec3 fist = side.ctrl_grip_pos; // the controller's grip point
                         Quat want_weapon = side.handle_aligned ? (side.ctrl_world * side.weapon_from_ctrl).normalized()
                                                                : (side.second_hand ? weapon_xf.q : (target.q * side.hand_in_weapon.q.inverse()).normalized());
+                        if (cfg.hold_layer)
+                        {
+                            // The joint's frame is the hold frame itself: it goes where the controller's grip is.
+                            want_weapon = side.ctrl_world;
+                            side.hold_world.q = (weapon_xf.q * side.hold_local_q).normalized();
+                            side.hold_world.t = weapon_xf.t + weapon_xf.q.rotate(side.joint_f1 * weapon_xf.s);
+                            side.have_hold_world = true;
+                            side.ctrl_speed = length(v_target);
+                        }
                         // Targets in the joint's world frame (where it was made).
                         Quat r0i = side.joint_r0.inverse();
                         Vec3 pos = r0i.rotate(fist - side.joint_p0);
@@ -5404,12 +5585,15 @@ namespace hsvr
                         side.drive_err_cm = length(e);
                         side.drive_err_deg = angle * kRadToDeg;
                         side.handle_off_deg = -1.0;
-                        if (side.handle_aligned)
+                        if (cfg.hold_layer && side.have_hold_world)
+                            side.handle_off_deg = quat_angle_deg(side.hold_world.q, side.ctrl_world);
+                        else if (side.handle_aligned)
                         {
                             Quat now_from_ctrl = (side.ctrl_world.inverse() * weapon_xf.q).normalized();
                             Quat d = (now_from_ctrl * side.weapon_from_ctrl.inverse()).normalized();
                             side.handle_off_deg = 2.0 * std::acos(std::min(1.0, std::fabs(d.w))) * kRadToDeg;
                         }
+                        if (cfg.hold_layer && !side.second_hand && !two_handed) hold_disarm(side, f_max);
                         if (log_throttle(side.out_sign > 0 ? "wd-r" : "wd-l", 1.0))
                         {
                             // What holds the hand where it is (self-test run 20: the hand 10 cm / 15 deg off the
@@ -5978,7 +6162,11 @@ namespace hsvr
                 // physics has not: locked here, the joint is locked when it counts.
                 Config cfg = config();
                 for (Side& side : s.side) shield_to_hand(side, cfg);
-                for (Side& side : s.side) grip_lock_update(side, cfg.rigid_grip && s.kin_active);
+                for (Side& side : s.side)
+                {
+                    if (cfg.hold_layer && side.weapon_driven && !side.second_hand) grip_loose(side);
+                    else grip_lock_update(side, cfg.rigid_grip && s.kin_active);
+                }
             }
             // The capsule leash's reach again, here as well as in the body's update: the game works
             // out its own value at the end of its script each frame, and that script may run before
