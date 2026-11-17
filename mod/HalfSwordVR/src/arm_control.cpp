@@ -468,6 +468,10 @@ namespace hsvr
             bool have_prev_drive_target = false;
             Xf prev_drive_target;
             double drive_err_cm = 0, drive_err_deg = 0;
+            // The game's own strength for this arm (its muscle settings for the forearm, which it
+            // works out from arm tonus, consciousness, stamina and more), and the most seen this life.
+            double arm_strength_ref = 0, arm_strength = 1.0;
+            UObject* arm_strength_pawn = nullptr;
             // For the log.
             double last_error_cm = 0, last_error_deg = 0;
             double last_reach = 0;    // controller distance from the shoulder / arm length
@@ -5056,8 +5060,37 @@ namespace hsvr
                 };
                 Vec3 v = get_vec(s.body, lin_get, &side.hand_name);
                 Vec3 w = get_vec(base, ang_get, nullptr);
+                // ---- the game's own strength for this arm ----
+                // Half Sword sets each muscle's turning drive itself, every frame or so: tonus times
+                // consciousness times uprightness times grab state (Control Physical Animation Str),
+                // with stamina, injury and muscle growth feeding the tonus. The forearm's value,
+                // against the highest it has had this life, is how strong this arm is now; the
+                // pull's caps are scaled by it (Matthew: the game's weight, strength, stamina and
+                // consciousness must matter).
+                {
+                    double now_strength = -1.0;
+                    for (const PullBody& body : g_pull_bodies)
+                    {
+                        if (body.kind != PullKind::arm || body.side != (int)(&side - s.side) || body.base.empty() || !(body.name == side.lower_name)) continue;
+                        now_strength = (double)pull_get(body.base.data(), g_pull.f_angvel);
+                    }
+                    if (side.arm_strength_pawn != s.pawn)
+                    {
+                        side.arm_strength_pawn = s.pawn;
+                        side.arm_strength_ref = 0.0;
+                    }
+                    if (now_strength > 0.0)
+                    {
+                        side.arm_strength_ref = std::max(side.arm_strength_ref, now_strength);
+                        side.arm_strength = std::max(cfg.wd_min_strength, std::min(1.0, now_strength / side.arm_strength_ref));
+                    }
+                    else if (now_strength == 0.0 && side.arm_strength_ref > 0.0)
+                    {
+                        side.arm_strength = cfg.wd_min_strength; // the game has the arm limp (knocked out, broken)
+                    }
+                }
                 // ---- place: a spring from the controller to the grip point (cm, kg, s) ----
-                double k = cfg.wd_pos_spring, f_max = cfg.wd_pos_max_n * 100.0; // N -> kg cm/s^2
+                double k = cfg.wd_pos_spring, f_max = cfg.wd_pos_max_n * 100.0 * side.arm_strength; // N -> kg cm/s^2, as strong as the arm is now
                 double c = std::max(cfg.wd_pos_damper, cfg.wd_damping_ratio * 2.0 * std::sqrt(k * m_total)); // no overshoot for this weight
                 Vec3 e = target.t - hand.t;
                 double kd = dt * dt * k / m_total, cd = dt * c / m_total;
@@ -5079,7 +5112,7 @@ namespace hsvr
                 Vec3 r_perp = r_hand - axis * dot(r_hand, axis);
                 inertia += 1.0 * dot(r_perp, r_perp);
                 inertia = std::max(inertia, 500.0); // at least a small object's (0.05 kg m^2)
-                double kr = cfg.wd_rot_spring * 1.0e4, t_max = cfg.wd_rot_max_nm * 1.0e4; // N m -> kg cm^2/s^2
+                double kr = cfg.wd_rot_spring * 1.0e4, t_max = cfg.wd_rot_max_nm * 1.0e4 * side.arm_strength; // N m -> kg cm^2/s^2
                 double cr = std::max(cfg.wd_rot_damper * 1.0e4, cfg.wd_damping_ratio * 2.0 * std::sqrt(kr * inertia));
                 double kdr = dt * dt * kr / inertia, cdr = dt * cr / inertia;
                 Vec3 w_new = (w + axis * (angle * dt * kr / inertia) + w_target * (kdr + cdr)) * (1.0 / (1.0 + kdr + cdr));
@@ -5099,8 +5132,8 @@ namespace hsvr
                 side.drive_err_cm = length(e);
                 side.drive_err_deg = angle * kRadToDeg;
                 if (log_throttle(side.out_sign > 0 ? "wd-r" : "wd-l", 1.0))
-                    HSVR_LOG("Weapon: %s: %.1f kg, grip %.1f cm and %.0f deg from the controller, %.0f cm/s, turning %.1f rad/s (inertia %.0f kg cm2)", side.label, mass,
-                             side.drive_err_cm, side.drive_err_deg, length(v_new), length(w_new), inertia);
+                    HSVR_LOG("Weapon: %s: %.1f kg, grip %.1f cm and %.0f deg from the controller, %.0f cm/s, turning %.1f rad/s (inertia %.0f kg cm2) | arm strength %.0f%% of its best this life (the game's own muscles)",
+                             side.label, mass, side.drive_err_cm, side.drive_err_deg, length(v_new), length(w_new), inertia, side.arm_strength * 100.0);
             }
         }
 

@@ -348,6 +348,10 @@ namespace hsvr
         // without overshoot; the B&S damper is used if it is stronger), and the caps are about what
         // a real arm (400 N) and wrist (40 N m) can give.)
         double wd_damping_ratio = 1.0;
+        // The caps follow the game's own strength for each arm (its forearm muscle drive, from arm
+        // tonus, consciousness, stamina...): a weaker, tired or hurt arm has smaller caps, down to
+        // this fraction.
+        double wd_min_strength = 0.15;
         double hand_pull_strength = 12000.0;
         double hand_pull_damping = 150.0;
         double hand_pull_max_force = 30000.0;
