@@ -460,6 +460,14 @@ namespace hsvr
             // the forearm (the forearm, placed, carried it before) has its own weight counted in:
             // the hand's pull is this many times stronger while it holds one.
             double held_carry = 1.0;
+            // B&S step 1 (weapon_drive): this hand's weapon is pulled to the controller, the hand rides
+            // on it. The hand's place in the weapon's frame is taken once per weapon (the grip is rigid).
+            bool weapon_driven = false;
+            UObject* drive_base = nullptr;
+            Xf hand_in_weapon;
+            bool have_prev_drive_target = false;
+            Xf prev_drive_target;
+            double drive_err_cm = 0, drive_err_deg = 0;
             // For the log.
             double last_error_cm = 0, last_error_deg = 0;
             double last_reach = 0;    // controller distance from the shoulder / arm length
@@ -1926,6 +1934,15 @@ namespace hsvr
                         pull_set(d, L.f_pos, (float)(cfg.hand_pull_strength * carry));
                         pull_set(d, L.f_vel, (float)(std::max(0.0, cfg.hand_pull_damping) * carry));
                         pull_set(d, L.f_maxlin, (float)(std::max(0.0, cfg.hand_pull_max_force) * carry));
+                        if (s.side[body.side].weapon_driven)
+                        {
+                            // B&S: the hand is not driven while it holds a weapon; the weapon is.
+                            pull_set(d, L.f_pos, 0.0f);
+                            pull_set(d, L.f_vel, 0.0f);
+                            pull_set(d, L.f_maxlin, 0.0f);
+                            pull_set(d, L.f_orient, 0.0f);
+                            pull_set(d, L.f_angvel, 0.0f);
+                        }
                     }
                 }
                 else if (body.kind == PullKind::arm)
@@ -3511,6 +3528,7 @@ namespace hsvr
             // Hands part (build 3, hands like Blade & Sorcery).
             bool h_begun = false, h_drop_checked = false, h_dropped = false, h_pick_checked = false, h_picked = false, h_pick_far = false;
             bool h_no_free_sheath = false, h_grip_locked_before = false;
+            int wd_frames = 0, wd_measured = 0; // B&S step 1: frames the right weapon was pulled to the controller (parts 2 to 9)
             bool h_kept = false, h_sheathe_checked = false, h_sheathed = false, h_draw_checked = false, h_drawn = false;
             bool h_grab_checked = false, h_grabbed = false, h_release_checked = false, h_let_go = false, h_has_target = false;
             UObject* h_weapon = nullptr;
@@ -3894,6 +3912,9 @@ namespace hsvr
                 line(t.mesh_on_character, "body mesh rides on the character");
                 line(t.physical_hands, "hands physical (wrists free), not the rigid fallback");
                 // (Judged as it was when the hands part began: that part drops and picks the weapon up.)
+                if (armed && cfg.weapon_drive)
+                    line(t.wd_measured > 0 && t.wd_frames * 10 >= t.wd_measured * 9, "B&S hold: the weapon itself was pulled to the controller in %d of %d measured frames (at least 90%%)",
+                         t.wd_frames, t.wd_measured);
                 if (armed) line(t.h_begun ? t.h_grip_locked_before : s.side[1].grip_locked, "weapon fixed rigidly in the right hand before the hands part (grip joint locked; re-locked %d times)", s.side[1].grip_relocked);
                 line(mean(still, 1) >= 0 && mean(still, 1) < 2.5 && mean(still, 0) < 2.5, "hands still: right %.1f cm, left %.1f cm from the controllers on average (limit 2.5)", mean(still, 1), mean(still, 0));
                 {
@@ -4264,6 +4285,11 @@ namespace hsvr
                 p.turn_max[k] = std::max(p.turn_max[k], s.side[k].last_error_deg);
             }
             if (!s.kin_active) t.placed_all_the_time = false;
+            if (part >= 1 && part <= 8)
+            {
+                ++t.wd_measured;
+                if (s.side[1].weapon_driven) ++t.wd_frames;
+            }
             if (part >= 1 && s.kin_active && s.kin_hands) t.physical_hands = false;
             if (s.kin_active && !body_attached_to_capsule()) t.mesh_on_character = false;
             Vec3 actor;
@@ -4842,7 +4868,7 @@ namespace hsvr
             if (dt <= 0.0) return;
             for (Side& side : s.side)
             {
-                if (!side.have_turn_target || !side.pull_active) continue;
+                if (!side.have_turn_target || !side.pull_active || side.weapon_driven) continue;
                 Xf hand;
                 if (!socket_transform(s.body, side.hand_name, RTS_World, hand)) continue;
                 Quat err = (side.turn_target * hand.q.inverse()).normalized();
@@ -4907,6 +4933,172 @@ namespace hsvr
                 ue::FVector speed{hand_speed.X + round.x, hand_speed.Y + round.y, hand_speed.Z + round.z};
                 memcpy(c + ls_vel, &speed, sizeof(speed));
                 base->ProcessEvent(lin_set, c);
+            }
+        }
+
+        // ---- B&S step 1: the weapon follows the controller (weapon_drive) ---------------------------
+        // Blade & Sorcery joins the held weapon (not the hand) to the controller with a spring, a damper
+        // and a force cap, and draws the hand onto the weapon. Here, each frame, the velocity the
+        // weapon should have is worked out from that spring (implicitly, so it is stable at any frame
+        // rate) and given to it and to the hand riding on it; the physics then adds gravity and
+        // whatever the weapon hits. Weight shows as the cap: a heavy weapon cannot be swung as fast.
+        // Masses and inertia are the game's own for the weapon, plus about 1 kg for the hand.
+        void weapon_drive(const Config& cfg)
+        {
+            State& s = g_state;
+            static double last = 0.0;
+            double now = now_seconds();
+            double dt = last > 0 ? std::min(0.05, now - last) : 0.0;
+            last = now;
+            UObject* right_weapon = s.pawn && s.pawn->GetPropertyByNameInChain(STR("Weapon R")) ? object_property(s.pawn, STR("Weapon R")) : nullptr;
+            for (Side& side : s.side)
+            {
+                const TCHAR* property = side.out_sign > 0 ? STR("Weapon R") : STR("Weapon L");
+                UObject* weapon = s.pawn && s.pawn->GetPropertyByNameInChain(property) ? object_property(s.pawn, property) : nullptr;
+                UObject* base = weapon && weapon->GetPropertyByNameInChain(STR("BaseMesh")) ? object_property(weapon, STR("BaseMesh")) : nullptr;
+                bool want = cfg.weapon_drive && s.kin_active && !s.kin_hands && s.body && side.pull_active && side.target_valid && side.grip_locked && side.wrist_freed &&
+                            base && side.held_carry <= 1.0 && side.rescue_until <= 0.0 && !(side.out_sign < 0 && weapon == right_weapon);
+                if (!want)
+                {
+                    if (side.weapon_driven) HSVR_LOG("Weapon: %s hand drives itself again (its weapon is no longer pulled to the controller)", side.label);
+                    side.weapon_driven = false;
+                    side.drive_base = nullptr;
+                    side.have_prev_drive_target = false;
+                    continue;
+                }
+                Xf hand, weapon_xf;
+                if (!socket_transform(s.body, side.hand_name, RTS_World, hand) || !component_world(base, weapon_xf)) continue;
+                if (base != side.drive_base)
+                {
+                    // The hand's place on the weapon, as the game's (locked) grip holds it now.
+                    Quat inv = weapon_xf.q.inverse();
+                    side.hand_in_weapon.q = (inv * hand.q).normalized();
+                    side.hand_in_weapon.t = inv.rotate(hand.t - weapon_xf.t) * (1.0 / weapon_xf.s);
+                    side.drive_base = base;
+                    side.have_prev_drive_target = false;
+                    HSVR_LOG("Weapon: %s hand's weapon %ls is now pulled to the controller (B&S hold); hand %.1f cm from the weapon's root", side.label,
+                             weapon->GetName().c_str(), length(hand.t - weapon_xf.t));
+                }
+                side.weapon_driven = true;
+                if (dt <= 0.0) continue;
+                // Where the hand (on the weapon) should be, and how fast that place moves.
+                const Xf& target = side.target_world;
+                Vec3 v_target{0, 0, 0}, w_target{0, 0, 0};
+                if (side.have_prev_drive_target)
+                {
+                    v_target = (target.t - side.prev_drive_target.t) * (1.0 / dt);
+                    Quat dq = (target.q * side.prev_drive_target.q.inverse()).normalized();
+                    if (dq.w < 0) dq = {-dq.x, -dq.y, -dq.z, -dq.w};
+                    double a = 2.0 * std::acos(std::min(1.0, dq.w));
+                    if (a > 1e-6) w_target = normalized({dq.x, dq.y, dq.z}) * (a / dt);
+                }
+                side.prev_drive_target = target;
+                side.have_prev_drive_target = true;
+                if (length(v_target) > 3000.0) v_target = v_target * (3000.0 / length(v_target)); // a recenter, not a swing
+                if (length(w_target) > 60.0) w_target = w_target * (60.0 / length(w_target));
+                // The weapon's own numbers.
+                double mass = 1.0;
+                if (UFunction* fn = base->GetFunctionByNameInChain(STR("GetMass")))
+                {
+                    alignas(16) uint8_t p[16] = {};
+                    base->ProcessEvent(fn, p);
+                    float m = 0;
+                    memcpy(&m, p, sizeof(m));
+                    if (m > 0.05f && m < 200.0f) mass = m;
+                }
+                double m_total = mass + 1.0; // the hand rides on it
+                Vec3 com = weapon_xf.t;
+                Vec3 inertia_local{0, 0, 0};
+                {
+                    UFunction* com_fn = base->GetFunctionByNameInChain(STR("GetCenterOfMass"));
+                    if (com_fn && com_fn->GetParmsSize() <= 64)
+                    {
+                        alignas(16) uint8_t p[64] = {};
+                        base->ProcessEvent(com_fn, p);
+                        int32_t r = param_offset(com_fn, L"ReturnValue");
+                        if (r >= 0) { ue::FVector c; memcpy(&c, p + r, sizeof(c)); com = {c.X, c.Y, c.Z}; }
+                    }
+                    UFunction* in_fn = base->GetFunctionByNameInChain(STR("GetInertiaTensor"));
+                    if (in_fn && in_fn->GetParmsSize() <= 64)
+                    {
+                        alignas(16) uint8_t p[64] = {};
+                        base->ProcessEvent(in_fn, p);
+                        int32_t r = param_offset(in_fn, L"ReturnValue");
+                        if (r >= 0) { ue::FVector c; memcpy(&c, p + r, sizeof(c)); inertia_local = {c.X, c.Y, c.Z}; }
+                    }
+                }
+                // Velocities now: the hand's (the grip point's) and the weapon's turning.
+                UFunction* lin_get = s.body->GetFunctionByNameInChain(STR("GetPhysicsLinearVelocity"));
+                UFunction* lin_set = s.body->GetFunctionByNameInChain(STR("SetPhysicsLinearVelocity"));
+                UFunction* ang_get = base->GetFunctionByNameInChain(STR("GetPhysicsAngularVelocityInRadians"));
+                UFunction* ang_set = base->GetFunctionByNameInChain(STR("SetPhysicsAngularVelocityInRadians"));
+                if (!lin_get || !lin_set || !ang_get || !ang_set || lin_get->GetParmsSize() > 64 || lin_set->GetParmsSize() > 64 || ang_get->GetParmsSize() > 64 ||
+                    ang_set->GetParmsSize() > 64)
+                    continue;
+                auto get_vec = [&](UObject* obj, UFunction* fn, const FName* bone) {
+                    alignas(16) uint8_t p[64] = {};
+                    int32_t b = param_offset(fn, L"BoneName"), r = param_offset(fn, L"ReturnValue");
+                    if (bone && b >= 0) memcpy(p + b, bone, sizeof(FName));
+                    obj->ProcessEvent(fn, p);
+                    ue::FVector v{};
+                    if (r >= 0) memcpy(&v, p + r, sizeof(v));
+                    return Vec3{v.X, v.Y, v.Z};
+                };
+                auto set_vec = [&](UObject* obj, UFunction* fn, const wchar_t* field, const FName* bone, const Vec3& v) {
+                    alignas(16) uint8_t p[64] = {};
+                    int32_t f = param_offset(fn, field), b = param_offset(fn, L"BoneName"), a = param_offset(fn, L"bAddToCurrent");
+                    if (f < 0) return;
+                    ue::FVector out{v.x, v.y, v.z};
+                    memcpy(p + f, &out, sizeof(out));
+                    if (a >= 0) p[a] = 0;
+                    if (bone && b >= 0) memcpy(p + b, bone, sizeof(FName));
+                    obj->ProcessEvent(fn, p);
+                };
+                Vec3 v = get_vec(s.body, lin_get, &side.hand_name);
+                Vec3 w = get_vec(base, ang_get, nullptr);
+                // ---- place: a spring from the controller to the grip point (cm, kg, s) ----
+                double k = cfg.wd_pos_spring, c = cfg.wd_pos_damper, f_max = cfg.wd_pos_max_n * 100.0; // N -> kg cm/s^2
+                Vec3 e = target.t - hand.t;
+                double kd = dt * dt * k / m_total, cd = dt * c / m_total;
+                Vec3 v_new = (v + e * (dt * k / m_total) + v_target * (kd + cd)) * (1.0 / (1.0 + kd + cd));
+                Vec3 dv = v_new - v;
+                double dv_max = f_max * dt / m_total;
+                if (length(dv) > dv_max) dv = dv * (dv_max / length(dv));
+                v_new = v + dv;
+                // ---- turn: the weapon's turn to where the controller says ----
+                Quat want_q = (target.q * side.hand_in_weapon.q.inverse()).normalized();
+                Quat err = (want_q * weapon_xf.q.inverse()).normalized();
+                if (err.w < 0) err = {-err.x, -err.y, -err.z, -err.w};
+                double angle = 2.0 * std::acos(std::min(1.0, err.w));
+                Vec3 axis = angle > 1e-6 ? normalized({err.x, err.y, err.z}) : Vec3{0, 0, 1};
+                // Inertia about that axis (kg cm^2): the weapon's own, plus the hand at the grip.
+                Vec3 a_local = weapon_xf.q.inverse().rotate(axis);
+                double inertia = a_local.x * a_local.x * inertia_local.x + a_local.y * a_local.y * inertia_local.y + a_local.z * a_local.z * inertia_local.z;
+                Vec3 r_hand = hand.t - com;
+                Vec3 r_perp = r_hand - axis * dot(r_hand, axis);
+                inertia += 1.0 * dot(r_perp, r_perp);
+                inertia = std::max(inertia, 500.0); // at least a small object's (0.05 kg m^2)
+                double kr = cfg.wd_rot_spring * 1.0e4, cr = cfg.wd_rot_damper * 1.0e4, t_max = cfg.wd_rot_max_nm * 1.0e4; // N m -> kg cm^2/s^2
+                double kdr = dt * dt * kr / inertia, cdr = dt * cr / inertia;
+                Vec3 w_new = (w + axis * (angle * dt * kr / inertia) + w_target * (kdr + cdr)) * (1.0 / (1.0 + kdr + cdr));
+                Vec3 dw = w_new - w;
+                double dw_max = t_max * dt / inertia;
+                if (length(dw) > dw_max) dw = dw * (dw_max / length(dw));
+                w_new = w + dw;
+                // Given to the weapon (its middle moves with the grip point and the turn) and the hand.
+                Vec3 r_com = com - hand.t;
+                Vec3 spin{w_new.y * r_com.z - w_new.z * r_com.y, w_new.z * r_com.x - w_new.x * r_com.z, w_new.x * r_com.y - w_new.y * r_com.x};
+                set_vec(base, ang_set, L"NewAngVel", nullptr, w_new);
+                UFunction* base_lin_set = base->GetFunctionByNameInChain(STR("SetPhysicsLinearVelocity"));
+                if (base_lin_set && base_lin_set->GetParmsSize() <= 64) set_vec(base, base_lin_set, L"NewVel", nullptr, v_new + spin);
+                set_vec(s.body, lin_set, L"NewVel", &side.hand_name, v_new);
+                UFunction* hand_ang_set = s.body->GetFunctionByNameInChain(STR("SetPhysicsAngularVelocityInRadians"));
+                if (hand_ang_set && hand_ang_set->GetParmsSize() <= 64) set_vec(s.body, hand_ang_set, L"NewAngVel", &side.hand_name, w_new);
+                side.drive_err_cm = length(e);
+                side.drive_err_deg = angle * kRadToDeg;
+                if (log_throttle(side.out_sign > 0 ? "wd-r" : "wd-l", 1.0))
+                    HSVR_LOG("Weapon: %s: %.1f kg, grip %.1f cm and %.0f deg from the controller, %.0f cm/s, turning %.1f rad/s (inertia %.0f kg cm2)", side.label, mass,
+                             side.drive_err_cm, side.drive_err_deg, length(v_new), length(w_new), inertia);
             }
         }
 
@@ -5330,6 +5522,7 @@ namespace hsvr
             }
             pull_update(s.pull_arms);
             turn_hands(config());
+            weapon_drive(config());
             carry_hands(config());
             {
                 // The game's script sets the limits of the joints that hold the weapons again and

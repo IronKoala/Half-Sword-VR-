@@ -333,6 +333,14 @@ namespace hsvr
         // the brake, max_force 0 = no limit. The sword's weight still slows the hand, because the
         // pull works on the hand and the sword hangs from it.
         bool hand_pull = true;
+        // Hands like Blade & Sorcery, step 1 (2026-11-17): while a hand holds a weapon, the WEAPON is
+        // pulled to the controller (as B&S's controller-to-weapon joint: a spring with a damper and a
+        // force cap, so heavy weapons lag by their own weight) and the hand rides on it (its own
+        // pull is off). The values are B&S's player values (Creature_PlayerDefaultMale): position
+        // 5000 N/m, 100 N s/m, 3000 N at most; rotation 1000 N m/rad, 50 N m s/rad, 250 N m at most.
+        bool weapon_drive = true;
+        double wd_pos_spring = 5000.0, wd_pos_damper = 100.0, wd_pos_max_n = 3000.0;
+        double wd_rot_spring = 1000.0, wd_rot_damper = 50.0, wd_rot_max_nm = 250.0;
         double hand_pull_strength = 12000.0;
         double hand_pull_damping = 150.0;
         double hand_pull_max_force = 30000.0;
