@@ -2141,7 +2141,7 @@ float4 PSMain(VSOut i) : SV_Target
                     }
                     // A menu (the game is paused or wants a mouse pointer): put a dark sheet behind
                     // the panel so every button can be read whatever is behind it.
-                    if (menu_showing || shared().game_paused.load()) c.params[3] = (float)cfg.ui_menu_backdrop;
+                    if ((menu_showing || shared().game_paused.load()) && !shared().menu_shows_character.load()) c.params[3] = (float)cfg.ui_menu_backdrop;
                     ui_acquired = blit_to_swapchain(g.ui, srv, c);
                     if (ui_acquired)
                     {

@@ -747,6 +747,39 @@ namespace
         shared.menu_up.store(game.paused || !pawn || !pawn_mesh);
         hsvr::input_watch_tick(game);
         {
+            // Is the equipment screen up? (Twice a second, only while a menu could be.)
+            static double next_check = 0.0;
+            double now_check = hsvr::now_seconds();
+            if (now_check >= next_check)
+            {
+                next_check = now_check + 0.5;
+                bool shows = false;
+                if (game.paused || game.wants_pointer || !pawn)
+                {
+                    std::vector<UObject*> widgets;
+                    UObjectGlobals::FindAllOf(STR("UserWidget"), widgets);
+                    for (UObject* widget : widgets)
+                    {
+                        if (!widget || std::wstring(widget->GetClassPrivate()->GetName()).rfind(L"UI_Tavern_Inventory", 0) != 0) continue;
+                        UFunction* in_viewport_fn = widget->GetFunctionByNameInChain(STR("IsInViewport"));
+                        UFunction* visibility_fn = widget->GetFunctionByNameInChain(STR("GetVisibility"));
+                        if (!in_viewport_fn) continue;
+                        BoolReturnParams in_viewport{};
+                        widget->ProcessEvent(in_viewport_fn, &in_viewport);
+                        if (!in_viewport.ReturnValue) continue;
+                        ByteReturnParams v{};
+                        if (visibility_fn) widget->ProcessEvent(visibility_fn, &v);
+                        if (v.ReturnValue == 1 || v.ReturnValue == 2) continue; // collapsed, hidden
+                        shows = true;
+                        break;
+                    }
+                }
+                if (shows != shared.menu_shows_character.load())
+                    HSVR_LOG(shows ? "UI: the equipment screen is up: no dark sheet behind the menus, so the character shows" : "UI: the equipment screen is gone");
+                shared.menu_shows_character.store(shows);
+            }
+        }
+        {
             std::wstring level = L"menu";
             if (pawn) { std::wstring full = pawn->GetFullName(); size_t dot = full.find(L'.'); size_t slash = full.rfind(L'/', dot); if (dot != std::wstring::npos && slash != std::wstring::npos) level = full.substr(slash + 1, dot - slash - 1); }
             hsvr::study_tick(pawn, level);

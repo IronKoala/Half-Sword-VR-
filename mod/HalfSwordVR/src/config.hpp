@@ -393,6 +393,9 @@ namespace hsvr
         bool bs_hands = true;
         // How near the palm something has to be to be grabbed (weapons and food: pickup_radius_m).
         double grab_radius_m = 0.12;
+        // The empty left hand squeezing within this distance of the place for the second hand on the
+        // right hand's weapon takes it two-handed (the game's own offhand attach).
+        double offhand_radius_m = 0.15;
         // (bs_hands=0 only:) A grip squeeze on a hand that holds a weapon is not passed to the game as a grab (which drops it).
         bool keep_held_weapon = true;
         // Two grip squeezes within this many seconds on a hand holding a weapon drop it (0 = never).

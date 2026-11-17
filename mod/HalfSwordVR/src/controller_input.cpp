@@ -757,6 +757,7 @@ namespace hsvr
         struct BsHandState
         {
             bool closed_on_weapon[2]{false, false}; // the grip was squeezed while this hand held a weapon
+            bool offhand = false;                    // the left hand holds the right hand's weapon as its second hand
         };
         BsHandState g_bs;
 
@@ -773,6 +774,25 @@ namespace hsvr
                     g_bs.closed_on_weapon[h] = true;
                     HSVR_LOG("Hands: %s grip closed on the weapon it holds%s", side, zone ? " (at a sheath place)" : "");
                     return;
+                }
+                // The second hand on a weapon (a two-hander, or one-handed in both hands): the empty
+                // left hand closes on the right hand's weapon at the place the game keeps for the
+                // second hand ("Grip L Hand Off Hand"); the game's own offhand attach does the rest.
+                if (h == 0)
+                {
+                    UObject* weapon = object_at(pawn, STR("Weapon R"));
+                    UObject* spot = weapon ? object_at(weapon, STR("Grip L Hand Off Hand")) : nullptr;
+                    Vec palm{}, at{};
+                    if (spot && hand_world(pawn, 0, palm) && component_world(spot, at))
+                    {
+                        double d = std::sqrt((palm.X - at.X) * (palm.X - at.X) + (palm.Y - at.Y) * (palm.Y - at.Y) + (palm.Z - at.Z) * (palm.Z - at.Z));
+                        if (d <= cfg.offhand_radius_m * 100.0 && call_event(pawn, STR("Attach L Hand To Offhand Position")))
+                        {
+                            g_bs.offhand = true;
+                            HSVR_LOG("Hands: left hand takes the weapon as its second hand (%.0f cm from the place for it)", d);
+                            return;
+                        }
+                    }
                 }
                 const XrHandRaw& hand = hands[h];
                 const XrHandRaw& other = hands[1 - h];
@@ -802,6 +822,13 @@ namespace hsvr
                 return;
             }
             // Released.
+            if (h == 0 && g_bs.offhand)
+            {
+                g_bs.offhand = false;
+                call_event(pawn, STR("Release Offhand"));
+                HSVR_LOG("Hands: left hand lets go of the weapon's handle");
+                return;
+            }
             if (bs_grabbing(pawn, h))
             {
                 bs_release(pawn, h);

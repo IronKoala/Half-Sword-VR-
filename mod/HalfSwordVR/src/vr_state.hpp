@@ -86,6 +86,9 @@ namespace hsvr
         // Told by the game thread: the game is paused / a menu is probably up (paused, or there
         // is no player character yet, as in the intro and main menu).
         std::atomic<bool> game_paused{false};
+        // The equipment screen (the tavern's UI_Tavern_Inventory) is up: it shows the character behind
+        // it, so no dark sheet is drawn behind the menu panel (Matthew, 2026-11-17).
+        std::atomic<bool> menu_shows_character{false};
         std::atomic<bool> menu_up{true};
         // The game has asked for a mouse pointer (it does in menus, not in a fight).
         std::atomic<bool> game_wants_pointer{false};
