@@ -3510,6 +3510,7 @@ namespace hsvr
             double walk_leg_start = 0;
             // Hands part (build 3, hands like Blade & Sorcery).
             bool h_begun = false, h_drop_checked = false, h_dropped = false, h_pick_checked = false, h_picked = false, h_pick_far = false;
+            bool h_no_free_sheath = false, h_grip_locked_before = false;
             bool h_kept = false, h_sheathe_checked = false, h_sheathed = false, h_draw_checked = false, h_drawn = false;
             bool h_grab_checked = false, h_grabbed = false, h_release_checked = false, h_let_go = false, h_has_target = false;
             UObject* h_weapon = nullptr;
@@ -3568,6 +3569,7 @@ namespace hsvr
             if (!t.h_begun)
             {
                 t.h_begun = true;
+                t.h_grip_locked_before = s.side[1].grip_locked;
                 t.h_weapon = weapon_r();
                 HSVR_LOG("Test: hands part: the right hand holds %ls", held_name().c_str());
             }
@@ -3632,6 +3634,40 @@ namespace hsvr
                         std::wstring w(slot);
                         t.h_sheathe_where = "in " + std::string(w.begin(), w.end());
                     }
+                }
+                {
+                    // What the game made of it (run 11: a longer weapon from a new save was in no slot).
+                    UObject* last = s.pawn->GetPropertyByNameInChain(STR("Last Sheathed Weapon R")) ? object_property(s.pawn, STR("Last Sheathed Weapon R")) : nullptr;
+                    bool* sheathing = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("R Weapon Sheathing"));
+                    bool* blocked = s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Block R Weapon From Sheathing"));
+                    uint8_t* slot = s.pawn->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Sheath Slot R"));
+                    UObject* parent = nullptr;
+                    if (UFunction* fn = t.h_weapon ? t.h_weapon->GetFunctionByNameInChain(STR("GetAttachParentActor")) : nullptr)
+                    {
+                        struct { UObject* ret; } out{};
+                        if (fn->GetParmsSize() == 8) t.h_weapon->ProcessEvent(fn, &out), parent = out.ret;
+                    }
+                    Vec3 at;
+                    double away = actor_location(t.h_weapon, at) ? length(at - s.actor_world) : -1.0;
+                    HSVR_LOG("Test: hands: sheathing: last sheathed is %s, sheathing now %s, blocked %s, slot %d, weapon attached to %ls, %.0f cm from the character",
+                             last == t.h_weapon ? "this weapon" : (last ? "another" : "none"), sheathing && *sheathing ? "yes" : "no", blocked && *blocked ? "yes" : "no",
+                             slot ? (int)*slot : -1, parent ? parent->GetName().c_str() : L"nothing", away);
+                    if (t.h_sheathe_where.empty() && last == t.h_weapon && parent == s.pawn) t.h_sheathe_where = "on the character (last sheathed)";
+                    // The game's own slot choice (Assign R Weapon Slot): a weapon that goes on the back
+                    // when the back already carries another is dropped by the game itself, mod or not
+                    // (run 12, with Matthew's newer save). Noted, not failed.
+                    UObject* back = s.pawn->GetPropertyByNameInChain(STR("Weapon Slot Back")) ? object_property(s.pawn, STR("Weapon Slot Back")) : nullptr;
+                    UObject* r1 = s.pawn->GetPropertyByNameInChain(STR("Weapon Slot R 1")) ? object_property(s.pawn, STR("Weapon Slot R 1")) : nullptr;
+                    UObject* r2 = s.pawn->GetPropertyByNameInChain(STR("Weapon Slot R 2")) ? object_property(s.pawn, STR("Weapon Slot R 2")) : nullptr;
+                    HSVR_LOG("Test: hands: slots: right 1 %ls, right 2 %ls, back %ls", r1 ? r1->GetName().c_str() : L"free", r2 ? r2->GetName().c_str() : L"free",
+                             back ? back->GetName().c_str() : L"free");
+                    // The weapon's own kind of sheath (ModularWeaponBP "SheathSlot"): 4 = none at all,
+                    // and the game's put-away drops such a weapon (run 13). 2/3 = shoulder/back, dropped
+                    // by the game when that place already carries another.
+                    uint8_t* kind = t.h_weapon ? t.h_weapon->GetValuePtrByPropertyNameInChain<uint8_t>(STR("SheathSlot")) : nullptr;
+                    int k = kind ? (int)*kind : -1;
+                    HSVR_LOG("Test: hands: the weapon's own sheath kind is %d (0/1 hip, 2 shoulder, 3 back, 4 none)", k);
+                    t.h_no_free_sheath = t.h_sheathe_where.empty() && !weapon_r() && (k == 4 || ((k == 2 || k == 3) && back && back != t.h_weapon));
                 }
                 t.h_sheathed = !weapon_r() && !t.h_sheathe_where.empty();
                 if (t.h_sheathe_where.empty()) t.h_sheathe_where = weapon_r() ? "still in the hand" : "in no weapon slot: dropped?";
@@ -3857,7 +3893,8 @@ namespace hsvr
                 line(t.placed_all_the_time, "body placed (not simulated) for the whole test");
                 line(t.mesh_on_character, "body mesh rides on the character");
                 line(t.physical_hands, "hands physical (wrists free), not the rigid fallback");
-                if (armed) line(s.side[1].grip_locked, "weapon fixed rigidly in the right hand (grip joint locked; re-locked %d times)", s.side[1].grip_relocked);
+                // (Judged as it was when the hands part began: that part drops and picks the weapon up.)
+                if (armed) line(t.h_begun ? t.h_grip_locked_before : s.side[1].grip_locked, "weapon fixed rigidly in the right hand before the hands part (grip joint locked; re-locked %d times)", s.side[1].grip_relocked);
                 line(mean(still, 1) >= 0 && mean(still, 1) < 2.5 && mean(still, 0) < 2.5, "hands still: right %.1f cm, left %.1f cm from the controllers on average (limit 2.5)", mean(still, 1), mean(still, 0));
                 {
                     // A standing player's eyes are the character's eyes: the hips need not be moved to
@@ -3960,7 +3997,10 @@ namespace hsvr
                         if (t.h_picked)
                         {
                             line(t.h_kept, "hands: holding the grip kept it in the hand (standing up, carrying it to the hip)");
-                            line(t.h_sheathed, "hands: letting go at the hip put it away (%s)", t.h_sheathe_where.c_str());
+                            if (t.h_no_free_sheath)
+                                note("hands: letting go at the hip: this weapon has no sheath (or its place is taken), and the game's own put-away drops it, as it does without the mod; sheathing not checked");
+                            else
+                                line(t.h_sheathed, "hands: letting go at the hip put it away (%s)", t.h_sheathe_where.c_str());
                             if (t.h_sheathed) line(t.h_drawn, "hands: squeezing at the hip drew a weapon again");
                         }
                     }

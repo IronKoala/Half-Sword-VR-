@@ -862,6 +862,29 @@ namespace hsvr
                      !asked ? "could not be dropped" : (after ? "is STILL in the hand" : "dropped"));
         }
 
+        // The game puts the left hand on the right hand's weapon by itself whenever the left hand
+        // comes near the place for it (its tick; so at spawn, where its own pose has the hands
+        // together). With the left hand at the player's own hand that joint and the hand fight
+        // (Matthew: two-handers "freaking out" from spawn; self-test: the left hand torn 120 cm off
+        // two seconds in). With these hands the second hand is only on when the left grip put it there.
+        void undo_auto_offhand(UObject* pawn)
+        {
+            // The game's own switch that stops its tick from attaching the second hand (one of the
+            // conditions before "Attach L Hand To Offhand Position", @507795), held on every frame.
+            // (Self-test run 10: taking the hand off after the fact had the game put it back 175
+            // times.) The left grip's own attach calls that function directly, past the switch.
+            if (bool* block = pawn->GetValuePtrByPropertyNameInChain<bool>(STR("Block Offhand Attach"))) *block = true;
+            bool* attached = pawn->GetValuePtrByPropertyNameInChain<bool>(STR("L Hand In Offhand Attached"));
+            static double next_release = 0.0;
+            if (attached && *attached && !g_bs.offhand && now_seconds() >= next_release)
+            {
+                next_release = now_seconds() + 0.5;
+                call_event(pawn, STR("Release Offhand"));
+                HSVR_LOG("Hands: the game put the left hand on the weapon by itself; taken off (squeeze the left grip there to hold it two-handed)");
+            }
+            if (attached && !*attached && now_seconds() - g_bs.offhand_since > 1.0) g_bs.offhand = false;
+        }
+
         void gestures(UObject* pawn, const XrHandRaw hands[2], bool in_menu, const Config& cfg)
         {
             GestureState& g = g_gesture;
@@ -935,23 +958,6 @@ namespace hsvr
                     HSVR_LOG("Gesture: %s hand draws a weapon (%s)", h ? "right" : "left", zone);
                     g.consumed[h] = call_event(pawn, side == L'R' ? STR("Unsheath R Event") : STR("Unsheath L Event"));
                 }
-            }
-            // The game puts the left hand on the right hand's weapon by itself whenever the left hand
-            // comes near the place for it (its tick; so at spawn, where its own pose has the hands
-            // together). With the left hand at the player's own hand that joint and the hand fight
-            // (Matthew: two-handers "freaking out" from spawn). With these hands the second hand is
-            // only on when the left grip put it there.
-            if (cfg.bs_hands && active)
-            {
-                bool* attached = pawn->GetValuePtrByPropertyNameInChain<bool>(STR("L Hand In Offhand Attached"));
-                static double next_release = 0.0;
-                if (attached && *attached && !g_bs.offhand && now_seconds() >= next_release)
-                {
-                    next_release = now_seconds() + 0.5;
-                    call_event(pawn, STR("Release Offhand"));
-                    HSVR_LOG("Hands: the game put the left hand on the weapon by itself; taken off (squeeze the left grip there to hold it two-handed)");
-                }
-                if (attached && !*attached && now_seconds() - g_bs.offhand_since > 1.0) g_bs.offhand = false;
             }
             // Eating: food held up to the mouth (within 15 cm of the eyes) is eaten, once every 2 s.
             static double next_bite = 0.0;
@@ -1300,6 +1306,7 @@ namespace hsvr
             pad.rx = axes[2];
             pad.ry = axes[3];
         }
+        if (cfg.bs_hands && cfg.controller_gestures && !vr_off && pawn && !in_menu && shared().body_placed.load()) undo_auto_offhand(pawn);
         if (have && !vr_off && cfg.stick_layout && pawn && !in_menu) stick_layout_tick(pawn, hands, pad, cfg);
         else g_x_tapped = false;
         if (cfg.own_crouch && shared().body_placed.load() && !vr_off)
