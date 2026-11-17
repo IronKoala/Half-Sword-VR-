@@ -2816,6 +2816,12 @@ float4 PSMain(VSOut i) : SV_Target
                     // Hands part: grips as the test says; the right hand held at a place the test
                     // worked out in tracking space (a dropped weapon, another character's arm).
                     hand.squeeze = shared().selftest_grip[h].load();
+                    if (h == 0 && shared().selftest_lhand_set.load())
+                    {
+                        hand.px = shared().selftest_lhand_xr[0].load();
+                        hand.py = shared().selftest_lhand_xr[1].load();
+                        hand.pz = shared().selftest_lhand_xr[2].load();
+                    }
                     if (h == 1 && shared().selftest_hand_set.load())
                     {
                         hand.px = shared().selftest_hand_xr[0].load();

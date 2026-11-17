@@ -256,6 +256,13 @@ namespace hsvr
         // disarm rule (force on the hold against arm tonus, consciousness, pain, grip) is applied to
         // the hold joint. Releases faster than throw_speed_ms are throws (x throw_boost).
         bool hold_layer = true;
+        // The game's disarm rule on the hold joint: off until its force scale is known (the first
+        // try compared the hold's force in engine units with the game's threshold and dropped every
+        // weapon at once; the game's own rule has been held off by hold_tight since the 13th cut).
+        bool hold_disarm_rule = false;
+        // How much harder a hand is pulled onto the weapon it holds than an empty hand to its
+        // controller (self-test: at x1 a fast swing left the hand 14 cm off the handle).
+        double hold_hand_pull = 6.0;
         double throw_speed_ms = 2.0, throw_boost = 2.0;
         // Build 2 (Matthew's point 2): a shield the game straps to the forearm is joined to the
         // hand instead, at the angle a straight wrist gives, so it goes where the hand goes and

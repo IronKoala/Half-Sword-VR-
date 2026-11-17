@@ -397,6 +397,8 @@ namespace hsvr
         flag("weapon_joint", c.weapon_joint);
         flag("align_handle", c.align_handle);
         flag("hold_layer", c.hold_layer);
+        flag("hold_disarm_rule", c.hold_disarm_rule);
+        num("hold_hand_pull", c.hold_hand_pull);
         num("throw_speed_ms", c.throw_speed_ms);
         num("throw_boost", c.throw_boost);
         num("offhand_radius_m", c.offhand_radius_m);

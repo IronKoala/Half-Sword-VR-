@@ -8,7 +8,7 @@ T=/c/dev/hsvr-test/surgery
 if tasklist 2>/dev/null | grep -qi "HalfSwordUE5"; then echo "GAME IS RUNNING - not starting a test"; exit 1; fi
 cp "$ROOT"/build-mod/HalfSwordVR/Game__Shipping__Win64/main.dll "$D/dlls/main.dll" || exit 1
 sed 's/^dev_fake_headset=0/dev_fake_headset=1/' $T/HalfSwordVR.ini.matthew > "$D/HalfSwordVR.ini"
-printf 'dev_fake_hands=1\r\ndev_fake_still=1\r\ndev_selftest=1\r\ndev_script=25:open /Game/Maps/Arenas/Map_Arena_Cellar;170:quit\r\n' >> "$D/HalfSwordVR.ini"
+printf 'dev_fake_hands=1\r\ndev_fake_still=1\r\ndev_selftest=1\r\ndev_script=25:open /Game/Maps/Arenas/Map_Arena_Cellar;173:quit\r\n' >> "$D/HalfSwordVR.ini"
 if [ -n "$EXTRA" ]; then echo "$EXTRA" | tr '|' '\n' | sed 's/$/\r/' >> "$D/HalfSwordVR.ini"; fi
 rm -f "$D/selftest_result.txt"
 cmd //c start "" "steam://rungameid/2397300"
