@@ -1215,6 +1215,16 @@ namespace hsvr
                 Quat hand_rot = (grip_rot * controller_frame * hand_frame.inverse()).normalized();
                 side.target_world.q = hand_rot;
                 side.target_world.t = grip_pos - hand_rot.rotate(side.grip_center);
+                if (side.handle_aligned && side.weapon_driven && !side.second_hand)
+                {
+                    // Holding a weapon lined up on the controller: the hand is where the weapon puts it
+                    // (its handle along the controller's, the fist at the controller's grip point), and
+                    // the arm is drawn to that hand (self-test run 19: drawn to the unturned hand, the
+                    // arm and the hand were 13 cm apart in motion).
+                    Quat hq = (grip_rot * side.weapon_from_ctrl * side.hand_in_weapon.q).normalized();
+                    side.target_world.q = hq;
+                    side.target_world.t = grip_pos - hq.rotate(side.grip_center);
+                }
                 side.blade_world = grip_rot.rotate(handle_axis);
                 side.target_valid = true;
             }
