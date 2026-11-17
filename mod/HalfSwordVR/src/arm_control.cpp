@@ -478,6 +478,12 @@ namespace hsvr
             UObject* joint_base = nullptr;
             Vec3 joint_p0;
             Quat joint_r0;
+            // The weapon's own handle lined up with the controller (B&S: no extra tilt): the weapon's
+            // turn in the controller's frame, worked out once when the joint is made.
+            bool handle_aligned = false;
+            Quat weapon_from_ctrl;
+            bool second_hand = false; // this hand holds the other hand's weapon as its second hand
+            double handle_off_deg = -1.0; // the weapon's handle against the controller's, this frame (-1 = not lined up)
             // For the log.
             double last_error_cm = 0, last_error_deg = 0;
             double last_reach = 0;    // controller distance from the shoulder / arm length
@@ -3538,7 +3544,8 @@ namespace hsvr
             // Hands part (build 3, hands like Blade & Sorcery).
             bool h_begun = false, h_drop_checked = false, h_dropped = false, h_pick_checked = false, h_picked = false, h_pick_far = false;
             bool h_no_free_sheath = false, h_grip_locked_before = false;
-            int wd_frames = 0, wd_measured = 0; // B&S step 1: frames the right weapon was pulled to the controller (parts 2 to 9)
+            int wd_frames = 0, wd_measured = 0;
+            double handle_off_max = -1.0; // the weapon's handle against the controller's while the hands are still (part 2) // B&S step 1: frames the right weapon was pulled to the controller (parts 2 to 9)
             bool h_kept = false, h_sheathe_checked = false, h_sheathed = false, h_draw_checked = false, h_drawn = false;
             bool h_grab_checked = false, h_grabbed = false, h_release_checked = false, h_let_go = false, h_has_target = false;
             UObject* h_weapon = nullptr;
@@ -3922,6 +3929,9 @@ namespace hsvr
                 line(t.mesh_on_character, "body mesh rides on the character");
                 line(t.physical_hands, "hands physical (wrists free), not the rigid fallback");
                 // (Judged as it was when the hands part began: that part drops and picks the weapon up.)
+                if (armed && cfg.weapon_joint && cfg.align_handle)
+                    line(t.handle_off_max >= 0.0 && t.handle_off_max < 5.0, "handle lined up: the weapon's handle lay along the controller's within %.1f degrees while the hands were still (limit 5)",
+                         t.handle_off_max);
                 if (armed && cfg.weapon_drive)
                     line(t.wd_measured > 0 && t.wd_frames * 10 >= t.wd_measured * 9, "B&S hold: the weapon itself was pulled to the controller in %d of %d measured frames (at least 90%%)",
                          t.wd_frames, t.wd_measured);
@@ -4295,6 +4305,7 @@ namespace hsvr
                 p.turn_max[k] = std::max(p.turn_max[k], s.side[k].last_error_deg);
             }
             if (!s.kin_active) t.placed_all_the_time = false;
+            if (part == 1 && s.side[1].handle_off_deg >= 0.0) t.handle_off_max = std::max(t.handle_off_max, s.side[1].handle_off_deg);
             if (part >= 1 && part <= 8)
             {
                 ++t.wd_measured;
@@ -5125,13 +5136,21 @@ namespace hsvr
             double dt = last > 0 ? std::min(0.05, now - last) : 0.0;
             last = now;
             UObject* right_weapon = s.pawn && s.pawn->GetPropertyByNameInChain(STR("Weapon R")) ? object_property(s.pawn, STR("Weapon R")) : nullptr;
+            // The left hand on the right hand's weapon (the game's offhand joint, put on by the left
+            // grip): both hands then pull it, as in B&S's two-handed hold.
+            bool* offhand_flag = s.pawn ? s.pawn->GetValuePtrByPropertyNameInChain<bool>(STR("L Hand In Offhand Attached")) : nullptr;
+            bool two_handed = cfg.weapon_joint && offhand_flag && *offhand_flag && right_weapon && s.side[1].weapon_driven;
             for (Side& side : s.side)
             {
                 const TCHAR* property = side.out_sign > 0 ? STR("Weapon R") : STR("Weapon L");
                 UObject* weapon = s.pawn && s.pawn->GetPropertyByNameInChain(property) ? object_property(s.pawn, property) : nullptr;
+                bool second = side.out_sign < 0 && two_handed;
+                if (second) weapon = right_weapon;
                 UObject* base = weapon && weapon->GetPropertyByNameInChain(STR("BaseMesh")) ? object_property(weapon, STR("BaseMesh")) : nullptr;
                 bool want = cfg.weapon_drive && s.kin_active && !s.kin_hands && s.body && side.pull_active && side.target_valid && side.grip_locked && side.wrist_freed &&
-                            base && side.held_carry <= 1.0 && side.rescue_until <= 0.0 && !(side.out_sign < 0 && weapon == right_weapon);
+                            base && side.held_carry <= 1.0 && side.rescue_until <= 0.0 && !(side.out_sign < 0 && weapon == right_weapon && !second);
+                if (second != side.second_hand && side.joint) joint_release(side); // the joint is made anew for the new role
+                side.second_hand = second;
                 if (!want)
                 {
                     if (side.weapon_driven) HSVR_LOG("Weapon: %s hand drives itself again (its weapon is no longer pulled to the controller)", side.label);
@@ -5229,7 +5248,33 @@ namespace hsvr
                     if (side.joint_base != base)
                     {
                         joint_release(side);
-                        joint_make(side, base, hand);
+                        side.handle_aligned = false;
+                        if (joint_make(side, base, hand) && !side.second_hand && cfg.align_handle)
+                        {
+                            // Line the weapon's own handle up with the controller's (B&S: the grip point's
+                            // axis along the controller's, no tilt). The handle is the weapon's long axis:
+                            // the one it is easiest to turn about, pointing from the hand to the weapon's
+                            // middle (towards the blade or head).
+                            int axis_i = -1;
+                            double least = 1e30;
+                            const double mom[3] = {inertia_local.x, inertia_local.y, inertia_local.z};
+                            for (int i = 0; i < 3; ++i)
+                                if (mom[i] > 0.0 && mom[i] < least) least = mom[i], axis_i = i;
+                            if (axis_i >= 0)
+                            {
+                                Vec3 along{axis_i == 0 ? 1.0 : 0.0, axis_i == 1 ? 1.0 : 0.0, axis_i == 2 ? 1.0 : 0.0};
+                                if (dot(along, weapon_xf.q.inverse().rotate(com - hand.t)) < 0.0) along = along * -1.0;
+                                Vec3 L = weapon_xf.q.rotate(along);
+                                Vec3 F = side.ctrl_world.rotate(Vec3{1, 0, 0}); // the controller's handle direction
+                                Vec3 cr{L.y * F.z - L.z * F.y, L.z * F.x - L.x * F.z, L.x * F.y - L.y * F.x};
+                                double ang = std::atan2(length(cr), dot(L, F));
+                                Quat turn = length(cr) > 1e-9 ? quat_axis_angle(normalized(cr), ang) : Quat{0, 0, 0, 1};
+                                side.weapon_from_ctrl = (side.ctrl_world.inverse() * turn * weapon_xf.q).normalized();
+                                side.handle_aligned = true;
+                                HSVR_LOG("Weapon: %s: the weapon's handle (its long axis, local %c) was %.0f degrees off the controller's; lined up with it", side.label,
+                                         "xyz"[axis_i], ang * kRadToDeg);
+                            }
+                        }
                     }
                     if (side.joint)
                     {
@@ -5247,31 +5292,62 @@ namespace hsvr
                         double c = std::max(cfg.wd_pos_damper, cfg.wd_damping_ratio * 2.0 * std::sqrt(k * m_total));
                         double cr = std::max(cfg.wd_rot_damper * 1.0e4, cfg.wd_damping_ratio * 2.0 * std::sqrt(kr * inertia));
                         double f_max = cfg.wd_pos_max_n * 100.0 * side.arm_strength, t_max = cfg.wd_rot_max_nm * 1.0e4 * side.arm_strength;
+                        if (two_handed)
+                        {
+                            // B&S two-handed (forceSpringDamper2HNoDomMult 2 / 1.5; rotation x2 for the leading
+                            // hand only): both hands pull twice as hard; the right hand turns the weapon, the left
+                            // holds its place, so the angle comes from the lever between the two.
+                            k *= 2.0;
+                            c *= 1.5;
+                            f_max *= 2.0;
+                            if (side.second_hand) kr = cr = t_max = 0.0;
+                            else kr *= 2.0, cr *= 2.0, t_max *= 2.0;
+                        }
                         named(side.joint, L"SetLinearDriveParams", {{L"PositionStrength", bytes<float>((float)k)}, {L"VelocityStrength", bytes<float>((float)c)}, {L"InForceLimit", bytes<float>((float)f_max)}});
                         named(side.joint, L"SetAngularDriveParams", {{L"PositionStrength", bytes<float>((float)kr)}, {L"VelocityStrength", bytes<float>((float)cr)}, {L"InForceLimit", bytes<float>((float)t_max)}});
+                        // Where the hand should be: at the controller, turned so the weapon's handle lies along
+                        // the controller's (when lined up), or as the controller turns the hand.
+                        Xf aim = target;
+                        if (side.handle_aligned)
+                        {
+                            Quat want_weapon = (side.ctrl_world * side.weapon_from_ctrl).normalized();
+                            aim.q = (want_weapon * side.hand_in_weapon.q).normalized();
+                            Vec3 fist = target.t + target.q.rotate(side.grip_center); // the controller's grip point
+                            aim.t = fist - aim.q.rotate(side.grip_center);
+                        }
                         // Targets in the joint's world frame (where it was made).
                         Quat r0i = side.joint_r0.inverse();
-                        Vec3 pos = r0i.rotate(target.t - side.joint_p0);
+                        Vec3 pos = r0i.rotate(aim.t - side.joint_p0);
                         Vec3 vel = r0i.rotate(v_target);
-                        Quat q_rel = (r0i * target.q).normalized();
+                        Quat q_rel = (r0i * aim.q).normalized();
                         Rot rr = quat_to_rot(q_rel);
                         Vec3 wrev = r0i.rotate(w_target) * (1.0 / (2.0 * kPi)); // revolutions a second
                         named(side.joint, L"SetLinearPositionTarget", {{L"InPosTarget", bytes(ue::FVector{pos.x, pos.y, pos.z})}});
                         named(side.joint, L"SetLinearVelocityTarget", {{L"InVelTarget", bytes(ue::FVector{vel.x, vel.y, vel.z})}});
                         named(side.joint, L"SetAngularOrientationTarget", {{L"InPosTarget", bytes(ue::FRotator{rr.pitch, rr.yaw, rr.roll})}});
                         named(side.joint, L"SetAngularVelocityTarget", {{L"InVelTarget", bytes(ue::FVector{wrev.x, wrev.y, wrev.z})}});
-                        Vec3 e = target.t - hand.t;
+                        Vec3 e = aim.t - hand.t;
                         // (Measured hand against target: the weapon-frame estimate above read a steady 15
                         // degrees that the self-test's own hand-to-controller check did not see.)
-                        Quat herr = (target.q * hand.q.inverse()).normalized();
+                        Quat herr = (aim.q * hand.q.inverse()).normalized();
                         double angle = 2.0 * std::acos(std::min(1.0, std::fabs(herr.w)));
                         side.drive_err_cm = length(e);
                         side.drive_err_deg = angle * kRadToDeg;
+                        side.handle_off_deg = -1.0;
+                        if (side.handle_aligned)
+                        {
+                            Quat now_from_ctrl = (side.ctrl_world.inverse() * weapon_xf.q).normalized();
+                            Quat d = (now_from_ctrl * side.weapon_from_ctrl.inverse()).normalized();
+                            side.handle_off_deg = 2.0 * std::acos(std::min(1.0, std::fabs(d.w))) * kRadToDeg;
+                        }
                         if (log_throttle(side.out_sign > 0 ? "wd-r" : "wd-l", 1.0))
-                            HSVR_LOG("Weapon: %s (joint): %.1f kg, grip %.1f cm and %.0f deg from the controller (at rest a hanging %.1f kg would sag %.1f cm) | arm strength %.0f%% "
-                                     "of its best this life (the game's own muscles) | caps %.0f N, %.0f N m",
-                                     side.label, mass, side.drive_err_cm, side.drive_err_deg, m_total, m_total * 980.0 / k, side.arm_strength * 100.0, f_max / 100.0,
-                                     t_max / 1.0e4);
+                        {
+                            double handle_off = side.handle_off_deg;
+                            HSVR_LOG("Weapon: %s (joint%s): %.1f kg, grip %.1f cm and %.0f deg from where it should be, handle %.0f deg off the controller's%s (at rest a hanging %.1f kg would sag %.1f cm) | "
+                                     "arm strength %.0f%% of its best this life (the game's own muscles) | caps %.0f N, %.0f N m",
+                                     side.label, side.second_hand ? ", second hand" : (two_handed ? ", both hands" : ""), mass, side.drive_err_cm, side.drive_err_deg,
+                                     handle_off, side.handle_aligned ? "" : " (not lined up)", m_total, m_total * 980.0 / k, side.arm_strength * 100.0, f_max / 100.0, t_max / 1.0e4);
+                        }
                         continue;
                     }
                 }
@@ -5976,7 +6052,7 @@ namespace hsvr
             static bool down[2] = {false, false};
             for (int k = 0; k < 2; ++k)
             {
-                bool now_down = s.hands_valid && s.hands[k].valid && (down[k] ? s.hands[k].squeeze > 0.4f : s.hands[k].squeeze > 0.6f);
+                bool now_down = s.hands_valid && s.hands[k].valid && (down[k] ? s.hands[k].squeeze > (float)config().grip_release : s.hands[k].squeeze > (float)config().grip_press);
                 if (now_down == down[k]) continue;
                 down[k] = now_down;
                 HSVR_LOG("Grip: %s grip %s | hands off their targets right %.1f cm %.0f deg, left %.1f cm %.0f deg | body %s | hand pull right %s left %s", k ? "right" : "left",

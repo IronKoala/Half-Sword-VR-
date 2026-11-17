@@ -895,9 +895,28 @@ namespace hsvr
             for (int h = 0; h < 2; ++h)
             {
                 const XrHandRaw& hand = hands[h];
-                bool down = g.grip_down[h] ? hand.squeeze > 0.4f : hand.squeeze > 0.6f;
+                bool down = g.grip_down[h] ? hand.squeeze > (float)cfg.grip_release : hand.squeeze > (float)cfg.grip_press;
                 bool pressed = down && !g.grip_down[h];
                 bool released = !down && g.grip_down[h];
+                {
+                    // The grip's own reading over the last moment, written down at each let-go, so a
+                    // session shows whether a let-go was the player's hand opening or the reading dipping.
+                    static float history[2][48] = {};
+                    static int at[2] = {0, 0};
+                    history[h][at[h]] = hand.squeeze;
+                    at[h] = (at[h] + 1) % 48;
+                    if (released)
+                    {
+                        std::string text;
+                        char v[8];
+                        for (int i = 0; i < 48; ++i)
+                        {
+                            snprintf(v, sizeof(v), " %.2f", history[h][(at[h] + i) % 48]);
+                            text += v;
+                        }
+                        HSVR_LOG("Grip: %s let go; the grip read over the last 48 frames (oldest first):%s", h ? "right" : "left", text.c_str());
+                    }
+                }
                 g.grip_down[h] = down;
                 if (!down) g.consumed[h] = false;
                 if (cfg.bs_hands && active)

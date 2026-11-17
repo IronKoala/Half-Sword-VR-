@@ -382,6 +382,8 @@ namespace hsvr
         num("pickup_radius_m", c.pickup_radius_m);
         flag("eat_at_mouth", c.eat_at_mouth);
         flag("bs_hands", c.bs_hands);
+        num("grip_press", c.grip_press);
+        num("grip_release", c.grip_release);
         num("grab_radius_m", c.grab_radius_m);
         flag("weapon_drive", c.weapon_drive);
         num("wd_pos_spring", c.wd_pos_spring);
@@ -393,6 +395,7 @@ namespace hsvr
         num("wd_damping_ratio", c.wd_damping_ratio);
         num("wd_min_strength", c.wd_min_strength);
         flag("weapon_joint", c.weapon_joint);
+        flag("align_handle", c.align_handle);
         num("offhand_radius_m", c.offhand_radius_m);
         flag("keep_held_weapon", c.keep_held_weapon);
         num("drop_double_squeeze_s", c.drop_double_squeeze_s);

@@ -245,7 +245,10 @@ namespace hsvr
         // direction towards the controller's top. 25 = the plain tilt build 1 (fourteenth cut) wrote into
         // ctrl_axes_l/r, so the angle does not change between the builds; with grip_fixed on, ctrl_axes is not read.
         bool grip_fixed = true;
-        double grip_tilt_deg = 25.0;
+        double grip_tilt_deg = 0.0; // (2026-11-17: 0, as B&S on SteamVR; 25 was a guess on the Quest stand-in)
+        // While a weapon is pulled by the joint, its own handle (long axis) is lined up with the
+        // controller's grip axis when it is taken, as B&S does.
+        bool align_handle = true;
         // Build 2 (Matthew's point 2): a shield the game straps to the forearm is joined to the
         // hand instead, at the angle a straight wrist gives, so it goes where the hand goes and
         // turns as the hand turns.
@@ -414,6 +417,11 @@ namespace hsvr
         // the game lets a hand grab (people too) to hold it; let go of a weapon at the hip or over
         // the shoulder to sheathe it. The grips then no longer reach the game as its grab key.
         bool bs_hands = true;
+        // When a grip counts as closed and as open again (0..1 of the squeeze). Valve's own Steam
+        // Frame bindings (legacy_bindings_frame_controller.json) press at 0.10 and release at 0.05;
+        // the mod's 0.6 / 0.4 read a natural hold on the Frame as let go now and then (2026-11-17:
+        // the weapon dropped and was grabbed again 0.1 to 0.5 s later, again and again).
+        double grip_press = 0.10, grip_release = 0.05;
         // How near the palm something has to be to be grabbed (weapons and food: pickup_radius_m).
         double grab_radius_m = 0.12;
         // The empty left hand squeezing within this distance of the place for the second hand on the
