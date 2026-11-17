@@ -758,6 +758,7 @@ namespace hsvr
         {
             bool closed_on_weapon[2]{false, false}; // the grip was squeezed while this hand held a weapon
             bool offhand = false;                    // the left hand holds the right hand's weapon as its second hand
+            double offhand_since = 0.0;
         };
         BsHandState g_bs;
 
@@ -789,6 +790,7 @@ namespace hsvr
                         if (d <= cfg.offhand_radius_m * 100.0 && call_event(pawn, STR("Attach L Hand To Offhand Position")))
                         {
                             g_bs.offhand = true;
+                            g_bs.offhand_since = now_seconds();
                             HSVR_LOG("Hands: left hand takes the weapon as its second hand (%.0f cm from the place for it)", d);
                             return;
                         }
@@ -933,6 +935,23 @@ namespace hsvr
                     HSVR_LOG("Gesture: %s hand draws a weapon (%s)", h ? "right" : "left", zone);
                     g.consumed[h] = call_event(pawn, side == L'R' ? STR("Unsheath R Event") : STR("Unsheath L Event"));
                 }
+            }
+            // The game puts the left hand on the right hand's weapon by itself whenever the left hand
+            // comes near the place for it (its tick; so at spawn, where its own pose has the hands
+            // together). With the left hand at the player's own hand that joint and the hand fight
+            // (Matthew: two-handers "freaking out" from spawn). With these hands the second hand is
+            // only on when the left grip put it there.
+            if (cfg.bs_hands && active)
+            {
+                bool* attached = pawn->GetValuePtrByPropertyNameInChain<bool>(STR("L Hand In Offhand Attached"));
+                static double next_release = 0.0;
+                if (attached && *attached && !g_bs.offhand && now_seconds() >= next_release)
+                {
+                    next_release = now_seconds() + 0.5;
+                    call_event(pawn, STR("Release Offhand"));
+                    HSVR_LOG("Hands: the game put the left hand on the weapon by itself; taken off (squeeze the left grip there to hold it two-handed)");
+                }
+                if (attached && !*attached && now_seconds() - g_bs.offhand_since > 1.0) g_bs.offhand = false;
             }
             // Eating: food held up to the mouth (within 15 cm of the eyes) is eaten, once every 2 s.
             static double next_bite = 0.0;
