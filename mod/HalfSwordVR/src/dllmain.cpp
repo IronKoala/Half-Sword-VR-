@@ -306,8 +306,9 @@ namespace
     }
 
     // SetSimulatePhysics on a skeletal mesh only changes the bodies whose physics asset entry is
-    // "Default"; bodies set to "Simulated" in the asset keep simulating (run 4 on 2026-11-17: the
-    // pelvis and hand_r still simulated in the same tick). SetAllBodiesSimulatePhysics changes every
+    // "Default". Willie's mesh uses Willie_PhysicsAsset_Capsules, whose 22 bodies are all marked
+    // Kinematic (decoded 2026-11-17), and the game makes them simulate itself, so SetSimulatePhysics
+    // leaves them alone (the pelvis and hand_r still simulated in the same tick). SetAllBodiesSimulatePhysics changes every
     // body regardless, so it is called after it. Each step is logged with what the pelvis reads after.
     void set_simulate(UObject* mesh, bool simulate, bool report = false)
     {
