@@ -472,6 +472,12 @@ namespace hsvr
             // works out from arm tonus, consciousness, stamina and more), and the most seen this life.
             double arm_strength_ref = 0, arm_strength = 1.0;
             UObject* arm_strength_pawn = nullptr;
+            // weapon_joint: the mod's own joint from a world frame (where the grip was when it was
+            // made: p0, r0) to the weapon at the grip point.
+            UObject* joint = nullptr;
+            UObject* joint_base = nullptr;
+            Vec3 joint_p0;
+            Quat joint_r0;
             // For the log.
             double last_error_cm = 0, last_error_deg = 0;
             double last_reach = 0;    // controller distance from the shoulder / arm length
@@ -4947,8 +4953,172 @@ namespace hsvr
         // rate) and given to it and to the hand riding on it; the physics then adds gravity and
         // whatever the weapon hits. Weight shows as the cap: a heavy weapon cannot be swung as fast.
         // Masses and inertia are the game's own for the weapon, plus about 1 kg for the hand.
+        // A reflected call with its parameters set by name.
+        struct NamedCall
+        {
+            UObject* obj = nullptr;
+            UFunction* fn = nullptr;
+            alignas(16) uint8_t buf[512];
+            bool init(UObject* o, const wchar_t* name)
+            {
+                obj = o;
+                fn = o ? o->GetFunctionByNameInChain(name) : nullptr;
+                if (!fn || fn->GetParmsSize() > (int)sizeof(buf)) return false;
+                memset(buf, 0, sizeof(buf));
+                return true;
+            }
+            template <class T> bool set(const wchar_t* name, const T& v)
+            {
+                int32_t at = param_offset(fn, name);
+                if (at < 0) return false;
+                memcpy(buf + at, &v, sizeof(T));
+                return true;
+            }
+            template <class T> T get(const wchar_t* name)
+            {
+                T v{};
+                int32_t at = param_offset(fn, name);
+                if (at >= 0) memcpy(&v, buf + at, sizeof(T));
+                return v;
+            }
+            void run() { obj->ProcessEvent(fn, buf); }
+        };
+        bool named(UObject* o, const wchar_t* name, std::initializer_list<std::pair<const wchar_t*, std::vector<uint8_t>>> args)
+        {
+            NamedCall c;
+            if (!c.init(o, name)) return false;
+            for (const auto& a : args)
+            {
+                int32_t at = param_offset(c.fn, a.first);
+                if (at < 0) return false;
+                memcpy(c.buf + at, a.second.data(), a.second.size());
+            }
+            c.run();
+            return true;
+        }
+        template <class T> std::vector<uint8_t> bytes(const T& v)
+        {
+            std::vector<uint8_t> b(sizeof(T));
+            memcpy(b.data(), &v, sizeof(T));
+            return b;
+        }
+
+        // How the engine steps physics (Half Sword's own settings), once.
+        void log_physics_rate()
+        {
+            static bool done = false;
+            if (done) return;
+            UObject* settings = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__PhysicsSettings"));
+            if (!settings) return;
+            done = true;
+            auto b = [&](const TCHAR* n) {
+                FProperty* p = settings->GetPropertyByNameInChain(n);
+                if (!p) return -1;
+                auto* f = static_cast<FBoolProperty*>(p);
+                return (*(reinterpret_cast<uint8_t*>(settings) + p->GetOffset_Internal() + f->GetByteOffset()) & f->GetFieldMask()) ? 1 : 0;
+            };
+            auto fl = [&](const TCHAR* n) {
+                float* v = settings->GetPropertyByNameInChain(n) ? settings->GetValuePtrByPropertyNameInChain<float>(n) : nullptr;
+                return v ? (double)*v : -1.0;
+            };
+            auto in = [&](const TCHAR* n) {
+                int32_t* v = settings->GetPropertyByNameInChain(n) ? settings->GetValuePtrByPropertyNameInChain<int32_t>(n) : nullptr;
+                return v ? *v : -1;
+            };
+            HSVR_LOG("Physics: the game's physics stepping: substepping %d (async %d), at most %d substeps of %.4f s, max step %.4f s, async fixed step %.4f s",
+                     b(STR("bSubstepping")), b(STR("bSubsteppingAsync")), in(STR("MaxSubsteps")), fl(STR("MaxSubstepDeltaTime")), fl(STR("MaxPhysicsDeltaTime")),
+                     fl(STR("AsyncFixedTimeStepSize")));
+            HSVR_LOG("Physics: physics on its own thread (bTickPhysicsAsync) %d", b(STR("bTickPhysicsAsync")));
+        }
+
+        void joint_release(Side& side)
+        {
+            if (side.joint)
+            {
+                named(side.joint, L"BreakConstraint", {});
+                named(side.joint, L"K2_DestroyComponent", {{L"Object", bytes<UObject*>(side.joint)}});
+                HSVR_LOG("Weapon: %s hand's pull joint removed", side.label);
+            }
+            side.joint = nullptr;
+            side.joint_base = nullptr;
+        }
+
+        // Makes the joint from the world (at the grip as it is now) to the weapon at the grip point.
+        bool joint_make(Side& side, UObject* base, const Xf& hand)
+        {
+            State& s = g_state;
+            static UObject* constraint_class = nullptr;
+            if (!constraint_class) constraint_class = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+            NamedCall add;
+            if (!constraint_class || !add.init(s.pawn, L"AddComponentByClass"))
+            {
+                HSVR_LOG("Weapon: the engine's add-component call was not found; the pull stays per frame");
+                return false;
+            }
+            add.set<UObject*>(L"Class", constraint_class);
+            add.set<bool>(L"bManualAttachment", true);
+            {
+                // FTransform (doubles): rotation x y z w, translation, scale.
+                alignas(16) double xf[12] = {0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0};
+                int32_t at = param_offset(add.fn, L"RelativeTransform");
+                if (at >= 0) memcpy(add.buf + at, xf, sizeof(xf));
+            }
+            add.set<bool>(L"bDeferredFinish", false);
+            add.run();
+            UObject* joint = add.get<UObject*>(L"ReturnValue");
+            if (!joint)
+            {
+                HSVR_LOG("Weapon: the engine did not make the pull joint; the pull stays per frame");
+                return false;
+            }
+            Rot r = quat_to_rot(hand.q);
+            ue::FRotator rot{r.pitch, r.yaw, r.roll};
+            ue::FVector at{hand.t.x, hand.t.y, hand.t.z};
+            {
+                NamedCall place;
+                if (place.init(joint, L"K2_SetWorldLocationAndRotation"))
+                {
+                    place.set(L"NewLocation", at);
+                    place.set(L"NewRotation", rot);
+                    place.set<bool>(L"bTeleport", true);
+                    place.run();
+                }
+            }
+            // Nothing to collide, everything free; the drives do the holding.
+            named(joint, L"SetDisableCollision", {{L"bDisableCollision", bytes<bool>(true)}});
+            for (const wchar_t* fn : {L"SetLinearXLimit", L"SetLinearYLimit", L"SetLinearZLimit"})
+                named(joint, fn, {{L"ConstraintType", bytes<uint8_t>(0)}, {L"LimitSize", bytes<float>(0.0f)}});
+            named(joint, L"SetAngularSwing1Limit", {{L"MotionType", bytes<uint8_t>(0)}, {L"Swing1LimitAngle", bytes<float>(0.0f)}});
+            named(joint, L"SetAngularSwing2Limit", {{L"MotionType", bytes<uint8_t>(0)}, {L"Swing2LimitAngle", bytes<float>(0.0f)}});
+            named(joint, L"SetAngularTwistLimit", {{L"ConstraintType", bytes<uint8_t>(0)}, {L"TwistLimitAngle", bytes<float>(0.0f)}});
+            named(joint, L"SetLinearPositionDrive", {{L"bEnableDriveX", bytes<bool>(true)}, {L"bEnableDriveY", bytes<bool>(true)}, {L"bEnableDriveZ", bytes<bool>(true)}});
+            named(joint, L"SetLinearVelocityDrive", {{L"bEnableDriveX", bytes<bool>(true)}, {L"bEnableDriveY", bytes<bool>(true)}, {L"bEnableDriveZ", bytes<bool>(true)}});
+            named(joint, L"SetAngularDriveMode", {{L"DriveMode", bytes<uint8_t>(0)}}); // SLERP
+            named(joint, L"SetOrientationDriveSLERP", {{L"bEnableSLERP", bytes<bool>(true)}});
+            named(joint, L"SetAngularVelocityDriveSLERP", {{L"bEnableSLERP", bytes<bool>(true)}});
+            // The weapon is body 1 (its frame at the grip point), the world is body 2.
+            {
+                NamedCall join;
+                if (!join.init(joint, L"SetConstrainedComponents"))
+                {
+                    named(joint, L"K2_DestroyComponent", {{L"Object", bytes<UObject*>(joint)}});
+                    return false;
+                }
+                join.set<UObject*>(L"Component1", base);
+                join.set<UObject*>(L"Component2", nullptr);
+                join.run();
+            }
+            side.joint = joint;
+            side.joint_base = base;
+            side.joint_p0 = hand.t;
+            side.joint_r0 = hand.q;
+            HSVR_LOG("Weapon: %s hand's pull is now an engine joint (solved in every physics step)", side.label);
+            return true;
+        }
+
         void weapon_drive(const Config& cfg)
         {
+            log_physics_rate();
             State& s = g_state;
             static double last = 0.0;
             double now = now_seconds();
@@ -4965,6 +5135,7 @@ namespace hsvr
                 if (!want)
                 {
                     if (side.weapon_driven) HSVR_LOG("Weapon: %s hand drives itself again (its weapon is no longer pulled to the controller)", side.label);
+                    joint_release(side);
                     side.weapon_driven = false;
                     side.drive_base = nullptr;
                     side.have_prev_drive_target = false;
@@ -5029,6 +5200,76 @@ namespace hsvr
                         base->ProcessEvent(in_fn, p);
                         int32_t r = param_offset(in_fn, L"ReturnValue");
                         if (r >= 0) { ue::FVector c; memcpy(&c, p + r, sizeof(c)); inertia_local = {c.X, c.Y, c.Z}; }
+                    }
+                }
+                // (The game's own strength for this arm is worked out further down; for the joint it is
+                // needed here, so the same reading is done first.)
+                if (cfg.weapon_joint)
+                {
+                    double now_strength = -1.0;
+                    for (const PullBody& body : g_pull_bodies)
+                    {
+                        if (body.kind != PullKind::arm || body.side != (int)(&side - s.side) || body.base.empty() || !(body.name == side.lower_name)) continue;
+                        now_strength = (double)pull_get(body.base.data(), g_pull.f_angvel);
+                    }
+                    if (side.arm_strength_pawn != s.pawn)
+                    {
+                        side.arm_strength_pawn = s.pawn;
+                        side.arm_strength_ref = 0.0;
+                    }
+                    if (now_strength > 0.0)
+                    {
+                        side.arm_strength_ref = std::max(side.arm_strength_ref, now_strength);
+                        side.arm_strength = std::max(cfg.wd_min_strength, std::min(1.0, now_strength / side.arm_strength_ref));
+                    }
+                    else if (now_strength == 0.0 && side.arm_strength_ref > 0.0)
+                    {
+                        side.arm_strength = cfg.wd_min_strength;
+                    }
+                    if (side.joint_base != base)
+                    {
+                        joint_release(side);
+                        joint_make(side, base, hand);
+                    }
+                    if (side.joint)
+                    {
+                        // Inertia about the turn still to go (as below), for the turning damper.
+                        Quat want_q0 = (target.q * side.hand_in_weapon.q.inverse()).normalized();
+                        Quat err0 = (want_q0 * weapon_xf.q.inverse()).normalized();
+                        if (err0.w < 0) err0 = {-err0.x, -err0.y, -err0.z, -err0.w};
+                        Vec3 ax0 = length(Vec3{err0.x, err0.y, err0.z}) > 1e-6 ? normalized({err0.x, err0.y, err0.z}) : Vec3{0, 0, 1};
+                        Vec3 al = weapon_xf.q.inverse().rotate(ax0);
+                        double inertia = al.x * al.x * inertia_local.x + al.y * al.y * inertia_local.y + al.z * al.z * inertia_local.z;
+                        Vec3 r_hand = hand.t - com;
+                        Vec3 r_perp = r_hand - ax0 * dot(r_hand, ax0);
+                        inertia = std::max(500.0, inertia + dot(r_perp, r_perp));
+                        double k = cfg.wd_pos_spring, kr = cfg.wd_rot_spring * 1.0e4;
+                        double c = std::max(cfg.wd_pos_damper, cfg.wd_damping_ratio * 2.0 * std::sqrt(k * m_total));
+                        double cr = std::max(cfg.wd_rot_damper * 1.0e4, cfg.wd_damping_ratio * 2.0 * std::sqrt(kr * inertia));
+                        double f_max = cfg.wd_pos_max_n * 100.0 * side.arm_strength, t_max = cfg.wd_rot_max_nm * 1.0e4 * side.arm_strength;
+                        named(side.joint, L"SetLinearDriveParams", {{L"PositionStrength", bytes<float>((float)k)}, {L"VelocityStrength", bytes<float>((float)c)}, {L"InForceLimit", bytes<float>((float)f_max)}});
+                        named(side.joint, L"SetAngularDriveParams", {{L"PositionStrength", bytes<float>((float)kr)}, {L"VelocityStrength", bytes<float>((float)cr)}, {L"InForceLimit", bytes<float>((float)t_max)}});
+                        // Targets in the joint's world frame (where it was made).
+                        Quat r0i = side.joint_r0.inverse();
+                        Vec3 pos = r0i.rotate(target.t - side.joint_p0);
+                        Vec3 vel = r0i.rotate(v_target);
+                        Quat q_rel = (r0i * target.q).normalized();
+                        Rot rr = quat_to_rot(q_rel);
+                        Vec3 wrev = r0i.rotate(w_target) * (1.0 / (2.0 * kPi)); // revolutions a second
+                        named(side.joint, L"SetLinearPositionTarget", {{L"InPosTarget", bytes(ue::FVector{pos.x, pos.y, pos.z})}});
+                        named(side.joint, L"SetLinearVelocityTarget", {{L"InVelTarget", bytes(ue::FVector{vel.x, vel.y, vel.z})}});
+                        named(side.joint, L"SetAngularOrientationTarget", {{L"InPosTarget", bytes(ue::FRotator{rr.pitch, rr.yaw, rr.roll})}});
+                        named(side.joint, L"SetAngularVelocityTarget", {{L"InVelTarget", bytes(ue::FVector{wrev.x, wrev.y, wrev.z})}});
+                        Vec3 e = target.t - hand.t;
+                        double angle = 2.0 * std::acos(std::min(1.0, std::fabs(err0.w)));
+                        side.drive_err_cm = length(e);
+                        side.drive_err_deg = angle * kRadToDeg;
+                        if (log_throttle(side.out_sign > 0 ? "wd-r" : "wd-l", 1.0))
+                            HSVR_LOG("Weapon: %s (joint): %.1f kg, grip %.1f cm and %.0f deg from the controller (at rest a hanging %.1f kg would sag %.1f cm) | arm strength %.0f%% "
+                                     "of its best this life (the game's own muscles) | caps %.0f N, %.0f N m",
+                                     side.label, mass, side.drive_err_cm, side.drive_err_deg, m_total, m_total * 980.0 / k, side.arm_strength * 100.0, f_max / 100.0,
+                                     t_max / 1.0e4);
+                        continue;
                     }
                 }
                 // Velocities now: the hand's (the grip point's) and the weapon's turning.

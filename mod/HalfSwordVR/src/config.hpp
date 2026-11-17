@@ -352,6 +352,10 @@ namespace hsvr
         // tonus, consciousness, stamina...): a weaker, tired or hurt arm has smaller caps, down to
         // this fraction.
         double wd_min_strength = 0.15;
+        // The pull as a real engine joint (a physics constraint from a fixed world frame to the
+        // weapon, with position and SLERP drives), solved by the physics on every one of its steps
+        // as B&S's ConfigurableJoint is; 0 = set the weapon's speed once per game frame instead.
+        bool weapon_joint = true;
         double hand_pull_strength = 12000.0;
         double hand_pull_damping = 150.0;
         double hand_pull_max_force = 30000.0;
