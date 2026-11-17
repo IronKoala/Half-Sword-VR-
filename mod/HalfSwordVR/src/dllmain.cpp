@@ -319,6 +319,29 @@ namespace
     // TEST ONLY (dev_player_physics_off): physics off on the player's own body, to see what the
     // game does without its ragdoll. Only the pawn the player controls is touched; the enemies run
     // the same Blueprint and are left alone.
+    // -1 = follow dev_player_physics_off; 0/1 = set by the unattended script (hsvr.physics_off).
+    int g_physics_override = -1;
+
+    // Once a second while log_body is on or the physics test runs: where the character is.
+    void log_body(UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
+    {
+        static double last = 0.0;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+        UFunction* actor_fn = pawn->GetFunctionByNameInChain(STR("K2_GetActorLocation"));
+        ActorLocationParams actor{};
+        if (actor_fn) pawn->ProcessEvent(actor_fn, &actor);
+        hsvr::Vec3 pelvis, head, hand_l, hand_r;
+        bone_location(mesh, "pelvis", pelvis);
+        bone_location(mesh, "Head", head);
+        bone_location(mesh, cfg.hand_bone_left, hand_l);
+        bone_location(mesh, cfg.hand_bone_right, hand_r);
+        HSVR_LOG("Body: actor (%.0f, %.0f, %.0f) pelvis (%.0f, %.0f, %.0f) head (%.0f, %.0f, %.0f) hand_l (%.0f, %.0f, %.0f) hand_r (%.0f, %.0f, %.0f) | head above actor %.0f cm, physics pelvis %d",
+                 actor.ReturnValue.X, actor.ReturnValue.Y, actor.ReturnValue.Z, pelvis.x, pelvis.y, pelvis.z, head.x, head.y, head.z, hand_l.x, hand_l.y, hand_l.z,
+                 hand_r.x, hand_r.y, hand_r.z, head.z - actor.ReturnValue.Z, is_simulating(mesh, "pelvis"));
+    }
+
     void player_physics_test(const hsvr::Config& cfg)
     {
         static UObject* switched_off = nullptr; // the mesh we turned physics off on
@@ -331,7 +354,9 @@ namespace
             checked_pawn = pawn;
             pawn_is_willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
         }
-        bool want_off = cfg.dev_player_physics_off && mesh && pawn_is_willie;
+        bool flag = g_physics_override >= 0 ? g_physics_override != 0 : cfg.dev_player_physics_off;
+        bool want_off = flag && mesh && pawn_is_willie;
+        if (mesh && pawn_is_willie && (cfg.log_body || switched_off)) log_body(pawn, mesh, cfg);
         if (switched_off && (switched_off != mesh || !want_off))
         {
             if (switched_off == mesh)
@@ -638,6 +663,12 @@ namespace
             GetSystemTime(&utc);
             HSVR_LOG("Script: %.0f s: %s (%02d:%02d:%02d.%03d UTC)", entry.at, entry.command.c_str(), (int)utc.wHour, (int)utc.wMinute, (int)utc.wSecond,
                      (int)utc.wMilliseconds);
+            // Mod commands for unattended tests; everything else goes to the engine console.
+            if (entry.command.rfind("hsvr.physics_off ", 0) == 0)
+            {
+                g_physics_override = atoi(entry.command.c_str() + 17) != 0 ? 1 : 0;
+                continue;
+            }
             run_console_command(entry.command);
             return; // one a tick
         }

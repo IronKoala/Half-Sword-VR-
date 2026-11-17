@@ -137,6 +137,10 @@ namespace hsvr
         // switching back to 0 turns physics on again, which may not match the game's own setup,
         // so restart the fight afterwards.
         bool dev_player_physics_off = false;
+        // 1 = once a second, where your character's body, head and hands are (on automatically
+        // while the physics test runs). Unattended tests can also switch the physics test with
+        // the dev_script step "hsvr.physics_off 1" / "hsvr.physics_off 0".
+        bool log_body = false;
     };
 
     // Current settings (copy). Cheap enough to call once per frame.

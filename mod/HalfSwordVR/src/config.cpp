@@ -227,6 +227,7 @@ namespace hsvr
         text("hand_bone_right", c.hand_bone_right);
         flag("haptics_test", c.haptics_test);
         flag("dev_player_physics_off", c.dev_player_physics_off);
+        flag("log_body", c.log_body);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;

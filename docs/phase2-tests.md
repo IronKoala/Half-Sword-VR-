@@ -14,6 +14,7 @@ Background for both: the roadmap and the decompile write-up (`HalfSwordDecomp\in
 | `log_controllers` | 1 | Once a second, one log line per controller: offset from your head (forward, right, up in cm), position and rotation in the game world, distance to the character's hand bone, and what the buttons and stick read. |
 | `hand_bone_left`, `hand_bone_right` | `hand_l`, `hand_r` | Bones the distance is measured to. `hand_r` is the weapon hand per the decompile; `hand_l` is assumed from the same naming and is checked by this test (the bone list is in the log at the start of each fight). |
 | `haptics_test` | 0 | 1 = a short buzz on a controller each time its trigger is pulled all the way. |
+| `log_body` | 0 | 1 = once a second, where your character's body, pelvis, head and hands are, and whether the pelvis is simulated. On automatically while the physics test runs. |
 | `dev_player_physics_off` | 0 | TEST ONLY. 1 = physics off on your character's body. Read while the game runs. Back to 0 turns physics on again, which may not match the game's own setup, so restart the fight afterwards. |
 
 The ini is only written with these lines when it is first created. On an existing install, add the lines by hand.
@@ -34,5 +35,7 @@ The ini is only written with these lines when it is first created. On an existin
 2. Watch and note: does he stand, stay animated, fall through the floor, freeze, drop his weapon? Can you still walk, swing, block, get hit, kill the opponent, die?
 3. The log checks every second whether the game turned physics back on (`Physics test: simulating now ...`) and switches it off again if so.
 4. Set it back to 0, then restart the fight.
+
+Unattended version: `dev_script` can switch the test with the mod's own steps `hsvr.physics_off 1` and `hsvr.physics_off 0`, next to engine console commands such as `open <map>`, so a timed run can load a fight, record a while with physics on (`log_body=1`), switch it off, and record again.
 
 **What this answers:** whether physics can be switched off for the player alone without the game breaking, and what Phase 3 has to replace.
