@@ -1063,6 +1063,16 @@ namespace hsvr
             const XrHandRaw& l = s.hands[0];
             const XrHandRaw& r = s.hands[1];
             bool holding = s.hands_valid && l.valid && r.valid && l.squeeze > 0.8f && r.squeeze > 0.8f;
+            // Only with both hands empty: both grips held on a weapon (a two-handed hold) is holding
+            // it, not the calibration pose (2026-11-17: a two-handed grip on a sword ran the
+            // calibration, which took the player's eyes as 123 cm and made Willie look small).
+            auto holds = [&](const TCHAR* p) { return s.pawn && s.pawn->GetPropertyByNameInChain(p) && object_property(s.pawn, p) != nullptr; };
+            auto grabbing = [&](const TCHAR* p) {
+                bool* g = s.pawn ? s.pawn->GetValuePtrByPropertyNameInChain<bool>(p) : nullptr;
+                return g && *g;
+            };
+            if (holding && (holds(STR("Weapon R")) || holds(STR("Weapon L")) || grabbing(STR("Grabbed R")) || grabbing(STR("Grabbed L")) || shared().left_second_hand.load()))
+                holding = false;
             if (!holding)
             {
                 hold_start = 0.0;
@@ -1122,10 +1132,19 @@ namespace hsvr
                 if (origin >= 0.0f)
                 {
                     double eye_cm = (origin + head.y) * 100.0;
-                    char text[32];
-                    snprintf(text, sizeof(text), "%.1f", eye_cm);
-                    config_store({{"player_eye_cm", text}});
-                    HSVR_LOG("Arms: your eyes are %.0f cm above the floor standing (stored as player_eye_cm)", eye_cm);
+                    double before = config().player_eye_cm;
+                    if (before > 0.0 && std::fabs(eye_cm - before) > 0.15 * before)
+                    {
+                        // Not standing straight (crouched, leaning): the eye height is kept as it was.
+                        HSVR_LOG("Arms: your eyes read %.0f cm above the floor, more than 15%% from the %.0f cm stored: not standing straight? kept %.0f cm", eye_cm, before, before);
+                    }
+                    else
+                    {
+                        char text[32];
+                        snprintf(text, sizeof(text), "%.1f", eye_cm);
+                        config_store({{"player_eye_cm", text}});
+                        HSVR_LOG("Arms: your eyes are %.0f cm above the floor standing (stored as player_eye_cm)", eye_cm);
+                    }
                 }
             }
             for (Side& side : s.side) side.have_offset = false;

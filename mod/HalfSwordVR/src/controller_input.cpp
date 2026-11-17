@@ -788,7 +788,23 @@ namespace hsvr
                     UObject* grip = weapon ? object_at(weapon, STR("Grip R Hand Default Pos")) : nullptr;
                     if (!grip && weapon) grip = object_at(weapon, STR("Grip"));
                     Vec palm{}, a{}, b{};
-                    if (pommel && grip && hand_world(pawn, 0, palm) && component_world(pommel, a) && component_world(grip, b))
+                    // The palm, not the wrist bone (6 cm back from it): the left hand's weapon socket.
+                    bool have_palm = false;
+                    {
+                        UObject** mesh = pawn->GetValuePtrByPropertyNameInChain<UObject*>(STR("Mesh"));
+                        UFunction* fn = mesh && *mesh ? (*mesh)->GetFunctionByNameInChain(STR("GetSocketLocation")) : nullptr;
+                        if (fn)
+                        {
+                            SocketParams p{};
+                            p.InSocketName = FName(STR("weapon_lSocket"), FNAME_Add);
+                            (*mesh)->ProcessEvent(fn, &p);
+                            palm = p.ReturnValue;
+                            have_palm = true;
+                        }
+                    }
+                    if (!have_palm) have_palm = hand_world(pawn, 0, palm);
+                    if (weapon && (!pommel || !grip)) HSVR_LOG("Hands: the right hand's weapon has no %s part; the second hand cannot find its handle", pommel ? "grip" : "pommel");
+                    if (pommel && grip && have_palm && component_world(pommel, a) && component_world(grip, b))
                     {
                         // Out past the right hand too (towards the blade: a half-sword hold), by half a handle.
                         double ux = b.X - a.X, uy = b.Y - a.Y, uz = b.Z - a.Z;
@@ -809,6 +825,7 @@ namespace hsvr
                                          d, along, len);
                                 return;
                             }
+                            HSVR_LOG("Hands: left hand closed %.0f cm from the right hand's weapon's handle (it takes it within %.0f cm), %.0f cm along it", d, cfg.offhand_radius_m * 100.0, along);
                         }
                     }
                 }
