@@ -5649,6 +5649,43 @@ namespace
                 g_joint_trace.store(atoi(entry.command.c_str() + 17) != 0);
                 continue;
             }
+            if (entry.command == "hsvr.passive_foe")
+            {
+                // A training dummy for unattended tests (passive_foe.md): every foe's AI controller
+                // (AI_BP_C) is stopped - DED set, its tick off, its movement stopped - and the inputs it
+                // writes on its pawn cleared. The foe keeps its own physics, balance and get-up (those
+                // run in Willie_BP's tick), so it can be hit, grabbed and stuck into. It can still die.
+                UObject* player = nullptr;
+                find_pawn_mesh(&player);
+                std::vector<UObject*> ais;
+                UObjectGlobals::FindAllOf(STR("AI_BP_C"), ais);
+                int stopped = 0;
+                for (UObject* ai : ais)
+                {
+                    if (!ai || ai->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                    Call gp(ai, STR("K2_GetPawn"));
+                    gp.run();
+                    UObject* foe = gp.object_result();
+                    if (!foe || foe == player) continue;
+                    set_variable(ai, STR("DED"), 1.0);
+                    Call tick(ai, STR("SetActorTickEnabled"));
+                    tick.first_flag(false);
+                    tick.run();
+                    Call stop(ai, STR("StopMovement"));
+                    stop.run();
+                    std::wstring missing;
+                    for (const TCHAR* v : {STR("R Hand Active"), STR("L Hand Active"), STR("R Down"), STR("L Down"), STR("Chain Attack"), STR("BobnWeave"),
+                                           STR("Dodging"), STR("Alt Thrusting"), STR("AI In Combat"), STR("Is Crouched??")})
+                        if (!set_variable(foe, v, 0.0)) missing += std::wstring(v) + STR(", ");
+                    if (FProperty* p = foe->GetPropertyByNameInChain(STR("Aim Vector_0")))
+                        write_three(reinterpret_cast<uint8_t*>(foe) + p->GetOffset_Internal(), p, 0.0, 0.0, 0.0);
+                    ++stopped;
+                    HSVR_LOG("Script: hsvr.passive_foe: %ls (controller %ls) made passive%ls%ls", foe->GetName().c_str(), ai->GetName().c_str(),
+                             missing.empty() ? STR("") : STR("; not found: "), missing.c_str());
+                }
+                HSVR_LOG("Script: hsvr.passive_foe: %d foe(s) made passive (%d AI controllers)", stopped, (int)ais.size());
+                continue;
+            }
             if (entry.command.rfind("hsvr.force_watch ", 0) == 0)
             {
                 install_force_watch();
