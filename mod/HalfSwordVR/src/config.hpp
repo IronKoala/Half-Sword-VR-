@@ -140,21 +140,8 @@ namespace hsvr
         std::string hand_bone_right = "hand_r";
         // 1 = a short buzz on a controller each time its trigger is pulled all the way (checks vibration).
         bool haptics_test = false;
-        // TEST ONLY. 1 = switch physics off on your own character's body (enemies are not touched)
-        // to see what the game does without the ragdoll. Can be flipped while the game runs;
-        // switching back to 0 turns physics on again, which may not match the game's own setup,
-        // so restart the fight afterwards.
-        bool dev_player_physics_off = false;
-        // 1 = once a second, where your character's body, head and hands are (on automatically
-        // while the physics test runs). Unattended tests can also switch the physics test with
-        // the dev_script step "hsvr.physics_off 1" / "hsvr.physics_off 0".
+        // 1 = once a second, where your character's body, head and hands are.
         bool log_body = false;
-        // TEST ONLY, with the physics test: 1 = keep physics on for both arms (every body from
-        // these bones outwards), so the rest of the body is still and the arms hang and move by the
-        // game's own muscles.
-        bool dev_player_arm_physics = false;
-        std::string arm_bone_left = "clavicle_l";
-        std::string arm_bone_right = "clavicle_r";
         // TEST ONLY (Phase 3 probe). 1 = on your character's animation (ABP_Willie on the hidden
         // DriverSkeleton), set the end-of-graph "Modify Bone" node for dev_pose_bone to this
         // rotation (degrees, component space, replacing the animation), to check that the mod can

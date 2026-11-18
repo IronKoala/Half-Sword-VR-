@@ -110,6 +110,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `hsvr.mark` | Clears the test counters (let-goes, kicks, worst hold lag) |
 | `hsvr.expect <what> <op> <value> [label]` | Logs "EXPECT PASS" or "EXPECT FAIL". what: held_r, held_l, grabbed_r, grabbed_l, letgo and kicks (counts since hsvr.mark), lag_r, lag_l (worst cm since hsvr.mark); op: < <= = >= > |
 | `hsvr.joint_trace 0/1` | Logs the right hand joint every tick before and after our free, with his soft-attach variables ("Joint:") |
+| `hsvr.watch_vars grip,offhand,stuck` | Every tick, logs each change ("Watch: <time> pawn.<name> old -> new") of the number, yes/no and enum variables on his pawn and on the weapon in each hand whose names contain one of the words (case ignored). No words = stop. For matching a game routine to a kick by its timing |
 | `hsvr.passive_foe` | Makes every foe a training dummy: its AI controller stopped (DED, tick off, movement stopped) and its attack inputs cleared; its physics, balance and get-up keep working. Spawn one with Free Mode Foes Amount=1, Brawling off, and run this right after it spawns |
 | `hsvr.force_watch 0/1` | Logs ("Force:") every physics write from game script (impulses, forces, velocities, teleports, collision and physics switches) on a part of a weapon in his hands or his own body, with the calling Blueprint function and bytecode offset |
 | `hsvr.break_joint 0/1` | Breaks the game's hand joint on the held weapon (test: only the mod's hold links them) |

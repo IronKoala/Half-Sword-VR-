@@ -356,47 +356,9 @@ namespace
                      whole ? "called" : "not found", after_whole, every_body ? "called" : "not found", is_simulating(mesh, "pelvis"));
     }
 
-    struct BodiesBelowParams
-    {
-        FName InBoneName;
-        bool bNewSimulate;
-        bool bIncludeSelf;
-    };
-
-    // Physics back on for one branch of the skeleton (the game itself does this from the pelvis
-    // when it rescales the character).
-    void set_simulate_below(UObject* mesh, const std::string& bone, bool simulate)
-    {
-        UFunction* fn = mesh->GetFunctionByNameInChain(STR("SetAllBodiesBelowSimulatePhysics"));
-        if (!fn) return;
-        BodiesBelowParams p{};
-        p.InBoneName = bone_fname(bone);
-        p.bNewSimulate = simulate;
-        p.bIncludeSelf = true;
-        mesh->ProcessEvent(fn, &p);
-    }
-
-    // The physics test's "off": everything off, then the arms back on when dev_player_arm_physics is set.
-    void physics_test_off(UObject* mesh, const hsvr::Config& cfg, bool report)
-    {
-        set_simulate(mesh, false, report);
-        if (!cfg.dev_player_arm_physics) return;
-        set_simulate_below(mesh, cfg.arm_bone_left, true);
-        set_simulate_below(mesh, cfg.arm_bone_right, true);
-        if (report)
-            HSVR_LOG("Physics test: arms kept on from %s / %s: pelvis %d, %s %d, %s %d", cfg.arm_bone_left.c_str(), cfg.arm_bone_right.c_str(),
-                     is_simulating(mesh, "pelvis"), cfg.hand_bone_left.c_str(), is_simulating(mesh, cfg.hand_bone_left), cfg.hand_bone_right.c_str(),
-                     is_simulating(mesh, cfg.hand_bone_right));
-    }
-
-    // TEST ONLY (dev_player_physics_off): physics off on the player's own body, to see what the
-    // game does without its ragdoll. Only the pawn the player controls is touched; the enemies run
-    // the same Blueprint and are left alone.
-    // -1 = follow dev_player_physics_off; 0/1 = set by the unattended script (hsvr.physics_off).
-    int g_physics_override = -1;
     std::atomic<bool> g_joint_trace{false}; // hsvr.joint_trace 1: the right hand joint every tick, before and after our free
 
-    // Once a second while log_body is on or the physics test runs: where the character is.
+    // Once a second while log_body is on: where the character is.
     void log_body(UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
     {
         static double last = 0.0;
@@ -416,66 +378,12 @@ namespace
                  hand_r.x, hand_r.y, hand_r.z, head.z - actor.ReturnValue.Z, is_simulating(mesh, "pelvis"));
     }
 
-    void player_physics_test(const hsvr::Config& cfg)
+    void body_log_tick(const hsvr::Config& cfg)
     {
-        static UObject* switched_off = nullptr; // the mesh we turned physics off on
-        static UObject* checked_pawn = nullptr;
-        static bool pawn_is_willie = false;
+        if (!cfg.log_body) return;
         UObject* pawn = nullptr;
         UObject* mesh = find_pawn_mesh(&pawn);
-        if (pawn != checked_pawn)
-        {
-            checked_pawn = pawn;
-            pawn_is_willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
-        }
-        bool flag = g_physics_override >= 0 ? g_physics_override != 0 : cfg.dev_player_physics_off;
-        bool want_off = flag && mesh && pawn_is_willie;
-        if (mesh && pawn_is_willie && (cfg.log_body || switched_off)) log_body(pawn, mesh, cfg);
-        if (switched_off && (switched_off != mesh || !want_off))
-        {
-            if (switched_off == mesh)
-            {
-                set_simulate(mesh, true, true);
-                HSVR_LOG("Physics test: physics back ON for your character (may differ from the game's own setup; restart the fight to be sure)");
-            }
-            else
-            {
-                HSVR_LOG("Physics test: your character changed; the new one keeps its physics until the test applies again");
-            }
-            switched_off = nullptr;
-        }
-        if (want_off && switched_off != mesh)
-        {
-            physics_test_off(mesh, cfg, true);
-            switched_off = mesh;
-            HSVR_LOG("Physics test: physics OFF for your character (%ls)%s", pawn->GetFullName().c_str(),
-                     cfg.dev_player_arm_physics ? ", arms kept on" : "");
-        }
-        // dev_player_arm_physics changed while the test runs: apply it now.
-        static bool arms_applied = false;
-        if (switched_off && switched_off == mesh && arms_applied != cfg.dev_player_arm_physics)
-        {
-            physics_test_off(mesh, cfg, true);
-            HSVR_LOG("Physics test: arms %s", cfg.dev_player_arm_physics ? "on (physics), rest of the body off" : "off with the rest of the body");
-        }
-        arms_applied = switched_off ? cfg.dev_player_arm_physics : false;
-        if (!switched_off) return;
-        static double last = 0.0;
-        double now = hsvr::now_seconds();
-        if (now - last < 1.0) return;
-        last = now;
-        // Watch whether the game turns physics back on by itself.
-        int pelvis = is_simulating(mesh, "pelvis");
-        int hand = is_simulating(mesh, cfg.hand_bone_right);
-        HSVR_LOG("Physics test: simulating now: pelvis %d, %s %d (1 = physics on, -1 = unknown)", pelvis, cfg.hand_bone_right.c_str(), hand);
-        // With the arms kept on, only the pelvis tells whether the game switched the whole body on.
-        if (pelvis == 1 || (hand == 1 && !cfg.dev_player_arm_physics))
-        {
-            HSVR_LOG("Physics test: the game switched physics back on; switching it off again");
-            static int reports_left = 5;
-            physics_test_off(mesh, cfg, reports_left > 0);
-            if (reports_left > 0) --reports_left;
-        }
+        if (mesh && pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos) log_body(pawn, mesh, cfg);
     }
 
     // ---- Phase 3 probe: posing bones through ABP_Willie's Modify Bone nodes ----------------------
@@ -5606,11 +5514,6 @@ namespace
             HSVR_LOG("Script: %s%.0f s: %s (%02d:%02d:%02d.%03d UTC)", entry.after_menu ? "M+" : "", entry.at, entry.command.c_str(), (int)utc.wHour, (int)utc.wMinute, (int)utc.wSecond,
                      (int)utc.wMilliseconds);
             // Mod commands for unattended tests; everything else goes to the engine console.
-            if (entry.command.rfind("hsvr.physics_off ", 0) == 0)
-            {
-                g_physics_override = atoi(entry.command.c_str() + 17) != 0 ? 1 : 0;
-                continue;
-            }
             if (entry.command.rfind("hsvr.set ", 0) == 0)
             {
                 script_set_game_instance(entry.command.substr(9));
@@ -5677,6 +5580,27 @@ namespace
                 else known = false;
                 if (got_n < 3 || !known) HSVR_LOG("EXPECT FAIL: could not read \"%s\"", entry.command.c_str());
                 else HSVR_LOG("EXPECT %s: %s %s %g (is %g)%s%s", pass ? "PASS" : "FAIL", what, op, want, value, label[0] ? " - " : "", label);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.watch_vars", 0) == 0)
+            {
+                // hsvr.watch_vars grip,offhand,stuck  (words, comma separated; none = stop)
+                g_watch_words.clear();
+                g_watched.clear();
+                for (auto& o : g_watch_owners) o = nullptr;
+                std::string rest = entry.command.size() > 16 ? entry.command.substr(16) : std::string();
+                size_t start = 0;
+                while (start <= rest.size())
+                {
+                    size_t end = rest.find(',', start);
+                    if (end == std::string::npos) end = rest.size();
+                    std::wstring word;
+                    for (size_t i = start; i < end; ++i)
+                        if (rest[i] != ' ') word += (wchar_t)tolower((unsigned char)rest[i]);
+                    if (!word.empty()) g_watch_words.push_back(word);
+                    start = end + 1;
+                }
+                HSVR_LOG("Watch: %d words", (int)g_watch_words.size());
                 continue;
             }
             if (entry.command.rfind("hsvr.joint_trace ", 0) == 0)
@@ -6327,6 +6251,86 @@ namespace
                  (int)bool_property(pawn, STR("Player Match End")));
     }
 
+    // ---- Variable watch (kick hunt, hsvr.watch_vars) -------------------------------------------
+    // Every tick, the number, yes/no, byte and enum variables of the player's pawn and of the weapon
+    // in each hand whose names contain one of the given words (case ignored) are read, and each
+    // change is logged with the time, so a game routine can be matched to a kick by its timing.
+    struct WatchedVar
+    {
+        UObject* owner;
+        FProperty* property;
+        std::string label;
+        double value;
+    };
+    std::vector<std::wstring> g_watch_words;
+    std::vector<WatchedVar> g_watched;
+    UObject* g_watch_owners[3] = {nullptr, nullptr, nullptr};
+
+    double watch_read(UObject* owner, FProperty* p)
+    {
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
+        auto kind = p->GetClass().GetName();
+        if (kind == STR("DoubleProperty")) return *reinterpret_cast<double*>(at);
+        if (kind == STR("FloatProperty")) return *reinterpret_cast<float*>(at);
+        if (kind == STR("IntProperty")) return *reinterpret_cast<int32_t*>(at);
+        if (kind == STR("ByteProperty") || kind == STR("EnumProperty")) return *at;
+        if (kind == STR("BoolProperty"))
+        {
+            auto* flag = static_cast<FBoolProperty*>(p);
+            return (at[flag->GetByteOffset()] & flag->GetFieldMask()) != 0 ? 1.0 : 0.0;
+        }
+        return 0.0;
+    }
+
+    void watch_collect(UObject* owner, const char* who)
+    {
+        if (!owner) return;
+        int found = 0;
+        for (UStruct* level = static_cast<UStruct*>(owner->GetClassPrivate()); level; level = level->GetSuperStruct())
+            for (FProperty* p : level->ForEachProperty())
+            {
+                auto kind = p->GetClass().GetName();
+                if (kind != STR("DoubleProperty") && kind != STR("FloatProperty") && kind != STR("IntProperty") && kind != STR("ByteProperty") &&
+                    kind != STR("EnumProperty") && kind != STR("BoolProperty"))
+                    continue;
+                std::wstring name = p->GetName(), lower = name;
+                for (auto& ch : lower) ch = (wchar_t)towlower(ch);
+                bool match = false;
+                for (auto& w : g_watch_words)
+                    if (lower.find(w) != std::wstring::npos) match = true;
+                if (!match) continue;
+                std::string label = who;
+                label += ".";
+                for (wchar_t ch : name) label += (char)(ch < 128 ? ch : '?');
+                g_watched.push_back({owner, p, label, watch_read(owner, p)});
+                ++found;
+            }
+        HSVR_LOG("Watch: %d variables on %s (%ls)", found, who, owner->GetName().c_str());
+    }
+
+    void watch_vars_tick()
+    {
+        if (g_watch_words.empty()) return;
+        UObject* pawn = g_pose.pawn;
+        UObject* owners[3] = {pawn, pawn ? object_property(pawn, STR("Weapon L")) : nullptr, pawn ? object_property(pawn, STR("Weapon R")) : nullptr};
+        if (owners[0] != g_watch_owners[0] || owners[1] != g_watch_owners[1] || owners[2] != g_watch_owners[2])
+        {
+            g_watched.clear();
+            for (int i = 0; i < 3; ++i) g_watch_owners[i] = owners[i];
+            watch_collect(owners[0], "pawn");
+            watch_collect(owners[1], "weaponL");
+            watch_collect(owners[2], "weaponR");
+        }
+        double now = hsvr::now_seconds();
+        for (auto& v : g_watched)
+        {
+            double value = watch_read(v.owner, v.property);
+            if (value == v.value) continue;
+            HSVR_LOG("Watch: %.3f %s %g -> %g", now, v.label.c_str(), v.value, value);
+            v.value = value;
+        }
+    }
+
     void game_tick(UObject* engine, float delta_seconds)
     {
         g_engine = engine;
@@ -6356,11 +6360,12 @@ namespace
 
         hsvr::Config cfg = hsvr::config();
         log_controllers(cfg);
-        player_physics_test(cfg);
+        body_log_tick(cfg);
         pose_probe(cfg);
         pose_body(cfg);
         hide_own_head(cfg);
         grab_button(cfg, hsvr::controllers_state(), shared.menu_up.load());
+        watch_vars_tick();
         if (g_console_done)
         {
             apply_picture_settings(cfg);

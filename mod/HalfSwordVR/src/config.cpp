@@ -112,10 +112,8 @@ namespace hsvr
                 "hand_bone_left=%s\n"
                 "hand_bone_right=%s\n"
                 "; 1 = short buzz when a trigger is pulled all the way (vibration check).\n"
-                "haptics_test=%d\n"
-                "; TEST ONLY: 1 = physics off on your own character's body. Restart the fight after switching back.\n"
-                "dev_player_physics_off=%d\n",
-                d.log_controllers, d.hand_bone_left.c_str(), d.hand_bone_right.c_str(), d.haptics_test, d.dev_player_physics_off);
+                "haptics_test=%d\n",
+                d.log_controllers, d.hand_bone_left.c_str(), d.hand_bone_right.c_str(), d.haptics_test);
         fclose(f);
     }
 
@@ -293,11 +291,7 @@ namespace hsvr
         text("hand_bone_left", c.hand_bone_left);
         text("hand_bone_right", c.hand_bone_right);
         flag("haptics_test", c.haptics_test);
-        flag("dev_player_physics_off", c.dev_player_physics_off);
         flag("log_body", c.log_body);
-        flag("dev_player_arm_physics", c.dev_player_arm_physics);
-        text("arm_bone_left", c.arm_bone_left);
-        text("arm_bone_right", c.arm_bone_right);
         flag("dev_pose_probe", c.dev_pose_probe);
         text("dev_pose_bone", c.dev_pose_bone);
         num("dev_pose_pitch", c.dev_pose_pitch);
