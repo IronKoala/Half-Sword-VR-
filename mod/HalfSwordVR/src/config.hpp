@@ -147,6 +147,13 @@ namespace hsvr
         bool dev_player_arm_physics = false;
         std::string arm_bone_left = "clavicle_l";
         std::string arm_bone_right = "clavicle_r";
+        // TEST ONLY (Phase 3 probe). 1 = on your character's animation (ABP_Willie on the hidden
+        // DriverSkeleton), set the end-of-graph "Modify Bone" node for dev_pose_bone to this
+        // rotation (degrees, component space, replacing the animation), to check that the mod can
+        // pose bones that way. The node table is logged once.
+        bool dev_pose_probe = false;
+        std::string dev_pose_bone = "head";
+        double dev_pose_pitch = 0.0, dev_pose_yaw = 0.0, dev_pose_roll = 0.0;
     };
 
     // Current settings (copy). Cheap enough to call once per frame.

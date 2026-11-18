@@ -243,6 +243,11 @@ namespace hsvr
         flag("dev_player_arm_physics", c.dev_player_arm_physics);
         text("arm_bone_left", c.arm_bone_left);
         text("arm_bone_right", c.arm_bone_right);
+        flag("dev_pose_probe", c.dev_pose_probe);
+        text("dev_pose_bone", c.dev_pose_bone);
+        num("dev_pose_pitch", c.dev_pose_pitch);
+        num("dev_pose_yaw", c.dev_pose_yaw);
+        num("dev_pose_roll", c.dev_pose_roll);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;

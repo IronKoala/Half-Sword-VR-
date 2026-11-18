@@ -451,6 +451,192 @@ namespace
         }
     }
 
+    // ---- Phase 3 probe: posing bones through ABP_Willie's Modify Bone nodes ----------------------
+    // ABP_Willie ends in one FAnimNode_ModifyBone per main bone (decompile, internals-map "Posing for
+    // Phase 3"); the game only writes their Scale. Every field is found by name through reflection.
+    FProperty* struct_member(UScriptStruct* type, const TCHAR* name)
+    {
+        if (!type) return nullptr;
+        for (UStruct* level = type; level; level = level->GetSuperStruct())
+            for (FProperty* member : level->ForEachProperty())
+                if (member->GetName() == name) return member;
+        return nullptr;
+    }
+
+    UScriptStruct* struct_type(FProperty* property)
+    {
+        if (!property || property->GetClass().GetName() != STR("StructProperty")) return nullptr;
+        return static_cast<FStructProperty*>(property)->GetStruct();
+    }
+
+    // Writes three numbers into a vector or rotator field (float or double members, in order).
+    bool write_three(uint8_t* field, FProperty* property, double a, double b, double c)
+    {
+        UScriptStruct* type = struct_type(property);
+        if (!type) return false;
+        double values[3] = {a, b, c};
+        int i = 0;
+        for (FProperty* member : type->ForEachProperty())
+        {
+            if (i >= 3) break;
+            auto kind = member->GetClass().GetName();
+            uint8_t* at = field + member->GetOffset_Internal();
+            if (kind == STR("DoubleProperty")) *reinterpret_cast<double*>(at) = values[i];
+            else if (kind == STR("FloatProperty")) *reinterpret_cast<float*>(at) = (float)values[i];
+            else return false;
+            ++i;
+        }
+        return i == 3;
+    }
+
+    void read_three(const uint8_t* field, FProperty* property, double out[3])
+    {
+        out[0] = out[1] = out[2] = 0.0;
+        UScriptStruct* type = struct_type(property);
+        if (!type) return;
+        int i = 0;
+        for (FProperty* member : type->ForEachProperty())
+        {
+            if (i >= 3) break;
+            auto kind = member->GetClass().GetName();
+            const uint8_t* at = field + member->GetOffset_Internal();
+            if (kind == STR("DoubleProperty")) out[i] = *reinterpret_cast<const double*>(at);
+            else if (kind == STR("FloatProperty")) out[i] = *reinterpret_cast<const float*>(at);
+            ++i;
+        }
+    }
+
+    struct ModifyBoneNode
+    {
+        std::wstring bone;
+        uint8_t* node = nullptr; // inside the anim instance
+        FProperty* rotation = nullptr;
+        FProperty* translation = nullptr;
+        FProperty* rotation_mode = nullptr;
+        FProperty* rotation_space = nullptr;
+        FProperty* translation_mode = nullptr;
+        FProperty* translation_space = nullptr;
+    };
+
+    // The player's DriverSkeleton anim instance (ABP_Willie). Enemies run the same ABP; this is
+    // reached through the player's own pawn, so only the player's is touched.
+    UObject* player_pose_instance(UObject* pawn)
+    {
+        UObject* driver = object_property(pawn, STR("DriverSkeleton"));
+        static UObject* reported = nullptr;
+        if (!driver && reported != pawn)
+        {
+            reported = pawn;
+            HSVR_LOG("Pose probe: %ls has no DriverSkeleton variable", pawn->GetFullName().c_str());
+        }
+        return object_property(driver, STR("AnimScriptInstance"));
+    }
+
+    std::vector<ModifyBoneNode> find_modify_bone_nodes(UObject* instance)
+    {
+        std::vector<ModifyBoneNode> nodes;
+        for (UStruct* level = instance->GetClassPrivate(); level; level = level->GetSuperStruct())
+        {
+            for (FProperty* property : level->ForEachProperty())
+            {
+                UScriptStruct* type = struct_type(property);
+                if (!type || type->GetName() != STR("AnimNode_ModifyBone")) continue;
+                ModifyBoneNode n;
+                n.node = reinterpret_cast<uint8_t*>(instance) + property->GetOffset_Internal();
+                FProperty* bone_ref = struct_member(type, STR("BoneToModify"));
+                FProperty* bone_name = struct_member(struct_type(bone_ref), STR("BoneName"));
+                if (bone_ref && bone_name)
+                    n.bone = reinterpret_cast<const FName*>(n.node + bone_ref->GetOffset_Internal() + bone_name->GetOffset_Internal())->ToString();
+                n.rotation = struct_member(type, STR("Rotation"));
+                n.translation = struct_member(type, STR("Translation"));
+                n.rotation_mode = struct_member(type, STR("RotationMode"));
+                n.rotation_space = struct_member(type, STR("RotationSpace"));
+                n.translation_mode = struct_member(type, STR("TranslationMode"));
+                n.translation_space = struct_member(type, STR("TranslationSpace"));
+                nodes.push_back(n);
+            }
+        }
+        return nodes;
+    }
+
+    void pose_probe(const hsvr::Config& cfg)
+    {
+        static UObject* logged_for = nullptr;
+        static bool was_on = false;
+        static std::vector<ModifyBoneNode> nodes;
+        static uint8_t saved_mode = 0, saved_space = 0;
+        static ModifyBoneNode* active = nullptr;
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        UObject* instance = pawn ? player_pose_instance(pawn) : nullptr;
+        if (!cfg.dev_pose_probe || !instance)
+        {
+            if (was_on && active && instance == logged_for)
+            {
+                *(active->node + active->rotation_mode->GetOffset_Internal()) = saved_mode;
+                *(active->node + active->rotation_space->GetOffset_Internal()) = saved_space;
+                HSVR_LOG("Pose probe: off, %ls back to the game's own setting", active->bone.c_str());
+            }
+            was_on = false;
+            active = nullptr;
+            return;
+        }
+        if (instance != logged_for)
+        {
+            logged_for = instance;
+            active = nullptr;
+            was_on = false;
+            nodes = find_modify_bone_nodes(instance);
+            HSVR_LOG("Pose probe: %ls has %d Modify Bone nodes", instance->GetFullName().c_str(), (int)nodes.size());
+            for (const ModifyBoneNode& n : nodes)
+            {
+                double r[3], t[3];
+                if (n.rotation) read_three(n.node + n.rotation->GetOffset_Internal(), n.rotation, r);
+                if (n.translation) read_three(n.node + n.translation->GetOffset_Internal(), n.translation, t);
+                HSVR_LOG("  %ls: rotation mode %d space %d (%.1f, %.1f, %.1f), translation mode %d space %d (%.1f, %.1f, %.1f)", n.bone.c_str(),
+                         n.rotation_mode ? (int)*(n.node + n.rotation_mode->GetOffset_Internal()) : -1,
+                         n.rotation_space ? (int)*(n.node + n.rotation_space->GetOffset_Internal()) : -1, r[0], r[1], r[2],
+                         n.translation_mode ? (int)*(n.node + n.translation_mode->GetOffset_Internal()) : -1,
+                         n.translation_space ? (int)*(n.node + n.translation_space->GetOffset_Internal()) : -1, t[0], t[1], t[2]);
+            }
+        }
+        std::wstring wanted(cfg.dev_pose_bone.begin(), cfg.dev_pose_bone.end());
+        if (!active || active->bone != wanted)
+        {
+            active = nullptr;
+            for (ModifyBoneNode& n : nodes)
+                if (_wcsicmp(n.bone.c_str(), wanted.c_str()) == 0 && n.rotation && n.rotation_mode && n.rotation_space) active = &n;
+            if (!active)
+            {
+                static std::string missing;
+                if (missing != cfg.dev_pose_bone) HSVR_LOG("Pose probe: no Modify Bone node for \"%s\"", cfg.dev_pose_bone.c_str());
+                missing = cfg.dev_pose_bone;
+                return;
+            }
+            saved_mode = *(active->node + active->rotation_mode->GetOffset_Internal());
+            saved_space = *(active->node + active->rotation_space->GetOffset_Internal());
+        }
+        // EBoneModificationMode: 0 ignore, 1 replace, 2 additive. EBoneControlSpace: 0 world, 1 component, 2 parent, 3 bone.
+        *(active->node + active->rotation_mode->GetOffset_Internal()) = 1;
+        *(active->node + active->rotation_space->GetOffset_Internal()) = 1;
+        write_three(active->node + active->rotation->GetOffset_Internal(), active->rotation, cfg.dev_pose_pitch, cfg.dev_pose_yaw, cfg.dev_pose_roll);
+        if (!was_on)
+            HSVR_LOG("Pose probe: %ls rotation set to (%.1f, %.1f, %.1f) in component space, replacing the animation", active->bone.c_str(),
+                     cfg.dev_pose_pitch, cfg.dev_pose_yaw, cfg.dev_pose_roll);
+        was_on = true;
+        // Once a second: where the bone really is, to see whether the write took.
+        static double last = 0.0;
+        double now = hsvr::now_seconds();
+        if (now - last >= 1.0)
+        {
+            last = now;
+            hsvr::Vec3 at;
+            UObject* mesh = find_pawn_mesh();
+            std::string bone(cfg.dev_pose_bone);
+            if (mesh && bone_location(mesh, bone, at)) HSVR_LOG("Pose probe: %s now at (%.0f, %.0f, %.0f)", bone.c_str(), at.x, at.y, at.z);
+        }
+    }
+
     struct ConsoleCommandParams
     {
         UObject* WorldContextObject;
@@ -1307,6 +1493,7 @@ namespace
         hsvr::Config cfg = hsvr::config();
         log_controllers(cfg);
         player_physics_test(cfg);
+        pose_probe(cfg);
         if (g_console_done)
         {
             apply_picture_settings(cfg);
