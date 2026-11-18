@@ -15,6 +15,7 @@ Background for both: the roadmap and the decompile write-up (`HalfSwordDecomp\in
 | `hand_bone_left`, `hand_bone_right` | `hand_l`, `hand_r` | Bones the distance is measured to. `hand_r` is the weapon hand per the decompile; `hand_l` is assumed from the same naming and is checked by this test (the bone list is in the log at the start of each fight). |
 | `haptics_test` | 0 | 1 = a short buzz on a controller each time its trigger is pulled all the way. |
 | `log_body` | 0 | 1 = once a second, where your character's body, pelvis, head and hands are, and whether the pelvis is simulated. On automatically while the physics test runs. |
+| `dev_player_arm_physics` | 0 | TEST ONLY, with `dev_player_physics_off=1`: keeps physics on for both arms (every body from `arm_bone_left` / `arm_bone_right`, default `clavicle_l` / `clavicle_r`, outwards), so the rest of the body is still and the arms move by the game's own muscles. Can be flipped while the test runs. |
 | `dev_player_physics_off` | 0 | TEST ONLY. 1 = physics off on your character's body. Read while the game runs. Back to 0 turns physics on again, which may not match the game's own setup, so restart the fight afterwards. |
 
 The ini is only written with these lines when it is first created. On an existing install, add the lines by hand.

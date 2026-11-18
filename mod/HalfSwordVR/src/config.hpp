@@ -141,6 +141,12 @@ namespace hsvr
         // while the physics test runs). Unattended tests can also switch the physics test with
         // the dev_script step "hsvr.physics_off 1" / "hsvr.physics_off 0".
         bool log_body = false;
+        // TEST ONLY, with the physics test: 1 = keep physics on for both arms (every body from
+        // these bones outwards), so the rest of the body is still and the arms hang and move by the
+        // game's own muscles.
+        bool dev_player_arm_physics = false;
+        std::string arm_bone_left = "clavicle_l";
+        std::string arm_bone_right = "clavicle_r";
     };
 
     // Current settings (copy). Cheap enough to call once per frame.

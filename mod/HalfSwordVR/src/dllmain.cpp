@@ -330,6 +330,39 @@ namespace
                      whole ? "called" : "not found", after_whole, every_body ? "called" : "not found", is_simulating(mesh, "pelvis"));
     }
 
+    struct BodiesBelowParams
+    {
+        FName InBoneName;
+        bool bNewSimulate;
+        bool bIncludeSelf;
+    };
+
+    // Physics back on for one branch of the skeleton (the game itself does this from the pelvis
+    // when it rescales the character).
+    void set_simulate_below(UObject* mesh, const std::string& bone, bool simulate)
+    {
+        UFunction* fn = mesh->GetFunctionByNameInChain(STR("SetAllBodiesBelowSimulatePhysics"));
+        if (!fn) return;
+        BodiesBelowParams p{};
+        p.InBoneName = bone_fname(bone);
+        p.bNewSimulate = simulate;
+        p.bIncludeSelf = true;
+        mesh->ProcessEvent(fn, &p);
+    }
+
+    // The physics test's "off": everything off, then the arms back on when dev_player_arm_physics is set.
+    void physics_test_off(UObject* mesh, const hsvr::Config& cfg, bool report)
+    {
+        set_simulate(mesh, false, report);
+        if (!cfg.dev_player_arm_physics) return;
+        set_simulate_below(mesh, cfg.arm_bone_left, true);
+        set_simulate_below(mesh, cfg.arm_bone_right, true);
+        if (report)
+            HSVR_LOG("Physics test: arms kept on from %s / %s: pelvis %d, %s %d, %s %d", cfg.arm_bone_left.c_str(), cfg.arm_bone_right.c_str(),
+                     is_simulating(mesh, "pelvis"), cfg.hand_bone_left.c_str(), is_simulating(mesh, cfg.hand_bone_left), cfg.hand_bone_right.c_str(),
+                     is_simulating(mesh, cfg.hand_bone_right));
+    }
+
     // TEST ONLY (dev_player_physics_off): physics off on the player's own body, to see what the
     // game does without its ragdoll. Only the pawn the player controls is touched; the enemies run
     // the same Blueprint and are left alone.
@@ -386,10 +419,19 @@ namespace
         }
         if (want_off && switched_off != mesh)
         {
-            set_simulate(mesh, false, true);
+            physics_test_off(mesh, cfg, true);
             switched_off = mesh;
-            HSVR_LOG("Physics test: physics OFF for your character (%ls)", pawn->GetFullName().c_str());
+            HSVR_LOG("Physics test: physics OFF for your character (%ls)%s", pawn->GetFullName().c_str(),
+                     cfg.dev_player_arm_physics ? ", arms kept on" : "");
         }
+        // dev_player_arm_physics changed while the test runs: apply it now.
+        static bool arms_applied = false;
+        if (switched_off && switched_off == mesh && arms_applied != cfg.dev_player_arm_physics)
+        {
+            physics_test_off(mesh, cfg, true);
+            HSVR_LOG("Physics test: arms %s", cfg.dev_player_arm_physics ? "on (physics), rest of the body off" : "off with the rest of the body");
+        }
+        arms_applied = switched_off ? cfg.dev_player_arm_physics : false;
         if (!switched_off) return;
         static double last = 0.0;
         double now = hsvr::now_seconds();
@@ -399,11 +441,12 @@ namespace
         int pelvis = is_simulating(mesh, "pelvis");
         int hand = is_simulating(mesh, cfg.hand_bone_right);
         HSVR_LOG("Physics test: simulating now: pelvis %d, %s %d (1 = physics on, -1 = unknown)", pelvis, cfg.hand_bone_right.c_str(), hand);
-        if (pelvis == 1 || hand == 1)
+        // With the arms kept on, only the pelvis tells whether the game switched the whole body on.
+        if (pelvis == 1 || (hand == 1 && !cfg.dev_player_arm_physics))
         {
             HSVR_LOG("Physics test: the game switched physics back on; switching it off again");
             static int reports_left = 5;
-            set_simulate(mesh, false, reports_left > 0);
+            physics_test_off(mesh, cfg, reports_left > 0);
             if (reports_left > 0) --reports_left;
         }
     }
