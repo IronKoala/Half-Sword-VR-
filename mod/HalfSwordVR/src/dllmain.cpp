@@ -2741,6 +2741,36 @@ namespace
                         HSVR_LOG("Grip: weapon response to channel %d set to %d, reads %d", ch, g_weapon_channel_resp.load(), byte_result(readback));
                     }
                 }
+                // Anchor the weapon at its own handle marker instead of the game's anchor point.
+                {
+                    static UObject* anchored[2] = {nullptr, nullptr};
+                    static bool anchored_marker[2] = {false, false};
+                    static Vec3 game_pos1[2];
+                    bool want = cfg.pose_grip_anchor_marker;
+                    if (anchored[side] != joint || anchored_marker[side] != want)
+                    {
+                        if (anchored[side] != joint)
+                        {
+                            auto p1 = [&](const TCHAR* axis) {
+                                double v = nested_number(joint, {STR("ConstraintInstance"), STR("Pos1"), axis});
+                                return std::isnan(v) ? 0.0 : v;
+                            };
+                            game_pos1[side] = Vec3{p1(STR("X")), p1(STR("Y")), p1(STR("Z"))};
+                        }
+                        anchored[side] = joint;
+                        anchored_marker[side] = want;
+                        Vec3 at = game_pos1[side];
+                        UObject* marker = object_property(weapon, side == 0 ? STR("Grip L Hand Default Pos") : STR("Grip R Hand Default Pos"));
+                        if (want && marker)
+                            at = component_rotation(base).inverse().rotate(component_location(marker) - component_location(base));
+                        Call rp(joint, STR("SetConstraintReferencePosition"));
+                        rp.byte(STR("Frame"), 0); // Frame1, the weapon's side
+                        rp.three(STR("RefPosition"), at.x, at.y, at.z);
+                        rp.run();
+                        HSVR_LOG("Grip: %s weapon anchor at (%.1f, %.1f, %.1f) in the weapon (%s)", side == 0 ? "left" : "right", at.x, at.y, at.z,
+                                 want ? (marker ? "its handle marker" : "no handle marker, the game's anchor") : "the game's anchor");
+                    }
+                }
                 if (spring_on && g_grip_ignore_arm.load())
                     ignore_arm_collision(pawn, object_property(pawn, STR("Mesh")), weapon, base, side);
                 else if (g_arm_ignore[side].weapon)

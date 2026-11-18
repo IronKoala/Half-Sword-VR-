@@ -289,6 +289,7 @@ namespace hsvr
         num("pose_grip_turn_scale", c.pose_grip_turn_scale);
         num("pose_grip_turn_damping", c.pose_grip_turn_damping);
         num("pose_grip_turn_max_scale", c.pose_grip_turn_max_scale);
+        flag("pose_grip_anchor_marker", c.pose_grip_anchor_marker);
         flag("pose_crouch", c.pose_crouch);
         num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);

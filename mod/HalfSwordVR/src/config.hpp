@@ -205,6 +205,9 @@ namespace hsvr
         double pose_grip_turn_scale = 4.0;
         double pose_grip_turn_damping = 0.3;
         double pose_grip_turn_max_scale = 100.0;
+        // Where on the weapon the hand holds it: 0 = the game's joint anchor; 1 = the weapon's own
+        // "Grip R/L Hand Default Pos" marker (the handle), when it has one.
+        bool pose_grip_anchor_marker = false;
         // 1 = he crouches as low as you do (your headset below where you stood when you recentred,
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;
