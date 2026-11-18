@@ -896,6 +896,9 @@ namespace
         hsvr::Vec3 upper_dir_local, upper_normal_local; // in the upperarm bone's frame
         hsvr::Vec3 lower_dir_local, lower_normal_local; // in the lowerarm bone's frame
         hsvr::Vec3 fingers_local, thumb_local;           // in the hand bone's frame: toward the fingers, toward the thumb side
+        hsvr::Quat clavicle_in_chest;  // clavicle rotation in spine_05's frame, as the animation has it at calibration
+        hsvr::Vec3 shoulder_in_clavicle; // the upperarm joint in the clavicle's frame
+        bool clavicle_valid = false;
         double twist_deg = 0, bend_deg = 0;              // last frame, for the log
     };
 
@@ -1051,6 +1054,13 @@ namespace
             std::string sx = side_suffix(side);
             FName upper = bone_fname("upperarm" + sx), lower = bone_fname("lowerarm" + sx), hand = bone_fname("hand" + sx);
             Vec3 S = socket_location(d, upper), E = socket_location(d, lower), H = socket_location(d, hand);
+            {
+                FName clav = bone_fname("clavicle" + sx);
+                Quat Wch = socket_rotation(d, bone_fname("spine_05")), Wcl = socket_rotation(d, clav);
+                a.clavicle_in_chest = (Wch.inverse() * Wcl).normalized();
+                a.shoulder_in_clavicle = Wcl.inverse().rotate(S - socket_location(d, clav));
+                a.clavicle_valid = length(a.shoulder_in_clavicle) > 1.0;
+            }
             a.upper_length = length(E - S);
             a.lower_length = length(H - E);
             Vec3 n = cross(E - S, H - E);
@@ -1442,11 +1452,16 @@ namespace
             return S;
         }
         const ArmCalibration& a = g_pose.arm[side];
+        if (!a.clavicle_valid) return S;
         double reach = a.upper_length + a.lower_length;
+        // From the clavicle as the chest carries it, not as posed last frame (its socket already
+        // carries last frame's turn, which made the shoulder go only part of the way: run 34).
         Vec3 C = socket_location(g_pose.driver, bone_fname("clavicle" + sx));
-        Vec3 arm = S - C;
+        Quat Wc = (socket_rotation(g_pose.driver, bone_fname("spine_05")) * a.clavicle_in_chest).normalized();
+        Vec3 arm = Wc.rotate(a.shoulder_in_clavicle);
+        Vec3 S0 = C + arm;
         double c = length(arm);
-        double D = length(target - S);
+        double D = length(target - S0);
         double from = reach - (std::max)(0.0, cfg.pose_shoulder_reach_start_cm), to = reach + (std::max)(0.0, cfg.pose_shoulder_reach_cm);
         double t = cfg.pose_shoulder_reach_cm > 0.0 && to > from ? (std::min)(1.0, (std::max)(0.0, (D - from) / (to - from))) : 0.0;
         t = t * t * (3.0 - 2.0 * t);
@@ -1467,9 +1482,20 @@ namespace
         axis = axis * (1.0 / al);
         double angle = (std::min)(cfg.pose_shoulder_reach_cm * t / c, cfg.pose_shoulder_reach_max_deg * kDegToRad);
         Quat dq = quat_axis_angle(axis, angle);
-        Quat Wc = socket_rotation(g_pose.driver, bone_fname("clavicle" + sx));
         node_set_rotation(*n, component_inv * (dq * Wc).normalized());
-        return C + dq.rotate(arm);
+        Vec3 moved = C + dq.rotate(arm);
+        // Check: where we said the shoulder would be last frame against where it is now.
+        static Vec3 said[2];
+        static double last_log[2] = {0.0, 0.0};
+        double now = now_seconds();
+        if (now - last_log[side] >= 1.0)
+        {
+            last_log[side] = now;
+            HSVR_LOG("Pose: %s shoulder reaches %.0f%%: %.1f cm forward of where the chest has it; last frame's prediction off by %.1f cm", side == 0 ? "left" : "right",
+                     t * 100.0, length(moved - S0), length(said[side] - S));
+        }
+        said[side] = moved;
+        return moved;
     }
 
     void pose_arm(int side, const hsvr::Config& cfg, const hsvr::ControllerState& state, const hsvr::Quat& body, const hsvr::Quat& component_inv)
