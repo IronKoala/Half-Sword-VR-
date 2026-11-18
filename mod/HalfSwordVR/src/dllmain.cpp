@@ -833,7 +833,6 @@ namespace
         hsvr::Vec3 upper_dir_local, upper_normal_local; // in the upperarm bone's frame
         hsvr::Vec3 lower_dir_local, lower_normal_local; // in the lowerarm bone's frame
         hsvr::Vec3 fingers_local, thumb_local;           // in the hand bone's frame: toward the fingers, toward the thumb side
-        hsvr::Quat wrist_rest;                           // forearm -> hand at calibration (the game's relaxed wrist)
         double twist_deg = 0, bend_deg = 0;              // last frame, for the log
     };
 
@@ -961,7 +960,6 @@ namespace
                 across = socket_location(d, bone_fname("index_01" + sx)) - socket_location(d, bone_fname("pinky_01" + sx));
                 how = "finger bones";
             }
-            a.wrist_rest = (Wl.inverse() * Wh).normalized();
             a.fingers_local = normalized(Wh.inverse().rotate(fingers));
             Vec3 t = Wh.inverse().rotate(across);
             a.thumb_local = normalized(t - a.fingers_local * dot(t, a.fingers_local));
@@ -1180,20 +1178,26 @@ namespace
         Vec3 pole = body.rotate(want_local);
         if (length(reject(pole, dir)) < 1e-3) pole = swivel_dir(best);
         Vec3 E = elbow_for(pole);
-        Vec3 n = cross(E - S, H - E);
-        if (length(n) < 1e-6) n = cross(normalized(reject(pole, dir)), dir);
-        Quat Wu = aim_bone(a.upper_dir_local, a.upper_normal_local, E - S, n);
-        Quat Wl = aim_bone(a.lower_dir_local, a.lower_normal_local, H - E, n);
-        // The forearm has no twist bones, so a hand turned about the forearm's axis would wring
-        // the wrist. Measure that turn against the game's relaxed wrist and give the forearm bone
-        // its share (pose_forearm_twist_share; the hand keeps its exact rotation).
-        Vec3 axis = normalized(H - E);
-        Quat delta = (Wh * (Wl * a.wrist_rest).inverse()).normalized();
-        double proj = delta.x * axis.x + delta.y * axis.y + delta.z * axis.z;
-        double twist = 2.0 * std::atan2(proj, delta.w);
-        if (twist > 3.14159265358979323846) twist -= 2.0 * 3.14159265358979323846;
-        if (twist < -3.14159265358979323846) twist += 2.0 * 3.14159265358979323846;
-        Wl = (quat_axis_angle(axis, twist * cfg.pose_forearm_twist_share) * Wl).normalized();
+        // The arm's roll is set from Willie's reference pose (T-pose, palms down, thumbs forward),
+        // where upper arm, forearm and hand share their axes (Willie_Lopoly, HalfSwordDecomp
+        // defaults/hand_bones.md): along the arm is the bone's own direction, and +Y (the thumb
+        // side) is the way the forearm folds when the elbow bends. So the elbow is a pure hinge,
+        // and a hand in that same frame (a handshake grip) has no twist. The hand's turn about the
+        // forearm away from that is the twist; the forearm bone takes pose_forearm_twist_share of it,
+        // since Willie's forearm has no twist bones, and the hand keeps its exact rotation.
+        Vec3 fold_axis_local{0.0, 1.0, 0.0};
+        Vec3 ud = normalized(E - S), fd = normalized(H - E);
+        Vec3 fold = reject(fd, ud);
+        if (length(fold) < 1e-3) fold = reject(pole, ud) * -1.0; // straight arm: away from the elbow's side
+        fold = normalized(fold);
+        Quat Wu = (quat_from_two(ud, fold) * quat_from_two(a.upper_dir_local, fold_axis_local).inverse()).normalized();
+        Quat Wl = (quat_from_two(fd, arc(ud, fd, fold)) * quat_from_two(a.lower_dir_local, fold_axis_local).inverse()).normalized();
+        Vec3 axis_local = normalized(a.lower_dir_local);
+        Quat rel_hand = (Wl.inverse() * Wh).normalized();
+        double proj = rel_hand.x * axis_local.x + rel_hand.y * axis_local.y + rel_hand.z * axis_local.z;
+        double twist = wrap(2.0 * std::atan2(proj, rel_hand.w));
+        Wl = (Wl * quat_axis_angle(axis_local, twist * cfg.pose_forearm_twist_share)).normalized();
+        Vec3 axis = fd;
         a.twist_deg = twist * 180.0 / 3.14159265358979323846;
         double c = dot(normalized(Wh.rotate(a.fingers_local)), axis);
         a.bend_deg = std::acos((std::max)(-1.0, (std::min)(1.0, c))) * 180.0 / 3.14159265358979323846;
