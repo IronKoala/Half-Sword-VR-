@@ -2062,6 +2062,9 @@ namespace
     // -1 = leave alone; otherwise the ECollisionEnabled value to give the held weapon's BaseMesh
     // (0 none, 1 query only, 3 query and physics).
     std::atomic<int> g_weapon_collision{-1};
+    // Set by hsvr.grip_rejoin: re-create the hand joint once (SetConstrainedComponents) after the
+    // spring settings, in case the physics side never took them.
+    std::atomic<bool> g_grip_rejoin{false};
     // Linear drive target for the test (the joint's own frame, cm); zero is the normal spring.
     std::atomic<double> g_grip_target[3] = {0.0, 0.0, 0.0};
 
@@ -2076,6 +2079,7 @@ namespace
         // The joint's own stretch: its weapon-side anchor (BaseMesh origin + Pos1) minus its hand-side
         // anchor (hand bone + Pos2, in the bone's frame). Zero when the spring holds perfectly.
         hsvr::Vec3 stretch_vec, stretch_hand;
+        int broken = -1;
         double stretch = 0.0;
         hsvr::Vec3 pos2;
         int visible = -1;
@@ -2313,7 +2317,28 @@ namespace
                     last_before = t;
                     HSVR_LOG("Grip: right joint after his tick (the game's): %s", joint_settings(joint).c_str());
                 }
-                if (spring_on) spring_joint(joint, mass, cfg);
+                // Override 2: write the spring once per weapon, then leave the joint alone.
+                static UObject* sprung_once[2] = {nullptr, nullptr};
+                if (spring_override == 2)
+                {
+                    if (sprung_once[side] != weapon)
+                    {
+                        sprung_once[side] = weapon;
+                        spring_joint(joint, mass, cfg);
+                        HSVR_LOG("Grip: spring written once: %s", joint_settings(joint).c_str());
+                    }
+                }
+                else if (spring_on) spring_joint(joint, mass, cfg);
+                if (side == 1 && g_grip_rejoin.exchange(false))
+                {
+                    Call rj(joint, STR("SetConstrainedComponents"));
+                    rj.object(STR("Component1"), base);
+                    rj.name(STR("BoneName1"), FName(STR("None"), FNAME_Add));
+                    rj.object(STR("Component2"), object_property(pawn, STR("Mesh")));
+                    rj.name(STR("BoneName2"), bone_fname("hand_r"));
+                    bool ok = rj.run();
+                    HSVR_LOG("Grip: rejoined the right hand joint (%d): %s", (int)ok, joint_settings(joint).c_str());
+                }
                 int collision = g_weapon_collision.load();
                 if (collision >= 0)
                 {
@@ -2440,6 +2465,9 @@ namespace
             {
                 Vec3 lf = f.vec(STR("OutLinearForce"));
                 log.force = length(lf);
+                Call br(joint, STR("IsBroken"));
+                if (br.run())
+                    if (FProperty* rp = br.param(STR("ReturnValue"))) log.broken = *(br.buffer.data() + rp->GetOffset_Internal()) ? 1 : 0;
 
             }
             // Buzz with the joint's stretch: nothing within 2 cm, full at 15 cm.
@@ -2465,12 +2493,12 @@ namespace
                     HSVR_LOG("Grip: %s weapon at (%.0f, %.0f, %.0f), hand at (%.0f, %.0f, %.0f), visible %d, joint between %ls", side == 0 ? "left" : "right",
                              g_grip_log[side].weapon_at.x, g_grip_log[side].weapon_at.y, g_grip_log[side].weapon_at.z, g_grip_log[side].hand_at.x,
                              g_grip_log[side].hand_at.y, g_grip_log[side].hand_at.z, g_grip_log[side].visible, g_grip_log[side].joined.c_str());
-                    HSVR_LOG("Grip: %s joint stretch %.1f cm (%.1f, %.1f, %.1f) world, (%.1f, %.1f, %.1f) hand frame, hand anchor Pos2 (%.1f, %.1f, %.1f) [spring %d, k x%g, gravity %d, collision %d, target (%g, %g, %g)]",
+                    HSVR_LOG("Grip: %s joint stretch %.1f cm (%.1f, %.1f, %.1f) world, (%.1f, %.1f, %.1f) hand frame, hand anchor Pos2 (%.1f, %.1f, %.1f) [spring %d, k x%g, gravity %d, collision %d, target (%g, %g, %g), broken %d]",
                              side == 0 ? "left" : "right", g_grip_log[side].stretch, g_grip_log[side].stretch_vec.x, g_grip_log[side].stretch_vec.y, g_grip_log[side].stretch_vec.z,
                              g_grip_log[side].stretch_hand.x, g_grip_log[side].stretch_hand.y, g_grip_log[side].stretch_hand.z,
                              g_grip_log[side].pos2.x, g_grip_log[side].pos2.y, g_grip_log[side].pos2.z, g_grip_spring_override.load(),
                              g_grip_k_scale.load(), g_weapon_gravity.load(), g_weapon_collision.load(), g_grip_target[0].load(), g_grip_target[1].load(),
-                             g_grip_target[2].load());
+                             g_grip_target[2].load(), g_grip_log[side].broken);
                 }
         }
     }
@@ -3323,6 +3351,11 @@ namespace
             if (entry.command.rfind("hsvr.grip_k_scale ", 0) == 0)
             {
                 g_grip_k_scale.store(atof(entry.command.c_str() + 18));
+                continue;
+            }
+            if (entry.command == "hsvr.grip_rejoin")
+            {
+                g_grip_rejoin.store(true);
                 continue;
             }
             if (entry.command.rfind("hsvr.weapon_collision ", 0) == 0)
