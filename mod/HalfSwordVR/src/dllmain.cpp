@@ -4151,7 +4151,10 @@ namespace
             double t = (std::min)(1.0, (std::max)(0.0, b.stamina_value / 100.0));
             b.stamina = cfg.pose_body_stamina_floor + (1.0 - cfg.pose_body_stamina_floor) * t;
         }
-        b.total = (std::max)(cfg.pose_body_strength_min, b.strength * b.injury * b.stamina);
+        // The arm's tonus already falls with exhaustion (the game caps it 1 -> 0.25 as Exhaustion rises,
+        // which happens only once stamina is nearly gone), so stamina and tonus are not multiplied
+        // (strength test 1: that counted it twice, 0.33 at stamina 0): the weaker of the two counts.
+        b.total = (std::max)(cfg.pose_body_strength_min, b.strength * (std::min)(b.injury, b.stamina));
         static bool reported = false;
         if (!reported)
         {
@@ -4162,17 +4165,27 @@ namespace
         return b;
     }
 
-    // Holding and swinging tire him: the game's own drain reads the hand joint's force, which the
-    // hold leaves at 0, so the mod takes pose_stamina_per_kn_s of stamina a second for each kN the
-    // hold pulls with (holding a sword still costs almost nothing; a hard swing or a blocked push
-    // outruns the game's regeneration).
-    void drain_stamina(UObject* pawn, double force_n, double dt, const hsvr::Config& cfg)
+    // Holding and swinging tire him. The game's own drain (strength_stamina.md, @441296 and @354657)
+    // reads the hand joint's force, which the hold leaves at 0, and the mouse's "Aim Swing Speed",
+    // which VR never moves. The mod runs the same formula on the hold: the hand's burn rate is the
+    // force it pulls with (in the game's units, x0.01, so N) times MRC(Muscle Rate, 0..3 -> 1..0.1),
+    // kept only from 10 up, and the swing is the speed at the grip mapped like the mouse's aim speed
+    // (pose_stamina_swing_cm_s lo..hi -> x10..x85), x0.0125, x pose_stamina_scale.
+    void drain_stamina(UObject* pawn, double force_n, double grip_speed_cm_s, double dt, const hsvr::Config& cfg)
     {
-        if (!pawn || cfg.pose_stamina_per_kn_s <= 0.0 || force_n <= 0.0) return;
+        if (!pawn || cfg.pose_stamina_scale <= 0.0) return;
+        double mr = read_number_variable(pawn, STR("Muscle Rate"));
+        double strength = mr >= 0.0 ? 1.0 - 0.9 * (std::min)(1.0, (std::max)(0.0, mr / 3.0)) : 1.0;
+        double burn = force_n * strength;
+        if (burn < 10.0) return;
+        double lo = cfg.pose_stamina_swing_lo_cm_s, hi = (std::max)(lo + 1.0, cfg.pose_stamina_swing_hi_cm_s);
+        double t = (std::min)(1.0, (std::max)(0.0, (grip_speed_cm_s - lo) / (hi - lo)));
+        double swing = 10.0 + 75.0 * t;
         double st = read_number_variable(pawn, STR("Stamina"));
         if (st < 0.0) return;
-        double next = (std::max)(0.0, st - cfg.pose_stamina_per_kn_s * (force_n / 1000.0) * dt);
-        set_variable(pawn, STR("Stamina"), next);
+        double per_s = burn * swing * 0.0125 * cfg.pose_stamina_scale;
+        set_variable(pawn, STR("Stamina"), (std::max)(0.0, st - per_s * dt));
+        HSVR_LOG_EVERY(1.0, "Stamina: %.1f, taking %.1f a second (hold %.0f N, grip %.0f cm/s, swing x%.0f)", st, per_s, force_n, grip_speed_cm_s, swing);
     }
 
     // One tick of the hold for one hand. `joint` is the game's hand joint (its frames say where on the
@@ -4399,7 +4412,7 @@ namespace
         force = clamp_length(force, max_force);
         Vec3 v_next = v + force * (dt / mass);
         h.force_n = length(force) / 100.0;
-        drain_stamina(pawn, h.force_n, dt, cfg);
+        drain_stamina(pawn, h.force_n, length(v), dt, cfg);
         // The weight (less what the grip's acceleration takes) turns the weapon about the point held.
         double gz = g_weapon_gravity.load() == 0 ? 0.0 : -980.0;
         Vec3 gravity{0.0, 0.0, gz};

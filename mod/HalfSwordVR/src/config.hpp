@@ -198,8 +198,11 @@ namespace hsvr
         bool pose_body_strength = true;
         double pose_body_stamina_floor = 0.5;
         double pose_body_strength_min = 0.1;
-        // Stamina a second per kN the hold pulls with (the game's own drain reads the hand joint, now 0).
-        double pose_stamina_per_kn_s = 15.0;
+        // Holding and swinging cost stamina by the game's own formula, run on the hold's force and the
+        // grip's speed (mapped like the mouse's aim speed: lo..hi cm/s -> x10..x85), times this scale.
+        double pose_stamina_scale = 1.0;
+        double pose_stamina_swing_lo_cm_s = 200.0;
+        double pose_stamina_swing_hi_cm_s = 600.0;
         double pose_hold_spring = 5000.0;
         double pose_hold_damper = 100.0;
         double pose_hold_max_force = 3000.0;
