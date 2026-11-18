@@ -3313,6 +3313,29 @@ namespace
         bool fallback_tried = false;
     };
     ObjectGrab g_object_grab[2];
+    // Test (hsvr.bring_object): an object kept at the right hand each tick until it is grabbed or 4 s pass.
+    UObject* g_bring = nullptr;
+    double g_bring_until = -1.0;
+
+    void keep_brought_object(UObject* pawn, UObject* mesh)
+    {
+        if (!g_bring) return;
+        if (hsvr::now_seconds() > g_bring_until || bool_property(pawn, STR("Grabbed R")))
+        {
+            HSVR_LOG("Script: hsvr.bring_object: no longer kept at the hand (Grabbed R %d)", (int)bool_property(pawn, STR("Grabbed R")));
+            g_bring = nullptr;
+            return;
+        }
+        hsvr::Vec3 hand = hand_grab_point(mesh, 1);
+        Call move(g_bring, STR("K2_SetWorldLocation"));
+        move.three(STR("NewLocation"), hand.x, hand.y, hand.z + 4.0);
+        move.flag(STR("bTeleport"), true);
+        move.run();
+        Call stop(g_bring, STR("SetPhysicsLinearVelocity"));
+        stop.run();
+        Call spin(g_bring, STR("SetPhysicsAngularVelocityInDegrees"));
+        spin.run();
+    }
 
     // Squeezing near something that is not a weapon: a loose physics object (brick, barrel, armour
     // piece, food) or a body (anyone's bone, the dead too). The nearest simulating body within
@@ -3504,6 +3527,7 @@ namespace
             held[0] = held[1] = false;
             return;
         }
+        keep_brought_object(pawn, mesh);
         for (int side = 0; side < 2; ++side) check_object_grab(side, pawn);
         for (int side = 0; side < 2; ++side)
         {
@@ -5138,6 +5162,8 @@ namespace
                     move.run();
                     Call stop(best, STR("SetPhysicsLinearVelocity"));
                     stop.run();
+                    g_bring = best;
+                    g_bring_until = hsvr::now_seconds() + 4.0;
                 }
                 HSVR_LOG("Script: hsvr.bring_object: %d loose objects; moved %ls (was %.0f cm away) to the right hand", loose,
                          best ? best->GetFullName().c_str() : STR("nothing"), best_d);
