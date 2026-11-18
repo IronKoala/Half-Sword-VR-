@@ -340,6 +340,9 @@ namespace hsvr
         num("pose_ghost_roll", c.pose_ghost_roll);
         num("pose_ghost_scale", c.pose_ghost_scale);
         num("pose_user_arm_cm", c.pose_user_arm_cm);
+        num("pose_shoulder_reach_cm", c.pose_shoulder_reach_cm);
+        num("pose_shoulder_reach_start_cm", c.pose_shoulder_reach_start_cm);
+        num("pose_shoulder_reach_max_deg", c.pose_shoulder_reach_max_deg);
         num("pose_grip_strength_kg", c.pose_grip_strength_kg);
         num("pose_grip_hz", c.pose_grip_hz);
         num("pose_grip_damping", c.pose_grip_damping);

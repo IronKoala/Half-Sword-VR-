@@ -227,6 +227,12 @@ namespace hsvr
         // sides and holding B and Y for 2 s. 0 = not measured: your hands go exactly where the
         // controllers are. Measured, your reach is scaled to his so full reach is full reach.
         double pose_user_arm_cm = 0.0;
+        // The shoulder reaches with you: as your hand nears the end of his arm (the last
+        // pose_shoulder_reach_start_cm), his clavicle turns toward it and brings the shoulder up to
+        // pose_shoulder_reach_cm closer (at most pose_shoulder_reach_max_deg of clavicle turn). 0 = off.
+        double pose_shoulder_reach_cm = 12.0;
+        double pose_shoulder_reach_start_cm = 6.0;
+        double pose_shoulder_reach_max_deg = 35.0;
         double pose_grip_strength_kg = 20.0;
         double pose_grip_hz = 20.0;
         double pose_grip_damping = 0.3;

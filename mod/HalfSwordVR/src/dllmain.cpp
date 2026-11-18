@@ -1420,6 +1420,58 @@ namespace
         measured = true;
     }
 
+    // The shoulder reaches with you (Matthew's choice 2026-11-18, B&S-style): your real reach is
+    // longer than your arm (the shoulder blade slides forward and the shoulder lifts when you reach,
+    // ~88 cm controller-to-shoulder against a 56 cm arm in his log), so as the hand target nears the
+    // end of his arm, his clavicle turns toward it and carries the shoulder up to pose_shoulder_reach_cm
+    // closer. It eases in over the last pose_shoulder_reach_start_cm of his reach. Returns where the
+    // shoulder (upperarm joint) will be this frame.
+    hsvr::Vec3 shoulder_reach(int side, const hsvr::Config& cfg, const hsvr::Vec3& S, const hsvr::Vec3& target, const hsvr::Quat& component_inv)
+    {
+        using namespace hsvr;
+        std::string sx = side_suffix(side);
+        ModifyBoneNode* n = chain_node("clavicle" + sx);
+        if (!n)
+        {
+            static bool told[2] = {false, false};
+            if (!told[side])
+            {
+                told[side] = true;
+                HSVR_LOG("Pose: %s clavicle has no bone node in his animation, so the shoulder can't reach forward", side == 0 ? "left" : "right");
+            }
+            return S;
+        }
+        const ArmCalibration& a = g_pose.arm[side];
+        double reach = a.upper_length + a.lower_length;
+        Vec3 C = socket_location(g_pose.driver, bone_fname("clavicle" + sx));
+        Vec3 arm = S - C;
+        double c = length(arm);
+        double D = length(target - S);
+        double from = reach - (std::max)(0.0, cfg.pose_shoulder_reach_start_cm), to = reach + (std::max)(0.0, cfg.pose_shoulder_reach_cm);
+        double t = cfg.pose_shoulder_reach_cm > 0.0 && to > from ? (std::min)(1.0, (std::max)(0.0, (D - from) / (to - from))) : 0.0;
+        t = t * t * (3.0 - 2.0 * t);
+        if (t <= 0.0 || c < 1.0)
+        {
+            node_release(*n);
+            return S;
+        }
+        // Turn the clavicle about its own root so the shoulder moves toward the target.
+        Vec3 want = target - C;
+        Vec3 axis = cross(arm, want);
+        double al = length(axis);
+        if (al < 1e-6)
+        {
+            node_release(*n);
+            return S;
+        }
+        axis = axis * (1.0 / al);
+        double angle = (std::min)(cfg.pose_shoulder_reach_cm * t / c, cfg.pose_shoulder_reach_max_deg * kDegToRad);
+        Quat dq = quat_axis_angle(axis, angle);
+        Quat Wc = socket_rotation(g_pose.driver, bone_fname("clavicle" + sx));
+        node_set_rotation(*n, component_inv * (dq * Wc).normalized());
+        return C + dq.rotate(arm);
+    }
+
     void pose_arm(int side, const hsvr::Config& cfg, const hsvr::ControllerState& state, const hsvr::Quat& body, const hsvr::Quat& component_inv)
     {
         using namespace hsvr;
@@ -1436,7 +1488,7 @@ namespace
             if (!cfg.dev_pose_fake_tracking)
             {
                 // No controller (playing with mouse and keyboard, or tracking lost): the game's own arms.
-                for (const char* b : {"upperarm", "lowerarm", "hand"})
+                for (const char* b : {"clavicle", "upperarm", "lowerarm", "hand"})
                     if (ModifyBoneNode* n = chain_node(std::string(b) + sx)) node_release(*n);
                 g_pose.hand_valid[side] = false;
                 ghost_hand(side, cfg, false, Vec3{}, Quat{});
@@ -1472,6 +1524,7 @@ namespace
         // as far out along his arm as it is along yours.
         if (cfg.pose_user_arm_cm > 1.0 && tracked) target = S + (target - S) * ((a.upper_length + a.lower_length) / cfg.pose_user_arm_cm);
         g_pose.target[side] = target;
+        S = shoulder_reach(side, cfg, S, target, component_inv);
 
         Vec3 to = target - S;
         double D = length(to);
@@ -1879,7 +1932,7 @@ namespace
                 if (side == 1) measure_arms(state);
             }
             else
-                for (const char* b : {"upperarm", "lowerarm", "hand"})
+                for (const char* b : {"clavicle", "upperarm", "lowerarm", "hand"})
                     if (ModifyBoneNode* n = chain_node(std::string(b) + side_suffix(side))) node_release(*n);
         }
         static double last_line = 0.0;
