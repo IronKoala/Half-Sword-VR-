@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <initializer_list>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -2028,6 +2029,8 @@ namespace
         set_named_number(pawn, STR("Root Height"), height);
     }
 
+    void log_joint_before_tick(UObject* pawn);
+
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
@@ -2035,6 +2038,7 @@ namespace
         g_hold_have = true;
         if (g_pose_active.load())
         {
+            log_joint_before_tick(context);
             turn_body_before_tick();
             stick_walk_before_tick(context);
         }
@@ -2127,6 +2131,68 @@ namespace
         ang.run();
     }
 
+    // Reads a number inside nested structs of an object, by member names (e.g. ConstraintInstance >
+    // ProfileInstance > LinearDrive > XDrive > Stiffness). NaN when a name is missing.
+    double nested_number(UObject* owner, std::initializer_list<const TCHAR*> path)
+    {
+        if (!owner) return NAN;
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner);
+        FProperty* p = nullptr;
+        UScriptStruct* type = nullptr;
+        bool first = true;
+        for (const TCHAR* name : path)
+        {
+            p = first ? owner->GetPropertyByNameInChain(name) : struct_member(type, name);
+            first = false;
+            if (!p) return NAN;
+            at += p->GetOffset_Internal();
+            type = struct_type(p);
+        }
+        auto kind = p->GetClass().GetName();
+        if (kind == STR("DoubleProperty")) return *reinterpret_cast<double*>(at);
+        if (kind == STR("FloatProperty")) return *reinterpret_cast<float*>(at);
+        if (kind == STR("ByteProperty") || kind == STR("EnumProperty")) return *at;
+        if (kind == STR("BoolProperty"))
+        {
+            auto* flag = static_cast<FBoolProperty*>(p);
+            return (at[flag->GetByteOffset()] & flag->GetFieldMask()) != 0 ? 1.0 : 0.0;
+        }
+        return NAN;
+    }
+
+    // What the hand joint really has set, for the log: linear X drive (on, stiffness, damping, max
+    // force), slerp drive (on, stiffness, max), linear X motion (0 free, 1 limited, 2 locked).
+    std::string joint_settings(UObject* joint)
+    {
+        auto n = [&](std::initializer_list<const TCHAR*> path) { return nested_number(joint, path); };
+        char text[320];
+        std::snprintf(text, sizeof(text), "linX pos %.0f k %.0f c %.0f max %.0f, slerp %.0f k %.0f max %.0f, mode %.0f, X motion %.0f, swing1 %.0f",
+                      n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearDrive"), STR("XDrive"), STR("bEnablePositionDrive")}),
+                      n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearDrive"), STR("XDrive"), STR("Stiffness")}),
+                      n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearDrive"), STR("XDrive"), STR("Damping")}),
+                      n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearDrive"), STR("XDrive"), STR("MaxForce")}),
+                      n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("AngularDrive"), STR("SlerpDrive"), STR("bEnablePositionDrive")}),
+                      n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("AngularDrive"), STR("SlerpDrive"), STR("Stiffness")}),
+                      n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("AngularDrive"), STR("SlerpDrive"), STR("MaxForce")}),
+                      n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("AngularDrive"), STR("AngularDriveMode")}),
+                      n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("XMotion")}),
+                      n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("ConeLimit"), STR("Swing1Motion")}));
+        return text;
+    }
+
+    // Just before his tick: what the hand joint looks like after everything else ran since our
+    // last write (the weapon's own tick, physics), to catch anyone else changing it.
+    void log_joint_before_tick(UObject* pawn)
+    {
+        static double last = 0.0;
+        double now = now_seconds();
+        if (now - last < 1.0) return;
+        UObject* joint = object_property(pawn, STR("PhysicsConstraint R Hand"));
+        if (!joint || !object_property(pawn, STR("Weapon R"))) return;
+        last = now;
+        HSVR_LOG("Grip: right joint before his tick: %s", joint_settings(joint).c_str());
+    }
+
     void weapon_spring_after_tick(UObject* pawn)
     {
         using namespace hsvr;
@@ -2149,7 +2215,18 @@ namespace
             Call m(base, STR("GetMass"));
             m.run();
             double mass = (std::max)(0.05, m.number());
-            spring_joint(joint, mass, cfg);
+            {
+                static double last_before = 0.0;
+                double t = now_seconds();
+                bool show = side == 1 && t - last_before >= 1.0;
+                if (show)
+                {
+                    last_before = t;
+                    HSVR_LOG("Grip: right joint after his tick (the game's): %s", joint_settings(joint).c_str());
+                }
+                spring_joint(joint, mass, cfg);
+                if (show) HSVR_LOG("Grip: right joint after the mod's change: %s", joint_settings(joint).c_str());
+            }
             log.active = true;
             log.mass = mass;
             {
@@ -2168,7 +2245,31 @@ namespace
                     Quat hand_rot = socket_rotation(g_pose.mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
                     if (log.weapon_seen != weapon)
                     {
-                        log.weapon_seen = weapon;
+                        // Once per weapon: what it is made of (a modular weapon's parts are welded children of BaseMesh).
+                        Call kids(base, STR("GetChildrenComponents"));
+                        kids.flag(STR("bIncludeAllDescendants"), true);
+                        if (kids.run())
+                            if (FProperty* cp = kids.param(STR("Children")))
+                            {
+                                struct RawArray
+                                {
+                                    UObject** data;
+                                    int32_t num, max;
+                                };
+                                RawArray* arr = reinterpret_cast<RawArray*>(kids.buffer.data() + cp->GetOffset_Internal());
+                                HSVR_LOG("Grip: %ls has %d parts under BaseMesh", weapon->GetFullName().c_str(), arr->num);
+                                for (int32_t i = 0; arr->data && i < arr->num && i < 32; ++i)
+                                {
+                                    UObject* part = arr->data[i];
+                                    if (!part) continue;
+                                    Call pv(part, STR("IsVisible"));
+                                    pv.run();
+                                    FProperty* vp = pv.param(STR("ReturnValue"));
+                                    Vec3 at = component_location(part);
+                                    HSVR_LOG("Grip:   part %ls visible %d at (%.0f, %.0f, %.0f)", part->GetFullName().c_str(),
+                                             vp ? (*(pv.buffer.data() + vp->GetOffset_Internal()) ? 1 : 0) : -1, at.x, at.y, at.z);
+                                }
+                            }
                         log.rest = hand_rot.inverse().rotate(log.weapon_at - log.hand_at);
                     }
                     // How far the weapon is from where it sat in the hand when it was seated.
