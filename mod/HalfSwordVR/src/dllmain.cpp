@@ -2105,6 +2105,7 @@ namespace
         hsvr::Vec3 stretch_vec, stretch_hand;
         int broken = -1;
         double mesh_hand_diff = -1.0;
+        hsvr::Vec3 hand_com_local, weapon_com_local;
         int same_mesh = -1;
         double stretch = 0.0;
         hsvr::Vec3 pos2;
@@ -2120,12 +2121,16 @@ namespace
         const double pi = 3.14159265358979;
         double w = 2.0 * pi * cfg.pose_grip_hz;
         double scale = g_grip_k_scale.load();
-        double k = scale * mass * w * w;                 // kg/s^2: force per cm of gap (cm units)
-        double c = scale * 2.0 * cfg.pose_grip_damping * mass * w;
-        double max_force = scale * cfg.pose_grip_strength_kg * 980.0; // kg weight in kg*cm/s^2
-        double inertia = mass * cfg.pose_grip_radius_cm * cfg.pose_grip_radius_cm; // rough, kg*cm^2
-        double ka = scale * inertia * w * w, ca = scale * 2.0 * cfg.pose_grip_damping * inertia * w;
-        double max_torque = max_force * cfg.pose_grip_radius_cm;
+        // Chaos always runs constraint drives in acceleration mode (PhysInterface_Chaos.cpp,
+        // UpdateLinearDrive_AssumesLocked: SetLinearDriveForceMode(Acceleration)), so the mass
+        // cancels: stiffness is w^2 (1/s^2), damping 2*zeta*w (1/s), and MaxForce is a maximum
+        // ACCELERATION (the solver divides it by the effective inverse mass). Strength in kg means:
+        // the hand can hold strength_kg against gravity, so the cap is strength_kg*g/mass.
+        double k = scale * w * w;
+        double c = scale * 2.0 * cfg.pose_grip_damping * w;
+        double max_force = scale * cfg.pose_grip_strength_kg * 980.0 / (std::max)(0.05, mass); // cm/s^2
+        double ka = scale * w * w, ca = scale * 2.0 * cfg.pose_grip_damping * w;
+        double max_torque = max_force / (std::max)(1.0, cfg.pose_grip_radius_cm); // rad/s^2 for that pull at the radius
         for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
         {
             Call c1(joint, fn);
@@ -2801,6 +2806,19 @@ namespace
                     log.stretch_vec = weapon_anchor - hand_anchor;
                     log.stretch = length(log.stretch_vec);
                     log.stretch_hand = hand_rot.inverse().rotate(log.stretch_vec);
+                    // Where the physics bodies themselves are (centre of mass of the hand_r body and of the
+                    // weapon body), in the bone's / component's own frame. Constant = just a local offset;
+                    // changing with the arm's motion = the physics body is not where the bone is.
+                    {
+                        Call hc(g_pose.mesh, STR("GetCenterOfMass"));
+                        hc.name(STR("BoneName"), bone_fname(side == 0 ? "hand_l" : "hand_r"));
+                        hc.run();
+                        log.hand_com_local = hand_rot.inverse().rotate(hc.vec() - log.hand_at);
+                        Call wc(base, STR("GetCenterOfMass"));
+                        wc.name(STR("BoneName"), FName());
+                        wc.run();
+                        log.weapon_com_local = base_rot.inverse().rotate(wc.vec() - log.weapon_at);
+                    }
                     // The joint binds the pawn's Mesh (CharacterMesh0); the measurement above used the
                     // posed mesh. Log how far apart their hand bones are, in case they differ.
                     if (UObject* cm = object_property(pawn, STR("Mesh")))
@@ -2874,6 +2892,10 @@ namespace
                              g_grip_k_scale.load(), g_weapon_gravity.load(), g_weapon_collision.load(), g_grip_target[0].load(), g_grip_target[1].load(),
                              g_grip_target[2].load(), g_grip_log[side].broken, (int)g_arm_ignore[side].joints.size(),
                              g_grip_log[side].same_mesh, g_grip_log[side].mesh_hand_diff);
+                    HSVR_LOG("Grip: %s bodies: hand body centre (%.1f, %.1f, %.1f) in the hand bone's frame, weapon body centre (%.1f, %.1f, %.1f) in its frame",
+                             side == 0 ? "left" : "right", g_grip_log[side].hand_com_local.x, g_grip_log[side].hand_com_local.y,
+                             g_grip_log[side].hand_com_local.z, g_grip_log[side].weapon_com_local.x, g_grip_log[side].weapon_com_local.y,
+                             g_grip_log[side].weapon_com_local.z);
                 }
         }
     }
