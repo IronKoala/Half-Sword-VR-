@@ -1007,9 +1007,14 @@ namespace
             g_pose.foot_rot_local[side] = (body_inv * socket_rotation(d, foot)).normalized();
             Vec3 foot_at = socket_location(g_pose.mesh, foot);
             double floor_z = 0.0;
-            if (ground_below(g_pose.pawn, foot_at.x, foot_at.y, actor.z, floor_z) && foot_at.z - floor_z > 2.0 && foot_at.z - floor_z < 30.0)
-                g_pose.ankle_height[side] = foot_at.z - floor_z;
-            HSVR_LOG("Pose: %s ankle %.1f cm above the floor", side == 0 ? "left" : "right", g_pose.ankle_height[side]);
+            bool hit = ground_below(g_pose.pawn, foot_at.x, foot_at.y, actor.z, floor_z);
+            bool used = hit && foot_at.z - floor_z > 2.0 && foot_at.z - floor_z < 30.0;
+            if (used) g_pose.ankle_height[side] = foot_at.z - floor_z;
+            if (hit)
+                HSVR_LOG("Pose: %s ankle %.1f cm above the floor (foot bone at %.1f, floor at %.1f%s)", side == 0 ? "left" : "right",
+                         g_pose.ankle_height[side], foot_at.z, floor_z, used ? "" : ", out of range: 10 cm used");
+            else
+                HSVR_LOG("Pose: %s ankle: no floor found under the foot (trace from %.0f down), 10 cm used", side == 0 ? "left" : "right", actor.z);
             HSVR_LOG("Pose: %s foot stands at (%.0f, %.0f, %.0f) from the actor", side == 0 ? "left" : "right", g_pose.foot_home_local[side].x,
                      g_pose.foot_home_local[side].y, g_pose.foot_home_local[side].z);
         }
