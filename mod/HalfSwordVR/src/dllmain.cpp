@@ -903,6 +903,10 @@ namespace
         hsvr::Vec3 swivel_local[2]; // smoothed elbow direction, in the body's frame
         bool swivel_valid[2] = {false, false};
         double twist_deg = 0.0; // how far the spine and neck together turned this frame, for the log
+        // Feet (see "Feet that stand and step" below).
+        hsvr::Vec3 foot_home_local[2];   // where each foot stands relative to the actor, in the body's frame
+        hsvr::Quat foot_rot_local[2];    // body frame -> foot bone, standing
+        bool feet_calibrated = false;
         double swivel_time[2] = {0.0, 0.0};
     };
     PoseState g_pose;
@@ -924,6 +928,8 @@ namespace
         return it == g_pose.chain.end() ? nullptr : &it->second;
     }
 
+    void feet_reset();
+
     void pose_release()
     {
         for (auto& [bone, n] : g_pose.chain) node_release(n);
@@ -935,6 +941,7 @@ namespace
         g_pose = PoseState{};
         g_pose_anchor_fixed = false;
         g_pose_room_moved_local = {};
+        feet_reset();
     }
 
     double actor_heading(UObject* pawn)
@@ -985,6 +992,21 @@ namespace
         g_pose_anchor_fixed = true;
         g_pose_room_moved_local = {};
 
+        g_pose.feet_calibrated = true;
+        for (int side = 0; side < 2; ++side)
+        {
+            FName foot = bone_fname(side == 0 ? "foot_l" : "foot_r");
+            if (!bone_exists(g_pose.mesh, side == 0 ? "foot_l" : "foot_r"))
+            {
+                g_pose.feet_calibrated = false;
+                continue;
+            }
+            g_pose.foot_home_local[side] = body_inv.rotate(socket_location(g_pose.mesh, foot) - actor);
+            g_pose.foot_rot_local[side] = (body_inv * socket_rotation(d, foot)).normalized();
+            HSVR_LOG("Pose: %s foot stands at (%.0f, %.0f, %.0f) from the actor", side == 0 ? "left" : "right", g_pose.foot_home_local[side].x,
+                     g_pose.foot_home_local[side].y, g_pose.foot_home_local[side].z);
+        }
+
         for (int side = 0; side < 2; ++side)
         {
             ArmCalibration& a = g_pose.arm[side];
@@ -1029,6 +1051,212 @@ namespace
     hsvr::Quat aim_bone(const hsvr::Vec3& dir_local, const hsvr::Vec3& normal_local, const hsvr::Vec3& dir, const hsvr::Vec3& normal)
     {
         return (hsvr::quat_from_two(dir, normal) * hsvr::quat_from_two(dir_local, normal_local).inverse()).normalized();
+    }
+
+    // ---- Feet that stand and step ---------------------------------------------------------------
+    // The game re-measures where each foot stands from the body every tick, so when the body turns
+    // or slides the feet go with it, and it lifts a foot only once it is about 25 cm or 60-100
+    // degrees off (decompile: Willie_BP @596869-598708). While posed, the mod keeps each foot where
+    // it was put down, and steps it (lift and place, one foot at a time) once it is more than
+    // pose_step_distance_cm from where it would stand under the hips, or turned more than
+    // pose_step_angle_deg from them. The foot positions go into ABP_Willie's two foot IK effectors
+    // (in the pelvis's frame) right after the game's animation update writes its own; the leg IK
+    // bends the knees. The height is the game's own (its ground under the foot), held while the game
+    // runs one of its own (hidden) steps.
+    struct FootState
+    {
+        bool valid = false;
+        hsvr::Vec3 at;          // where the foot stands (x, y; z unused)
+        double yaw = 0.0;
+        bool stepping = false;
+        double t = 0.0, duration = 0.3;
+        hsvr::Vec3 from;
+        double yaw_from = 0.0;
+        double lift = 0.0;      // this frame's height above the ground (cm)
+        double ground_z = 0.0;  // the game's height for this foot
+        bool have_ground = false;
+        int steps = 0;
+    };
+    FootState g_feet[2];
+    std::atomic<bool> g_feet_active{false};
+    int g_last_foot = -1;
+    double g_feet_time = 0.0;
+    FProperty* g_effector[2] = {nullptr, nullptr};
+    bool g_effector_looked = false;
+
+    double wrap_deg(double a)
+    {
+        while (a > 180.0) a -= 360.0;
+        while (a < -180.0) a += 360.0;
+        return a;
+    }
+
+    void feet_reset()
+    {
+        for (FootState& f : g_feet) f = FootState{};
+        g_feet_active = false;
+        g_last_foot = -1;
+    }
+
+    // Called each frame from pose_body, after the body is placed for this frame.
+    void pose_feet(const hsvr::Config& cfg, UObject* pawn, const hsvr::Vec3& actor, double heading, const hsvr::Quat& component_inv)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_feet || !g_pose.feet_calibrated)
+        {
+            if (g_feet_active.load())
+            {
+                for (const char* b : {"foot_l", "foot_r"})
+                    if (ModifyBoneNode* n = chain_node(b)) node_release(*n);
+                feet_reset();
+            }
+            return;
+        }
+        double now = now_seconds();
+        double dt = (std::min)(0.1, (std::max)(0.0, now - g_feet_time));
+        g_feet_time = now;
+        Quat body = quat_from_yaw_deg(heading);
+        // Where your feet would stand under your hips, a little ahead in the direction you move.
+        Vec3 velocity{0, 0, 0};
+        if (UObject* movement = object_property(pawn, STR("CharacterMovement")))
+            if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+            {
+                double v[3];
+                read_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v);
+                velocity = {v[0], v[1], 0.0};
+            }
+        double speed = length(velocity);
+        Vec3 want[2];
+        double need[2];
+        for (int side = 0; side < 2; ++side)
+        {
+            Vec3 home = g_pose.foot_home_local[side];
+            want[side] = actor + body.rotate(Vec3{home.x, home.y, 0.0}) + velocity * cfg.pose_step_lead_s;
+            want[side].z = 0.0;
+            FootState& f = g_feet[side];
+            if (!f.valid)
+            {
+                f.valid = true;
+                f.at = want[side];
+                f.yaw = heading;
+            }
+            Vec3 off = f.at - want[side];
+            off.z = 0.0;
+            double d = length(off);
+            if (d > 120.0) // teleported or respawned: put both feet down at once
+            {
+                f.at = want[side];
+                f.yaw = heading;
+                f.stepping = false;
+                d = 0.0;
+            }
+            need[side] = (std::max)(d / (std::max)(1.0, cfg.pose_step_distance_cm), std::fabs(wrap_deg(heading - f.yaw)) / (std::max)(1.0, cfg.pose_step_angle_deg));
+        }
+        bool any_stepping = g_feet[0].stepping || g_feet[1].stepping;
+        if (!any_stepping)
+        {
+            // The foot that needs it most; after a step the other foot goes next if it needs it at all.
+            int pick = need[0] >= need[1] ? 0 : 1;
+            if (pick == g_last_foot && need[1 - pick] >= 0.5 && need[pick] < 2.0 * need[1 - pick]) pick = 1 - pick;
+            if (need[pick] >= 1.0)
+            {
+                FootState& f = g_feet[pick];
+                f.stepping = true;
+                f.t = 0.0;
+                f.from = f.at;
+                f.yaw_from = f.yaw;
+                // Quicker steps when moving faster.
+                f.duration = cfg.pose_step_time_s / (1.0 + speed / 150.0);
+                f.duration = (std::max)(0.12, f.duration);
+                g_last_foot = pick;
+                ++f.steps;
+            }
+        }
+        for (int side = 0; side < 2; ++side)
+        {
+            FootState& f = g_feet[side];
+            f.lift = 0.0;
+            if (f.stepping)
+            {
+                f.t += dt;
+                double u = (std::min)(1.0, f.t / f.duration);
+                double s = u * u * (3.0 - 2.0 * u);
+                // It aims for where the foot should land now, so it keeps up with a moving body.
+                f.at = f.from + (want[side] - f.from) * s;
+                f.at.z = 0.0;
+                f.yaw = wrap_deg(f.yaw_from + wrap_deg(heading - f.yaw_from) * s);
+                f.lift = std::sin(u * 3.14159265358979) * cfg.pose_step_lift_cm;
+                if (u >= 1.0) f.stepping = false;
+            }
+            // The foot points where it was put down, flat (the leg IK takes its turn from the hips otherwise).
+            if (ModifyBoneNode* n = chain_node(side == 0 ? "foot_l" : "foot_r"))
+                node_set_rotation(*n, component_inv * (quat_from_yaw_deg(f.yaw) * g_pose.foot_rot_local[side]));
+        }
+        g_feet_active = true;
+    }
+
+    // Right after ABP_Willie's animation update (which copies the game's foot targets in): our feet.
+    UFunction* g_anim_update = nullptr;
+    void feet_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        using namespace hsvr;
+        if (!g_feet_active.load() || !context || context != g_pose.instance || !function) return;
+        if (g_anim_update) { if (function != g_anim_update) return; }
+        else
+        {
+            if (function->GetName() != STR("BlueprintUpdateAnimation")) return;
+            g_anim_update = function;
+        }
+        if (!g_effector_looked)
+        {
+            g_effector_looked = true;
+            g_effector[0] = context->GetPropertyByNameInChain(STR("Left Foot Effector Location"));
+            g_effector[1] = context->GetPropertyByNameInChain(STR("Right Foot Effector Location"));
+            std::string seen;
+            for (UStruct* level = static_cast<UStruct*>(context->GetClassPrivate()); level; level = level->GetSuperStruct())
+                for (FProperty* p : level->ForEachProperty())
+                {
+                    std::wstring n = p->GetName();
+                    if (n.find(STR("Effector")) == std::wstring::npos && n.find(STR("Foot")) == std::wstring::npos) continue;
+                    if (!seen.empty()) seen += ", ";
+                    for (wchar_t ch : n) seen += (char)(ch < 128 ? ch : '?');
+                }
+            HSVR_LOG("Feet: animation foot targets %s/%s; foot properties in the animation: %s", g_effector[0] ? "found" : "MISSING",
+                     g_effector[1] ? "found" : "MISSING", seen.c_str());
+        }
+        UObject* mesh = g_pose.mesh;
+        UObject* pawn = g_pose.pawn;
+        if (!mesh || !pawn) return;
+        static const FName pelvis = bone_fname("pelvis");
+        for (int side = 0; side < 2; ++side)
+        {
+            FProperty* p = g_effector[side];
+            FootState& f = g_feet[side];
+            if (!p || !f.valid) continue;
+            uint8_t* field = reinterpret_cast<uint8_t*>(context) + p->GetOffset_Internal();
+            // The game's own target: its height is the ground under the foot (held during its own steps).
+            double local[3];
+            read_three(field, p, local);
+            bool game_stepping = bool_property(pawn, side == 0 ? STR("L Stepping") : STR("R Stepping"));
+            if (!game_stepping || !f.have_ground)
+            {
+                Call from(mesh, STR("TransformFromBoneSpace"));
+                from.name(STR("BoneName"), pelvis);
+                from.three(STR("InPosition"), local[0], local[1], local[2]);
+                if (from.run())
+                {
+                    f.ground_z = from.vec(STR("OutPosition")).z;
+                    f.have_ground = true;
+                }
+            }
+            if (!f.have_ground) continue;
+            Call to(mesh, STR("TransformToBoneSpace"));
+            to.name(STR("BoneName"), pelvis);
+            to.three(STR("InPosition"), f.at.x, f.at.y, f.ground_z + f.lift);
+            if (!to.run()) continue;
+            Vec3 out = to.vec(STR("OutPosition"));
+            write_three(field, p, out.x, out.y, out.z);
+        }
     }
 
     // ---- Torso twist ----------------------------------------------------------------------------
@@ -1314,6 +1542,7 @@ namespace
             else if (g_pose.pawn)
             {
                 g_pose = PoseState{}; // character gone: nothing to restore
+                feet_reset();
                 g_pose_anchor_fixed = false;
                 g_pose_room_moved_local = {};
             }
@@ -1322,6 +1551,9 @@ namespace
         if (g_pose.pawn != pawn || g_pose.instance != instance)
         {
             g_pose = PoseState{};
+            feet_reset();
+            g_effector_looked = false;
+            g_anim_update = nullptr;
             g_pose.pawn = pawn;
             g_pose.mesh = mesh;
             g_pose.driver = driver;
@@ -1443,6 +1675,7 @@ namespace
             node_release(*n);
         }
         pose_torso_twist(cfg, have_look, look_rot, heading, component_inv);
+        pose_feet(cfg, pawn, actor, heading, component_inv);
         for (int side = 0; side < 2; ++side)
         {
             if (cfg.pose_arms) pose_arm(side, cfg, state, body, component_inv);
@@ -1467,6 +1700,13 @@ namespace
                     mode = *(reinterpret_cast<uint8_t*>(movement) + mp->GetOffset_Internal());
             }
             HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d, torso twist %.0f deg", v[0], v[1], v[2], mode, g_pose.twist_deg);
+            if (g_feet_active.load())
+            {
+                Vec3 fl = socket_location(mesh, bone_fname("foot_l")), fr = socket_location(mesh, bone_fname("foot_r"));
+                HSVR_LOG("Feet: left at (%.0f, %.0f) foot bone (%.0f, %.0f, %.0f) ground %.0f%s, %d steps; right at (%.0f, %.0f) foot bone (%.0f, %.0f, %.0f) ground %.0f%s, %d steps",
+                         g_feet[0].at.x, g_feet[0].at.y, fl.x, fl.y, fl.z, g_feet[0].ground_z, g_feet[0].stepping ? " stepping" : "", g_feet[0].steps,
+                         g_feet[1].at.x, g_feet[1].at.y, fr.x, fr.y, fr.z, g_feet[1].ground_z, g_feet[1].stepping ? " stepping" : "", g_feet[1].steps);
+            }
             HSVR_LOG("Pose: wrists: left twist %.0f deg, bend %.0f deg; right twist %.0f deg, bend %.0f deg (twist before the forearm's share)",
                      g_pose.arm[0].twist_deg, g_pose.arm[0].bend_deg, g_pose.arm[1].twist_deg, g_pose.arm[1].bend_deg);
             HSVR_LOG("Pose: actor (%.0f, %.0f, %.0f) heading %.0f, pelvis gap %.0f cm, room moved (%.0f, %.0f) this frame (%.1f, %.1f), head %s, hands %s/%s, "
@@ -2716,6 +2956,7 @@ class HalfSwordVR : public CppUserModBase
         }
         Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});
         Hook::RegisterProcessEventPostCallback(&capsule_after_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleAfter")});
+        Hook::RegisterProcessEventPostCallback(&feet_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FeetAfterAnim")});
         Hook::RegisterEngineTickPreCallback(
                 [](auto&, UEngine* engine, float delta_seconds, bool) {
                     game_tick(reinterpret_cast<UObject*>(engine), delta_seconds);

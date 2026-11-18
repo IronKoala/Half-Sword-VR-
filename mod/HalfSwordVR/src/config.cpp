@@ -268,6 +268,12 @@ namespace hsvr
         num("pose_swivel_smooth_s", c.pose_swivel_smooth_s);
         num("pose_forearm_twist_share", c.pose_forearm_twist_share);
         num("pose_torso_twist", c.pose_torso_twist);
+        flag("pose_feet", c.pose_feet);
+        num("pose_step_distance_cm", c.pose_step_distance_cm);
+        num("pose_step_angle_deg", c.pose_step_angle_deg);
+        num("pose_step_time_s", c.pose_step_time_s);
+        num("pose_step_lift_cm", c.pose_step_lift_cm);
+        num("pose_step_lead_s", c.pose_step_lead_s);
         flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
         flag("hide_own_head", c.hide_own_head);
         text("hide_own_gore_from", c.hide_own_gore_from);

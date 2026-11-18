@@ -190,6 +190,13 @@ namespace hsvr
         // How much of your head's turn away from the hips the spine and neck take together (0 to 1;
         // the head is always exactly the headset).
         double pose_torso_twist = 0.7;
+        // Feet stay where they were put down and step (lift and place) when the hips have moved or
+        // turned away from them: 1 = on, 0 = the game's own feet.
+        bool pose_feet = true;
+        double pose_step_distance_cm = 10.0, pose_step_angle_deg = 30.0; // when a foot steps
+        double pose_step_time_s = 0.3;  // how long a step takes standing (shorter when moving)
+        double pose_step_lift_cm = 10.0; // how high the foot lifts
+        double pose_step_lead_s = 0.2;   // how far ahead (in seconds of movement) a foot lands when walking
         // How quickly the elbow's swing around the arm follows (seconds; the hand is never smoothed).
         double pose_swivel_smooth_s = 0.06;
         // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and
