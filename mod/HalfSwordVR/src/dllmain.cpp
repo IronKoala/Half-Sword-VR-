@@ -2185,7 +2185,7 @@ namespace
     void log_joint_before_tick(UObject* pawn)
     {
         static double last = 0.0;
-        double now = now_seconds();
+        double now = hsvr::now_seconds();
         if (now - last < 1.0) return;
         UObject* joint = object_property(pawn, STR("PhysicsConstraint R Hand"));
         if (!joint || !object_property(pawn, STR("Weapon R"))) return;
