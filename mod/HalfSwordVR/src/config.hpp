@@ -199,10 +199,12 @@ namespace hsvr
         // reads ~4.5-5.5 cm on this measure (headset test 1: buzzing at 6 fired a third of the time).
         double pose_grip_buzz_from_cm = 10.0;
         // The turning hold, relative to the position hold: stiffness multiplier, its own damping
-        // ratio, and a multiplier on the turning cap.
-        double pose_grip_turn_scale = 1.0;
+        // ratio, and a multiplier on the turning cap. Test 27: at cap x1 the weapon held ~1 deg for a
+        // few seconds, then broke loose and spun (up to 150 deg); x10 and up held; 4 / 0.3 / 100 held
+        // 0.8 deg still and ~4.5 deg in fast swings.
+        double pose_grip_turn_scale = 4.0;
         double pose_grip_turn_damping = 0.3;
-        double pose_grip_turn_max_scale = 1.0;
+        double pose_grip_turn_max_scale = 100.0;
         // 1 = he crouches as low as you do (your headset below where you stood when you recentred,
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;

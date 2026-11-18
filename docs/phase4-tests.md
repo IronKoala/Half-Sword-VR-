@@ -27,6 +27,7 @@ The game holds a weapon with a physics joint between the weapon and the hand bon
 | `pose_grip_hz`, `pose_grip_damping` | 20, 0.3 | How briskly the weapon follows (natural frequency) and the damping ratio. Chaos runs drives in acceleration mode and solves their damping against the spring's own correction, so damping 1 makes the weapon sag ~16 cm; 0.3 holds as well as the game's locked grip (tests 25-26). |
 | `pose_grip_radius_cm` | 30 | The lever used for turning stiffness and strength. |
 | `pose_grip_buzz` | 0.6 | Buzz strength for the gap (0 = off). |
+| `pose_grip_turn_scale`, `pose_grip_turn_damping`, `pose_grip_turn_max_scale` | 4, 0.3, 100 | The turning hold: stiffness relative to the position hold, its damping ratio, and a multiplier on its cap. At cap x1 the weapon broke loose and spun after a few seconds (test 27). |
 | `pose_grip_buzz_from_cm` | 10 | The buzz starts past this stretch. The game's own locked grip reads ~4.5 cm on this measure. |
 
 For unattended tests the dev_script step `hsvr.give_weapon <class path>` equips a weapon through the game's own "Set Up Right Hand Weapon" (the scripted Free Mode start has none).
