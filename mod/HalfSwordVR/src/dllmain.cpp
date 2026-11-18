@@ -852,6 +852,9 @@ namespace
         std::string arm_style;
         double last_check = 0.0;
         hsvr::Vec3 target[2]; // last hand targets, for the log
+        hsvr::Vec3 swivel_local[2]; // smoothed elbow direction, in the body's frame
+        bool swivel_valid[2] = {false, false};
+        double swivel_time[2] = {0.0, 0.0};
     };
     PoseState g_pose;
     std::atomic<bool> g_hold_capsule{false}; // see "The capsule stays where you are" below
@@ -1016,19 +1019,6 @@ namespace
         if (D < 1e-3) return;
         Vec3 dir = to * (1.0 / D);
         D = (std::min)((std::max)(D, lo), hi);
-        Vec3 pole = body.rotate(Vec3{-cfg.pose_elbow_back, cfg.pose_elbow_out * out, -cfg.pose_elbow_down});
-        Vec3 p = pole - dir * dot(pole, dir);
-        if (length(p) < 1e-6) p = body.rotate({0, 0, -1}) - dir * dot(body.rotate({0, 0, -1}), dir);
-        p = normalized(p);
-        double along = (L1 * L1 - L2 * L2 + D * D) / (2.0 * D);
-        double h = std::sqrt((std::max)(0.0, L1 * L1 - along * along));
-        Vec3 E = S + dir * along + p * h;
-        Vec3 H = S + dir * D;
-        Vec3 n = cross(E - S, H - E);
-        if (length(n) < 1e-6) n = cross(p, dir);
-
-        Quat Wu = aim_bone(a.upper_dir_local, a.upper_normal_local, E - S, n);
-        Quat Wl = aim_bone(a.lower_dir_local, a.lower_normal_local, H - E, n);
         // The hand in the controller's grip (OpenXR grip pose, here X forward through the fist from
         // the little finger to the thumb, Y right, Z up): the fingers run down the handle, tilted
         // pose_knuckle_deg toward the front; the thumb side is the front. The same for both hands
@@ -1039,6 +1029,161 @@ namespace
         Vec3 fingers_world = hand_grip.rotate(Vec3{std::sin(k), 0.0, -std::cos(k)});
         Vec3 thumb_world = hand_grip.rotate(Vec3{std::cos(k), 0.0, std::sin(k)});
         Quat Wh = (quat_from_two(fingers_world, thumb_world) * quat_from_two(a.fingers_local, a.thumb_local).inverse()).normalized();
+
+        // Where the elbow points around the shoulder-to-wrist line (the swivel): ported from the
+        // arm solver in Matthew's Chasms VR Framework (crates/ik/src/arm.rs, MIT, Copyright (c) 2026
+        // chasmlol). Start from VRArmIK's tuned version of Parger's position model, follow the
+        // hand's twist when the arm is nearly straight, then take the cheapest angle in a short
+        // search that keeps the wrist and forearm twist in comfortable ranges, the elbow out of the
+        // ribcage and close to last frame. The hand itself is never moved.
+        const double PI = 3.14159265358979323846, RAD = PI / 180.0;
+        Vec3 up{0, 0, 1}, forward = body.rotate({1, 0, 0}), outward = body.rotate({0, out, 0});
+        auto reject = [](const Vec3& v, const Vec3& from) { return v - from * dot(v, from); };
+        auto smoothstep = [](double e0, double e1, double x) {
+            double t = (std::min)(1.0, (std::max)(0.0, (x - e0) / (e1 - e0)));
+            return t * t * (3.0 - 2.0 * t);
+        };
+        auto wrap = [PI](double x) {
+            while (x > PI) x -= 2.0 * PI;
+            while (x < -PI) x += 2.0 * PI;
+            return x;
+        };
+        // The rotation taking unit `from` onto unit `to`, applied to `v`.
+        auto arc = [](const Vec3& from, const Vec3& to, const Vec3& v) {
+            Vec3 c = cross(from, to);
+            double d = dot(from, to);
+            if (d < -0.999999) return v * -1.0;
+            Quat q{c.x, c.y, c.z, 1.0 + d};
+            return q.normalized().rotate(v);
+        };
+        auto signed_angle = [](Vec3 a2, Vec3 b2, Vec3 axis2) {
+            axis2 = normalized(axis2);
+            a2 = a2 - axis2 * dot(a2, axis2);
+            b2 = b2 - axis2 * dot(b2, axis2);
+            return std::atan2(dot(cross(a2, b2), axis2), dot(a2, b2));
+        };
+        // Body frame in the framework's chest space: x right, y up, z forward.
+        Vec3 chest = socket_location(g_pose.driver, bone_fname("spine_05"));
+        auto local = [&](const Vec3& v) { Vec3 l = body.inverse().rotate(v - chest); return Vec3{l.y, l.z, l.x}; };
+
+        Vec3 axis_sw = dir;
+        double lean = -dot(axis_sw, up) * 0.2;
+        Vec3 u = reject(up, axis_sw) + reject(forward, axis_sw) * lean;
+        if (length(u) < 1e-6) u = reject(forward, axis_sw);
+        u = normalized(u);
+        Vec3 o = reject(reject(outward, axis_sw) - reject(forward, axis_sw) * 0.3, u);
+        if (length(o) < 1e-6)
+        {
+            o = cross(u, axis_sw);
+            if (dot(o, outward) < 0) o = o * -1.0;
+        }
+        o = normalized(o);
+        Vec3 swivel_axis = cross(u, o);
+        auto swivel_dir = [&](double al) { return u * std::cos(al) + o * std::sin(al); };
+        auto swivel_angle = [&](const Vec3& e) { return std::atan2(dot(e, o), dot(e, u)); };
+        double along = (L1 * L1 - L2 * L2 + D * D) / (2.0 * D);
+        double h = std::sqrt((std::max)(0.0, L1 * L1 - along * along));
+        auto elbow_for = [&](const Vec3& e) { return S + dir * along + normalized(reject(e, dir)) * h; };
+        Vec3 H = S + dir * D;
+
+        // 1. The position model, from the wrist relative to the shoulder in arm lengths.
+        Vec3 rel = local(target) - local(S);
+        // The framework's lengths are metres for a reference body whose arm is 56.5 cm.
+        double scale = (L1 + L2) / 56.5;
+        Vec3 hn = rel * (1.0 / (L1 + L2));
+        double alpha = 135.0 - 60.0 * hn.y;
+        alpha += hn.y > 0.0 ? 260.0 * (std::max)(0.0, 0.6 - hn.z) * hn.y : -100.0 * (std::max)(0.0, 0.6 - hn.z) * -hn.y;
+        alpha -= 50.0 * (std::max)(0.0, -hn.x * out + 0.1);
+        {
+            double lo2 = 13.0, hi2 = 175.0, knee = 10.0;
+            auto soft = [knee](double over) { return knee * (1.0 - std::exp(-over / knee)); };
+            if (alpha > hi2 - knee) alpha = hi2 - knee + soft(alpha - (hi2 - knee));
+            else if (alpha < lo2 + knee) alpha = lo2 + knee - soft(lo2 + knee - alpha);
+        }
+        Vec3 prior_dir = swivel_dir(alpha * RAD);
+        // 2. Parger's singularity correction near the shoulder's vertical axis and behind it.
+        double radius_m = std::sqrt(rel.x * rel.x + rel.z * rel.z) / 100.0 / scale;
+        double blend = (std::max)(1.0 - radius_m / 0.5, (std::min)(1.0, (std::max)(0.0, -rel.z / 100.0 / scale / 0.1)));
+        if (blend > 0.0)
+        {
+            Vec3 fixed_local{0.133 * out, -0.443, -0.886}; // x right, y up, z forward
+            Vec3 fixed = body.rotate(Vec3{fixed_local.z, fixed_local.x, fixed_local.y});
+            fixed = reject(fixed, swivel_axis);
+            if (length(fixed) > 1e-6)
+            {
+                Vec3 b = prior_dir + (normalized(fixed) - prior_dir) * (std::min)(1.0, blend);
+                if (length(b) > 1e-6) prior_dir = normalized(b);
+            }
+        }
+        double prior = swivel_angle(prior_dir);
+        Vec3 hand_y = normalized(fingers_world), hand_z = normalized(thumb_world), hand_x = cross(hand_y, hand_z);
+        // A nearly straight arm follows the hand's twist: the inside of the elbow toward the thumb.
+        double dd = (std::min)(D, L1 + L2);
+        double flexion = std::acos((std::max)(-1.0, (std::min)(1.0, (dd * dd - L1 * L1 - L2 * L2) / (2.0 * L1 * L2))));
+        double straight = smoothstep(30.0 * RAD, 8.0 * RAD, flexion);
+        {
+            Vec3 f = normalized(H - elbow_for(swivel_dir(prior)));
+            Vec3 thumb = arc(hand_y, f, hand_z);
+            Vec3 r = reject(thumb * -1.0, swivel_axis);
+            if (length(r) > 1e-6) prior += wrap(swivel_angle(r) - prior) * straight;
+        }
+        // 3. The cheapest swivel near the prior.
+        Vec3 shoulder_l = local(S);
+        auto excess = [RAD](double angle, double limit_deg) { return (std::max)(0.0, angle - limit_deg * RAD); };
+        bool have_prev = g_pose.swivel_valid[side];
+        double prev = have_prev ? swivel_angle(body.rotate(g_pose.swivel_local[side])) : 0.0;
+        auto cost = [&](double al) {
+            Vec3 e = swivel_dir(al);
+            Vec3 Ee = elbow_for(e);
+            Vec3 f = normalized(H - Ee);
+            double alg = dot(f, hand_y);
+            double flex = std::fabs(std::atan2(dot(f, hand_x), alg));
+            double dev = std::atan2(dot(f, hand_z), alg);
+            dev = dev > 0.0 ? excess(dev, 30.0) : excess(-dev, 15.0);
+            Vec3 thumb = arc(hand_y, f, hand_z);
+            double tw = std::fabs(signed_angle(e * -1.0, thumb, f));
+            double c = 1.0 - std::cos(al - prior) + 8.0 * (std::pow(excess(flex, 50.0), 2) + dev * dev) + 4.0 * std::pow(excess(tw, 70.0), 2);
+            if (have_prev) c += 0.3 * (1.0 - std::cos(al - prev));
+            Vec3 el = local(Ee);
+            if (std::fabs(el.x) < 14.0 * scale && el.z > -12.0 * scale && el.z < 11.0 * scale && el.y > -55.0 * scale && el.y < shoulder_l.y) c += 20.0;
+            double tucked = (std::min)(shoulder_l.x * out, local(H).x * out) - el.x * out;
+            c += 2.0 * std::pow((std::max)(0.0, tucked) / (10.0 * scale), 2);
+            return c;
+        };
+        double lo_a = 30.0 * RAD, hi_a = 215.0 * RAD, step = 10.0 * RAD;
+        double best = lo_a, best_cost = 1e30;
+        for (int i = 0; i <= 18; ++i)
+        {
+            double al = lo_a + step * i, c = cost(al);
+            if (c < best_cost) best = al, best_cost = c;
+        }
+        {
+            double before = cost(best - step), after = cost(best + step), curve = before - 2.0 * best_cost + after;
+            if (curve > 1e-6)
+            {
+                double refined = (std::min)(hi_a, (std::max)(lo_a, best + 0.5 * step * (before - after) / curve));
+                if (cost(refined) < best_cost) best = refined;
+            }
+        }
+        // Smooth the swivel (never the hand), in the body's frame.
+        Vec3 want_local = body.inverse().rotate(swivel_dir(best));
+        double dt = now_seconds() - g_pose.swivel_time[side];
+        g_pose.swivel_time[side] = now_seconds();
+        if (have_prev && dt > 0.0 && dt < 0.5)
+        {
+            double k2 = 1.0 - std::exp(-dt / (std::max)(0.001, cfg.pose_swivel_smooth_s));
+            Vec3 m = g_pose.swivel_local[side] + (want_local - g_pose.swivel_local[side]) * k2;
+            if (length(m) > 1e-6) want_local = normalized(m);
+        }
+        g_pose.swivel_local[side] = want_local;
+        g_pose.swivel_valid[side] = true;
+        Vec3 pole = body.rotate(want_local);
+        if (length(reject(pole, dir)) < 1e-3) pole = swivel_dir(best);
+        Vec3 E = elbow_for(pole);
+        Vec3 n = cross(E - S, H - E);
+        if (length(n) < 1e-6) n = cross(normalized(reject(pole, dir)), dir);
+        Quat Wu = aim_bone(a.upper_dir_local, a.upper_normal_local, E - S, n);
+        Quat Wl = aim_bone(a.lower_dir_local, a.lower_normal_local, H - E, n);
         // The forearm has no twist bones, so a hand turned about the forearm's axis would wring
         // the wrist. Measure that turn against the game's relaxed wrist and give the forearm bone
         // its share (pose_forearm_twist_share; the hand keeps its exact rotation).

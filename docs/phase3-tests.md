@@ -22,7 +22,7 @@ How it works (from the decompile, `HalfSwordDecomp\internals-map.md`, "Posing fo
 | `pose_knuckle_deg` | 20 | How far the fingers tilt from straight down the controller's handle toward its front. |
 
 The hand's direction comes from Willie's own finger bones, measured when posing starts. The log line "hand frame from finger bones" shows it. The grip geometry follows the hand model in Matthew's Chasms VR Framework (MIT).
-| `pose_elbow_back`, `pose_elbow_out`, `pose_elbow_down` | 0.3, 0.6, 1 | Which way the elbows point. |
+| `pose_swivel_smooth_s` | 0.06 | How quickly the elbow follows as it swings around the arm. The hand itself is never smoothed. Where the elbow points is chosen each frame by the swivel search ported from the Chasms VR Framework (`crates/ik/src/arm.rs`, MIT). The search keeps the wrist bend and forearm twist in comfortable ranges and the elbow out of the ribcage. |
 | `hide_own_head` | 1 | Your character's head and hair are not drawn in your own view while you look out of it (first person through the mod). They still cast their shadow and stay in the game. Helmets and other headwear stay visible. |
 | `dev_pose_fake_tracking` | 0 | TEST ONLY: the head and hands follow a slow made-up path instead of the headset and controllers, for unattended runs. |
 

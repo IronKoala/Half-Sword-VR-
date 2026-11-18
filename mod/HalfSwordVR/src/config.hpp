@@ -180,8 +180,8 @@ namespace hsvr
         // How much of the hand's turn about the forearm the forearm bone takes (0 to 1); the rest
         // shows at the wrist. Willie's forearm has no twist bones.
         double pose_forearm_twist_share = 0.5;
-        // Which way the elbows point (in the body's frame: back, out, down; any length).
-        double pose_elbow_back = 0.3, pose_elbow_out = 0.6, pose_elbow_down = 1.0;
+        // How quickly the elbow's swing around the arm follows (seconds; the hand is never smoothed).
+        double pose_swivel_smooth_s = 0.06;
         // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and
         // controllers, so an unattended run (no one wearing the headset) can check the posing.
         bool dev_pose_fake_tracking = false;
