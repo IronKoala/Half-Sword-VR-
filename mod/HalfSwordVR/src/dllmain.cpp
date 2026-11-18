@@ -1462,7 +1462,10 @@ namespace
 
     // ---- Your own head, hidden from your view only --------------------------------------------
     // The head is its own component (CharacterMesh_Head) and the hair another (Hair, a groom);
-    // helmets are separate armour pieces and stay visible. "Owner no see" hides a component only in
+    // helmets are separate armour pieces and stay visible. Under the skin the game draws a whole
+    // gore skeleton (SK_Skeleton: flesh, organs, bones, with the skull, jaw and teeth), which shows
+    // from inside once the head is hidden, so it is hidden from your view too (your own exposed
+    // bones in a wound then don't show to you; everyone else still sees them). "Owner no see" hides a component only in
     // the views of the player who owns it; "cast hidden shadow" keeps its shadow. The game makes new
     // components on a haircut or armour change, so this is checked once a second.
     void set_owner_hidden(UObject* component, bool hidden)
@@ -1477,7 +1480,8 @@ namespace
 
     void hide_own_head(const hsvr::Config& cfg)
     {
-        static UObject* hidden[2] = {nullptr, nullptr};
+        constexpr int N = 3;
+        static UObject* hidden[N] = {nullptr, nullptr, nullptr};
         static double last = 0.0;
         double now = hsvr::now_seconds();
         if (now - last < 1.0) return;
@@ -1486,16 +1490,21 @@ namespace
         find_pawn_mesh(&pawn);
         bool willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
         bool want = cfg.hide_own_head && willie && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().stereo_installed.load();
-        UObject* parts[2] = {nullptr, nullptr};
+        UObject* parts[N] = {nullptr, nullptr, nullptr};
         if (willie)
         {
             parts[0] = object_property(pawn, STR("CharacterMesh_Head"));
             parts[1] = object_property(pawn, STR("Hair"));
+            if (cfg.hide_own_gore_skeleton) parts[2] = object_property(pawn, STR("SK_Skeleton"));
         }
-        for (int i = 0; i < 2; ++i)
+        for (int i = 0; i < N; ++i)
         {
             UObject* now_part = want ? parts[i] : nullptr;
-            if (hidden[i] && hidden[i] != now_part && hidden[i] == parts[i]) set_owner_hidden(hidden[i], false);
+            if (hidden[i] && hidden[i] != now_part && hidden[i] == parts[i])
+            {
+                set_owner_hidden(hidden[i], false);
+                HSVR_LOG("Head: %ls shown in your view again", hidden[i]->GetFullName().c_str());
+            }
             if (now_part && hidden[i] != now_part)
             {
                 set_owner_hidden(now_part, true);

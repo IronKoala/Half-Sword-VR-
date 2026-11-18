@@ -265,6 +265,7 @@ namespace hsvr
         num("pose_forearm_twist_share", c.pose_forearm_twist_share);
         flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
         flag("hide_own_head", c.hide_own_head);
+        flag("hide_own_gore_skeleton", c.hide_own_gore_skeleton);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;

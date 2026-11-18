@@ -189,6 +189,9 @@ namespace hsvr
         // it; it still casts its shadow and is there for the game (hits, other characters). Helmets
         // and other headwear stay visible.
         bool hide_own_head = true;
+        // 1 = also hide the gore skeleton under his skin (its skull, jaw and teeth otherwise show
+        // from inside the hidden head). Your own exposed bones in wounds then don't show to you.
+        bool hide_own_gore_skeleton = true;
     };
 
     // Current settings (copy). Cheap enough to call once per frame.
