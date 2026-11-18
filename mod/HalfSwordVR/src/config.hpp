@@ -238,6 +238,8 @@ namespace hsvr
         // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and
         // controllers, so an unattended run (no one wearing the headset) can check the posing.
         bool dev_pose_fake_tracking = false;
+        // Log the right-hand grip every tick (hand bone, hand physics body, weapon anchor, wrist target).
+        bool dev_grip_trace = false;
         // 1 = your character's head (and hair) is not drawn in your own view while you look out of
         // it; it still casts its shadow and is there for the game (hits, other characters). Helmets
         // and other headwear stay visible.

@@ -2107,6 +2107,7 @@ namespace
         double mesh_hand_diff = -1.0;
         hsvr::Vec3 hand_com_local, weapon_com_local;
         double turn_err_deg = 0.0;
+        hsvr::Vec3 hand_com_world;
         int same_mesh = -1;
         double stretch = 0.0;
         hsvr::Vec3 pos2;
@@ -2928,10 +2929,22 @@ namespace
                         hc.name(STR("BoneName"), bone_fname(side == 0 ? "hand_l" : "hand_r"));
                         hc.run();
                         log.hand_com_local = hand_rot.inverse().rotate(hc.vec() - log.hand_at);
+                        log.hand_com_world = hc.vec();
                         Call wc(base, STR("GetCenterOfMass"));
                         wc.name(STR("BoneName"), FName());
                         wc.run();
                         log.weapon_com_local = base_rot.inverse().rotate(wc.vec() - log.weapon_at);
+                    }
+                    if (cfg.dev_grip_trace && side == 1)
+                    {
+                        static double last_t = 0.0;
+                        double t = now_seconds();
+                        Vec3 tg = g_pose.target[1];
+                        HSVR_LOG("Trace: dt %.4f hand (%.2f, %.2f, %.2f) body (%.2f, %.2f, %.2f) weapon (%.2f, %.2f, %.2f) target (%.2f, %.2f, %.2f) "
+                                 "stretch %.2f turn %.2f",
+                                 t - last_t, log.hand_at.x, log.hand_at.y, log.hand_at.z, log.hand_com_world.x, log.hand_com_world.y, log.hand_com_world.z,
+                                 log.weapon_at.x, log.weapon_at.y, log.weapon_at.z, tg.x, tg.y, tg.z, log.stretch, log.turn_err_deg);
+                        last_t = t;
                     }
                     // The joint binds the pawn's Mesh (CharacterMesh0); the measurement above used the
                     // posed mesh. Log how far apart their hand bones are, in case they differ.

@@ -309,6 +309,7 @@ namespace hsvr
         num("pose_step_lift_cm", c.pose_step_lift_cm);
         num("pose_step_lead_s", c.pose_step_lead_s);
         flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
+        flag("dev_grip_trace", c.dev_grip_trace);
         flag("hide_own_head", c.hide_own_head);
         text("hide_own_gore_from", c.hide_own_gore_from);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
