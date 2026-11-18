@@ -172,8 +172,8 @@ namespace hsvr
         double pose_hand_pitch = 0.0, pose_hand_yaw = 0.0, pose_hand_roll = 0.0;
         // Which way the elbows point (in the body's frame: back, out, down; any length).
         double pose_elbow_back = 0.3, pose_elbow_out = 0.6, pose_elbow_down = 1.0;
-        // TEST ONLY: when the headset or a controller is not tracked (no one wearing it), move the
-        // head and hands along a slow made-up path instead, so an unattended run can check the posing.
+        // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and
+        // controllers, so an unattended run (no one wearing the headset) can check the posing.
         bool dev_pose_fake_tracking = false;
     };
 

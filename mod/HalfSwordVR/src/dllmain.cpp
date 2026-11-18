@@ -181,6 +181,9 @@ namespace
     // is taken once when posing starts and used instead.
     bool g_pose_anchor_fixed = false;
     hsvr::Vec3 g_pose_anchor_local;
+    // How far your walking in the room has already been handed to the game's capsule (in the
+    // view's heading frame), so it is not counted twice.
+    hsvr::Vec3 g_pose_room_moved_local;
 
     // Called by the stereo device while the frame's views are being set up (game thread).
     bool provide_anchor(hsvr::PlayerAnchor& out)
@@ -211,7 +214,8 @@ namespace
             }
         }
         if (g_pose_anchor_fixed)
-            out.head_position = out.actor_position + hsvr::quat_from_yaw_deg(out.has_heading ? out.heading_yaw : 0.0).rotate(g_pose_anchor_local);
+            out.head_position = out.actor_position +
+                                hsvr::quat_from_yaw_deg(out.has_heading ? out.heading_yaw : 0.0).rotate(g_pose_anchor_local - g_pose_room_moved_local);
         return true;
     }
 
@@ -826,6 +830,7 @@ namespace
         ArmCalibration arm[2];
         std::string arm_style;
         double last_check = 0.0;
+        hsvr::Vec3 target[2]; // last hand targets, for the log
     };
     PoseState g_pose;
 
@@ -848,6 +853,7 @@ namespace
         }
         g_pose = PoseState{};
         g_pose_anchor_fixed = false;
+        g_pose_room_moved_local = {};
     }
 
     double actor_heading(UObject* pawn)
@@ -895,6 +901,7 @@ namespace
         g_pose.head_offset = (body_inv * socket_rotation(d, bone_fname("Head"))).normalized();
         g_pose_anchor_local = body_inv.rotate(head - actor);
         g_pose_anchor_fixed = true;
+        g_pose_room_moved_local = {};
 
         for (int side = 0; side < 2; ++side)
         {
@@ -937,7 +944,7 @@ namespace
         double out = side == 0 ? -1.0 : 1.0;
         Vec3 grip;
         Quat grip_rot;
-        bool tracked = hs.grip_valid && stereo_tracking_to_world(hs.grip, grip, grip_rot);
+        bool tracked = !cfg.dev_pose_fake_tracking && hs.grip_valid && stereo_tracking_to_world(hs.grip, grip, grip_rot);
         if (!tracked)
         {
             if (!cfg.dev_pose_fake_tracking)
@@ -954,6 +961,7 @@ namespace
             grip_rot = body;
         }
         Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
+        g_pose.target[side] = target;
 
         Vec3 S = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
         Vec3 to = target - S;
@@ -995,7 +1003,12 @@ namespace
         if (!cfg.pose_body || !abp || !mesh)
         {
             if (g_pose.pawn && (pawn == g_pose.pawn)) pose_release();
-            else if (g_pose.pawn) g_pose = PoseState{}, g_pose_anchor_fixed = false; // character gone: nothing to restore
+            else if (g_pose.pawn)
+            {
+                g_pose = PoseState{}; // character gone: nothing to restore
+                g_pose_anchor_fixed = false;
+                g_pose_room_moved_local = {};
+            }
             return;
         }
         if (g_pose.pawn != pawn || g_pose.instance != instance)
@@ -1025,7 +1038,8 @@ namespace
         Quat body = quat_from_yaw_deg(heading);
         Vec3 actor = actor_location(pawn);
 
-        // The body under you: where the game's capsule is, plus how far you have walked in the room.
+        // Walking in the room moves the game's capsule (with collision), so the game, the camera
+        // and the body agree on where you are; the view takes the same amount off its anchor.
         Vec3 room{0, 0, 0};
         Vec3 anchor;
         double base_yaw = 0.0;
@@ -1033,18 +1047,49 @@ namespace
         {
             Vec3 head_world;
             Quat head_rot;
-            if (stereo_tracking_to_world(state.head, head_world, head_rot)) room = Vec3{head_world.x - anchor.x, head_world.y - anchor.y, 0.0};
+            if (stereo_tracking_to_world(state.head, head_world, head_rot))
+            {
+                Quat base = quat_from_yaw_deg(base_yaw);
+                Vec3 total = base.inverse().rotate(Vec3{head_world.x - anchor.x, head_world.y - anchor.y, 0.0});
+                total.z = 0.0;
+                Vec3 delta = total - g_pose_room_moved_local;
+                if (length(delta) > 50.0)
+                {
+                    g_pose_room_moved_local = total; // recentred or tracking jumped: take it as the new start
+                }
+                else if (length(delta) > 0.3)
+                {
+                    Vec3 want = actor + base.rotate(delta);
+                    Call move(pawn, STR("K2_SetActorLocation"));
+                    move.three(STR("NewLocation"), want.x, want.y, want.z);
+                    move.flag(STR("bSweep"), true);
+                    move.flag(STR("bTeleport"), false);
+                    move.run();
+                    Vec3 moved = actor_location(pawn) - actor;
+                    moved.z = 0.0;
+                    g_pose_room_moved_local = g_pose_room_moved_local + base.inverse().rotate(moved);
+                    g_pose_room_moved_local.z = 0.0;
+                    actor = actor + moved;
+                    room = moved;
+                }
+            }
         }
-        set_component_transform(mesh, actor + body.rotate(g_pose.mesh_offset_local) + room, (body * g_pose.mesh_rotation_local).normalized());
+        // Put the body so its pelvis stands on the capsule. The game pulls the capsule toward the
+        // pelvis; a pelvis anywhere else would drag the capsule along and the body with it.
+        Vec3 mesh_now = component_location(mesh);
+        Vec3 pelvis_off = socket_location(driver, bone_fname("pelvis")) - mesh_now;
+        Vec3 place = actor + body.rotate(g_pose.mesh_offset_local);
+        place.x = actor.x - pelvis_off.x;
+        place.y = actor.y - pelvis_off.y;
+        set_component_transform(mesh, place, (body * g_pose.mesh_rotation_local).normalized());
 
         Quat component_inv = component_rotation(driver).inverse();
-        bool fake_head = cfg.dev_pose_fake_tracking && !state.head_valid;
-        if (cfg.pose_head && (state.head_valid || fake_head))
+        if (cfg.pose_head)
         {
             Vec3 head_world;
             Quat head_rot;
-            bool have = state.head_valid && stereo_tracking_to_world(state.head, head_world, head_rot);
-            if (!have && fake_head)
+            bool have = !cfg.dev_pose_fake_tracking && state.head_valid && stereo_tracking_to_world(state.head, head_world, head_rot);
+            if (!have && cfg.dev_pose_fake_tracking)
             {
                 // Made-up path: looks left and right, and up and down.
                 double t = now_seconds();
@@ -1068,9 +1113,20 @@ namespace
                 for (const char* b : {"upperarm", "lowerarm", "hand"})
                     if (ModifyBoneNode* n = chain_node(std::string(b) + side_suffix(side))) node_release(*n);
         }
-        HSVR_LOG_EVERY(1.0, "Pose: actor (%.0f, %.0f, %.0f) heading %.0f, room offset (%.0f, %.0f), head %s, hands %s/%s", actor.x, actor.y, actor.z, heading,
-                       room.x, room.y, state.head_valid ? "tracked" : "not tracked", state.hand[0].grip_valid ? "tracked" : "-",
-                       state.hand[1].grip_valid ? "tracked" : "-");
+        static double last_line = 0.0;
+        if (now - last_line >= 1.0)
+        {
+            last_line = now;
+            Vec3 pelvis = socket_location(driver, bone_fname("pelvis"));
+            Vec3 hl = socket_location(driver, bone_fname("hand_l")), hr = socket_location(driver, bone_fname("hand_r"));
+            HSVR_LOG("Pose: actor (%.0f, %.0f, %.0f) heading %.0f, pelvis gap %.0f cm, room moved (%.0f, %.0f) this frame (%.1f, %.1f), head %s, hands %s/%s, "
+                     "hand_l (%.0f, %.0f, %.0f) target (%.0f, %.0f, %.0f), hand_r (%.0f, %.0f, %.0f) target (%.0f, %.0f, %.0f)",
+                     actor.x, actor.y, actor.z, heading, length(Vec3{pelvis.x - actor.x, pelvis.y - actor.y, 0.0}), g_pose_room_moved_local.x,
+                     g_pose_room_moved_local.y, room.x, room.y, state.head_valid ? "tracked" : "not tracked",
+                     state.hand[0].grip_valid ? "tracked" : (cfg.dev_pose_fake_tracking ? "fake" : "-"),
+                     state.hand[1].grip_valid ? "tracked" : (cfg.dev_pose_fake_tracking ? "fake" : "-"), hl.x, hl.y, hl.z, g_pose.target[0].x,
+                     g_pose.target[0].y, g_pose.target[0].z, hr.x, hr.y, hr.z, g_pose.target[1].x, g_pose.target[1].y, g_pose.target[1].z);
+        }
     }
 
     struct ConsoleCommandParams
