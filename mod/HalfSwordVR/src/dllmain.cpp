@@ -2160,6 +2160,39 @@ namespace
         return NAN;
     }
 
+    // Logs every number, flag and enum inside a struct (recursing into nested structs), one line
+    // per value, so the joint's whole ConstraintInstance can be read instead of guessed.
+    void dump_struct(const std::wstring& prefix, UScriptStruct* type, const uint8_t* at, int depth)
+    {
+        if (!type || depth > 5) return;
+        for (UStruct* level = type; level; level = level->GetSuperStruct())
+            for (FProperty* m : level->ForEachProperty())
+            {
+                const uint8_t* v = at + m->GetOffset_Internal();
+                std::wstring name = prefix + STR(".") + m->GetName();
+                auto kind = m->GetClass().GetName();
+                if (kind == STR("StructProperty")) dump_struct(name, struct_type(m), v, depth + 1);
+                else if (kind == STR("DoubleProperty")) HSVR_LOG("Grip:   %ls = %g", name.c_str(), *reinterpret_cast<const double*>(v));
+                else if (kind == STR("FloatProperty")) HSVR_LOG("Grip:   %ls = %g", name.c_str(), *reinterpret_cast<const float*>(v));
+                else if (kind == STR("IntProperty")) HSVR_LOG("Grip:   %ls = %d", name.c_str(), *reinterpret_cast<const int32_t*>(v));
+                else if (kind == STR("ByteProperty") || (kind == STR("EnumProperty") && m->GetSize() == 1)) HSVR_LOG("Grip:   %ls = %d", name.c_str(), (int)*v);
+                else if (kind == STR("BoolProperty"))
+                {
+                    auto* flag = static_cast<FBoolProperty*>(m);
+                    HSVR_LOG("Grip:   %ls = %d", name.c_str(), (v[flag->GetByteOffset()] & flag->GetFieldMask()) ? 1 : 0);
+                }
+                else if (kind == STR("NameProperty")) HSVR_LOG("Grip:   %ls = %ls", name.c_str(), reinterpret_cast<const FName*>(v)->ToString().c_str());
+            }
+    }
+
+    void dump_joint(UObject* joint)
+    {
+        FProperty* p = joint ? joint->GetPropertyByNameInChain(STR("ConstraintInstance")) : nullptr;
+        if (!p) return;
+        HSVR_LOG("Grip: full joint settings of %ls:", joint->GetFullName().c_str());
+        dump_struct(STR("ConstraintInstance"), struct_type(p), reinterpret_cast<const uint8_t*>(joint) + p->GetOffset_Internal(), 0);
+    }
+
     // What the hand joint really has set, for the log: linear X drive (on, stiffness, damping, max
     // force), slerp drive (on, stiffness, max), linear X motion (0 free, 1 limited, 2 locked).
     std::string joint_settings(UObject* joint)
@@ -2226,6 +2259,12 @@ namespace
                 }
                 spring_joint(joint, mass, cfg);
                 if (show) HSVR_LOG("Grip: right joint after the mod's change: %s", joint_settings(joint).c_str());
+                static UObject* dumped[2] = {nullptr, nullptr};
+                if (dumped[side] != weapon)
+                {
+                    dumped[side] = weapon;
+                    dump_joint(joint);
+                }
             }
             log.active = true;
             log.mass = mass;
@@ -2918,13 +2957,92 @@ namespace
     // (Willie_BP: called with a class for the start loadout, UG @24976). For unattended tests: the
     // scripted Free Mode start has no weapon. The class is loaded through the asset registry if it
     // isn't in memory yet. Example: /Game/.../ModularWeaponBP_ArmingSword.ModularWeaponBP_ArmingSword_C
+    // Loads an asset by its object path through the asset registry, if it is not loaded yet.
+    UObject* load_asset_object(const std::wstring& object_path)
+    {
+        UObject* found = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, object_path.c_str());
+        if (found) return found;
+        auto* registry = static_cast<UAssetRegistry*>(UAssetRegistryHelpers::GetAssetRegistry().ObjectPointer);
+        if (!registry) return nullptr;
+        FAssetData data = registry->GetAssetByObjectPath(FName(object_path.c_str(), FNAME_Add));
+        if (!data.PackageName().GetComparisonIndex())
+        {
+            HSVR_LOG("Script: the asset registry has no %ls", object_path.c_str());
+            return nullptr;
+        }
+        UAssetRegistryHelpers::GetAsset(data);
+        return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, object_path.c_str());
+    }
+
+    FProperty* class_member(UObject* object, const TCHAR* name, bool prefix = false)
+    {
+        if (!object) return nullptr;
+        std::wstring want = name;
+        for (UStruct* level = object->GetClassPrivate(); level; level = level->GetSuperStruct())
+            for (FProperty* member : level->ForEachProperty())
+            {
+                std::wstring n = member->GetName();
+                if (prefix ? n.rfind(want, 0) == 0 : n == want) return member;
+            }
+        return nullptr;
+    }
+
+    FProperty* struct_member_prefix(UScriptStruct* type, const TCHAR* prefix)
+    {
+        if (!type) return nullptr;
+        std::wstring want = prefix;
+        for (UStruct* level = type; level; level = level->GetSuperStruct())
+            for (FProperty* member : level->ForEachProperty())
+                if (member->GetName().rfind(want, 0) == 0) return member;
+        return nullptr;
+    }
+
+    // Finds a weapon passport in a Free Mode inventory data asset: Inventory.WeaponPssports[index].
+    // The game spells the member "WeaponPssports". Returns the passport's bytes, or nullptr.
+    const uint8_t* inventory_passport(const std::wstring& asset_path, int index, int32_t* count)
+    {
+        *count = 0;
+        UObject* asset = load_asset_object(asset_path);
+        if (!asset)
+        {
+            HSVR_LOG("Script: hsvr.give_weapon: could not load %ls", asset_path.c_str());
+            return nullptr;
+        }
+        FProperty* inventory = class_member(asset, STR("Inventory"));
+        UScriptStruct* type = struct_type(inventory);
+        FProperty* list = struct_member_prefix(type, STR("WeaponPssports"));
+        if (!list || list->GetClass().GetName() != STR("ArrayProperty"))
+        {
+            HSVR_LOG("Script: hsvr.give_weapon: %ls has no Inventory.WeaponPssports list", asset->GetFullName().c_str());
+            return nullptr;
+        }
+        const RawArray* arr = reinterpret_cast<const RawArray*>(reinterpret_cast<uint8_t*>(asset) + inventory->GetOffset_Internal() + list->GetOffset_Internal());
+        *count = arr->Num;
+        if (index < 0 || index >= arr->Num || !arr->Data) return nullptr;
+        return reinterpret_cast<const uint8_t*>(arr->Data);
+    }
+
     void script_give_weapon(const std::string& step)
     {
         std::string path = step;
         while (!path.empty() && path.back() == ' ') path.pop_back();
+        // "passport <inventory data asset> <index>": hand him a fully built weapon from that list.
+        std::wstring passport_asset;
+        int passport_index = 0;
+        if (path.rfind("passport ", 0) == 0)
+        {
+            std::string rest = path.substr(9);
+            size_t space = rest.find(' ');
+            if (space != std::string::npos)
+            {
+                passport_index = atoi(rest.c_str() + space + 1);
+                rest.resize(space);
+            }
+            passport_asset.assign(rest.begin(), rest.end());
+        }
         std::wstring wide(path.begin(), path.end());
-        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, wide.c_str());
-        if (!cls)
+        UClass* cls = passport_asset.empty() ? UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, wide.c_str()) : nullptr;
+        if (!cls && passport_asset.empty())
         {
             // The blueprint asset is the class path without "_C" on the object name.
             std::wstring asset = wide;
@@ -2943,7 +3061,7 @@ namespace
             }
             cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, wide.c_str());
         }
-        if (!cls)
+        if (!cls && passport_asset.empty())
         {
             HSVR_LOG("Script: hsvr.give_weapon: no class %s", path.c_str());
             return;
@@ -2969,7 +3087,32 @@ namespace
             names += " (";
             for (wchar_t ch : kind) names += (char)(ch < 128 ? ch : '?');
             names += ")";
-            if (!set && kind == STR("ClassProperty"))
+            if (!passport_asset.empty() && n == STR("Str Weapon Passport"))
+            {
+                int32_t count = 0;
+                const uint8_t* first = inventory_passport(passport_asset, passport_index, &count);
+                int32_t size = p->GetSize();
+                if (first)
+                {
+                    // The list holds the same passport struct as this parameter, so one entry is this many bytes.
+                    std::memcpy(parameters + p->GetOffset_Internal(), first + (size_t)size * passport_index, size);
+                    set = true;
+                    HSVR_LOG("Script: hsvr.give_weapon: passport %d of %d (%d bytes) from %ls", passport_index, count, size, passport_asset.c_str());
+                    if (UScriptStruct* pt = struct_type(p))
+                        for (FProperty* m : pt->ForEachProperty())
+                        {
+                            uint8_t* at = parameters + p->GetOffset_Internal() + m->GetOffset_Internal();
+                            if (m->GetClass().GetName() == STR("ClassProperty"))
+                            {
+                                UObject* c = *reinterpret_cast<UObject**>(at);
+                                HSVR_LOG("Script:   %ls = %ls", m->GetName().c_str(), c ? c->GetFullName().c_str() : STR("None"));
+                            }
+                        }
+                }
+                else
+                    HSVR_LOG("Script: hsvr.give_weapon: no passport %d (the list has %d)", passport_index, count);
+            }
+            if (passport_asset.empty() && !set && kind == STR("ClassProperty"))
             {
                 *reinterpret_cast<UClass**>(parameters + p->GetOffset_Internal()) = cls;
                 set = true;
@@ -2998,7 +3141,7 @@ namespace
         HSVR_LOG("Script: hsvr.give_weapon: parameters %s", names.c_str());
         if (!set)
         {
-            HSVR_LOG("Script: hsvr.give_weapon: no class parameter, not called");
+            HSVR_LOG("Script: hsvr.give_weapon: no class or passport given, not called");
             return;
         }
         pawn->ProcessEvent(fn, parameters);

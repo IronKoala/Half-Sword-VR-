@@ -30,4 +30,6 @@ The game holds a weapon with a physics joint between the weapon and the hand bon
 
 For unattended tests the dev_script step `hsvr.give_weapon <class path>` equips a weapon through the game's own "Set Up Right Hand Weapon" (the scripted Free Mode start has none).
 
+A bare class gives an unbuilt weapon (no blade, guard, grip or pommel), because the modular weapon builds itself only from its passport. To get a complete one, use `hsvr.give_weapon passport <inventory data asset> <index>`, which copies `Inventory.WeaponPssports[index]` from that asset into the call. The arming sword is `hsvr.give_weapon passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Beggar.DA_FreeMode_Inventory_Tier_Beggar 0`.
+
 Next: your strength from the game's stats instead of a fixed number, the hand staying on the weapon with a ghost hand at the controller, two hands, grab button, slide grip.
