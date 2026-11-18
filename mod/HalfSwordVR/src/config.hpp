@@ -260,7 +260,7 @@ namespace hsvr
         // Fists: squeezing an empty grip with nothing in reach makes that hand a fist (the game's
         // Weapon_Fists_C); letting go opens it. pose_fist_class = its object path if it is not loaded.
         bool pose_fists = true;
-        std::string pose_fist_class;
+        std::string pose_fist_class = "/Game/Assets/Weapons/Blueprints/Built_Weapons/Weapon_Fists.Weapon_Fists_C";
         // Eating and drinking: grabbed food within pose_eat_cm of your mouth is bitten (the game's
         // Bite Event); a held bottle at your mouth with its neck below pose_drink_tip (the dot of its
         // axis with up) is drunk from, at most once a second.

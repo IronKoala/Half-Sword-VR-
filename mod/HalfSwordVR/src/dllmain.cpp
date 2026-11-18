@@ -3857,9 +3857,10 @@ namespace
     UClass* fist_class(const hsvr::Config& cfg)
     {
         if (g_fist_class) return g_fist_class;
-        if (!cfg.pose_fist_class.empty())
         {
-            std::wstring path(cfg.pose_fist_class.begin(), cfg.pose_fist_class.end());
+            // An empty ini value (written by an earlier build) means the game's own path.
+            std::string chosen = cfg.pose_fist_class.empty() ? std::string("/Game/Assets/Weapons/Blueprints/Built_Weapons/Weapon_Fists.Weapon_Fists_C") : cfg.pose_fist_class;
+            std::wstring path(chosen.begin(), chosen.end());
             g_fist_class = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
             if (!g_fist_class)
             {
@@ -3881,10 +3882,9 @@ namespace
                     break;
                 }
         }
-        if (!g_fist_looked || g_fist_class)
+        if (!g_fist_looked)
         {
-            if (!g_fist_looked)
-                HSVR_LOG("Fist: class %ls", g_fist_class ? g_fist_class->GetFullName().c_str() : STR("NOT FOUND (set pose_fist_class to its object path)"));
+            HSVR_LOG("Fist: class %ls", g_fist_class ? g_fist_class->GetFullName().c_str() : STR("NOT FOUND (set pose_fist_class to its object path)"));
             g_fist_looked = true;
         }
         return g_fist_class;
@@ -3981,13 +3981,55 @@ namespace
         return false;
     }
 
+    // The game's bite trace starts at VoiceScene + Right x10..15 (UF @753233). VoiceScene is found
+    // among his components by name (any component whose name contains "VoiceScene", as a property or
+    // an attached component); without it, the head bone of his body 8 cm forward (logged).
+    UObject* find_voice_scene(UObject* pawn)
+    {
+        static UObject* seen_pawn = nullptr;
+        static UObject* found = nullptr;
+        if (pawn == seen_pawn) return found;
+        seen_pawn = pawn;
+        found = object_property(pawn, STR("VoiceScene"));
+        std::vector<UObject*> comps;
+        std::string near_names;
+        if (!found)
+        {
+            UObjectGlobals::FindAllOf(STR("SceneComponent"), comps);
+            for (UObject* c : comps)
+            {
+                if (!c || c->GetOuterPrivate() != pawn) continue;
+                std::wstring n = c->GetName();
+                if (n.find(STR("VoiceScene")) != std::wstring::npos && !found) found = c;
+                std::wstring lower = n;
+                for (auto& ch : lower) ch = (wchar_t)towlower(ch);
+                if (lower.find(STR("voice")) != std::wstring::npos || lower.find(STR("mouth")) != std::wstring::npos || lower.find(STR("head")) != std::wstring::npos)
+                {
+                    if (!near_names.empty()) near_names += ", ";
+                    for (wchar_t ch : n) near_names += (char)(ch < 128 ? ch : '?');
+                }
+            }
+        }
+        HSVR_LOG("Eat: mouth point from %ls%s%s", found ? found->GetFullName().c_str() : STR("his head bone (no VoiceScene found)"),
+                 near_names.empty() ? "" : "; components named voice/mouth/head: ", near_names.c_str());
+        return found;
+    }
+
     bool mouth_point(UObject* pawn, hsvr::Vec3& out)
     {
-        UObject* voice = object_property(pawn, STR("VoiceScene"));
-        if (!voice) return false;
+        if (!pawn) return false;
         Call right(pawn, STR("GetActorRightVector"));
         right.run();
-        out = component_location(voice) + right.vec() * 12.5;
+        if (UObject* voice = find_voice_scene(pawn))
+        {
+            out = component_location(voice) + right.vec() * 12.5;
+            return true;
+        }
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        if (!mesh) return false;
+        Call fwd(pawn, STR("GetActorForwardVector"));
+        fwd.run();
+        out = socket_location(mesh, bone_fname("Head")) + fwd.vec() * 8.0;
         return true;
     }
 
@@ -3996,11 +4038,7 @@ namespace
         using namespace hsvr;
         if (!cfg.pose_eat || !pawn) return;
         Vec3 mouth;
-        if (!mouth_point(pawn, mouth))
-        {
-            HSVR_LOG_EVERY(30.0, "Eat: no VoiceScene on the character, eating and drinking off");
-            return;
-        }
+        if (!mouth_point(pawn, mouth)) return;
         static bool at_mouth[2] = {false, false};
         static double last_drink = -10.0, last_bite = -10.0;
         double now = now_seconds();
@@ -6034,6 +6072,19 @@ namespace
             HSVR_LOG("Script: hsvr.give_weapon: no class %s", path.c_str());
             return;
         }
+        // Set Up Hand Weapon calls weapon-only events on what it is given; anything else is a fatal
+        // engine error (fist-eat test 1: an apple). Only ModularWeaponBP classes.
+        if (cls)
+        {
+            bool weapon = false;
+            for (UStruct* level = cls; level; level = level->GetSuperStruct())
+                if (level->GetName() == STR("ModularWeaponBP_C")) weapon = true;
+            if (!weapon)
+            {
+                HSVR_LOG("Script: hsvr.give_weapon: %s is not a ModularWeaponBP, not given (use hsvr.spawn)", path.c_str());
+                return;
+            }
+        }
         UObject* pawn = nullptr;
         find_pawn_mesh(&pawn);
         UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(setup_name) : nullptr;
@@ -6519,6 +6570,67 @@ namespace
                 UObject* pawn = nullptr;
                 find_pawn_mesh(&pawn);
                 if (pawn) weapon_dump(entry.command.size() > 17 && entry.command[17] == '0' ? 0 : 1, pawn);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.spawn ", 0) == 0)
+            {
+                // hsvr.spawn <class path> [left]: an actor of that class at the hand (right, or left).
+                std::string rest = entry.command.substr(11);
+                int spawn_side = 1;
+                if (rest.size() > 5 && rest.substr(rest.size() - 5) == " left")
+                {
+                    spawn_side = 0;
+                    rest.resize(rest.size() - 5);
+                }
+                std::wstring path(rest.begin(), rest.end());
+                UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
+                if (!cls)
+                {
+                    std::wstring asset = path;
+                    if (asset.size() > 2 && asset.substr(asset.size() - 2) == STR("_C")) asset.resize(asset.size() - 2);
+                    load_asset_object(asset);
+                    cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
+                }
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+                if (!cls || !mesh || !gs)
+                {
+                    HSVR_LOG("Script: hsvr.spawn: %s (class %s, character %s)", rest.c_str(), cls ? "found" : "NOT FOUND", mesh ? "found" : "none");
+                    continue;
+                }
+                hsvr::Vec3 at = hand_grab_point(mesh, spawn_side) + hsvr::Vec3{0, 0, 6.0};
+                auto fill_transform = [&](Call& c) {
+                    FProperty* p = c.param(STR("SpawnTransform"));
+                    UScriptStruct* type = p ? struct_type(p) : nullptr;
+                    if (!type) return;
+                    uint8_t* tat = c.buffer.data() + p->GetOffset_Internal();
+                    if (FProperty* r = struct_member(type, STR("Rotation")))
+                        if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                        {
+                            uint8_t* wat = tat + r->GetOffset_Internal() + w->GetOffset_Internal();
+                            if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                            else *reinterpret_cast<float*>(wat) = 1.0f;
+                        }
+                    if (FProperty* t = struct_member(type, STR("Translation"))) write_three(tat + t->GetOffset_Internal(), t, at.x, at.y, at.z);
+                    if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(tat + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+                };
+                Call begin(gs, STR("BeginDeferredActorSpawnFromClass"));
+                begin.object(STR("WorldContextObject"), pawn);
+                begin.object(STR("ActorClass"), cls);
+                fill_transform(begin);
+                begin.byte(STR("CollisionHandlingOverride"), 1); // always spawn
+                begin.run();
+                UObject* actor = begin.object_result();
+                if (actor)
+                {
+                    Call finish(gs, STR("FinishSpawningActor"));
+                    finish.object(STR("Actor"), actor);
+                    fill_transform(finish);
+                    finish.run();
+                }
+                HSVR_LOG("Script: hsvr.spawn: %ls at the %s hand (%.0f, %.0f, %.0f)", actor ? actor->GetFullName().c_str() : STR("NOTHING spawned"),
+                         spawn_side == 0 ? "left" : "right", at.x, at.y, at.z);
                 continue;
             }
             if (entry.command.rfind("hsvr.bring_object", 0) == 0)
