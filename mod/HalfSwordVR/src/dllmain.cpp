@@ -4193,6 +4193,69 @@ namespace
         s.unstuck = unstuck;
     }
 
+    // The kick hunt: who pushes the held weapon. Hooks the engine's physics writes (impulses, forces,
+    // velocities, teleports) and logs every call from game script whose target is a part of a weapon
+    // in his hands or his own mesh, with the calling Blueprint function and its bytecode offset (the
+    // "@" offsets of the decompile). Calls made through ProcessEvent (ours) are skipped: their frame's
+    // function is the hooked function itself. hsvr.force_watch 1 installs it (once).
+    std::atomic<bool> g_force_watch{false};
+    void force_watch_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        if (!g_force_watch.load()) return;
+        UObject* target = context.Context;
+        UFunction* hooked = static_cast<UFunction*>(custom_data);
+        if (!target || !g_pose.pawn) return;
+        UFunction* caller = context.TheStack.Node();
+        if (!caller || caller == hooked) return; // ours, through ProcessEvent
+        UObject* outer = target->GetOuterPrivate();
+        UObject* wr = object_property(g_pose.pawn, STR("Weapon R"));
+        UObject* wl = object_property(g_pose.pawn, STR("Weapon L"));
+        bool weapon = outer && (outer == wr || outer == wl);
+        bool own = target == g_pose.mesh || outer == g_pose.pawn;
+        if (!weapon && !own) return;
+        long long offset = -1;
+        const auto& script = caller->GetScript();
+        if (context.TheStack.Code() && script.GetData()) offset = (long long)(context.TheStack.Code() - script.GetData());
+        HSVR_LOG("Force: %ls on %ls.%ls from %ls (%ls) @%lld", hooked->GetName().c_str(), outer ? outer->GetName().c_str() : STR("?"), target->GetName().c_str(),
+                 caller->GetName().c_str(), caller->GetOuterPrivate() ? caller->GetOuterPrivate()->GetName().c_str() : STR("?"), offset);
+    }
+
+    void install_force_watch()
+    {
+        static bool installed = false;
+        if (installed) return;
+        installed = true;
+        int hooked = 0;
+        for (const TCHAR* path : {STR("/Script/Engine.PrimitiveComponent:AddImpulse"), STR("/Script/Engine.PrimitiveComponent:AddImpulseAtLocation"),
+                                  STR("/Script/Engine.PrimitiveComponent:AddForce"), STR("/Script/Engine.PrimitiveComponent:AddForceAtLocation"),
+                                  STR("/Script/Engine.PrimitiveComponent:AddForceAtLocationLocal"), STR("/Script/Engine.PrimitiveComponent:AddTorqueInRadians"),
+                                  STR("/Script/Engine.PrimitiveComponent:AddTorqueInDegrees"), STR("/Script/Engine.PrimitiveComponent:AddAngularImpulseInRadians"),
+                                  STR("/Script/Engine.PrimitiveComponent:AddAngularImpulseInDegrees"), STR("/Script/Engine.PrimitiveComponent:AddRadialImpulse"),
+                                  STR("/Script/Engine.PrimitiveComponent:AddRadialForce"), STR("/Script/Engine.PrimitiveComponent:SetPhysicsLinearVelocity"),
+                                  STR("/Script/Engine.PrimitiveComponent:SetAllPhysicsLinearVelocity"),
+                                  STR("/Script/Engine.PrimitiveComponent:SetPhysicsAngularVelocityInRadians"),
+                                  STR("/Script/Engine.PrimitiveComponent:SetPhysicsAngularVelocityInDegrees"), STR("/Script/Engine.PrimitiveComponent:SetSimulatePhysics"),
+                                  STR("/Script/Engine.PrimitiveComponent:SetMassOverrideInKg"), STR("/Script/Engine.PrimitiveComponent:SetCenterOfMass"),
+                                  STR("/Script/Engine.PrimitiveComponent:SetCollisionEnabled"), STR("/Script/Engine.PrimitiveComponent:SetCollisionResponseToChannel"),
+                                  STR("/Script/Engine.PrimitiveComponent:WakeRigidBody"), STR("/Script/Engine.SceneComponent:K2_SetWorldLocation"),
+                                  STR("/Script/Engine.SceneComponent:K2_SetWorldTransform"), STR("/Script/Engine.SceneComponent:K2_SetWorldLocationAndRotation"),
+                                  STR("/Script/Engine.SceneComponent:K2_AddWorldOffset"), STR("/Script/Engine.SceneComponent:K2_SetRelativeLocation"),
+                                  STR("/Script/Engine.SceneComponent:K2_AttachToComponent"), STR("/Script/Engine.SceneComponent:DetachFromParent"),
+                                  STR("/Script/Engine.SkeletalMeshComponent:SetAllBodiesSimulatePhysics"),
+                                  STR("/Script/Engine.SkeletalMeshComponent:SetAllBodiesBelowSimulatePhysics"),
+                                  STR("/Script/Engine.SkeletalMeshComponent:SetAllBodiesPhysicsBlendWeight"),
+                                  STR("/Script/Engine.SkeletalMeshComponent:SetAllMassScale"), STR("/Script/Engine.PrimitiveComponent:SetPhysMaterialOverride"),
+                                  STR("/Script/Engine.PhysicsConstraintComponent:SetConstrainedComponents"),
+                                  STR("/Script/Engine.PhysicsConstraintComponent:SetConstraintReferencePosition")})
+        {
+            UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, path);
+            if (!fn) continue;
+            UObjectGlobals::RegisterHook(fn, &force_watch_hook, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+            ++hooked;
+        }
+        HSVR_LOG("Force: watching %d engine physics functions for calls on his weapons and his body", hooked);
+    }
+
     void weapon_spring_after_tick(UObject* pawn)
     {
         using namespace hsvr;
@@ -5584,6 +5647,12 @@ namespace
             if (entry.command.rfind("hsvr.joint_trace ", 0) == 0)
             {
                 g_joint_trace.store(atoi(entry.command.c_str() + 17) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.force_watch ", 0) == 0)
+            {
+                install_force_watch();
+                g_force_watch.store(atoi(entry.command.c_str() + 17) != 0);
                 continue;
             }
             if (entry.command.rfind("hsvr.pin_disabled ", 0) == 0)
