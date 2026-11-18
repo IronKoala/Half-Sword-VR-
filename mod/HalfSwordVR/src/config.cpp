@@ -263,6 +263,7 @@ namespace hsvr
         num("pose_elbow_out", c.pose_elbow_out);
         num("pose_elbow_down", c.pose_elbow_down);
         flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
+        flag("hide_own_head", c.hide_own_head);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;

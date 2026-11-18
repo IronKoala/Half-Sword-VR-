@@ -712,6 +712,20 @@ namespace
             if (value) *at |= b->GetFieldMask();
             else *at &= ~b->GetFieldMask();
         }
+        // The function's first yes/no parameter, whatever it is called.
+        void first_flag(bool value)
+        {
+            if (!fn) return;
+            for (FProperty* p : fn->ForEachProperty())
+            {
+                if (p->GetClass().GetName() != STR("BoolProperty")) continue;
+                auto* b = static_cast<FBoolProperty*>(p);
+                uint8_t* at = buffer.data() + p->GetOffset_Internal() + b->GetByteOffset();
+                if (value) *at |= b->GetFieldMask();
+                else *at &= ~b->GetFieldMask();
+                return;
+            }
+        }
         void name(const TCHAR* param_name, FName value)
         {
             if (FProperty* p = param(param_name)) *reinterpret_cast<FName*>(buffer.data() + p->GetOffset_Internal()) = value;
@@ -1137,6 +1151,51 @@ namespace
                      state.hand[0].grip_valid ? "tracked" : (cfg.dev_pose_fake_tracking ? "fake" : "-"),
                      state.hand[1].grip_valid ? "tracked" : (cfg.dev_pose_fake_tracking ? "fake" : "-"), hl.x, hl.y, hl.z, g_pose.target[0].x,
                      g_pose.target[0].y, g_pose.target[0].z, hr.x, hr.y, hr.z, g_pose.target[1].x, g_pose.target[1].y, g_pose.target[1].z);
+        }
+    }
+
+    // ---- Your own head, hidden from your view only --------------------------------------------
+    // The head is its own component (CharacterMesh_Head) and the hair another (Hair, a groom);
+    // helmets are separate armour pieces and stay visible. "Owner no see" hides a component only in
+    // the views of the player who owns it; "cast hidden shadow" keeps its shadow. The game makes new
+    // components on a haircut or armour change, so this is checked once a second.
+    void set_owner_hidden(UObject* component, bool hidden)
+    {
+        Call see(component, STR("SetOwnerNoSee"));
+        see.first_flag(hidden);
+        see.run();
+        Call shadow(component, STR("SetCastHiddenShadow"));
+        shadow.first_flag(hidden);
+        shadow.run();
+    }
+
+    void hide_own_head(const hsvr::Config& cfg)
+    {
+        static UObject* hidden[2] = {nullptr, nullptr};
+        static double last = 0.0;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        bool willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
+        bool want = cfg.hide_own_head && willie && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().xr_running.load();
+        UObject* parts[2] = {nullptr, nullptr};
+        if (willie)
+        {
+            parts[0] = object_property(pawn, STR("CharacterMesh_Head"));
+            parts[1] = object_property(pawn, STR("Hair"));
+        }
+        for (int i = 0; i < 2; ++i)
+        {
+            UObject* now_part = want ? parts[i] : nullptr;
+            if (hidden[i] && hidden[i] != now_part && hidden[i] == parts[i]) set_owner_hidden(hidden[i], false);
+            if (now_part && hidden[i] != now_part)
+            {
+                set_owner_hidden(now_part, true);
+                HSVR_LOG("Head: %ls hidden from your view (shadow kept)", now_part->GetFullName().c_str());
+            }
+            hidden[i] = now_part;
         }
     }
 
@@ -1998,6 +2057,7 @@ namespace
         player_physics_test(cfg);
         pose_probe(cfg);
         pose_body(cfg);
+        hide_own_head(cfg);
         if (g_console_done)
         {
             apply_picture_settings(cfg);

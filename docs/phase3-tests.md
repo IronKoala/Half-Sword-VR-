@@ -19,6 +19,7 @@ How it works (from the decompile, `HalfSwordDecomp\internals-map.md`, "Posing fo
 | `pose_wrist_forward_cm`, `pose_wrist_right_cm`, `pose_wrist_up_cm` | -6, 0, -2 | Where the wrist sits relative to the controller grip. |
 | `pose_hand_pitch`, `pose_hand_yaw`, `pose_hand_roll` | 0 | Turns the hand relative to the controller. |
 | `pose_elbow_back`, `pose_elbow_out`, `pose_elbow_down` | 0.3, 0.6, 1 | Which way the elbows point. |
+| `hide_own_head` | 1 | Your character's head and hair are not drawn in your own view while you look out of it (first person, headset running). They still cast their shadow and stay in the game. Helmets and other headwear stay visible. |
 | `dev_pose_fake_tracking` | 0 | TEST ONLY: the head and hands follow a slow made-up path instead of the headset and controllers, for unattended runs. |
 
 ## Known limits of this first version
