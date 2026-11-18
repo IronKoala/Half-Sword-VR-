@@ -5338,6 +5338,43 @@ namespace
         HSVR_LOG("Script: hsvr.give_weapon: right hand now holds %ls", weapon ? weapon->GetFullName().c_str() : STR("nothing"));
     }
 
+    // Parses "<time>: <command>" steps separated by ';' or new lines. Times are seconds from `base`
+    // (script time), or "M+<s>" from the first menu on screen.
+    int parse_script_steps(const std::string& text, double base, std::vector<ScriptEntry>& entries)
+    {
+        int added = 0;
+        size_t pos = 0;
+        while (pos < text.size())
+        {
+            size_t end = text.find_first_of(";\n", pos);
+            if (end == std::string::npos) end = text.size();
+            std::string one = text.substr(pos, end - pos);
+            pos = end + 1;
+            size_t colon = one.find(':');
+            if (colon == std::string::npos) continue;
+            ScriptEntry entry;
+            std::string when = one.substr(0, colon);
+            size_t w0 = when.find_first_not_of(" \t\r\n");
+            if (w0 == std::string::npos) continue;
+            if (when[w0] == '#') continue;
+            if (when[w0] == 'M' || when[w0] == 'm')
+            {
+                entry.after_menu = true;
+                when = when.substr(w0 + 1);
+                if (!when.empty() && when[0] == '+') when = when.substr(1);
+            }
+            entry.at = atof(when.c_str()) + (entry.after_menu ? 0.0 : base);
+            entry.command = one.substr(colon + 1);
+            size_t first = entry.command.find_first_not_of(" \t");
+            size_t last = entry.command.find_last_not_of(" \t\r\n");
+            if (first == std::string::npos) continue;
+            entry.command = entry.command.substr(first, last - first + 1);
+            entries.push_back(entry);
+            ++added;
+        }
+        return added;
+    }
+
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -5347,34 +5384,48 @@ namespace
         {
             parsed = true;
             start = GetTickCount64();
-            size_t pos = 0;
-            const std::string& text = cfg.dev_script;
-            while (pos < text.size())
+            int n = parse_script_steps(cfg.dev_script, 0.0, entries);
+            if (n > 0) HSVR_LOG("Script: %d timed step(s) from the settings file (dev_script)", n);
+        }
+        // Live steps: HalfSwordVR_commands.txt next to the ini, checked once a second. Each time it is
+        // written, its steps are added with their times counted from that moment, so one game launch
+        // can run many tests (write a batch, wait, write the next).
+        {
+            static double checked = -10.0;
+            static FILETIME seen{};
+            double t = (double)(GetTickCount64() - start) / 1000.0;
+            if (t - checked >= 1.0)
             {
-                size_t end = text.find(';', pos);
-                if (end == std::string::npos) end = text.size();
-                std::string one = text.substr(pos, end - pos);
-                pos = end + 1;
-                size_t colon = one.find(':');
-                if (colon == std::string::npos) continue;
-                ScriptEntry entry;
-                std::string when = one.substr(0, colon);
-                size_t w0 = when.find_first_not_of(" \t\r\n");
-                if (w0 != std::string::npos && (when[w0] == 'M' || when[w0] == 'm'))
+                checked = t;
+                std::wstring path = hsvr::mod_dir() + L"HalfSwordVR_commands.txt";
+                WIN32_FILE_ATTRIBUTE_DATA info{};
+                if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) && CompareFileTime(&info.ftLastWriteTime, &seen) != 0)
                 {
-                    entry.after_menu = true;
-                    when = when.substr(w0 + 1);
-                    if (!when.empty() && when[0] == '+') when = when.substr(1);
+                    bool first_look = seen.dwLowDateTime == 0 && seen.dwHighDateTime == 0;
+                    seen = info.ftLastWriteTime;
+                    // A file left over from before this launch is not run.
+                    if (!first_look || t > 0.0)
+                        if (FILE* f = _wfopen(path.c_str(), L"rb"))
+                        {
+                            std::string text;
+                            char buf[4096];
+                            size_t got;
+                            while ((got = fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, got);
+                            fclose(f);
+                            if (first_look)
+                            {
+                                HSVR_LOG("Script: %ls was already there at launch; not run (write it again to run it)", path.c_str());
+                            }
+                            else
+                            {
+                                int n = parse_script_steps(text, t, entries);
+                                HSVR_LOG("Script: %d live step(s) from HalfSwordVR_commands.txt, counted from %.1f s", n, t);
+                            }
+                        }
                 }
-                entry.at = atof(when.c_str());
-                entry.command = one.substr(colon + 1);
-                size_t first = entry.command.find_first_not_of(" \t");
-                size_t last = entry.command.find_last_not_of(" \t\r\n");
-                if (first == std::string::npos) continue;
-                entry.command = entry.command.substr(first, last - first + 1);
-                entries.push_back(entry);
+                else if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) && seen.dwLowDateTime == 0 && seen.dwHighDateTime == 0)
+                    seen.dwLowDateTime = 1; // no file at launch: the first one written is new
             }
-            if (!entries.empty()) HSVR_LOG("Script: %d timed step(s) from the settings file (dev_script)", (int)entries.size());
         }
         if (entries.empty()) return;
         double now = (double)(GetTickCount64() - start) / 1000.0;
