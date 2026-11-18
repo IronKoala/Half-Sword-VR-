@@ -4122,7 +4122,7 @@ namespace
         if (at_end && !was_at_end[side]) controllers_buzz(side, 0.5f);
         was_at_end[side] = at_end;
         HSVR_LOG_EVERY(0.5, "Slide: %s hand at %.1f cm (wants %.1f, zone %.1f .. %.1f, trigger %.2f, moved %.2f this tick)%s", side == 0 ? "left" : "right", h.slide,
-                       want, h.zone_lo, h.zone_hi, trig, h.slide - before, at_end ? " at the stop" : "");
+                       want, zlo, zhi, trig, h.slide - before, at_end ? " at the stop" : "");
     }
 
     // How strong his hand is now, from the game's own stats (strength_stamina.md): his strength
