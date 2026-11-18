@@ -940,7 +940,13 @@ namespace
         bool tracked = hs.grip_valid && stereo_tracking_to_world(hs.grip, grip, grip_rot);
         if (!tracked)
         {
-            if (!cfg.dev_pose_fake_tracking) return;
+            if (!cfg.dev_pose_fake_tracking)
+            {
+                // No controller (playing with mouse and keyboard, or tracking lost): the game's own arms.
+                for (const char* b : {"upperarm", "lowerarm", "hand"})
+                    if (ModifyBoneNode* n = chain_node(std::string(b) + sx)) node_release(*n);
+                return;
+            }
             // Made-up path: each hand circles slowly in front of its shoulder.
             double t = now_seconds() * 1.5 + side * 1.5;
             Vec3 shoulder = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
@@ -1046,7 +1052,10 @@ namespace
                 have = true;
             }
             if (ModifyBoneNode* n = chain_node("head"))
+            {
                 if (have) node_set_rotation(*n, component_inv * (head_rot * g_pose.head_offset));
+                else node_release(*n);
+            }
         }
         else if (ModifyBoneNode* n = chain_node("head"))
         {
