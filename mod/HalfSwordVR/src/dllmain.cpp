@@ -2248,6 +2248,143 @@ namespace
             }
     }
 
+    // ---- keeping the held weapon from colliding with his own hand and forearm ---------------------
+    // Contacts are rigid and beat any drive, so a soft grip spring lost to his own fist and forearm
+    // bodies pressing on the grip (tests 18-22: ~15 cm off with any stiffness, while the game's
+    // locked joint overpowers them). UE turns collision off between two bodies joined by a
+    // constraint with bDisableCollision, so the mod adds one free (no-force) constraint between the
+    // weapon and each physics body of that arm from the forearm down.
+    std::vector<FName> physics_body_bones(UObject* mesh)
+    {
+        std::vector<FName> out;
+        UObject* asset = nullptr;
+        for (const TCHAR* n : {STR("SkeletalMeshAsset"), STR("SkinnedAsset"), STR("SkeletalMesh")})
+            if (!asset) asset = object_property(mesh, n);
+        UObject* physics = object_property(mesh, STR("PhysicsAssetOverride"));
+        if (!physics && asset) physics = object_property(asset, STR("PhysicsAsset"));
+        if (!physics)
+        {
+            HSVR_LOG("Grip: no physics asset found on %ls", mesh->GetFullName().c_str());
+            return out;
+        }
+        FProperty* list = physics->GetPropertyByNameInChain(STR("SkeletalBodySetups"));
+        if (!list) return out;
+        const RawArray* arr = reinterpret_cast<const RawArray*>(reinterpret_cast<uint8_t*>(physics) + list->GetOffset_Internal());
+        for (int32_t i = 0; i < arr->Num; ++i)
+        {
+            UObject* body = reinterpret_cast<UObject*>(arr->Data[i]);
+            if (!body) continue;
+            FProperty* bn = body->GetPropertyByNameInChain(STR("BoneName"));
+            if (bn) out.push_back(*reinterpret_cast<FName*>(reinterpret_cast<uint8_t*>(body) + bn->GetOffset_Internal()));
+        }
+        return out;
+    }
+
+    FName parent_bone(UObject* mesh, FName bone)
+    {
+        Call c(mesh, STR("GetParentBone"));
+        c.name(STR("BoneName"), bone);
+        if (!c.run()) return FName();
+        FProperty* rp = c.param(STR("ReturnValue"));
+        return rp ? *reinterpret_cast<FName*>(c.buffer.data() + rp->GetOffset_Internal()) : FName();
+    }
+
+    // True for the forearm and everything below it on that side (twist bones, hand, fingers).
+    bool in_forearm(UObject* mesh, FName bone, int side)
+    {
+        std::wstring stop = side == 0 ? STR("lowerarm_l") : STR("lowerarm_r");
+        FName at = bone;
+        for (int i = 0; i < 12; ++i)
+        {
+            std::wstring n = at.ToString();
+            if (n == stop) return true;
+            if (n == STR("None") || n.empty()) return false;
+            at = parent_bone(mesh, at);
+        }
+        return false;
+    }
+
+    struct ArmIgnore
+    {
+        UObject* weapon = nullptr;
+        std::vector<UObject*> joints;
+    };
+    ArmIgnore g_arm_ignore[2];
+    std::atomic<int> g_grip_ignore_arm{1};
+
+    void clear_arm_ignore(int side)
+    {
+        for (UObject* j : g_arm_ignore[side].joints)
+        {
+            Call d(j, STR("K2_DestroyComponent"));
+            d.object(STR("Object"), j);
+            d.run();
+        }
+        g_arm_ignore[side].joints.clear();
+        g_arm_ignore[side].weapon = nullptr;
+    }
+
+    void ignore_arm_collision(UObject* pawn, UObject* mesh, UObject* weapon, UObject* base, int side)
+    {
+        if (g_arm_ignore[side].weapon == weapon) return;
+        clear_arm_ignore(side);
+        g_arm_ignore[side].weapon = weapon;
+        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+        if (!cls || !mesh) return;
+        FName hand = bone_fname(side == 0 ? "hand_l" : "hand_r");
+        std::wstring names;
+        for (FName bone : physics_body_bones(mesh))
+        {
+            if (bone.ToString() == hand.ToString() || !in_forearm(mesh, bone, side)) continue;
+            Call add(pawn, STR("AddComponentByClass"));
+            add.object(STR("Class"), cls);
+            add.flag(STR("bManualAttachment"), false);
+            if (FProperty* t = add.param(STR("RelativeTransform")))
+            {
+                uint8_t* at = add.buffer.data() + t->GetOffset_Internal();
+                UScriptStruct* type = struct_type(t);
+                if (FProperty* r = struct_member(type, STR("Rotation")))
+                    if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                    {
+                        uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                        if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                        else *reinterpret_cast<float*>(wat) = 1.0f;
+                    }
+                if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+            }
+            add.flag(STR("bDeferredFinish"), false);
+            if (!add.run()) continue;
+            UObject* j = add.object_result();
+            if (!j) continue;
+            // Free in every direction and no drives: it holds nothing, it only switches off the pair's collision.
+            for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
+            {
+                Call c1(j, fn);
+                c1.byte(STR("ConstraintType"), 0);
+                c1.number(STR("LimitSize"), 0.0);
+                c1.run();
+            }
+            for (const TCHAR* fn : {STR("SetAngularSwing1Limit"), STR("SetAngularSwing2Limit"), STR("SetAngularTwistLimit")})
+            {
+                Call c1(j, fn);
+                c1.byte(STR("MotionType"), 0);
+                c1.run();
+            }
+            Call dc(j, STR("SetDisableCollision"));
+            dc.first_flag(true);
+            dc.run();
+            Call join(j, STR("SetConstrainedComponents"));
+            join.object(STR("Component1"), base);
+            join.name(STR("BoneName1"), FName());
+            join.object(STR("Component2"), mesh);
+            join.name(STR("BoneName2"), bone);
+            join.run();
+            g_arm_ignore[side].joints.push_back(j);
+            names += bone.ToString() + STR(" ");
+        }
+        HSVR_LOG("Grip: %s weapon no longer collides with: %ls", side == 0 ? "left" : "right", names.empty() ? STR("(no forearm bodies found)") : names.c_str());
+    }
+
     void dump_joint(UObject* joint)
     {
         FProperty* p = joint ? joint->GetPropertyByNameInChain(STR("ConstraintInstance")) : nullptr;
@@ -2302,6 +2439,7 @@ namespace
             if (!cfg.pose_grip_spring && spring_override < 0) continue;
             UObject* joint = object_property(pawn, side == 0 ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand"));
             UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (g_arm_ignore[side].weapon && g_arm_ignore[side].weapon != weapon) clear_arm_ignore(side);
             if (!joint || !weapon) continue;
             // Only a seated weapon (the game first pulls a new weapon into the hand over a short distance).
             if (side == 1)
@@ -2334,6 +2472,10 @@ namespace
                     }
                 }
                 else if (spring_on) spring_joint(joint, mass, cfg);
+                if (spring_on && g_grip_ignore_arm.load())
+                    ignore_arm_collision(pawn, object_property(pawn, STR("Mesh")), weapon, base, side);
+                else if (g_arm_ignore[side].weapon)
+                    clear_arm_ignore(side);
                 if (side == 1)
                 {
                     static int done_serial = 0;
@@ -2526,12 +2668,12 @@ namespace
                     HSVR_LOG("Grip: %s weapon at (%.0f, %.0f, %.0f), hand at (%.0f, %.0f, %.0f), visible %d, joint between %ls", side == 0 ? "left" : "right",
                              g_grip_log[side].weapon_at.x, g_grip_log[side].weapon_at.y, g_grip_log[side].weapon_at.z, g_grip_log[side].hand_at.x,
                              g_grip_log[side].hand_at.y, g_grip_log[side].hand_at.z, g_grip_log[side].visible, g_grip_log[side].joined.c_str());
-                    HSVR_LOG("Grip: %s joint stretch %.1f cm (%.1f, %.1f, %.1f) world, (%.1f, %.1f, %.1f) hand frame, hand anchor Pos2 (%.1f, %.1f, %.1f) [spring %d, k x%g, gravity %d, collision %d, target (%g, %g, %g), broken %d]",
+                    HSVR_LOG("Grip: %s joint stretch %.1f cm (%.1f, %.1f, %.1f) world, (%.1f, %.1f, %.1f) hand frame, hand anchor Pos2 (%.1f, %.1f, %.1f) [spring %d, k x%g, gravity %d, collision %d, target (%g, %g, %g), broken %d, arm ignored %d]",
                              side == 0 ? "left" : "right", g_grip_log[side].stretch, g_grip_log[side].stretch_vec.x, g_grip_log[side].stretch_vec.y, g_grip_log[side].stretch_vec.z,
                              g_grip_log[side].stretch_hand.x, g_grip_log[side].stretch_hand.y, g_grip_log[side].stretch_hand.z,
                              g_grip_log[side].pos2.x, g_grip_log[side].pos2.y, g_grip_log[side].pos2.z, g_grip_spring_override.load(),
                              g_grip_k_scale.load(), g_weapon_gravity.load(), g_weapon_collision.load(), g_grip_target[0].load(), g_grip_target[1].load(),
-                             g_grip_target[2].load(), g_grip_log[side].broken);
+                             g_grip_target[2].load(), g_grip_log[side].broken, (int)g_arm_ignore[side].joints.size());
                 }
         }
     }
@@ -3394,6 +3536,11 @@ namespace
                 g_grip_frame_offset[1].store(y);
                 g_grip_frame_offset[2].store(z);
                 g_grip_frame_serial.fetch_add(1);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.grip_ignore_arm ", 0) == 0)
+            {
+                g_grip_ignore_arm.store(atoi(entry.command.c_str() + 21));
                 continue;
             }
             if (entry.command == "hsvr.grip_rejoin")
