@@ -48,6 +48,20 @@ A bare class gives an unbuilt weapon (no blade, guard, grip or pommel), because 
 Next: your strength from the game's stats instead of a fixed number, the hand staying on the weapon with a ghost hand at the controller, two hands, grab button, slide grip.
 
 
+## Menu controls
+
+The game's menus take only the mouse and keyboard (no focus or gamepad navigation; HalfSwordDecomp defaults/menus_and_prompts.md), so the controllers stand in for them.
+
+- **Pointer:** while a menu is up, point either controller at the floating panel. A dot shows where it lands and the Windows mouse pointer moves to that spot in the game window. The trigger is the left mouse button (held = drag, for sliders); the controller buzzes on each click. The right hand points unless only the left is on the panel. Log line: "Pointer: ... clicks the panel at".
+- **Pause:** the left menu button is Escape, held while you hold it: it opens the pause menu, and holding it closes the pause menu like holding Escape does. Log lines: "Menu: left menu button down/up".
+- **"Hold G to continue":** after a won fight, hold right A for 1 s. The mod calls the player's VO Deescalate, which is what the game's held Talk (G) calls after a win (UI_WIN, then the Next Fight menu, which you click with the pointer). It only does this while the GameMode's "Match Won" is set and his "Player Match End" is not, because G itself also surrenders (held when the fight is not won) and bites (double press). Holding A at any other time does nothing and logs why. Log line: "Menu: A held".
+
+| Setting | Default | What it does |
+|---|---|---|
+| `ui_pointer` | 1 | The controller pointer and trigger click on the panel. |
+| `menu_buttons` | 1 | Left menu button = Escape; right A held = continue after a win. |
+| `menu_continue_hold_s` | 1.0 | How long right A is held to continue. |
+
 ## Unattended test tools (dev_script steps)
 
 The grip settings in the ini (pose_grip_*) are re-read every second during a run, so a test can change them live by editing the ini. Engine console commands in the dev_script (for example `shot`) take a screenshot at that step.
@@ -55,6 +69,8 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | Step | What it does |
 |---|---|
 | `hsvr.give_weapon passport <inventory asset> <index>` | Equips a fully built weapon; replaces the one in the hand |
+| `hsvr.match_won` | Sets what the game sets when the last enemy dies (GameMode "Match Won", his "Match Won (Player)"), to test continuing without a fight |
+| `hsvr.press_a 0/1` | 1 holds right A for the menu buttons (continue after a win) |
 | `hsvr.ghost_show 0/1` | 1 shows the ghost hand at your hand all the time (for fitting it) |
 | `hsvr.hold_reach 0/1` | 0 lets the hold aim past his reach (to push a held weapon into the floor with arm_move 5); 1 (default) clamps it to his reach |
 | `hsvr.grip_hold 0/1` | Turns the framework hold off or on for the test, whatever the ini says |
