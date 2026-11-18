@@ -1,5 +1,7 @@
 #include "vr_present.hpp"
 
+#include "controllers.hpp"
+
 #include "config.hpp"
 #include "engine_slot.hpp"
 #include "log.hpp"
@@ -918,6 +920,7 @@ float4 PSMain(VSOut i) : SV_Target
                 return false;
             }
             g_local_space.store(local);
+            controllers_attach(xr, session);
 
             uint32_t format_count = 0;
             xr.EnumerateSwapchainFormats(session, 0, &format_count, nullptr);
@@ -1092,6 +1095,10 @@ float4 PSMain(VSOut i) : SV_Target
                         g.frame_begun = false;
                         shared().xr_running.store(false);
                     }
+                }
+                else if (ev.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED)
+                {
+                    controllers_profile_changed(xr, g_instance, g_session.load());
                 }
                 else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING)
                 {
@@ -2303,6 +2310,7 @@ float4 PSMain(VSOut i) : SV_Target
         }
         XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
         if (XR_SUCCEEDED(xr.GetSystemProperties(g_instance, g_system, &sp))) HSVR_LOG("OpenXR: headset %s", sp.systemName);
+        controllers_create(xr, g_instance);
 
         uint32_t view_count = 0;
         xr.EnumerateViewConfigurationViews(g_instance, g_system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &view_count, nullptr);
@@ -2347,7 +2355,22 @@ float4 PSMain(VSOut i) : SV_Target
         else if (shared().xr_running.load())
         {
             XrTime time = g_frame_time.load() + g_lead_ns.load();
-            locate_views(time, pose);
+            bool located = locate_views(time, pose);
+            // The controllers are read for the same moment the eyes are predicted for.
+            XrPoseRaw head;
+            if (located)
+            {
+                const XrEyeRaw& a = pose.eye[0];
+                const XrEyeRaw& b = pose.eye[1];
+                head.px = (a.px + b.px) * 0.5f;
+                head.py = (a.py + b.py) * 0.5f;
+                head.pz = (a.pz + b.pz) * 0.5f;
+                head.qx = a.qx;
+                head.qy = a.qy;
+                head.qz = a.qz;
+                head.qw = a.qw;
+            }
+            controllers_update(xr, g_session.load(), g_local_space.load(), time, located ? &head : nullptr);
         }
         if (!pose.valid) return false;
         {

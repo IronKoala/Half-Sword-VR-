@@ -2,6 +2,7 @@
 // engine, the engine draws a left and a right view every frame using the headset's pose and
 // lens shape, which we then hand to the headset.
 #pragma once
+#include "vr_state.hpp"
 #include "vrmath.hpp"
 
 namespace hsvr
@@ -21,6 +22,10 @@ namespace hsvr
 
     // Called once per engine tick on the game thread, before the frame is drawn.
     void stereo_begin_game_frame(double delta_seconds);
+
+    // Places a pose from tracking space (a controller, say) in the game world the same way the
+    // eyes were placed for the last frame. Game thread. False until a frame has been placed.
+    bool stereo_tracking_to_world(const XrPoseRaw& pose, Vec3& location, Quat& rotation);
 
     // True while the engine draws the eyes into their own full-size target (settings key
     // separate_render_target) rather than side by side into the game window.

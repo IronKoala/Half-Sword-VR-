@@ -123,6 +123,30 @@ namespace hsvr
         // Example: 20:open /Game/Maps/Arenas/Map_Arena_Slums;50:r.Fog 0;56:r.Fog 1
         std::string dev_script;
         int stereo_slot_offset = 0; // 0 = find automatically
+
+        // ---- Phase 2: controllers (read only) and the player physics test ----
+        // Write the controllers' positions, buttons and sticks to the log once a second, with the
+        // distance from each controller to the character's hand bone.
+        bool log_controllers = true;
+        std::string hand_bone_left = "hand_l";
+        std::string hand_bone_right = "hand_r";
+        // 1 = a short buzz on a controller each time its trigger is pulled all the way (checks vibration).
+        bool haptics_test = false;
+        // TEST ONLY. 1 = switch physics off on your own character's body (enemies are not touched)
+        // to see what the game does without the ragdoll. Can be flipped while the game runs;
+        // switching back to 0 turns physics on again, which may not match the game's own setup,
+        // so restart the fight afterwards.
+        bool dev_player_physics_off = false;
+        // 1 = once a second, where your character's body, head and hands are (on automatically
+        // while the physics test runs). Unattended tests can also switch the physics test with
+        // the dev_script step "hsvr.physics_off 1" / "hsvr.physics_off 0".
+        bool log_body = false;
+        // TEST ONLY, with the physics test: 1 = keep physics on for both arms (every body from
+        // these bones outwards), so the rest of the body is still and the arms hang and move by the
+        // game's own muscles.
+        bool dev_player_arm_physics = false;
+        std::string arm_bone_left = "clavicle_l";
+        std::string arm_bone_right = "clavicle_r";
     };
 
     // Current settings (copy). Cheap enough to call once per frame.

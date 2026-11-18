@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -26,6 +27,7 @@
 #include <Unreal/UObjectGlobals.hpp>
 
 #include "config.hpp"
+#include "controllers.hpp"
 #include "engine_slot.hpp"
 #include "input_watch.hpp"
 #include "log.hpp"
@@ -202,6 +204,251 @@ namespace
             }
         }
         return true;
+    }
+
+    // ---- Phase 2: controllers in the log, and the player physics test -------------------------
+    FName bone_fname(const std::string& text)
+    {
+        static std::map<std::string, FName> cache;
+        auto it = cache.find(text);
+        if (it != cache.end()) return it->second;
+        std::wstring wide(text.begin(), text.end());
+        FName name(wide.c_str(), FNAME_Add);
+        cache.emplace(text, name);
+        return name;
+    }
+
+    bool bone_location(UObject* mesh, const std::string& bone, hsvr::Vec3& out)
+    {
+        if (!mesh) return false;
+        UFunction* socket_fn = mesh->GetFunctionByNameInChain(STR("GetSocketLocation"));
+        if (!socket_fn) return false;
+        SocketLocationParams socket{};
+        socket.InSocketName = bone_fname(bone);
+        mesh->ProcessEvent(socket_fn, &socket);
+        out = {socket.ReturnValue.X, socket.ReturnValue.Y, socket.ReturnValue.Z};
+        return true;
+    }
+
+    // Once a second: where each controller is (relative to the headset, and in the game world),
+    // how far that is from the character's hand bone, and what the buttons and sticks read.
+    void log_controllers(const hsvr::Config& cfg)
+    {
+        if (!cfg.log_controllers) return;
+        static double last = 0.0;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+        hsvr::ControllerState s = hsvr::controllers_state();
+        if (!s.active)
+        {
+            HSVR_LOG_EVERY(10.0, "Controllers: not read yet (headset session not running, or no action set)");
+            return;
+        }
+        UObject* mesh = find_pawn_mesh();
+        const char* names[2] = {"left", "right"};
+        const std::string* bones[2] = {&cfg.hand_bone_left, &cfg.hand_bone_right};
+        for (int h = 0; h < 2; ++h)
+        {
+            const hsvr::HandState& hand = s.hand[h];
+            char where[256] = "not tracked";
+            if (hand.grip_valid)
+            {
+                int n = 0;
+                if (s.head_valid)
+                {
+                    // Offset from the point between the eyes, in the head's heading: forward, right, up (cm).
+                    hsvr::Quat head_rotation = hsvr::xr_to_ue_rotation(s.head.qx, s.head.qy, s.head.qz, s.head.qw);
+                    hsvr::Quat heading = hsvr::quat_from_yaw_deg(hsvr::quat_yaw_deg(head_rotation));
+                    hsvr::Vec3 rel = heading.inverse().rotate(hsvr::xr_to_ue_position(hand.grip.px, hand.grip.py, hand.grip.pz, 100.0) -
+                                                              hsvr::xr_to_ue_position(s.head.px, s.head.py, s.head.pz, 100.0));
+                    n += snprintf(where + n, sizeof(where) - n, "from head fwd %.0f right %.0f up %.0f cm", rel.x, rel.y, rel.z);
+                }
+                hsvr::Vec3 world;
+                hsvr::Quat world_rotation;
+                if (hsvr::stereo_tracking_to_world(hand.grip, world, world_rotation))
+                {
+                    hsvr::Rot r = hsvr::quat_to_rot(world_rotation);
+                    n += snprintf(where + n, sizeof(where) - n, ", world (%.0f, %.0f, %.0f) rot p%.0f y%.0f r%.0f", world.x, world.y, world.z, r.pitch, r.yaw, r.roll);
+                    hsvr::Vec3 bone;
+                    if (bone_location(mesh, *bones[h], bone))
+                    {
+                        hsvr::Vec3 d = world - bone;
+                        n += snprintf(where + n, sizeof(where) - n, ", %.0f cm from %s", std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z), bones[h]->c_str());
+                    }
+                }
+            }
+            HSVR_LOG("Controller %s%s: %s | trigger %.2f grip %.2f stick %.2f %.2f%s%s%s%s", names[h], s.focused ? "" : " (no input focus)", where,
+                     hand.trigger, hand.squeeze, hand.stick_x, hand.stick_y, hand.stick_click ? " [stick]" : "", hand.primary ? " [A/X]" : "",
+                     hand.secondary ? " [B/Y]" : "", hand.menu ? " [menu]" : "");
+        }
+    }
+
+    struct SimulatePhysicsParams
+    {
+        bool bSimulate;
+    };
+
+    struct IsSimulatingParams
+    {
+        FName BoneName;
+        bool ReturnValue;
+    };
+
+    int is_simulating(UObject* mesh, const std::string& bone)
+    {
+        UFunction* fn = mesh->GetFunctionByNameInChain(STR("IsSimulatingPhysics"));
+        if (!fn) return -1;
+        IsSimulatingParams p{};
+        p.BoneName = bone_fname(bone);
+        mesh->ProcessEvent(fn, &p);
+        return p.ReturnValue ? 1 : 0;
+    }
+
+    // SetSimulatePhysics on a skeletal mesh only changes the bodies whose physics asset entry is
+    // "Default". Willie's mesh uses Willie_PhysicsAsset_Capsules, whose 22 bodies are all marked
+    // Kinematic (decoded 2026-11-17), and the game makes them simulate itself, so SetSimulatePhysics
+    // leaves them alone (the pelvis and hand_r still simulated in the same tick). SetAllBodiesSimulatePhysics changes every
+    // body regardless, so it is called after it. Each step is logged with what the pelvis reads after.
+    void set_simulate(UObject* mesh, bool simulate, bool report = false)
+    {
+        UFunction* whole = mesh->GetFunctionByNameInChain(STR("SetSimulatePhysics"));
+        UFunction* every_body = mesh->GetFunctionByNameInChain(STR("SetAllBodiesSimulatePhysics"));
+        if (whole)
+        {
+            SimulatePhysicsParams p{simulate};
+            mesh->ProcessEvent(whole, &p);
+        }
+        int after_whole = report ? is_simulating(mesh, "pelvis") : -1;
+        if (every_body)
+        {
+            SimulatePhysicsParams p{simulate};
+            mesh->ProcessEvent(every_body, &p);
+        }
+        if (report)
+            HSVR_LOG("Physics test: set %d: SetSimulatePhysics %s, pelvis then %d; SetAllBodiesSimulatePhysics %s, pelvis then %d", (int)simulate,
+                     whole ? "called" : "not found", after_whole, every_body ? "called" : "not found", is_simulating(mesh, "pelvis"));
+    }
+
+    struct BodiesBelowParams
+    {
+        FName InBoneName;
+        bool bNewSimulate;
+        bool bIncludeSelf;
+    };
+
+    // Physics back on for one branch of the skeleton (the game itself does this from the pelvis
+    // when it rescales the character).
+    void set_simulate_below(UObject* mesh, const std::string& bone, bool simulate)
+    {
+        UFunction* fn = mesh->GetFunctionByNameInChain(STR("SetAllBodiesBelowSimulatePhysics"));
+        if (!fn) return;
+        BodiesBelowParams p{};
+        p.InBoneName = bone_fname(bone);
+        p.bNewSimulate = simulate;
+        p.bIncludeSelf = true;
+        mesh->ProcessEvent(fn, &p);
+    }
+
+    // The physics test's "off": everything off, then the arms back on when dev_player_arm_physics is set.
+    void physics_test_off(UObject* mesh, const hsvr::Config& cfg, bool report)
+    {
+        set_simulate(mesh, false, report);
+        if (!cfg.dev_player_arm_physics) return;
+        set_simulate_below(mesh, cfg.arm_bone_left, true);
+        set_simulate_below(mesh, cfg.arm_bone_right, true);
+        if (report)
+            HSVR_LOG("Physics test: arms kept on from %s / %s: pelvis %d, %s %d, %s %d", cfg.arm_bone_left.c_str(), cfg.arm_bone_right.c_str(),
+                     is_simulating(mesh, "pelvis"), cfg.hand_bone_left.c_str(), is_simulating(mesh, cfg.hand_bone_left), cfg.hand_bone_right.c_str(),
+                     is_simulating(mesh, cfg.hand_bone_right));
+    }
+
+    // TEST ONLY (dev_player_physics_off): physics off on the player's own body, to see what the
+    // game does without its ragdoll. Only the pawn the player controls is touched; the enemies run
+    // the same Blueprint and are left alone.
+    // -1 = follow dev_player_physics_off; 0/1 = set by the unattended script (hsvr.physics_off).
+    int g_physics_override = -1;
+
+    // Once a second while log_body is on or the physics test runs: where the character is.
+    void log_body(UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
+    {
+        static double last = 0.0;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+        UFunction* actor_fn = pawn->GetFunctionByNameInChain(STR("K2_GetActorLocation"));
+        ActorLocationParams actor{};
+        if (actor_fn) pawn->ProcessEvent(actor_fn, &actor);
+        hsvr::Vec3 pelvis, head, hand_l, hand_r;
+        bone_location(mesh, "pelvis", pelvis);
+        bone_location(mesh, "Head", head);
+        bone_location(mesh, cfg.hand_bone_left, hand_l);
+        bone_location(mesh, cfg.hand_bone_right, hand_r);
+        HSVR_LOG("Body: actor (%.0f, %.0f, %.0f) pelvis (%.0f, %.0f, %.0f) head (%.0f, %.0f, %.0f) hand_l (%.0f, %.0f, %.0f) hand_r (%.0f, %.0f, %.0f) | head above actor %.0f cm, physics pelvis %d",
+                 actor.ReturnValue.X, actor.ReturnValue.Y, actor.ReturnValue.Z, pelvis.x, pelvis.y, pelvis.z, head.x, head.y, head.z, hand_l.x, hand_l.y, hand_l.z,
+                 hand_r.x, hand_r.y, hand_r.z, head.z - actor.ReturnValue.Z, is_simulating(mesh, "pelvis"));
+    }
+
+    void player_physics_test(const hsvr::Config& cfg)
+    {
+        static UObject* switched_off = nullptr; // the mesh we turned physics off on
+        static UObject* checked_pawn = nullptr;
+        static bool pawn_is_willie = false;
+        UObject* pawn = nullptr;
+        UObject* mesh = find_pawn_mesh(&pawn);
+        if (pawn != checked_pawn)
+        {
+            checked_pawn = pawn;
+            pawn_is_willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
+        }
+        bool flag = g_physics_override >= 0 ? g_physics_override != 0 : cfg.dev_player_physics_off;
+        bool want_off = flag && mesh && pawn_is_willie;
+        if (mesh && pawn_is_willie && (cfg.log_body || switched_off)) log_body(pawn, mesh, cfg);
+        if (switched_off && (switched_off != mesh || !want_off))
+        {
+            if (switched_off == mesh)
+            {
+                set_simulate(mesh, true, true);
+                HSVR_LOG("Physics test: physics back ON for your character (may differ from the game's own setup; restart the fight to be sure)");
+            }
+            else
+            {
+                HSVR_LOG("Physics test: your character changed; the new one keeps its physics until the test applies again");
+            }
+            switched_off = nullptr;
+        }
+        if (want_off && switched_off != mesh)
+        {
+            physics_test_off(mesh, cfg, true);
+            switched_off = mesh;
+            HSVR_LOG("Physics test: physics OFF for your character (%ls)%s", pawn->GetFullName().c_str(),
+                     cfg.dev_player_arm_physics ? ", arms kept on" : "");
+        }
+        // dev_player_arm_physics changed while the test runs: apply it now.
+        static bool arms_applied = false;
+        if (switched_off && switched_off == mesh && arms_applied != cfg.dev_player_arm_physics)
+        {
+            physics_test_off(mesh, cfg, true);
+            HSVR_LOG("Physics test: arms %s", cfg.dev_player_arm_physics ? "on (physics), rest of the body off" : "off with the rest of the body");
+        }
+        arms_applied = switched_off ? cfg.dev_player_arm_physics : false;
+        if (!switched_off) return;
+        static double last = 0.0;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+        // Watch whether the game turns physics back on by itself.
+        int pelvis = is_simulating(mesh, "pelvis");
+        int hand = is_simulating(mesh, cfg.hand_bone_right);
+        HSVR_LOG("Physics test: simulating now: pelvis %d, %s %d (1 = physics on, -1 = unknown)", pelvis, cfg.hand_bone_right.c_str(), hand);
+        // With the arms kept on, only the pelvis tells whether the game switched the whole body on.
+        if (pelvis == 1 || (hand == 1 && !cfg.dev_player_arm_physics))
+        {
+            HSVR_LOG("Physics test: the game switched physics back on; switching it off again");
+            static int reports_left = 5;
+            physics_test_off(mesh, cfg, reports_left > 0);
+            if (reports_left > 0) --reports_left;
+        }
     }
 
     struct ConsoleCommandParams
@@ -435,6 +682,197 @@ namespace
         bool done = false;
     };
 
+    // dev_script step "hsvr.set <Name>=<value>": writes one variable of the game instance (GI_Settings
+    // in Half Sword), the way the menus do before a fight is opened. <Name> is the variable's name as
+    // the Blueprint shows it, any case; a name the engine stores with a suffix ("<Name>_12_ABC...") also matches.
+    // Yes/no, byte, enum and whole-number variables only.
+    void script_set_game_instance(const std::string& step)
+    {
+        size_t equals = step.find('=');
+        if (equals == std::string::npos)
+        {
+            HSVR_LOG("Script: hsvr.set needs <Name>=<value>: %s", step.c_str());
+            return;
+        }
+        std::string name_text = step.substr(0, equals);
+        while (!name_text.empty() && name_text.back() == ' ') name_text.pop_back();
+        std::string value_text = step.substr(equals + 1);
+        std::wstring wanted(name_text.begin(), name_text.end());
+        std::wstring wanted_prefix = wanted + STR("_");
+
+        UObject* viewport = object_property(g_engine, STR("GameViewport"));
+        UObject* game_instance = object_property(viewport, STR("GameInstance"));
+        if (!game_instance)
+        {
+            HSVR_LOG("Script: hsvr.set: no game instance yet");
+            return;
+        }
+        UClass* game_class = game_instance->GetClassPrivate();
+        FProperty* found = nullptr;
+        for (UStruct* level = game_class; level && !found; level = level->GetSuperStruct())
+        {
+            for (FProperty* property : level->ForEachProperty())
+            {
+                auto property_name = property->GetName();
+                // Case is ignored: the editor shows names as typed, and they are easy to mistype.
+                if (_wcsicmp(property_name.c_str(), wanted.c_str()) == 0 ||
+                    _wcsnicmp(property_name.c_str(), wanted_prefix.c_str(), wanted_prefix.size()) == 0)
+                {
+                    found = property;
+                    break;
+                }
+            }
+        }
+        if (!found)
+        {
+            HSVR_LOG("Script: hsvr.set: %ls has no variable \"%s\". Its variables:", game_instance->GetFullName().c_str(), name_text.c_str());
+            for (FProperty* property : game_class->ForEachProperty())
+                HSVR_LOG("  %ls (%ls)", property->GetName().c_str(), property->GetClass().GetName().c_str());
+            return;
+        }
+        auto type = found->GetClass().GetName();
+        uint8_t* address = reinterpret_cast<uint8_t*>(game_instance) + found->GetOffset_Internal();
+        if (type == STR("BoolProperty"))
+        {
+            auto* flag = static_cast<FBoolProperty*>(found);
+            uint8_t* byte = address + flag->GetByteOffset();
+            bool before = (*byte & flag->GetFieldMask()) != 0;
+            bool value = value_text.find("true") != std::string::npos || atoi(value_text.c_str()) != 0;
+            if (value) *byte |= flag->GetFieldMask();
+            else *byte &= ~flag->GetFieldMask();
+            HSVR_LOG("Script: game instance %ls (yes/no) was %d, now %d", found->GetName().c_str(), (int)before, (int)value);
+            return;
+        }
+        if (type == STR("ByteProperty") || type == STR("EnumProperty") || type == STR("IntProperty"))
+        {
+            int32_t size = found->GetSize();
+            if (size != 1 && size != 4)
+            {
+                HSVR_LOG("Script: hsvr.set: %ls is %ls of %d bytes, not written", found->GetName().c_str(), type.c_str(), size);
+                return;
+            }
+            int64_t value = atoll(value_text.c_str());
+            int64_t before = size == 1 ? (int64_t)*address : (int64_t)*reinterpret_cast<int32_t*>(address);
+            if (size == 1) *address = (uint8_t)value;
+            else *reinterpret_cast<int32_t*>(address) = (int32_t)value;
+            HSVR_LOG("Script: game instance %ls (%ls) was %lld, now %lld", found->GetName().c_str(), type.c_str(), (long long)before, (long long)value);
+            return;
+        }
+        HSVR_LOG("Script: hsvr.set: %ls is a %ls, which this step does not write", found->GetName().c_str(), type.c_str());
+    }
+
+    // dev_script step "hsvr.dump": writes every reflected variable of the player's character, its
+    // components, its animation Blueprint, its class defaults, the controller and the game instance to
+    // the log ("Dump <object>: <name> (<type>) = <value>"), to read the values the game really runs
+    // with (Blueprint defaults could not be decoded from the pak). Read only.
+    void dump_value(const std::wstring& label, const std::wstring& path, FProperty* property, const uint8_t* address, int depth)
+    {
+        auto type = property->GetClass().GetName();
+        wchar_t value[256] = L"?";
+        if (type == STR("BoolProperty"))
+        {
+            auto* flag = static_cast<FBoolProperty*>(property);
+            swprintf(value, 256, L"%d", (address[flag->GetByteOffset()] & flag->GetFieldMask()) != 0 ? 1 : 0);
+        }
+        else if (type == STR("FloatProperty")) swprintf(value, 256, L"%g", (double)*reinterpret_cast<const float*>(address));
+        else if (type == STR("DoubleProperty")) swprintf(value, 256, L"%g", *reinterpret_cast<const double*>(address));
+        else if (type == STR("IntProperty")) swprintf(value, 256, L"%d", *reinterpret_cast<const int32_t*>(address));
+        else if (type == STR("Int64Property")) swprintf(value, 256, L"%lld", (long long)*reinterpret_cast<const int64_t*>(address));
+        else if (type == STR("ByteProperty") || (type == STR("EnumProperty") && property->GetSize() == 1)) swprintf(value, 256, L"%d", (int)*address);
+        else if (type == STR("NameProperty")) swprintf(value, 256, L"%ls", reinterpret_cast<const FName*>(address)->ToString().c_str());
+        else if (type == STR("ObjectProperty") || type == STR("ClassProperty"))
+        {
+            UObject* object = *reinterpret_cast<UObject* const*>(address);
+            swprintf(value, 256, L"%ls", object ? object->GetFullName().c_str() : L"none");
+        }
+        else if (type == STR("ArrayProperty")) swprintf(value, 256, L"%d entries", reinterpret_cast<const RawArray*>(address)->Num);
+        else if (type == STR("StructProperty") && depth < 3)
+        {
+            UScriptStruct* inner = static_cast<FStructProperty*>(property)->GetStruct();
+            if (inner)
+            {
+                for (FProperty* member : inner->ForEachProperty())
+                    dump_value(label, path + property->GetName() + STR("."), member, address + member->GetOffset_Internal(), depth + 1);
+                return;
+            }
+        }
+        HSVR_LOG("Dump %ls: %ls%ls (%ls) = %ls", label.c_str(), path.c_str(), property->GetName().c_str(), type.c_str(), value);
+    }
+
+    void dump_object(const std::wstring& label, UObject* object)
+    {
+        if (!object)
+        {
+            HSVR_LOG("Dump %ls: none", label.c_str());
+            return;
+        }
+        HSVR_LOG("Dump %ls: %ls", label.c_str(), object->GetFullName().c_str());
+        const uint8_t* base = reinterpret_cast<const uint8_t*>(object);
+        for (UStruct* level = object->GetClassPrivate(); level; level = level->GetSuperStruct())
+            for (FProperty* property : level->ForEachProperty())
+                dump_value(label, L"", property, base + property->GetOffset_Internal(), 0);
+    }
+
+    void script_dump()
+    {
+        UObject* pawn = nullptr;
+        UObject* mesh = find_pawn_mesh(&pawn);
+        UObject* controller = find_player_controller();
+        UObject* viewport = object_property(g_engine, STR("GameViewport"));
+        dump_object(STR("game instance"), object_property(viewport, STR("GameInstance")));
+        dump_object(STR("controller"), controller);
+        if (!pawn)
+        {
+            HSVR_LOG("Dump: no player character");
+            return;
+        }
+        dump_object(STR("character"), pawn);
+        dump_object(STR("character defaults"), pawn->GetClassPrivate()->GetClassDefaultObject());
+        dump_object(STR("animation"), object_property(mesh, STR("AnimScriptInstance")));
+        // Components: every object variable of the character that points at an object it owns.
+        for (UStruct* level = pawn->GetClassPrivate(); level; level = level->GetSuperStruct())
+        {
+            for (FProperty* property : level->ForEachProperty())
+            {
+                if (property->GetClass().GetName() != STR("ObjectProperty")) continue;
+                UObject* component = *reinterpret_cast<UObject* const*>(reinterpret_cast<const uint8_t*>(pawn) + property->GetOffset_Internal());
+                if (!component) continue;
+                // Owned by the character (components and other sub-objects), not things it points at.
+                if (component->GetOuterPrivate() != pawn) continue;
+                dump_object(STR("part ") + property->GetName(), component);
+            }
+        }
+        HSVR_LOG("Dump: done");
+    }
+
+    // dev_script step "hsvr.call <Function>": calls a function of the game instance that takes no
+    // parameters, e.g. GI_Settings "Save Game", which the Fight button calls before opening the arena
+    // (the arena's game manager loads the save again on BeginPlay, undoing hsvr.set otherwise).
+    void script_call_game_instance(const std::string& step)
+    {
+        std::string name_text = step;
+        while (!name_text.empty() && name_text.back() == ' ') name_text.pop_back();
+        std::wstring wanted(name_text.begin(), name_text.end());
+        UObject* viewport = object_property(g_engine, STR("GameViewport"));
+        UObject* game_instance = object_property(viewport, STR("GameInstance"));
+        if (!game_instance)
+        {
+            HSVR_LOG("Script: hsvr.call: no game instance yet");
+            return;
+        }
+        UFunction* function = game_instance->GetFunctionByNameInChain(wanted.c_str());
+        if (!function)
+        {
+            HSVR_LOG("Script: hsvr.call: %ls has no function \"%s\"", game_instance->GetFullName().c_str(), name_text.c_str());
+            return;
+        }
+        // Zeroed room for the parameter block; the functions this is meant for have none.
+        alignas(16) static uint8_t parameters[1024];
+        memset(parameters, 0, sizeof(parameters));
+        game_instance->ProcessEvent(function, parameters);
+        HSVR_LOG("Script: called %ls on the game instance", function->GetFullName().c_str());
+    }
+
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -475,6 +913,27 @@ namespace
             GetSystemTime(&utc);
             HSVR_LOG("Script: %.0f s: %s (%02d:%02d:%02d.%03d UTC)", entry.at, entry.command.c_str(), (int)utc.wHour, (int)utc.wMinute, (int)utc.wSecond,
                      (int)utc.wMilliseconds);
+            // Mod commands for unattended tests; everything else goes to the engine console.
+            if (entry.command.rfind("hsvr.physics_off ", 0) == 0)
+            {
+                g_physics_override = atoi(entry.command.c_str() + 17) != 0 ? 1 : 0;
+                continue;
+            }
+            if (entry.command.rfind("hsvr.set ", 0) == 0)
+            {
+                script_set_game_instance(entry.command.substr(9));
+                continue;
+            }
+            if (entry.command == "hsvr.dump")
+            {
+                script_dump();
+                continue;
+            }
+            if (entry.command.rfind("hsvr.call ", 0) == 0)
+            {
+                script_call_game_instance(entry.command.substr(10));
+                continue;
+            }
             run_console_command(entry.command);
             return; // one a tick
         }
@@ -846,6 +1305,8 @@ namespace
         watch_input();
 
         hsvr::Config cfg = hsvr::config();
+        log_controllers(cfg);
+        player_physics_test(cfg);
         if (g_console_done)
         {
             apply_picture_settings(cfg);

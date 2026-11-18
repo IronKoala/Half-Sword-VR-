@@ -56,6 +56,8 @@ namespace hsvr
         if (g_log_file) return;
         now_seconds();
         std::wstring path = mod_dir() + L"HalfSwordVR.log";
+        // Keep the previous run's log, so a quick restart does not lose a test.
+        MoveFileExW(path.c_str(), (mod_dir() + L"HalfSwordVR.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
         g_log_file = _wfopen(path.c_str(), L"w");
     }
 
