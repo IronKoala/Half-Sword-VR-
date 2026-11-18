@@ -1469,7 +1469,7 @@ namespace
             else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
             else if (mode == 5) local = Vec3{45.0, out * 15.0, -175.0}; // under the floor: the weapon is stopped by the ground
             else if (mode == 6) local = Vec3{62.0 + 8.0 * std::sin(now * 1.0), out * 10.0, 5.0}; // reaching out past his arm: the shoulder reaches
-            else if (mode == 8 && g_pose.pawn && mouth_point(g_pose.pawn, grip))
+            else if ((mode == 8 || mode == 9) && g_pose.pawn && mouth_point(g_pose.pawn, grip))
             {
                 // At his mouth (eating and drinking tests): the hand a little in front of and below it.
                 local = body.inverse().rotate(grip - shoulder) + Vec3{6.0, 0.0, -4.0};
@@ -1496,6 +1496,9 @@ namespace
             }
             grip = shoulder + body.rotate(local);
             grip_rot = (body * rot_to_quat(60.0, 0.0, 0.0)).normalized(); // controller handle tilted forward, as held
+            // Mode 9: at the mouth, the hand turning over (a full turn about his right in 6 s), so a
+            // held bottle tips its neck down at some point (drinking tests).
+            if (mode == 9) grip_rot = (body * quat_axis_angle(Vec3{0, 1, 0}, std::fmod(now, 6.0) / 6.0 * 2.0 * 3.14159265358979) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
         }
         Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
         g_pose.raw_target[side] = target;
@@ -4147,9 +4150,20 @@ namespace
         UObject* pawn = nullptr;
         UObject* mesh = find_pawn_mesh(&pawn);
         bool faked = g_fake_squeeze[0].load() >= 0.0f || g_fake_squeeze[1].load() >= 0.0f;
+        // A new character starts with open hands. A tick where the grab cannot run (no focus, the body
+        // not posed this tick) keeps what each grip was doing: resetting it there read as a release and
+        // a new squeeze on the next tick (fist-eat test 3: a fist made and opened every tick).
+        static UObject* last_pawn = nullptr;
+        if (pawn != last_pawn)
+        {
+            last_pawn = pawn;
+            held[0] = held[1] = false;
+        }
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
         {
-            held[0] = held[1] = false;
+            if (held[0] || held[1])
+                HSVR_LOG_EVERY(2.0, "Grab: skipped a tick with a grip held (pawn %d, mesh %d, faked %d, controllers active %d focused %d, body posed %d)", pawn != nullptr,
+                               mesh != nullptr, (int)faked, (int)state.active, (int)state.focused, (int)g_pose_active.load());
             return;
         }
         keep_brought_object(pawn, mesh);

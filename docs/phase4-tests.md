@@ -127,7 +127,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `hsvr.arm_move 7 <cm>` | Fake arms for two-hand tests: the right hand still in front, the left this many cm from it along the weapon the right hand holds (+ toward the tip, - toward the pommel) |
 | `hsvr.pawn_pin <variable> <value>` / `hsvr.pawn_pin off` | Holds a number variable of his pawn at a value every tick, after his tick (e.g. `Stamina 10`, `Arm R Tonus 0.25`), to test the strength scaling |
 | `hsvr.spawn <class path> [left]` | Spawns an actor of that class just above that hand (e.g. food: /Game/Assets/Food/Blueprints/BP_Food_Apple_Red.BP_Food_Apple_Red_C). `hsvr.give_weapon` now refuses anything that is not a ModularWeaponBP (an apple through Set Up Hand Weapon is a fatal engine error). |
-| `hsvr.arm_move 8` | Fake arms: both hands at his mouth (eating and drinking tests) |
+| `hsvr.arm_move 8` | Fake arms: both hands at his mouth (eating and drinking tests); `9` the same with the hands turning over (a full turn in 6 s) so a bottle tips |
 | `hsvr.bring_object [left] food` | As bring_object, food items only |
 | `hsvr.watch_vars grip,offhand,stuck` | Every tick, logs each change ("Watch: <time> pawn.<name> old -> new") of the number, yes/no and enum variables on his pawn and on the weapon in each hand whose names contain one of the words (case ignored). No words = stop. For matching a game routine to a kick by its timing |
 | `hsvr.passive_foe` | Makes every foe a training dummy: its AI controller stopped (DED, tick off, movement stopped) and its attack inputs cleared; its physics, balance and get-up keep working. Spawn one with Free Mode Foes Amount=1, Brawling off, and run this right after it spawns |
