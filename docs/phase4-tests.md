@@ -68,4 +68,4 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `hsvr.weapon_channel <channel> <response>` | Weapon's response to one collision channel (0 ignore, 1 overlap, 2 block) |
 | `hsvr.weapon_collision <n>` | Switches the weapon's collision mode. This rebuilds the body and breaks the hand joint; don't use it to test the grip |
 | `hsvr.contact_log 0/1` | Logs which of his bodies, and which other components, touch the weapon (on by default) |
-| `hsvr.arm_move <mode>` | Fake-tracking arms: 0 circles, 1 still, 2 slow swing, 3 fast swing, 4 overhead, 5 pushed down through the floor (the weapon is stopped by the ground) |
+| `hsvr.arm_move <mode>` | Fake-tracking arms: 0 circles, 1 still, 2 slow swing, 3 fast swing, 4 overhead, 5 pushed down through the floor (the weapon is stopped by the ground), 6 reaching 54-70 cm out in front (past his arm: the shoulder reaches) |

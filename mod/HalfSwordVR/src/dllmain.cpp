@@ -1496,7 +1496,8 @@ namespace
             }
             // Made-up path for unattended tests (dev_script "hsvr.arm_move <mode>"): 0 each hand circles
             // slowly in front of its shoulder; 1 holds still; 2 slow swing and 3 fast swing (side to
-            // side and down, a cut); 4 raised overhead; 5 pushed down through the floor.
+            // side and down, a cut); 4 raised overhead; 5 pushed down through the floor; 6 reaching out
+            // 54-70 cm in front of the shoulder (past his 53 cm arm).
             Vec3 shoulder = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
             int mode = g_fake_arm_mode.load();
             double now = now_seconds();
@@ -1509,6 +1510,7 @@ namespace
             }
             else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
             else if (mode == 5) local = Vec3{45.0, out * 15.0, -175.0}; // under the floor: the weapon is stopped by the ground
+            else if (mode == 6) local = Vec3{62.0 + 8.0 * std::sin(now * 1.0), out * 10.0, 5.0}; // reaching out past his arm: the shoulder reaches
             else
             {
                 double t = now * 1.5 + side * 1.5;
