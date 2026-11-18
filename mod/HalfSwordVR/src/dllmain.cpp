@@ -1873,8 +1873,11 @@ namespace
         pose_feet(cfg, pawn, actor, heading, component_inv);
         for (int side = 0; side < 2; ++side)
         {
-            if (cfg.pose_arms) pose_arm(side, cfg, state, body, component_inv);
-            if (side == 1 && cfg.pose_arms) measure_arms(state);
+            if (cfg.pose_arms)
+            {
+                pose_arm(side, cfg, state, body, component_inv);
+                if (side == 1) measure_arms(state);
+            }
             else
                 for (const char* b : {"upperarm", "lowerarm", "hand"})
                     if (ModifyBoneNode* n = chain_node(std::string(b) + side_suffix(side))) node_release(*n);
