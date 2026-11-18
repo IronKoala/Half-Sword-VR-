@@ -1370,6 +1370,9 @@ namespace
 
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     std::atomic<bool> g_hold_reach_clamp{true};
+    void ghost_hand(int side, const hsvr::Config& cfg, bool show, const hsvr::Vec3& wrist, const hsvr::Quat& hand_rot);
+    double hand_on_weapon_amount(int side);
+    UObject* load_asset_object(const std::wstring& object_path);
 
     // Measuring your arm length: arms straight out to the sides, B and Y held together for 2 s. Your
     // wrist-to-wrist span (from the controllers), less his shoulder width (yours is taken as his),
@@ -1436,6 +1439,7 @@ namespace
                 for (const char* b : {"upperarm", "lowerarm", "hand"})
                     if (ModifyBoneNode* n = chain_node(std::string(b) + sx)) node_release(*n);
                 g_pose.hand_valid[side] = false;
+                ghost_hand(side, cfg, false, Vec3{}, Quat{});
                 return;
             }
             // Made-up path for unattended tests (dev_script "hsvr.arm_move <mode>"): 0 each hand circles
@@ -1492,7 +1496,13 @@ namespace
         g_pose.hand_rot[side] = Wh;
         g_pose.hand_valid[side] = true;
         // Holding a weapon that something has stopped: his hand stays on the weapon (Matthew's framework).
-        if (hand_on_weapon(side, cfg, target, Wh))
+        Vec3 controller_wrist = target;
+        Quat controller_rot = Wh;
+        bool on_weapon = hand_on_weapon(side, cfg, target, Wh);
+        // Where your real hand is, while his stays on a stopped weapon.
+        ghost_hand(side, cfg, on_weapon && hand_on_weapon_amount(side) > 0.5 && length(controller_wrist - target) > cfg.pose_ghost_from_cm, controller_wrist,
+                   controller_rot);
+        if (on_weapon)
         {
             to = target - S;
             double d = length(to);
@@ -2913,6 +2923,123 @@ namespace
         double far_since = -1.0, far_logged = 0.0;
     };
     HoldState g_hold[2];
+    double hand_on_weapon_amount(int side) { return g_hold[side].on_weapon; }
+
+    // ---- The ghost hand ------------------------------------------------------------------------
+    // While his hand stays on a stopped weapon, a see-through hand shows where your real hand is
+    // (Matthew's framework, rig/mod.rs: "ghosts"). The cooked game has no separate hand mesh, so it
+    // is one of the game's static glove meshes with the engine's unlit translucent material
+    // (ghost_hand_assets.md). Its offset and turn from the hand bone are in the ini for fitting.
+    struct Ghost
+    {
+        UObject* pawn = nullptr;
+        UObject* comp = nullptr;
+        bool visible = false;
+        bool failed = false;
+    };
+    Ghost g_ghost[2];
+    std::atomic<bool> g_ghost_force{false};
+
+    void ghost_hand(int side, const hsvr::Config& cfg, bool show, const hsvr::Vec3& wrist, const hsvr::Quat& hand_rot)
+    {
+        using namespace hsvr;
+        Ghost& g = g_ghost[side];
+        if (g.pawn != g_pose.pawn)
+        {
+            g = Ghost{};
+            g.pawn = g_pose.pawn;
+        }
+        if (g_ghost_force.load()) show = true; // test: hsvr.ghost_show 1 shows it at your hand all the time
+        if (!cfg.pose_ghost_hand) show = false;
+        if (!g.comp && show && !g.failed && g.pawn)
+        {
+            g.failed = true; // tried once per character
+            UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.StaticMeshComponent"));
+            std::wstring mesh_path(cfg.pose_ghost_mesh.begin(), cfg.pose_ghost_mesh.end());
+            std::wstring mat_path(cfg.pose_ghost_material.begin(), cfg.pose_ghost_material.end());
+            UObject* mesh = load_asset_object(mesh_path);
+            UObject* mat = load_asset_object(mat_path);
+            if (!cls || !mesh)
+            {
+                HSVR_LOG("Ghost: no %ls (mesh %ls), no ghost hand", cls ? STR("mesh") : STR("StaticMeshComponent class"), mesh_path.c_str());
+                return;
+            }
+            Call add(g.pawn, STR("AddComponentByClass"));
+            add.object(STR("Class"), cls);
+            add.flag(STR("bManualAttachment"), true);
+            if (FProperty* t = add.param(STR("RelativeTransform")))
+            {
+                uint8_t* at = add.buffer.data() + t->GetOffset_Internal();
+                UScriptStruct* type = struct_type(t);
+                if (FProperty* r = struct_member(type, STR("Rotation")))
+                    if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                    {
+                        uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                        if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                        else *reinterpret_cast<float*>(wat) = 1.0f;
+                    }
+                if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+            }
+            add.flag(STR("bDeferredFinish"), false);
+            if (!add.run() || !add.object_result())
+            {
+                HSVR_LOG("Ghost: could not add the ghost hand component");
+                return;
+            }
+            UObject* c = add.object_result();
+            Call sm(c, STR("SetStaticMesh"));
+            sm.object(STR("NewMesh"), mesh);
+            sm.run();
+            Call ce(c, STR("SetCollisionEnabled"));
+            ce.byte(STR("NewType"), 0);
+            ce.run();
+            Call cs(c, STR("SetCastShadow"));
+            cs.first_flag(false);
+            cs.run();
+            int slots = 0;
+            if (mat)
+            {
+                Call n(c, STR("GetNumMaterials"));
+                n.run();
+                slots = (std::max)(1, n.integer());
+                for (int i = 0; i < slots; ++i)
+                {
+                    Call m(c, STR("SetMaterial"));
+                    if (FProperty* ip = m.param(STR("ElementIndex"))) *reinterpret_cast<int32_t*>(m.buffer.data() + ip->GetOffset_Internal()) = i;
+                    m.object(STR("Material"), mat);
+                    m.run();
+                }
+            }
+            // The left hand is the right glove mirrored.
+            Call scale(c, STR("SetWorldScale3D"));
+            scale.three(STR("NewScale"), cfg.pose_ghost_scale, cfg.pose_ghost_scale * (side == 0 ? -1.0 : 1.0), cfg.pose_ghost_scale);
+            scale.run();
+            g.comp = c;
+            g.failed = false;
+            HSVR_LOG("Ghost: %s ghost hand made from %ls, material %ls on %d slots", side == 0 ? "left" : "right", mesh_path.c_str(),
+                     mat ? mat_path.c_str() : STR("(not found, the glove's own)"), slots);
+        }
+        if (!g.comp) return;
+        if (show)
+        {
+            double out = side == 0 ? -1.0 : 1.0;
+            Quat rot = (hand_rot * rot_to_quat(cfg.pose_ghost_pitch, cfg.pose_ghost_yaw * out, cfg.pose_ghost_roll * out)).normalized();
+            Vec3 at = wrist + hand_rot.rotate(Vec3{cfg.pose_ghost_x_cm, cfg.pose_ghost_y_cm * out, cfg.pose_ghost_z_cm});
+            set_component_transform(g.comp, at, rot, true);
+        }
+        if (show != g.visible)
+        {
+            g.visible = show;
+            Call v(g.comp, STR("SetVisibility"));
+            v.flag(STR("bNewVisibility"), show);
+            v.flag(STR("bPropagateToChildren"), true);
+            v.run();
+            Call h(g.comp, STR("SetHiddenInGame"));
+            h.flag(STR("NewHidden"), !show);
+            h.flag(STR("bPropagateToChildren"), true);
+            h.run();
+        }
+    }
 
     // Lets go of the weapon in that hand the game's own way: Set Up Right/Left Hand Weapon with no
     // weapon and "Dropped With no Damage" (decompile: what the game's tap on grab does; it breaks the
@@ -4459,6 +4586,11 @@ namespace
             if (entry.command.rfind("hsvr.grip_spring ", 0) == 0)
             {
                 g_grip_spring_override.store(atoi(entry.command.c_str() + 17));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.ghost_show ", 0) == 0)
+            {
+                g_ghost_force.store(atoi(entry.command.c_str() + 16) != 0);
                 continue;
             }
             if (entry.command.rfind("hsvr.hold_reach ", 0) == 0)

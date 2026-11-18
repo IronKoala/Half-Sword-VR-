@@ -328,6 +328,17 @@ namespace hsvr
         num("pose_hold_blocked_from_cm", c.pose_hold_blocked_from_cm);
         flag("pose_hold_let_go", c.pose_hold_let_go);
         num("pose_hold_let_go_s", c.pose_hold_let_go_s);
+        flag("pose_ghost_hand", c.pose_ghost_hand);
+        num("pose_ghost_from_cm", c.pose_ghost_from_cm);
+        text("pose_ghost_mesh", c.pose_ghost_mesh);
+        text("pose_ghost_material", c.pose_ghost_material);
+        num("pose_ghost_x_cm", c.pose_ghost_x_cm);
+        num("pose_ghost_y_cm", c.pose_ghost_y_cm);
+        num("pose_ghost_z_cm", c.pose_ghost_z_cm);
+        num("pose_ghost_pitch", c.pose_ghost_pitch);
+        num("pose_ghost_yaw", c.pose_ghost_yaw);
+        num("pose_ghost_roll", c.pose_ghost_roll);
+        num("pose_ghost_scale", c.pose_ghost_scale);
         num("pose_user_arm_cm", c.pose_user_arm_cm);
         num("pose_grip_strength_kg", c.pose_grip_strength_kg);
         num("pose_grip_hz", c.pose_grip_hz);

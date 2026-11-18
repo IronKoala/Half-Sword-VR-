@@ -212,6 +212,16 @@ namespace hsvr
         // than an arm's length from your hand, for pose_hold_let_go_s, is let go (the game's own drop).
         bool pose_hold_let_go = true;
         double pose_hold_let_go_s = 0.15;
+        // The ghost hand: while his hand stays on a stopped weapon more than pose_ghost_from_cm from
+        // your real hand, a see-through glove shows where your hand is. Mesh and material are object
+        // paths in the cooked game; offset (cm) and turn (deg) from the hand bone, and scale, for fitting.
+        bool pose_ghost_hand = true;
+        double pose_ghost_from_cm = 4.0;
+        std::string pose_ghost_mesh = "/Game/Assets/Armor/Hand/Gauntlet/StaticMeshes/WM_Armor_Hand_Gauntlet_Glove_003.WM_Armor_Hand_Gauntlet_Glove_003";
+        std::string pose_ghost_material = "/Engine/EngineDebugMaterials/M_SimpleUnlitTranslucent.M_SimpleUnlitTranslucent";
+        double pose_ghost_x_cm = 0.0, pose_ghost_y_cm = 0.0, pose_ghost_z_cm = 0.0;
+        double pose_ghost_pitch = 0.0, pose_ghost_yaw = 0.0, pose_ghost_roll = 0.0;
+        double pose_ghost_scale = 1.0;
         // Your arm length (shoulder to wrist, cm), measured by holding both arms straight out to the
         // sides and holding B and Y for 2 s. 0 = not measured: your hands go exactly where the
         // controllers are. Measured, your reach is scaled to his so full reach is full reach.
