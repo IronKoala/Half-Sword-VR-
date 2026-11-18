@@ -2104,6 +2104,8 @@ namespace
         // anchor (hand bone + Pos2, in the bone's frame). Zero when the spring holds perfectly.
         hsvr::Vec3 stretch_vec, stretch_hand;
         int broken = -1;
+        double mesh_hand_diff = -1.0;
+        int same_mesh = -1;
         double stretch = 0.0;
         hsvr::Vec3 pos2;
         int visible = -1;
@@ -2513,6 +2515,46 @@ namespace
         HSVR_LOG("Grip: contacts: overlapping components: %ls", others.empty() ? STR("none") : others.c_str());
     }
 
+    // The physics solver's console variables that shape a joint drive (read through the Kismet
+    // library, since the shipping build writes no game log). Logged once per weapon.
+    void log_chaos_cvars()
+    {
+        static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        if (!cdo) return;
+        for (const TCHAR* name :
+             {STR("p.Chaos.JointConstraint.LinearDriveStiffnessScale"), STR("p.Chaos.JointConstraint.LinaearDriveDampingScale"),
+              STR("p.Chaos.JointConstraint.AngularDriveStiffnessScale"), STR("p.Chaos.JointConstraint.AngularDriveDampingScale"),
+              STR("p.Chaos.JointConstraint.SoftLinearForceMode"), STR("p.Chaos.JointConstraint.SoftAngularForceMode"),
+              STR("p.Chaos.JointConstraint.JointStiffness"), STR("p.Chaos.Solver.Joint.UsePBDDrives"), STR("p.Chaos.Solver.Joint.UseLinearSolver"),
+              STR("p.Chaos.Solver.Joint.MinSolverStiffness"), STR("p.Chaos.Solver.Joint.MaxSolverStiffness"),
+              STR("p.Chaos.Solver.Joint.NumIterationsAtMaxSolverStiffness"), STR("p.Chaos.Solver.Joint.SolvePositionLast"),
+              STR("p.Chaos.Solver.Joint.TransferCollisions"), STR("p.Chaos.Solver.Joint.MinParentMassRatio"), STR("p.Chaos.Solver.Joint.MaxInertiaRatio"),
+              STR("p.Chaos.Solver.Iterations.Position"), STR("p.Chaos.Solver.Iterations.Velocity"), STR("p.Chaos.Solver.Iterations.Projection"),
+              STR("p.Chaos.Joint.DisableSoftLimits"), STR("p.Chaos.Joint.VelProjectionAlpha"), STR("p.Chaos.Solver.Collision.MaxPushOutVelocity"),
+              STR("p.Chaos.Solver.Collision.DepenetrationVelocity"), STR("p.Chaos.Solver.Joint.ShockPropagation"), STR("p.ChaosSolverEnableJointConstraints")})
+        {
+            Call f(cdo, STR("GetConsoleVariableFloatValue"));
+            FProperty* vp = f.param(STR("VariableName"));
+            if (!vp) return;
+            FString text(name);
+            *reinterpret_cast<FString*>(f.buffer.data() + vp->GetOffset_Internal()) = text;
+            f.run();
+            double v = f.number();
+            *reinterpret_cast<FString*>(f.buffer.data() + vp->GetOffset_Internal()) = FString();
+            Call i(cdo, STR("GetConsoleVariableIntValue"));
+            FProperty* ip = i.param(STR("VariableName"));
+            int iv = 0;
+            if (ip)
+            {
+                *reinterpret_cast<FString*>(i.buffer.data() + ip->GetOffset_Internal()) = FString(name);
+                i.run();
+                iv = i.integer();
+                *reinterpret_cast<FString*>(i.buffer.data() + ip->GetOffset_Internal()) = FString();
+            }
+            HSVR_LOG("Grip: cvar %ls = %g (int %d)", name, v, iv);
+        }
+    }
+
     void dump_joint(UObject* joint)
     {
         FProperty* p = joint ? joint->GetPropertyByNameInChain(STR("ConstraintInstance")) : nullptr;
@@ -2606,6 +2648,7 @@ namespace
                     {
                         typed = weapon;
                         log_collision_types(pawn, base);
+                        log_chaos_cvars();
                     }
                     int ch = g_weapon_channel_cmd.exchange(-1);
                     if (side == 1 && ch >= 0)
@@ -2758,6 +2801,11 @@ namespace
                     log.stretch_vec = weapon_anchor - hand_anchor;
                     log.stretch = length(log.stretch_vec);
                     log.stretch_hand = hand_rot.inverse().rotate(log.stretch_vec);
+                    // The joint binds the pawn's Mesh (CharacterMesh0); the measurement above used the
+                    // posed mesh. Log how far apart their hand bones are, in case they differ.
+                    if (UObject* cm = object_property(pawn, STR("Mesh")))
+                        log.mesh_hand_diff = length(socket_location(cm, bone_fname(side == 0 ? "hand_l" : "hand_r")) - log.hand_at),
+                        log.same_mesh = cm == g_pose.mesh ? 1 : 0;
                 }
                 Call vis(base, STR("IsVisible"));
                 vis.run();
@@ -2819,12 +2867,13 @@ namespace
                     HSVR_LOG("Grip: %s weapon at (%.0f, %.0f, %.0f), hand at (%.0f, %.0f, %.0f), visible %d, joint between %ls", side == 0 ? "left" : "right",
                              g_grip_log[side].weapon_at.x, g_grip_log[side].weapon_at.y, g_grip_log[side].weapon_at.z, g_grip_log[side].hand_at.x,
                              g_grip_log[side].hand_at.y, g_grip_log[side].hand_at.z, g_grip_log[side].visible, g_grip_log[side].joined.c_str());
-                    HSVR_LOG("Grip: %s joint stretch %.1f cm (%.1f, %.1f, %.1f) world, (%.1f, %.1f, %.1f) hand frame, hand anchor Pos2 (%.1f, %.1f, %.1f) [spring %d, k x%g, gravity %d, collision %d, target (%g, %g, %g), broken %d, arm ignored %d]",
+                    HSVR_LOG("Grip: %s joint stretch %.1f cm (%.1f, %.1f, %.1f) world, (%.1f, %.1f, %.1f) hand frame, hand anchor Pos2 (%.1f, %.1f, %.1f) [spring %d, k x%g, gravity %d, collision %d, target (%g, %g, %g), broken %d, arm ignored %d, posed mesh is the joint's %d, hand bones apart %.1f]",
                              side == 0 ? "left" : "right", g_grip_log[side].stretch, g_grip_log[side].stretch_vec.x, g_grip_log[side].stretch_vec.y, g_grip_log[side].stretch_vec.z,
                              g_grip_log[side].stretch_hand.x, g_grip_log[side].stretch_hand.y, g_grip_log[side].stretch_hand.z,
                              g_grip_log[side].pos2.x, g_grip_log[side].pos2.y, g_grip_log[side].pos2.z, g_grip_spring_override.load(),
                              g_grip_k_scale.load(), g_weapon_gravity.load(), g_weapon_collision.load(), g_grip_target[0].load(), g_grip_target[1].load(),
-                             g_grip_target[2].load(), g_grip_log[side].broken, (int)g_arm_ignore[side].joints.size());
+                             g_grip_target[2].load(), g_grip_log[side].broken, (int)g_arm_ignore[side].joints.size(),
+                             g_grip_log[side].same_mesh, g_grip_log[side].mesh_hand_diff);
                 }
         }
     }
