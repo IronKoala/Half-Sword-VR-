@@ -5327,7 +5327,7 @@ namespace
             names += " (";
             for (wchar_t ch : kind) names += (char)(ch < 128 ? ch : '?');
             names += ")";
-            if (!passport_asset.empty() && n == STR("Str Weapon Passport"))
+            if (!passport_asset.empty() && !set && n.rfind(STR("Str Weapon Passport"), 0) == 0)
             {
                 int32_t count = 0;
                 const uint8_t* first = inventory_passport(passport_asset, passport_index, &count);
