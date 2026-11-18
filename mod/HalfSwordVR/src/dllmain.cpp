@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cwctype>
 #include <map>
 #include <string>
 #include <vector>
@@ -175,6 +176,12 @@ namespace
         if (!line.empty()) HSVR_LOG("Bones (%d total): %ls", count.ReturnValue, line.c_str());
     }
 
+    // Phase 3: while the body is posed from the headset, the view must not follow the head bone
+    // (the bone follows the view). The head's offset from the actor, in the actor's heading frame,
+    // is taken once when posing starts and used instead.
+    bool g_pose_anchor_fixed = false;
+    hsvr::Vec3 g_pose_anchor_local;
+
     // Called by the stereo device while the frame's views are being set up (game thread).
     bool provide_anchor(hsvr::PlayerAnchor& out)
     {
@@ -203,6 +210,8 @@ namespace
                 out.heading_yaw = rotation->Yaw;
             }
         }
+        if (g_pose_anchor_fixed)
+            out.head_position = out.actor_position + hsvr::quat_from_yaw_deg(out.has_heading ? out.heading_yaw : 0.0).rotate(g_pose_anchor_local);
         return true;
     }
 
@@ -660,6 +669,399 @@ namespace
                 HSVR_LOG("Pose probe: %s now at (%.0f, %.0f, %.0f), world rotation pitch %.0f yaw %.0f roll %.0f", bone.c_str(), at.x, at.y, at.z,
                          r.ReturnValue.Pitch, r.ReturnValue.Yaw, r.ReturnValue.Roll);
         }
+    }
+
+    // ---- Phase 3: the body posed from the headset and controllers ------------------------------
+    // Calls a Blueprint-callable function with named parameters, laid out by reflection (so no
+    // parameter struct has to match the engine by hand).
+    struct Call
+    {
+        UObject* target = nullptr;
+        UFunction* fn = nullptr;
+        std::vector<uint8_t> buffer;
+
+        Call(UObject* object, const TCHAR* name) : target(object)
+        {
+            fn = object ? object->GetFunctionByNameInChain(name) : nullptr;
+            size_t size = 16;
+            if (fn)
+                for (FProperty* p : fn->ForEachProperty()) size = (std::max)(size, (size_t)p->GetOffset_Internal() + (size_t)p->GetSize());
+            buffer.assign(size + 16, 0);
+        }
+        FProperty* param(const TCHAR* name)
+        {
+            if (!fn) return nullptr;
+            for (FProperty* p : fn->ForEachProperty())
+                if (p->GetName() == name) return p;
+            return nullptr;
+        }
+        void three(const TCHAR* name, double a, double b, double c)
+        {
+            if (FProperty* p = param(name)) write_three(buffer.data() + p->GetOffset_Internal(), p, a, b, c);
+        }
+        void flag(const TCHAR* name, bool value)
+        {
+            FProperty* p = param(name);
+            if (!p) return;
+            auto* b = static_cast<FBoolProperty*>(p);
+            uint8_t* at = buffer.data() + p->GetOffset_Internal() + b->GetByteOffset();
+            if (value) *at |= b->GetFieldMask();
+            else *at &= ~b->GetFieldMask();
+        }
+        void name(const TCHAR* param_name, FName value)
+        {
+            if (FProperty* p = param(param_name)) *reinterpret_cast<FName*>(buffer.data() + p->GetOffset_Internal()) = value;
+        }
+        bool run()
+        {
+            if (!fn || !target) return false;
+            target->ProcessEvent(fn, buffer.data());
+            return true;
+        }
+        hsvr::Vec3 vec(const TCHAR* name = STR("ReturnValue"))
+        {
+            double v[3] = {0, 0, 0};
+            if (FProperty* p = param(name)) read_three(buffer.data() + p->GetOffset_Internal(), p, v);
+            return {v[0], v[1], v[2]};
+        }
+        hsvr::Quat rot(const TCHAR* name = STR("ReturnValue"))
+        {
+            hsvr::Vec3 r = vec(name);
+            return hsvr::rot_to_quat(r.x, r.y, r.z);
+        }
+    };
+
+    hsvr::Vec3 socket_location(UObject* mesh, FName bone)
+    {
+        Call c(mesh, STR("GetSocketLocation"));
+        c.name(STR("InSocketName"), bone);
+        c.run();
+        return c.vec();
+    }
+
+    hsvr::Quat socket_rotation(UObject* mesh, FName bone)
+    {
+        Call c(mesh, STR("GetSocketRotation"));
+        c.name(STR("InSocketName"), bone);
+        c.run();
+        return c.rot();
+    }
+
+    hsvr::Quat component_rotation(UObject* component)
+    {
+        Call c(component, STR("K2_GetComponentRotation"));
+        c.run();
+        return c.rot();
+    }
+
+    hsvr::Vec3 component_location(UObject* component)
+    {
+        Call c(component, STR("K2_GetComponentLocation"));
+        c.run();
+        return c.vec();
+    }
+
+    void set_component_transform(UObject* component, const hsvr::Vec3& location, const hsvr::Quat& rotation)
+    {
+        Call c(component, STR("K2_SetWorldLocationAndRotation"));
+        hsvr::Rot r = hsvr::quat_to_rot(rotation);
+        c.three(STR("NewLocation"), location.x, location.y, location.z);
+        c.three(STR("NewRotation"), r.pitch, r.yaw, r.roll);
+        c.flag(STR("bSweep"), false);
+        c.flag(STR("bTeleport"), true);
+        c.run();
+    }
+
+    // The end-of-graph Modify Bone node of each bone (the game leaves them at Ignore, component space).
+    std::map<std::wstring, ModifyBoneNode> final_chain_nodes(UObject* instance)
+    {
+        std::map<std::wstring, ModifyBoneNode> chain;
+        std::vector<ModifyBoneNode> nodes = find_modify_bone_nodes(instance);
+        for (size_t i = 0; i < nodes.size(); ++i)
+        {
+            ModifyBoneNode& n = nodes[i];
+            if (!n.rotation || !n.rotation_mode || !n.rotation_space) continue;
+            if (*(n.node + n.rotation_mode->GetOffset_Internal()) != 0 || *(n.node + n.rotation_space->GetOffset_Internal()) != 1) continue;
+            std::wstring key = n.bone;
+            for (auto& ch : key) ch = (wchar_t)towlower(ch);
+            chain[key] = n; // the last one found wins
+            HSVR_LOG("Pose: bone %ls -> node %d", n.bone.c_str(), (int)i);
+        }
+        return chain;
+    }
+
+    void node_set_rotation(ModifyBoneNode& n, const hsvr::Quat& component_space)
+    {
+        hsvr::Rot r = hsvr::quat_to_rot(component_space);
+        *(n.node + n.rotation_space->GetOffset_Internal()) = 1; // component space
+        write_three(n.node + n.rotation->GetOffset_Internal(), n.rotation, r.pitch, r.yaw, r.roll);
+        *(n.node + n.rotation_mode->GetOffset_Internal()) = 1; // replace
+    }
+
+    void node_release(ModifyBoneNode& n)
+    {
+        *(n.node + n.rotation_mode->GetOffset_Internal()) = 0;
+    }
+
+    struct ArmCalibration
+    {
+        bool valid = false;
+        double upper_length = 0, lower_length = 0;
+        hsvr::Vec3 upper_dir_local, upper_normal_local; // in the upperarm bone's frame
+        hsvr::Vec3 lower_dir_local, lower_normal_local; // in the lowerarm bone's frame
+        hsvr::Quat hand_offset;                          // body frame -> hand bone, at calibration
+    };
+
+    struct PoseState
+    {
+        UObject* pawn = nullptr;
+        UObject* mesh = nullptr;
+        UObject* driver = nullptr;
+        UObject* instance = nullptr;
+        std::map<std::wstring, ModifyBoneNode> chain;
+        bool calibrated = false;
+        hsvr::Vec3 mesh_offset_local; // visible mesh relative to the actor, in the actor's heading frame
+        hsvr::Quat mesh_rotation_local;
+        hsvr::Quat head_offset;       // body frame -> head bone
+        ArmCalibration arm[2];
+        std::string arm_style;
+        double last_check = 0.0;
+    };
+    PoseState g_pose;
+
+    const char* side_suffix(int side) { return side == 0 ? "_l" : "_r"; }
+
+    ModifyBoneNode* chain_node(const std::string& bone)
+    {
+        std::wstring key(bone.begin(), bone.end());
+        auto it = g_pose.chain.find(key);
+        return it == g_pose.chain.end() ? nullptr : &it->second;
+    }
+
+    void pose_release()
+    {
+        for (auto& [bone, n] : g_pose.chain) node_release(n);
+        if (g_pose.mesh && g_pose.calibrated)
+        {
+            set_simulate(g_pose.mesh, true, true);
+            HSVR_LOG("Pose: off, physics back on for your character (restart the fight to be sure)");
+        }
+        g_pose = PoseState{};
+        g_pose_anchor_fixed = false;
+    }
+
+    double actor_heading(UObject* pawn)
+    {
+        if (UObject* controller = find_player_controller())
+            if (ue::FRotator* rotation = controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation"))) return rotation->Yaw;
+        Call c(pawn, STR("K2_GetActorRotation"));
+        c.run();
+        return c.vec().y;
+    }
+
+    hsvr::Vec3 actor_location(UObject* pawn)
+    {
+        Call c(pawn, STR("K2_GetActorLocation"));
+        c.run();
+        return c.vec();
+    }
+
+    void apply_arm_physics(const hsvr::Config& cfg)
+    {
+        set_simulate(g_pose.mesh, false);
+        if (cfg.pose_arm_style == "muscle")
+        {
+            set_simulate_below(g_pose.mesh, cfg.arm_bone_left, true);
+            set_simulate_below(g_pose.mesh, cfg.arm_bone_right, true);
+        }
+        g_pose.arm_style = cfg.pose_arm_style;
+    }
+
+    bool pose_calibrate(const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        UObject* d = g_pose.driver;
+        double heading = actor_heading(g_pose.pawn);
+        Quat body = quat_from_yaw_deg(heading);
+        Quat body_inv = body.inverse();
+        Vec3 actor = actor_location(g_pose.pawn);
+
+        apply_arm_physics(cfg);
+        Vec3 mesh_location = component_location(g_pose.mesh);
+        g_pose.mesh_offset_local = body_inv.rotate(mesh_location - actor);
+        g_pose.mesh_rotation_local = (body_inv * component_rotation(g_pose.mesh)).normalized();
+
+        Vec3 head = socket_location(d, bone_fname("Head"));
+        g_pose.head_offset = (body_inv * socket_rotation(d, bone_fname("Head"))).normalized();
+        g_pose_anchor_local = body_inv.rotate(head - actor);
+        g_pose_anchor_fixed = true;
+
+        for (int side = 0; side < 2; ++side)
+        {
+            ArmCalibration& a = g_pose.arm[side];
+            std::string sx = side_suffix(side);
+            FName upper = bone_fname("upperarm" + sx), lower = bone_fname("lowerarm" + sx), hand = bone_fname("hand" + sx);
+            Vec3 S = socket_location(d, upper), E = socket_location(d, lower), H = socket_location(d, hand);
+            a.upper_length = length(E - S);
+            a.lower_length = length(H - E);
+            Vec3 n = cross(E - S, H - E);
+            if (length(n) < 1e-3 * a.upper_length * a.lower_length) n = cross(body.rotate({1, 0, 0}), E - S); // straight arm: elbow bends forward
+            Quat Wu = socket_rotation(d, upper), Wl = socket_rotation(d, lower), Wh = socket_rotation(d, hand);
+            a.upper_dir_local = Wu.inverse().rotate(normalized(E - S));
+            a.upper_normal_local = Wu.inverse().rotate(normalized(n));
+            a.lower_dir_local = Wl.inverse().rotate(normalized(H - E));
+            a.lower_normal_local = Wl.inverse().rotate(normalized(n));
+            a.hand_offset = (body_inv * Wh).normalized();
+            a.valid = a.upper_length > 5.0 && a.lower_length > 5.0 && chain_node("upperarm" + sx) && chain_node("lowerarm" + sx) && chain_node("hand" + sx);
+            HSVR_LOG("Pose: %s arm upper %.1f cm, lower %.1f cm%s", side == 0 ? "left" : "right", a.upper_length, a.lower_length, a.valid ? "" : " (not usable)");
+        }
+        HSVR_LOG("Pose: on. Head %.0f cm above the actor, mesh offset (%.0f, %.0f, %.0f), arms %s", g_pose_anchor_local.z, g_pose.mesh_offset_local.x,
+                 g_pose.mesh_offset_local.y, g_pose.mesh_offset_local.z, cfg.pose_arm_style.c_str());
+        return true;
+    }
+
+    // The bone rotation that points its calibrated direction along `dir` with its calibrated
+    // bend-plane normal along `normal`.
+    hsvr::Quat aim_bone(const hsvr::Vec3& dir_local, const hsvr::Vec3& normal_local, const hsvr::Vec3& dir, const hsvr::Vec3& normal)
+    {
+        return (hsvr::quat_from_two(dir, normal) * hsvr::quat_from_two(dir_local, normal_local).inverse()).normalized();
+    }
+
+    void pose_arm(int side, const hsvr::Config& cfg, const hsvr::ControllerState& state, const hsvr::Quat& body, const hsvr::Quat& component_inv)
+    {
+        using namespace hsvr;
+        ArmCalibration& a = g_pose.arm[side];
+        const HandState& hs = state.hand[side];
+        if (!a.valid) return;
+        std::string sx = side_suffix(side);
+        double out = side == 0 ? -1.0 : 1.0;
+        Vec3 grip;
+        Quat grip_rot;
+        bool tracked = hs.grip_valid && stereo_tracking_to_world(hs.grip, grip, grip_rot);
+        if (!tracked)
+        {
+            if (!cfg.dev_pose_fake_tracking) return;
+            // Made-up path: each hand circles slowly in front of its shoulder.
+            double t = now_seconds() * 1.5 + side * 1.5;
+            Vec3 shoulder = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
+            grip = shoulder + body.rotate(Vec3{35.0 + 10.0 * std::sin(t), out * 15.0, -15.0 + 20.0 * std::cos(t)});
+            grip_rot = body;
+        }
+        Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
+
+        Vec3 S = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
+        Vec3 to = target - S;
+        double D = length(to);
+        double L1 = a.upper_length, L2 = a.lower_length;
+        double lo = std::fabs(L1 - L2) + 0.5, hi = L1 + L2 - 0.5;
+        if (D < 1e-3) return;
+        Vec3 dir = to * (1.0 / D);
+        D = (std::min)((std::max)(D, lo), hi);
+        Vec3 pole = body.rotate(Vec3{-cfg.pose_elbow_back, cfg.pose_elbow_out * out, -cfg.pose_elbow_down});
+        Vec3 p = pole - dir * dot(pole, dir);
+        if (length(p) < 1e-6) p = body.rotate({0, 0, -1}) - dir * dot(body.rotate({0, 0, -1}), dir);
+        p = normalized(p);
+        double along = (L1 * L1 - L2 * L2 + D * D) / (2.0 * D);
+        double h = std::sqrt((std::max)(0.0, L1 * L1 - along * along));
+        Vec3 E = S + dir * along + p * h;
+        Vec3 H = S + dir * D;
+        Vec3 n = cross(E - S, H - E);
+        if (length(n) < 1e-6) n = cross(p, dir);
+
+        Quat Wu = aim_bone(a.upper_dir_local, a.upper_normal_local, E - S, n);
+        Quat Wl = aim_bone(a.lower_dir_local, a.lower_normal_local, H - E, n);
+        Quat offset = rot_to_quat(cfg.pose_hand_pitch, cfg.pose_hand_yaw * out, cfg.pose_hand_roll * out);
+        Quat Wh = (grip_rot * offset * a.hand_offset).normalized();
+        node_set_rotation(*chain_node("upperarm" + sx), component_inv * Wu);
+        node_set_rotation(*chain_node("lowerarm" + sx), component_inv * Wl);
+        node_set_rotation(*chain_node("hand" + sx), component_inv * Wh);
+    }
+
+    void pose_body(const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        UObject* pawn = nullptr;
+        UObject* mesh = find_pawn_mesh(&pawn);
+        bool willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
+        UObject* driver = willie ? object_property(pawn, STR("DriverSkeleton")) : nullptr;
+        UObject* instance = object_property(driver, STR("AnimScriptInstance"));
+        bool abp = instance && instance->GetClassPrivate()->GetName().find(STR("ABP_Willie")) != std::wstring::npos;
+        if (!cfg.pose_body || !abp || !mesh)
+        {
+            if (g_pose.pawn && (pawn == g_pose.pawn)) pose_release();
+            else if (g_pose.pawn) g_pose = PoseState{}, g_pose_anchor_fixed = false; // character gone: nothing to restore
+            return;
+        }
+        if (g_pose.pawn != pawn || g_pose.instance != instance)
+        {
+            g_pose = PoseState{};
+            g_pose.pawn = pawn;
+            g_pose.mesh = mesh;
+            g_pose.driver = driver;
+            g_pose.instance = instance;
+            g_pose.chain = final_chain_nodes(instance);
+            g_pose.calibrated = pose_calibrate(cfg);
+        }
+        // Keep physics off: the game turns it on again after a spawn and when it rescales the body.
+        double now = now_seconds();
+        if (now - g_pose.last_check >= 0.5 || g_pose.arm_style != cfg.pose_arm_style)
+        {
+            g_pose.last_check = now;
+            if (is_simulating(mesh, "pelvis") == 1 || g_pose.arm_style != cfg.pose_arm_style)
+            {
+                HSVR_LOG_EVERY(5.0, "Pose: the game switched physics on again; switching it off");
+                apply_arm_physics(cfg);
+            }
+        }
+
+        ControllerState state = controllers_state();
+        double heading = actor_heading(pawn);
+        Quat body = quat_from_yaw_deg(heading);
+        Vec3 actor = actor_location(pawn);
+
+        // The body under you: where the game's capsule is, plus how far you have walked in the room.
+        Vec3 room{0, 0, 0};
+        Vec3 anchor;
+        double base_yaw = 0.0;
+        if (cfg.pose_follow_room && state.head_valid && stereo_view_anchor(anchor, base_yaw))
+        {
+            Vec3 head_world;
+            Quat head_rot;
+            if (stereo_tracking_to_world(state.head, head_world, head_rot)) room = Vec3{head_world.x - anchor.x, head_world.y - anchor.y, 0.0};
+        }
+        set_component_transform(mesh, actor + body.rotate(g_pose.mesh_offset_local) + room, (body * g_pose.mesh_rotation_local).normalized());
+
+        Quat component_inv = component_rotation(driver).inverse();
+        bool fake_head = cfg.dev_pose_fake_tracking && !state.head_valid;
+        if (cfg.pose_head && (state.head_valid || fake_head))
+        {
+            Vec3 head_world;
+            Quat head_rot;
+            bool have = state.head_valid && stereo_tracking_to_world(state.head, head_world, head_rot);
+            if (!have && fake_head)
+            {
+                // Made-up path: looks left and right, and up and down.
+                double t = now_seconds();
+                head_rot = (body * rot_to_quat(20.0 * std::sin(t * 0.7), 40.0 * std::sin(t * 0.5), 0.0)).normalized();
+                have = true;
+            }
+            if (ModifyBoneNode* n = chain_node("head"))
+                if (have) node_set_rotation(*n, component_inv * (head_rot * g_pose.head_offset));
+        }
+        else if (ModifyBoneNode* n = chain_node("head"))
+        {
+            node_release(*n);
+        }
+        for (int side = 0; side < 2; ++side)
+        {
+            if (cfg.pose_arms) pose_arm(side, cfg, state, body, component_inv);
+            else
+                for (const char* b : {"upperarm", "lowerarm", "hand"})
+                    if (ModifyBoneNode* n = chain_node(std::string(b) + side_suffix(side))) node_release(*n);
+        }
+        HSVR_LOG_EVERY(1.0, "Pose: actor (%.0f, %.0f, %.0f) heading %.0f, room offset (%.0f, %.0f), head %s, hands %s/%s", actor.x, actor.y, actor.z, heading,
+                       room.x, room.y, state.head_valid ? "tracked" : "not tracked", state.hand[0].grip_valid ? "tracked" : "-",
+                       state.hand[1].grip_valid ? "tracked" : "-");
     }
 
     struct ConsoleCommandParams
@@ -1519,6 +1921,7 @@ namespace
         log_controllers(cfg);
         player_physics_test(cfg);
         pose_probe(cfg);
+        pose_body(cfg);
         if (g_console_done)
         {
             apply_picture_settings(cfg);

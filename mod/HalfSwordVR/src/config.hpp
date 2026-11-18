@@ -154,6 +154,27 @@ namespace hsvr
         bool dev_pose_probe = false;
         std::string dev_pose_bone = "head";
         double dev_pose_pitch = 0.0, dev_pose_yaw = 0.0, dev_pose_roll = 0.0;
+
+        // ---- Phase 3: your body posed by you (off until tested) ----
+        // 1 = your character's physics off; his head turns with the headset, his arms reach for
+        // the controllers, and his body moves with you around the room. Can be flipped while
+        // playing; switching back restarts nothing, so restart the fight afterwards.
+        bool pose_body = false;
+        bool pose_head = true;
+        bool pose_arms = true;
+        bool pose_follow_room = true;
+        // "exact": arms posed exactly. "muscle": arms back on physics, pulled to the pose by the
+        // game's own muscles (strength, stamina and injury act on them as in the game).
+        std::string pose_arm_style = "exact";
+        // Where the wrist sits relative to the controller's grip, in the controller's frame
+        // (forward, right, up, cm), and how the hand is turned relative to the controller (degrees).
+        double pose_wrist_forward_cm = -6.0, pose_wrist_right_cm = 0.0, pose_wrist_up_cm = -2.0;
+        double pose_hand_pitch = 0.0, pose_hand_yaw = 0.0, pose_hand_roll = 0.0;
+        // Which way the elbows point (in the body's frame: back, out, down; any length).
+        double pose_elbow_back = 0.3, pose_elbow_out = 0.6, pose_elbow_down = 1.0;
+        // TEST ONLY: when the headset or a controller is not tracked (no one wearing it), move the
+        // head and hands along a slow made-up path instead, so an unattended run can check the posing.
+        bool dev_pose_fake_tracking = false;
     };
 
     // Current settings (copy). Cheap enough to call once per frame.

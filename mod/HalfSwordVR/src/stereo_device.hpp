@@ -26,6 +26,9 @@ namespace hsvr
     // Places a pose from tracking space (a controller, say) in the game world the same way the
     // eyes were placed for the last frame. Game thread. False until a frame has been placed.
     bool stereo_tracking_to_world(const XrPoseRaw& pose, Vec3& location, Quat& rotation);
+    // Where the view is anchored this frame (the point between the eyes at the recenter pose) and
+    // the heading "straight ahead" maps to. Game thread. False until a frame has been placed.
+    bool stereo_view_anchor(Vec3& anchor, double& base_yaw);
 
     // True while the engine draws the eyes into their own full-size target (settings key
     // separate_render_target) rather than side by side into the game window.

@@ -105,6 +105,62 @@ namespace hsvr
         return std::atan2(f.y, f.x) * kRadToDeg;
     }
 
+
+    inline double dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+    inline double length(const Vec3& a) { return std::sqrt(dot(a, a)); }
+    inline Vec3 normalized(const Vec3& a)
+    {
+        double n = length(a);
+        if (n < 1e-9) return {0, 0, 0};
+        return a * (1.0 / n);
+    }
+
+    // Same maths as Unreal's FRotator::Quaternion().
+    inline Quat rot_to_quat(double pitch, double yaw, double roll)
+    {
+        double sp = std::sin(pitch * kDegToRad * 0.5), cp = std::cos(pitch * kDegToRad * 0.5);
+        double sy = std::sin(yaw * kDegToRad * 0.5), cy = std::cos(yaw * kDegToRad * 0.5);
+        double sr = std::sin(roll * kDegToRad * 0.5), cr = std::cos(roll * kDegToRad * 0.5);
+        return {cr * sp * sy - sr * cp * cy, -cr * sp * cy - sr * cp * sy, cr * cp * sy - sr * sp * cy, cr * cp * cy + sr * sp * sy};
+    }
+
+    // The rotation that takes the unit axes X, Y, Z to the given orthonormal vectors.
+    inline Quat quat_from_axes(const Vec3& X, const Vec3& Y, const Vec3& Z)
+    {
+        double m00 = X.x, m10 = X.y, m20 = X.z, m01 = Y.x, m11 = Y.y, m21 = Y.z, m02 = Z.x, m12 = Z.y, m22 = Z.z;
+        double trace = m00 + m11 + m22;
+        Quat q;
+        if (trace > 0.0)
+        {
+            double s = std::sqrt(trace + 1.0) * 2.0;
+            q = {(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25 * s};
+        }
+        else if (m00 > m11 && m00 > m22)
+        {
+            double s = std::sqrt(1.0 + m00 - m11 - m22) * 2.0;
+            q = {0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s};
+        }
+        else if (m11 > m22)
+        {
+            double s = std::sqrt(1.0 + m11 - m00 - m22) * 2.0;
+            q = {(m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s};
+        }
+        else
+        {
+            double s = std::sqrt(1.0 + m22 - m00 - m11) * 2.0;
+            q = {(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s};
+        }
+        return q.normalized();
+    }
+
+    // A rotation from a main direction and a second direction (made perpendicular to the first).
+    inline Quat quat_from_two(const Vec3& main, const Vec3& second)
+    {
+        Vec3 a = normalized(main);
+        Vec3 b = normalized(second - a * dot(second, a));
+        return quat_from_axes(a, b, cross(a, b));
+    }
+
     // OpenXR -> Unreal, the same mapping Unreal's own OpenXR plugin uses.
     inline Vec3 xr_to_ue_position(float x, float y, float z, double cm_per_metre)
     {
