@@ -3032,6 +3032,8 @@ namespace
         // that only lags (a long spear swinging up at the hand's torque limit) is never let go.
         bool have_expected = false;
         hsvr::Vec3 expected_com;
+        hsvr::Vec3 last_set_v, last_set_w;
+        std::string last_responses;
         double miss_cm = 0.0, last_contact = -100.0;
         double last_blocked_cm = -1.0; // last tick's blocked_cm (a weapon still coming is not stuck)
         // The slide: how far the hand has moved along the weapon (cm along its +Z from the game's grip
@@ -3991,6 +3993,33 @@ namespace
         {
             h.miss_cm = length(com - h.expected_com);
             if (h.miss_cm > cfg.pose_hold_contact_cm) h.last_contact = now;
+            // The kick hunt: what the physics did with last tick's velocity, and whether the weapon's
+            // collision answers changed. Logged on every tick it went more than 3 cm astray.
+            if (g_joint_trace.load() && h.miss_cm > 3.0)
+            {
+                std::string resp;
+                for (int ch = 0; ch < 32; ++ch)
+                {
+                    Call r(base, STR("GetCollisionResponseToChannel"));
+                    r.byte(STR("Channel"), (uint8_t)ch);
+                    r.run();
+                    FProperty* rp = r.param(STR("ReturnValue"));
+                    resp += (char)('0' + (rp ? *(r.buffer.data() + rp->GetOffset_Internal()) : 9));
+                }
+                Call ce(base, STR("GetCollisionEnabled"));
+                ce.run();
+                FProperty* cp = ce.param(STR("ReturnValue"));
+                int enabled = cp ? *(ce.buffer.data() + cp->GetOffset_Internal()) : -1;
+                Vec3 got_v = lv.vec();
+                Vec3 off = com - h.expected_com;
+                Vec3 off_local = rot.inverse().rotate(off);
+                HSVR_LOG("Kick: %s weapon %.1f cm off where it was sent (weapon frame %.1f %.1f %.1f; +Z = blade), velocity set (%.0f %.0f %.0f) now (%.0f %.0f %.0f), "
+                         "spin set (%.1f %.1f %.1f) now (%.1f %.1f %.1f), collision %d, responses %s%s",
+                         side == 0 ? "left" : "right", h.miss_cm, off_local.x, off_local.y, off_local.z, h.last_set_v.x, h.last_set_v.y, h.last_set_v.z, got_v.x,
+                         got_v.y, got_v.z, h.last_set_w.x, h.last_set_w.y, h.last_set_w.z, w_now.x, w_now.y, w_now.z, enabled, resp.c_str(),
+                         (!h.last_responses.empty() && resp != h.last_responses) ? " (CHANGED)" : "");
+                h.last_responses = resp;
+            }
         }
         Vec3 pivot_now = pos + rot.rotate(pivot);
         Vec3 v = lv.vec() + cross(w_now, pivot_now - com);
@@ -4055,6 +4084,8 @@ namespace
         slv.three(STR("NewVel"), set_v.x, set_v.y, set_v.z);
         slv.flag(STR("bAddToCurrent"), false);
         slv.run();
+        h.last_set_v = set_v;
+        h.last_set_w = w_next;
         Call sav(base, STR("SetPhysicsAngularVelocityInRadians"));
         sav.three(STR("NewAngVel"), w_next.x, w_next.y, w_next.z);
         sav.flag(STR("bAddToCurrent"), false);
