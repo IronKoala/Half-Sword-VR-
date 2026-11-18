@@ -22,6 +22,8 @@
 #include <Unreal/FString.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/NameTypes.hpp>
+#include <Unreal/UAssetRegistry.hpp>
+#include <Unreal/UAssetRegistryHelpers.hpp>
 #include <Unreal/UClass.hpp>
 #include <Unreal/UFunction.hpp>
 #include <Unreal/UObject.hpp>
@@ -2749,6 +2751,79 @@ namespace
         HSVR_LOG("Script: called %ls on the game instance", function->GetFullName().c_str());
     }
 
+    // dev_script step "hsvr.give_weapon <class path>": puts a weapon in the player's right hand the
+    // way the game equips one, through Willie's "Set Up Right Hand Weapon" with the weapon class
+    // (Willie_BP: called with a class for the start loadout, UG @24976). For unattended tests: the
+    // scripted Free Mode start has no weapon. The class is loaded through the asset registry if it
+    // isn't in memory yet. Example: /Game/.../ModularWeaponBP_ArmingSword.ModularWeaponBP_ArmingSword_C
+    void script_give_weapon(const std::string& step)
+    {
+        std::string path = step;
+        while (!path.empty() && path.back() == ' ') path.pop_back();
+        std::wstring wide(path.begin(), path.end());
+        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, wide.c_str());
+        if (!cls)
+        {
+            // The blueprint asset is the class path without "_C" on the object name.
+            std::wstring asset = wide;
+            if (asset.size() > 2 && asset.substr(asset.size() - 2) == STR("_C")) asset.resize(asset.size() - 2);
+            auto* registry = static_cast<UAssetRegistry*>(UAssetRegistryHelpers::GetAssetRegistry().ObjectPointer);
+            if (registry)
+            {
+                FAssetData data = registry->GetAssetByObjectPath(FName(asset.c_str(), FNAME_Add));
+                if (data.PackageName().GetComparisonIndex())
+                {
+                    UObject* loaded = UAssetRegistryHelpers::GetAsset(data);
+                    HSVR_LOG("Script: hsvr.give_weapon: loaded %ls", loaded ? loaded->GetFullName().c_str() : STR("nothing"));
+                }
+                else
+                    HSVR_LOG("Script: hsvr.give_weapon: the asset registry has no %ls", asset.c_str());
+            }
+            cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, wide.c_str());
+        }
+        if (!cls)
+        {
+            HSVR_LOG("Script: hsvr.give_weapon: no class %s", path.c_str());
+            return;
+        }
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(STR("Set Up Right Hand Weapon")) : nullptr;
+        if (!fn)
+        {
+            HSVR_LOG("Script: hsvr.give_weapon: no character or no \"Set Up Right Hand Weapon\"");
+            return;
+        }
+        alignas(16) static uint8_t parameters[4096];
+        memset(parameters, 0, sizeof(parameters));
+        std::string names;
+        bool set = false;
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            std::wstring kind = p->GetClass().GetName();
+            names += (names.empty() ? "" : ", ");
+            for (wchar_t ch : n) names += (char)(ch < 128 ? ch : '?');
+            names += " (";
+            for (wchar_t ch : kind) names += (char)(ch < 128 ? ch : '?');
+            names += ")";
+            if (!set && kind == STR("ClassProperty"))
+            {
+                *reinterpret_cast<UClass**>(parameters + p->GetOffset_Internal()) = cls;
+                set = true;
+            }
+        }
+        HSVR_LOG("Script: hsvr.give_weapon: parameters %s", names.c_str());
+        if (!set)
+        {
+            HSVR_LOG("Script: hsvr.give_weapon: no class parameter, not called");
+            return;
+        }
+        pawn->ProcessEvent(fn, parameters);
+        UObject* weapon = object_property(pawn, STR("Weapon R"));
+        HSVR_LOG("Script: hsvr.give_weapon: right hand now holds %ls", weapon ? weapon->GetFullName().c_str() : STR("nothing"));
+    }
+
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -2803,6 +2878,11 @@ namespace
             if (entry.command == "hsvr.dump")
             {
                 script_dump();
+                continue;
+            }
+            if (entry.command.rfind("hsvr.give_weapon ", 0) == 0)
+            {
+                script_give_weapon(entry.command.substr(17));
                 continue;
             }
             if (entry.command.rfind("hsvr.call ", 0) == 0)

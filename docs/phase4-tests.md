@@ -28,4 +28,6 @@ The game holds a weapon with a physics joint between the weapon and the hand bon
 | `pose_grip_radius_cm` | 30 | The lever used for turning stiffness and strength. |
 | `pose_grip_buzz` | 0.6 | Buzz strength for the gap (0 = off). |
 
+For unattended tests the dev_script step `hsvr.give_weapon <class path>` equips a weapon through the game's own "Set Up Right Hand Weapon" (the scripted Free Mode start has none).
+
 Next: your strength from the game's stats instead of a fixed number, the hand staying on the weapon with a ghost hand at the controller, two hands, grab button, slide grip.
