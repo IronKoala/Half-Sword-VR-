@@ -2065,6 +2065,11 @@ namespace
     // Set by hsvr.grip_rejoin: re-create the hand joint once (SetConstrainedComponents) after the
     // spring settings, in case the physics side never took them.
     std::atomic<bool> g_grip_rejoin{false};
+    // hsvr.grip_frame_offset x y z: moves the joint's hand-side anchor (Frame2) by this much from
+    // where the game put it, in the hand's frame. A working joint must carry the weapon along with
+    // it; a dead one leaves the weapon in the fist. Changed values are written once per change.
+    std::atomic<double> g_grip_frame_offset[3] = {0.0, 0.0, 0.0};
+    std::atomic<int> g_grip_frame_serial{0};
     // Linear drive target for the test (the joint's own frame, cm); zero is the normal spring.
     std::atomic<double> g_grip_target[3] = {0.0, 0.0, 0.0};
 
@@ -2329,6 +2334,34 @@ namespace
                     }
                 }
                 else if (spring_on) spring_joint(joint, mass, cfg);
+                if (side == 1)
+                {
+                    static int done_serial = 0;
+                    static UObject* original_for = nullptr;
+                    static hsvr::Vec3 original;
+                    if (original_for != joint)
+                    {
+                        original_for = joint;
+                        auto jn = [&](const TCHAR* axis) {
+                            double v = nested_number(joint, {STR("ConstraintInstance"), STR("Pos2"), axis});
+                            return std::isnan(v) ? 0.0 : v;
+                        };
+                        original = hsvr::Vec3{jn(STR("X")), jn(STR("Y")), jn(STR("Z"))};
+                        done_serial = 0;
+                    }
+                    int serial = g_grip_frame_serial.load();
+                    if (serial != done_serial)
+                    {
+                        done_serial = serial;
+                        hsvr::Vec3 at{original.x + g_grip_frame_offset[0].load(), original.y + g_grip_frame_offset[1].load(),
+                                      original.z + g_grip_frame_offset[2].load()};
+                        Call rp(joint, STR("SetConstraintReferencePosition"));
+                        rp.byte(STR("Frame"), 1); // EConstraintFrame::Frame2, the hand's side
+                        rp.three(STR("RefPosition"), at.x, at.y, at.z);
+                        bool ok = rp.run();
+                        HSVR_LOG("Grip: hand anchor moved to (%.1f, %.1f, %.1f) (%d)", at.x, at.y, at.z, (int)ok);
+                    }
+                }
                 if (side == 1 && g_grip_rejoin.exchange(false))
                 {
                     Call rj(joint, STR("SetConstrainedComponents"));
@@ -3351,6 +3384,16 @@ namespace
             if (entry.command.rfind("hsvr.grip_k_scale ", 0) == 0)
             {
                 g_grip_k_scale.store(atof(entry.command.c_str() + 18));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.grip_frame_offset ", 0) == 0)
+            {
+                double x = 0, y = 0, z = 0;
+                sscanf(entry.command.c_str() + 23, "%lf %lf %lf", &x, &y, &z);
+                g_grip_frame_offset[0].store(x);
+                g_grip_frame_offset[1].store(y);
+                g_grip_frame_offset[2].store(z);
+                g_grip_frame_serial.fetch_add(1);
                 continue;
             }
             if (entry.command == "hsvr.grip_rejoin")
