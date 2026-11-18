@@ -2614,10 +2614,10 @@ namespace
                         r.byte(STR("Channel"), (uint8_t)ch);
                         r.byte(STR("NewResponse"), (uint8_t)g_weapon_channel_resp.load());
                         r.run();
-                        Call check(base, STR("GetCollisionResponseToChannel"));
-                        check.byte(STR("Channel"), (uint8_t)ch);
-                        check.run();
-                        HSVR_LOG("Grip: weapon response to channel %d set to %d, reads %d", ch, g_weapon_channel_resp.load(), byte_result(check));
+                        Call readback(base, STR("GetCollisionResponseToChannel"));
+                        readback.byte(STR("Channel"), (uint8_t)ch);
+                        readback.run();
+                        HSVR_LOG("Grip: weapon response to channel %d set to %d, reads %d", ch, g_weapon_channel_resp.load(), byte_result(readback));
                     }
                 }
                 if (spring_on && g_grip_ignore_arm.load())
