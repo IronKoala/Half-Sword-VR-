@@ -22,7 +22,11 @@ The game holds a weapon with a physics joint between the weapon and the hand bon
 
 | Setting | Default | What it does |
 |---|---|---|
-| `pose_grip_spring` | 1 | 1 = spring, 0 = the game's locked joint. |
+| `pose_grip_hold` | 1 | 1 = the hold from Matthew's Chasms VR Framework: the game's hand joint goes free and the mod sets the weapon's velocity and spin each tick so the point held follows the controller (implicit spring and damper, capped force and torque, the weapon's own weight and inertia about the grip). Replaces the spring below. 0 = the spring or the locked joint. |
+| `pose_hold_strength` | 1 | Multiplies every hold value (dampers by half of it past 1). Game stats will drive this later. |
+| `pose_hold_spring`, `pose_hold_damper`, `pose_hold_max_force` | 5000, 100, 3000 | The hold's spring (N/m), damper (N s/m) and most force (N), the framework's one-hand values. |
+| `pose_hold_turn_spring`, `pose_hold_turn_damper`, `pose_hold_max_torque` | 1100, 45, 250 | Its turning spring (N m/rad), damper and most torque (N m), the framework's values with its handle multipliers (x1.1, x0.9). |
+| `pose_grip_spring` | 1 | With the hold off: 1 = spring, 0 = the game's locked joint. |
 | `pose_grip_strength_kg` | 20 | The most weight the grip holds up, in kg. Turning strength is this times `pose_grip_radius_cm`. |
 | `pose_grip_hz`, `pose_grip_damping` | 20, 0.3 | How briskly the weapon follows (natural frequency) and the damping ratio. Chaos runs drives in acceleration mode and solves their damping against the spring's own correction, so damping 1 makes the weapon sag ~16 cm; 0.3 holds as well as the game's locked grip (tests 25-26). |
 | `pose_grip_radius_cm` | 30 | The lever used for turning stiffness and strength. |
@@ -44,6 +48,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | Step | What it does |
 |---|---|
 | `hsvr.give_weapon passport <inventory asset> <index>` | Equips a fully built weapon; replaces the one in the hand |
+| `hsvr.grip_hold 0/1` | Turns the framework hold off or on for the test, whatever the ini says |
 | `hsvr.grip_spring 0/1/2` | 0 leaves the game's locked joint alone (still measured), 1 our spring every tick, 2 our spring written once |
 | `hsvr.grip_k_scale <x>` | Multiplies the spring's stiffness, damping and force caps |
 | `hsvr.grip_frame_offset x y z` | Moves the joint's hand anchor (Frame2) by that much, to check the joint is live |

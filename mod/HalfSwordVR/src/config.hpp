@@ -190,6 +190,19 @@ namespace hsvr
         // holds as well as the game's locked grip, tests 25-26), pose_grip_radius_cm
         // the lever used for the turning strength, pose_grip_buzz the buzz strength for the gap (0 off).
         bool pose_grip_spring = true;
+        // The hold from Matthew's Chasms VR Framework (replaces the spring when on): the game's hand
+        // joint goes free and the mod sets the weapon's velocity and spin each tick so the point held
+        // follows the controller. Its spring (N/m), damper (N s/m), most force (N), turning spring
+        // (N m/rad), turning damper (N m s/rad) and most torque (N m), the framework's one-hand values
+        // (turning x1.1 / x0.9 for a handle), all times pose_hold_strength (dampers by half of it past 1).
+        bool pose_grip_hold = true;
+        double pose_hold_strength = 1.0;
+        double pose_hold_spring = 5000.0;
+        double pose_hold_damper = 100.0;
+        double pose_hold_max_force = 3000.0;
+        double pose_hold_turn_spring = 1100.0;
+        double pose_hold_turn_damper = 45.0;
+        double pose_hold_max_torque = 250.0;
         double pose_grip_strength_kg = 20.0;
         double pose_grip_hz = 20.0;
         double pose_grip_damping = 0.3;

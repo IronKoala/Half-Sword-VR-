@@ -280,6 +280,14 @@ namespace hsvr
         num("pose_snap_turn_deg", c.pose_snap_turn_deg);
         num("pose_stick_dead_zone", c.pose_stick_dead_zone);
         flag("pose_grip_spring", c.pose_grip_spring);
+        flag("pose_grip_hold", c.pose_grip_hold);
+        num("pose_hold_strength", c.pose_hold_strength);
+        num("pose_hold_spring", c.pose_hold_spring);
+        num("pose_hold_damper", c.pose_hold_damper);
+        num("pose_hold_max_force", c.pose_hold_max_force);
+        num("pose_hold_turn_spring", c.pose_hold_turn_spring);
+        num("pose_hold_turn_damper", c.pose_hold_turn_damper);
+        num("pose_hold_max_torque", c.pose_hold_max_torque);
         num("pose_grip_strength_kg", c.pose_grip_strength_kg);
         num("pose_grip_hz", c.pose_grip_hz);
         num("pose_grip_damping", c.pose_grip_damping);
