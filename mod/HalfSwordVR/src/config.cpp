@@ -315,6 +315,10 @@ namespace hsvr
         flag("pose_grip_spring", c.pose_grip_spring);
         flag("pose_grip_hold", c.pose_grip_hold);
         num("pose_hold_strength", c.pose_hold_strength);
+        flag("pose_body_strength", c.pose_body_strength);
+        num("pose_body_stamina_floor", c.pose_body_stamina_floor);
+        num("pose_body_strength_min", c.pose_body_strength_min);
+        num("pose_stamina_per_kn_s", c.pose_stamina_per_kn_s);
         num("pose_hold_spring", c.pose_hold_spring);
         num("pose_hold_damper", c.pose_hold_damper);
         num("pose_hold_max_force", c.pose_hold_max_force);

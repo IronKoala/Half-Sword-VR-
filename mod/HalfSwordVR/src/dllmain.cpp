@@ -2179,6 +2179,10 @@ namespace
     void log_joint_before_tick(UObject* pawn);
 
     void block_offhand_search_before_tick(UObject* pawn);
+    // Test: hsvr.pawn_pin <variable> <value> holds a number variable of his pawn at a value every tick,
+    // after his tick and before the hold reads it (e.g. Stamina 10, Arm R Tonus 0.25); "off" clears all.
+    std::vector<std::pair<std::wstring, double>> g_pawn_pins;
+    bool set_variable(UObject* owner, const TCHAR* name, double number, UObject* object, const FName* fname);
 
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
@@ -2975,6 +2979,7 @@ namespace
         bool zone_known = false;
         double zone_lo = 0.0, zone_hi = 0.0;
         double zone_stop = 0.0, zone_tip = 0.0; // the guard (top stop) and the tip, from the game's grip point
+        double body_strength = 1.0; // the game's stats on this hand's hold (strength x injury x stamina)
         bool sliding = false;
         double far_since = -1.0, far_logged = 0.0;
     };
@@ -4120,6 +4125,56 @@ namespace
                        want, h.zone_lo, h.zone_hi, trig, h.slide - before, at_end ? " at the stop" : "");
     }
 
+    // How strong his hand is now, from the game's own stats (strength_stamina.md): his strength
+    // (Muscle Rate, as the game's grip uses it: 0..1 -> 1..1.5, at least 0.5, here over its value at
+    // the usual 0.5), that arm's tonus (injury and exhaustion: the game caps it from 1 down to 0.25
+    // when exhausted) times his consciousness, and his stamina (100..0 -> 1..pose_body_stamina_floor).
+    // 1 for a fresh, healthy Willie of usual strength. Each part can be switched off for testing.
+    struct BodyStrength
+    {
+        double total = 1.0, strength = 1.0, injury = 1.0, stamina = 1.0;
+        double muscle_rate = -1.0, tonus = -1.0, consciousness = -1.0, stamina_value = -1.0;
+    };
+    BodyStrength body_strength(UObject* pawn, int side, const hsvr::Config& cfg)
+    {
+        BodyStrength b;
+        if (!cfg.pose_body_strength || !pawn) return b;
+        b.muscle_rate = read_number_variable(pawn, STR("Muscle Rate"));
+        b.tonus = read_number_variable(pawn, side == 0 ? STR("Arm L Tonus") : STR("Arm R Tonus"));
+        b.consciousness = read_number_variable(pawn, STR("Consciousness"));
+        b.stamina_value = read_number_variable(pawn, STR("Stamina"));
+        if (b.muscle_rate >= 0.0) b.strength = (std::max)(0.5, 1.0 + 0.5 * b.muscle_rate) / 1.25;
+        if (b.tonus >= 0.0) b.injury = (std::min)(1.0, b.tonus);
+        if (b.consciousness >= 0.0) b.injury *= (std::min)(1.0, b.consciousness / 100.0);
+        if (b.stamina_value >= 0.0)
+        {
+            double t = (std::min)(1.0, (std::max)(0.0, b.stamina_value / 100.0));
+            b.stamina = cfg.pose_body_stamina_floor + (1.0 - cfg.pose_body_stamina_floor) * t;
+        }
+        b.total = (std::max)(cfg.pose_body_strength_min, b.strength * b.injury * b.stamina);
+        static bool reported = false;
+        if (!reported)
+        {
+            reported = true;
+            HSVR_LOG("Strength: Muscle Rate %.2f, Arm %s Tonus %.3f, Consciousness %.0f, Stamina %.1f (-1 = not found) -> strength %.2f x injury %.2f x stamina %.2f = %.2f",
+                     b.muscle_rate, side == 0 ? "L" : "R", b.tonus, b.consciousness, b.stamina_value, b.strength, b.injury, b.stamina, b.total);
+        }
+        return b;
+    }
+
+    // Holding and swinging tire him: the game's own drain reads the hand joint's force, which the
+    // hold leaves at 0, so the mod takes pose_stamina_per_kn_s of stamina a second for each kN the
+    // hold pulls with (holding a sword still costs almost nothing; a hard swing or a blocked push
+    // outruns the game's regeneration).
+    void drain_stamina(UObject* pawn, double force_n, double dt, const hsvr::Config& cfg)
+    {
+        if (!pawn || cfg.pose_stamina_per_kn_s <= 0.0 || force_n <= 0.0) return;
+        double st = read_number_variable(pawn, STR("Stamina"));
+        if (st < 0.0) return;
+        double next = (std::max)(0.0, st - cfg.pose_stamina_per_kn_s * (force_n / 1000.0) * dt);
+        set_variable(pawn, STR("Stamina"), next);
+    }
+
     // One tick of the hold for one hand. `joint` is the game's hand joint (its frames say where on the
     // weapon the hand holds it and how the weapon sits in the hand); `base` the weapon's BaseMesh.
     void hold_weapon(int side, UObject* pawn, UObject* joint, UObject* base, UObject* weapon, double mass, const hsvr::Config& cfg)
@@ -4235,7 +4290,9 @@ namespace
                     target_pos = (p1 + p2) * 0.5 - target_rot.rotate(mid_local);
                     pivot = mid_local;
                 }
-                two_hand_gain = (std::max)(1.0, cfg.pose_two_hand_strength);
+                // Both hands pull: the second adds its own strength (B&S: two hands, twice the hold).
+                BodyStrength first = body_strength(pawn, side, cfg), second = body_strength(pawn, s2, cfg);
+                two_hand_gain = 1.0 + (std::max)(0.0, cfg.pose_two_hand_strength - 1.0) * (second.total / (std::max)(0.05, first.total));
                 // A controller pulled well off its spot on the weapon lets go (B&S).
                 Vec3 spot = bp_now + bq_now.rotate(local2);
                 double off = length(p2 - spot);
@@ -4278,10 +4335,12 @@ namespace
         double damp_strength = (std::max)(1.0, strength * 0.5);
         double k = cfg.pose_hold_spring * strength;
         double c = cfg.pose_hold_damper * damp_strength;
-        double max_force = cfg.pose_hold_max_force * strength * 100.0;
+        BodyStrength body = body_strength(pawn, side, cfg);
+        h.body_strength = body.total;
+        double max_force = cfg.pose_hold_max_force * strength * body.total * 100.0;
         double ka = cfg.pose_hold_turn_spring * strength * 1e4;
         double ca = cfg.pose_hold_turn_damper * damp_strength * 1e4;
-        double max_torque = cfg.pose_hold_max_torque * strength * 1e4;
+        double max_torque = cfg.pose_hold_max_torque * strength * body.total * 1e4;
 
         // The weapon as it is.
         Vec3 pos = component_location(base);
@@ -4340,6 +4399,7 @@ namespace
         force = clamp_length(force, max_force);
         Vec3 v_next = v + force * (dt / mass);
         h.force_n = length(force) / 100.0;
+        drain_stamina(pawn, h.force_n, dt, cfg);
         // The weight (less what the grip's acceleration takes) turns the weapon about the point held.
         double gz = g_weapon_gravity.load() == 0 ? 0.0 : -980.0;
         Vec3 gravity{0.0, 0.0, gz};
@@ -4994,6 +5054,7 @@ namespace
     void capsule_after_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
+        for (auto& pin : g_pawn_pins) set_variable(context, pin.first.c_str(), pin.second, nullptr, nullptr);
         if (g_pose_active.load())
         {
             crouch_after_tick(context);
@@ -6045,6 +6106,10 @@ namespace
                 else if (w == "kicks") value = g_count_kicks.load();
                 else if (w == "lag_r") value = g_worst_lag[1].load();
                 else if (w == "lag_l") value = g_worst_lag[0].load();
+                else if (w == "stamina") value = read_number_variable(pawn, STR("Stamina"));
+                else if (w == "strength_r") value = g_hold[1].body_strength;
+                else if (w == "strength_l") value = g_hold[0].body_strength;
+                else if (w == "two_hand") value = g_two.active ? 1.0 : 0.0;
                 else known = false;
                 std::string o = op;
                 bool pass = false;
@@ -6056,6 +6121,30 @@ namespace
                 else known = false;
                 if (got_n < 3 || !known) HSVR_LOG("EXPECT FAIL: could not read \"%s\"", entry.command.c_str());
                 else HSVR_LOG("EXPECT %s: %s %s %g (is %g)%s%s", pass ? "PASS" : "FAIL", what, op, want, value, label[0] ? " - " : "", label);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.pawn_pin ", 0) == 0)
+            {
+                std::string rest = entry.command.substr(14);
+                if (rest == "off")
+                {
+                    g_pawn_pins.clear();
+                    HSVR_LOG("Script: hsvr.pawn_pin: all cleared");
+                    continue;
+                }
+                size_t sp = rest.find_last_of(' ');
+                if (sp == std::string::npos) continue;
+                std::wstring name(rest.begin(), rest.begin() + sp);
+                double value = atof(rest.c_str() + sp + 1);
+                bool replaced = false;
+                for (auto& pin : g_pawn_pins)
+                    if (pin.first == name)
+                    {
+                        pin.second = value;
+                        replaced = true;
+                    }
+                if (!replaced) g_pawn_pins.push_back({name, value});
+                HSVR_LOG("Script: hsvr.pawn_pin %ls = %g", name.c_str(), value);
                 continue;
             }
             if (entry.command.rfind("hsvr.watch_vars", 0) == 0)

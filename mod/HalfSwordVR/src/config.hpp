@@ -192,6 +192,14 @@ namespace hsvr
         // (turning x1.1 / x0.9 for a handle), all times pose_hold_strength (dampers by half of it past 1).
         bool pose_grip_hold = true;
         double pose_hold_strength = 1.0;
+        // His stats on the hold: strength (Muscle Rate), that arm's tonus (injury, exhaustion) times
+        // consciousness, and stamina scale its force and torque caps (1 = a fresh, healthy Willie).
+        // Stamina at 0 leaves pose_body_stamina_floor of it; never below pose_body_strength_min.
+        bool pose_body_strength = true;
+        double pose_body_stamina_floor = 0.5;
+        double pose_body_strength_min = 0.1;
+        // Stamina a second per kN the hold pulls with (the game's own drain reads the hand joint, now 0).
+        double pose_stamina_per_kn_s = 15.0;
         double pose_hold_spring = 5000.0;
         double pose_hold_damper = 100.0;
         double pose_hold_max_force = 3000.0;
