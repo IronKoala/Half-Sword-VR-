@@ -2160,6 +2160,8 @@ namespace
 
     void log_joint_before_tick(UObject* pawn);
 
+    void block_offhand_search_before_tick(UObject* pawn);
+
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
@@ -2168,6 +2170,7 @@ namespace
         if (g_pose_active.load())
         {
             log_joint_before_tick(context);
+            block_offhand_search_before_tick(context);
             turn_body_before_tick();
             stick_walk_before_tick(context);
         }
@@ -2957,6 +2960,39 @@ namespace
         double far_since = -1.0, far_logged = 0.0;
     };
     HoldState g_hold[2];
+
+    // The game's off-hand search: with a two-handed weapon (longswords) in one hand and the other
+    // free, about once a second the game drops "Block <other> OffHand Grab", and on the next tick
+    // sets "<other> Offhand Searching Grip" and re-seats the weapon (teleports BaseMesh to the hand
+    // socket and back, UF @499290-@504348), all inside that one tick. Under the hold that teleport is
+    // a one-tick shove across the blade (kick tests 13-14). The mod owns grips, so just before his
+    // tick the gate is kept shut for a free other hand while the mod holds a weapon. A hand that holds
+    // or grabs something itself is left alone.
+    void block_offhand_search_before_tick(UObject* pawn)
+    {
+        if (!hsvr::config().pose_hold_block_offhand_search) return;
+        static const TCHAR* weapon_name[2] = {STR("Weapon L"), STR("Weapon R")};
+        static const TCHAR* grabbed_name[2] = {STR("Grabbed L"), STR("Grabbed R")};
+        static const TCHAR* block_name[2] = {STR("Block L OffHand Grab"), STR("Block R OffHand Grab")};
+        static const TCHAR* search_name[2] = {STR("L Offhand Searching Grip"), STR("R Offhand Searching Grip")};
+        static bool reported[2] = {false, false};
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* weapon = g_hold[side].weapon;
+            if (!weapon || object_property(pawn, weapon_name[side]) != weapon) continue;
+            int other = 1 - side;
+            if (object_property(pawn, weapon_name[other]) || bool_property(pawn, grabbed_name[other])) continue;
+            bool block_ok = set_bool_property(pawn, block_name[other], true);
+            bool search_ok = set_bool_property(pawn, search_name[other], false);
+            if (!reported[other])
+            {
+                reported[other] = true;
+                HSVR_LOG("Hold: the game's %s off-hand search kept off while the %s hand holds a weapon (%ls %s, %ls %s)", other == 0 ? "left" : "right",
+                         side == 0 ? "left" : "right", block_name[other], block_ok ? "set" : "NOT FOUND", search_name[other], search_ok ? "cleared" : "NOT FOUND");
+            }
+        }
+    }
+
     double hand_on_weapon_amount(int side) { return g_hold[side].on_weapon; }
 
     // ---- The ghost hand ------------------------------------------------------------------------
@@ -3218,6 +3254,18 @@ namespace
         Quat binv = bq.inverse();
         auto local = [&](const Vec3& w) { return binv.rotate(w - bp); };
         HSVR_LOG("Dump: %ls (class %ls), BaseMesh %ls", weapon->GetFullName().c_str(), weapon->GetClassPrivate()->GetName().c_str(), base->GetFullName().c_str());
+        // The weapon in the hand bone's frame (for checking that the left mirrors the right).
+        if (UObject* mesh = find_pawn_mesh())
+        {
+            FName hb = bone_fname(side == 0 ? "hand_l" : "hand_r");
+            Vec3 hp = socket_location(mesh, hb);
+            Quat hq = socket_rotation(mesh, hb);
+            Vec3 at = hq.inverse().rotate(bp - hp);
+            Quat q = (hq.inverse() * bq).normalized();
+            Vec3 bx = q.rotate(Vec3{1, 0, 0}), bz = q.rotate(Vec3{0, 0, 1});
+            HSVR_LOG("Dump: BaseMesh in the %s hand bone's frame: at (%.1f, %.1f, %.1f) cm, its X axis (%.2f, %.2f, %.2f), its Z axis (blade) (%.2f, %.2f, %.2f)",
+                     side == 0 ? "left" : "right", at.x, at.y, at.z, bx.x, bx.y, bx.z, bz.x, bz.y, bz.z);
+        }
         for (UStruct* level = weapon->GetClassPrivate(); level; level = level->GetSuperStruct())
             for (FProperty* p : level->ForEachProperty())
             {
@@ -3820,21 +3868,6 @@ namespace
             h = HoldState{};
             h.weapon = weapon;
             h.started = now;
-        }
-        // The game's off-hand search: with a two-handed weapon (longswords) in one hand and the other
-        // free, it sets "<side> Offhand Searching Grip" and about once a second re-seats the weapon in
-        // the hand (teleports BaseMesh to the hand socket and back, UF @499290-@504348). Under the
-        // hold that teleport is a one-tick shove across the blade (kick test 13). The mod owns grips,
-        // so the search is kept off while it holds a weapon.
-        if (cfg.pose_hold_block_offhand_search)
-        {
-            bool r = bool_property(pawn, STR("R Offhand Searching Grip")), l = bool_property(pawn, STR("L Offhand Searching Grip"));
-            if (r || l)
-            {
-                set_bool_property(pawn, STR("R Offhand Searching Grip"), false);
-                set_bool_property(pawn, STR("L Offhand Searching Grip"), false);
-                HSVR_LOG_EVERY(5.0, "Hold: the game's off-hand search was on (R %d, L %d); switched off", (int)r, (int)l);
-            }
         }
         // Where the controller has the hand: the hand bone's target this frame (exact arms), or the
         // bone itself when there is no controller.
