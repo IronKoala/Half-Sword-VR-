@@ -876,7 +876,6 @@ namespace
         hsvr::Quat mesh_rotation_local;
         hsvr::Quat head_offset;       // body frame -> head bone
         ArmCalibration arm[2];
-        std::string arm_style;
         double last_check = 0.0;
         hsvr::Vec3 target[2]; // last hand targets, for the log
         hsvr::Vec3 swivel_local[2]; // smoothed elbow direction, in the body's frame
@@ -885,9 +884,6 @@ namespace
     };
     PoseState g_pose;
     std::atomic<bool> g_hold_capsule{false}; // see "The capsule stays where you are" below
-    std::atomic<bool> g_muscle_active{false}; // muscle arms: see "Muscle arms" below
-    std::atomic<double> g_muscle_gain{1.0};
-    std::atomic<bool> g_muscle_fix_mass{true};
 
     const char* side_suffix(int side) { return side == 0 ? "_l" : "_r"; }
 
@@ -934,15 +930,9 @@ namespace
         return c.run() && c.integer() >= 0;
     }
 
-    void apply_arm_physics(const hsvr::Config& cfg)
+    void apply_arm_physics(const hsvr::Config&)
     {
         set_simulate(g_pose.mesh, false);
-        if (cfg.pose_arm_style == "muscle")
-        {
-            set_simulate_below(g_pose.mesh, cfg.arm_bone_left, true);
-            set_simulate_below(g_pose.mesh, cfg.arm_bone_right, true);
-        }
-        g_pose.arm_style = cfg.pose_arm_style;
     }
 
     bool pose_calibrate(const hsvr::Config& cfg)
@@ -1000,7 +990,7 @@ namespace
             HSVR_LOG("Pose: %s arm upper %.1f cm, lower %.1f cm%s", side == 0 ? "left" : "right", a.upper_length, a.lower_length, a.valid ? "" : " (not usable)");
         }
         HSVR_LOG("Pose: on. Head %.0f cm above the actor, mesh offset (%.0f, %.0f, %.0f), arms %s", g_pose_anchor_local.z, g_pose.mesh_offset_local.x,
-                 g_pose.mesh_offset_local.y, g_pose.mesh_offset_local.z, cfg.pose_arm_style.c_str());
+                 g_pose.mesh_offset_local.y, g_pose.mesh_offset_local.z, "exact");
         return true;
     }
 
@@ -1247,9 +1237,6 @@ namespace
         UObject* instance = object_property(driver, STR("AnimScriptInstance"));
         bool abp = instance && instance->GetClassPrivate()->GetName().find(STR("ABP_Willie")) != std::wstring::npos;
         g_hold_capsule.store(cfg.pose_body && cfg.pose_hold_capsule && abp && mesh && g_pose.calibrated && g_pose.pawn == pawn);
-        g_muscle_active.store(cfg.pose_body && cfg.pose_arm_style == "muscle" && abp && mesh && g_pose.calibrated && g_pose.pawn == pawn);
-        g_muscle_gain.store(cfg.pose_muscle_gain);
-        g_muscle_fix_mass.store(cfg.pose_muscle_fix_mass);
         if (!cfg.pose_body || !abp || !mesh)
         {
             if (g_pose.pawn && (pawn == g_pose.pawn)) pose_release();
@@ -1273,10 +1260,10 @@ namespace
         }
         // Keep physics off: the game turns it on again after a spawn and when it rescales the body.
         double now = now_seconds();
-        if (now - g_pose.last_check >= 0.5 || g_pose.arm_style != cfg.pose_arm_style)
+        if (now - g_pose.last_check >= 0.5)
         {
             g_pose.last_check = now;
-            if (is_simulating(mesh, "pelvis") == 1 || g_pose.arm_style != cfg.pose_arm_style)
+            if (is_simulating(mesh, "pelvis") == 1)
             {
                 HSVR_LOG_EVERY(5.0, "Pose: the game switched physics on again; switching it off");
                 apply_arm_physics(cfg);
@@ -1425,85 +1412,12 @@ namespace
 
     bool is_receive_tick(UObject* context, UFunction* function)
     {
-        if (!(g_hold_capsule.load() || g_muscle_active.load()) || !context || context != g_pose.pawn || !function) return false;
+        if (!g_hold_capsule.load() || !context || context != g_pose.pawn || !function) return false;
         if (g_receive_tick) return function == g_receive_tick;
         if (function->GetName() != STR("ReceiveTick")) return false;
         g_receive_tick = function;
         HSVR_LOG("Capsule: found your character's tick (%ls)", function->GetFullName().c_str());
         return true;
-    }
-
-    // ---- Muscle arms ----------------------------------------------------------------------------
-    // In "muscle" style his arms stay on physics, pulled toward the posed (hidden) skeleton by the
-    // game's own physical-animation springs. The game sets their strength every tick (Control
-    // Physical Animation Str): arm tonus x upper-body tonus x extra tonus per bone, and an overall
-    // multiplier from All Body Tonus and stamina, eased by "Free Fall Rate". Its feet traces can
-    // read the posed body as falling: that raises Free Fall Rate (weaker) and doubles every body's
-    // mass scale (heavier, so weaker again). After his tick the mod sets the overall multiplier
-    // the same way without the free-fall term, puts the mass scale back when it was doubled, and
-    // multiplies by pose_muscle_gain. Tonus, stamina, injury and dislocation still count as in the
-    // game. It logs the game's values so this can be checked against flatscreen.
-
-    UObject* physical_animation_component(UObject* pawn)
-    {
-        static UClass* type = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicalAnimationComponent"));
-        if (!type) return nullptr;
-        Call c(pawn, STR("GetComponentByClass"));
-        c.object(STR("ComponentClass"), reinterpret_cast<UObject*>(type));
-        c.run();
-        return c.object_result();
-    }
-
-    double named_number(UObject* owner, const TCHAR* name)
-    {
-        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
-        return p ? number_property(owner, p) : -1.0;
-    }
-
-    void muscle_after_tick(UObject* pawn)
-    {
-        using namespace hsvr;
-        UObject* mesh = g_pose.mesh;
-        if (!mesh) return;
-        double tonus = named_number(pawn, STR("All Body Tonus"));
-        double stamina = named_number(pawn, STR("Stamina"));
-        double mass_bp = named_number(pawn, STR("Mass Scale (Set in BP)"));
-        Call mass(mesh, STR("GetMassScale"));
-        mass.name(STR("BoneName"), bone_fname("upperarm_r"));
-        mass.run();
-        double mass_now = mass.number();
-        bool fixed_mass = false;
-        if (g_muscle_fix_mass.load() && mass_bp > 0.0 && mass_now > 0.0 && std::fabs(mass_now - mass_bp) > 0.01 * mass_bp)
-        {
-            Call set(mesh, STR("SetAllMassScale"));
-            set.number(STR("InMassScale"), mass_bp);
-            set.run();
-            fixed_mass = true;
-        }
-        UObject* pa = physical_animation_component(pawn);
-        double game_mult = named_number(pa, STR("StrengthMultiplyer"));
-        double mult = -1.0;
-        if (pa && tonus >= 0.0 && stamina >= 0.0)
-        {
-            auto clamp01 = [](double x) { return (std::min)(1.0, (std::max)(0.0, x)); };
-            double S = 0.5 + 0.5 * clamp01(stamina / 100.0);
-            mult = (clamp01(tonus / 100.0 * S) + clamp01(tonus / 25.0) * S) * g_muscle_gain.load();
-            Call set(pa, STR("SetStrengthMultiplyer"));
-            set.number(STR("InStrengthMultiplyer"), mult);
-            set.run();
-        }
-        static double last = 0.0;
-        double now = now_seconds();
-        if (now - last >= 0.5)
-        {
-            last = now;
-            HSVR_LOG("Muscle: game multiplier %.2f -> %.2f (gain %.2f), All Body Tonus %.1f, Upper Body Tonus %.2f, Arm R Tonus %.2f, Arm L Tonus %.2f, stamina %.1f, "
-                     "base %.2f, free fall %.2f, fallen %.0f, feet near ground %.0f, mass scale %.2f (BP %.2f)%s",
-                     game_mult, mult, g_muscle_gain.load(), tonus, named_number(pawn, STR("Upper Body Tonus")), named_number(pawn, STR("Arm R Tonus")),
-                     named_number(pawn, STR("Arm L Tonus")), stamina, named_number(pawn, STR("Physics Animation Base Strength Multiplier")),
-                     named_number(pawn, STR("Free Fall Rate")), named_number(pawn, STR("Fallen")), named_number(pawn, STR("Feet Near Ground")), mass_now,
-                     mass_bp, fixed_mass ? ", put back" : "");
-        }
     }
 
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
@@ -1516,7 +1430,6 @@ namespace
     void capsule_after_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
-        if (g_muscle_active.load()) muscle_after_tick(context);
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
         using namespace hsvr;
