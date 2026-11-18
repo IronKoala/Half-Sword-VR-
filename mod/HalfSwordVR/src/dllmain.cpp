@@ -4204,10 +4204,32 @@ namespace
         if (!g_force_watch.load()) return;
         UObject* target = context.Context;
         UFunction* hooked = static_cast<UFunction*>(custom_data);
-        if (!target || !g_pose.pawn) return;
         UFunction* caller = context.TheStack.Node();
+        {
+            // Proof the hooks fire: every call counted (any target, ours included), summed every 2 s.
+            static std::map<std::wstring, int> counts;
+            static double last = 0.0;
+            std::wstring key = hooked->GetName() + (caller == hooked ? STR(" (ProcessEvent)") : STR(" (script)"));
+            ++counts[key];
+            double now = hsvr::now_seconds();
+            if (now - last >= 2.0)
+            {
+                last = now;
+                std::wstring all;
+                for (auto& [k, n] : counts) all += k + STR(" ") + std::to_wstring(n) + STR(", ");
+                HSVR_LOG("Force: calls in the last 2 s, any target: %ls", all.c_str());
+                counts.clear();
+            }
+        }
+        if (!target || !g_pose.pawn) return;
         if (!caller || caller == hooked) return; // ours, through ProcessEvent
         UObject* outer = target->GetOuterPrivate();
+        if (outer && !is_a(outer, STR("Actor")))
+        {
+            Call own_call(target, STR("GetOwner"));
+            own_call.run();
+            if (UObject* o = own_call.object_result()) outer = o;
+        }
         UObject* wr = object_property(g_pose.pawn, STR("Weapon R"));
         UObject* wl = object_property(g_pose.pawn, STR("Weapon L"));
         bool weapon = outer && (outer == wr || outer == wl);
