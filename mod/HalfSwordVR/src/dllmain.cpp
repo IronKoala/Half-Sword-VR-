@@ -847,6 +847,7 @@ namespace
         hsvr::Vec3 target[2]; // last hand targets, for the log
     };
     PoseState g_pose;
+    std::atomic<bool> g_hold_capsule{false}; // see "The capsule stays where you are" below
 
     const char* side_suffix(int side) { return side == 0 ? "_l" : "_r"; }
 
@@ -1162,7 +1163,6 @@ namespace
     // slid him across the arena. While the body is posed, the mod notes where the capsule is just
     // before his tick and puts it back just after, so only your walking moves it. The stumble and
     // dodge offsets are cleared after each tick so they don't build up.
-    std::atomic<bool> g_hold_capsule{false};
     UFunction* g_receive_tick = nullptr;
     bool g_hold_have = false;
     hsvr::Vec3 g_hold_location;
