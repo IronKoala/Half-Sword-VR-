@@ -1381,6 +1381,10 @@ namespace
 
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     std::atomic<bool> g_hold_reach_clamp{true};
+    // Test counters since the last hsvr.mark (for hsvr.expect): stuck let-goes, kicks (a held weapon
+    // ending a tick more than 8 cm from where it was sent) and the worst hold lag (cm) per hand.
+    std::atomic<int> g_count_letgo{0}, g_count_kicks{0};
+    std::atomic<double> g_worst_lag[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     std::atomic<float> g_fake_trigger[2] = {-1.0f, -1.0f}; // test: hsvr.trigger <0|1> <value>, -1 = the controller
     std::atomic<float> g_fake_squeeze[2] = {-1.0f, -1.0f}; // test: hsvr.squeeze <0|1> <value>, -1 = the controller
@@ -3779,6 +3783,7 @@ namespace
                              "your hand %.0f cm from it (stopped %.1f cm short of where it was sent)",
                              side == 0 ? "left" : "right", h.weapon->GetName().c_str(), h.blocked_cm, from_shoulder, reach, from_hand, h.miss_cm);
                     h.stuck_since = -1.0;
+                    g_count_letgo.fetch_add(1);
                     drop_weapon(side, g_pose.pawn);
                     return false;
                 }
@@ -3993,6 +3998,7 @@ namespace
         {
             h.miss_cm = length(com - h.expected_com);
             if (h.miss_cm > cfg.pose_hold_contact_cm) h.last_contact = now;
+            if (h.miss_cm > 8.0) g_count_kicks.fetch_add(1);
             // The kick hunt: what the physics did with last tick's velocity, and whether the weapon's
             // collision answers changed. Logged on every tick it went more than 3 cm astray.
             if (g_joint_trace.load() && h.miss_cm > 3.0)
@@ -4091,6 +4097,7 @@ namespace
         sav.flag(STR("bAddToCurrent"), false);
         sav.run();
         h.lag = length(to);
+        if (h.lag > g_worst_lag[side].load()) g_worst_lag[side].store(h.lag);
         // Far behind for a while: why it isn't coming (asleep, not simulating, what it does with the
         // velocity it was given, its damping, and how it answers the world's channels).
         if (h.lag > 20.0)
@@ -5523,6 +5530,48 @@ namespace
             if (entry.command.rfind("hsvr.ghost_show ", 0) == 0)
             {
                 g_ghost_force.store(atoi(entry.command.c_str() + 16) != 0);
+                continue;
+            }
+            if (entry.command == "hsvr.mark")
+            {
+                g_count_letgo.store(0);
+                g_count_kicks.store(0);
+                g_worst_lag[0].store(0.0);
+                g_worst_lag[1].store(0.0);
+                HSVR_LOG("Script: hsvr.mark: test counters cleared");
+                continue;
+            }
+            if (entry.command.rfind("hsvr.expect ", 0) == 0)
+            {
+                // hsvr.expect <what> <op> <value> [label]; what: held_r, held_l, grabbed_r, grabbed_l,
+                // letgo, kicks (since hsvr.mark), lag_r, lag_l (worst cm since hsvr.mark); op: < <= = >= >.
+                char what[64] = {0}, op[4] = {0}, label[128] = {0};
+                double want = 0.0;
+                int got_n = sscanf(entry.command.c_str() + 12, "%63s %3s %lf %127[^\n]", what, op, &want, label);
+                UObject* pawn = nullptr;
+                find_pawn_mesh(&pawn);
+                std::string w = what;
+                double value = 0.0;
+                bool known = true;
+                if (w == "held_r") value = object_property(pawn, STR("Weapon R")) ? 1.0 : 0.0;
+                else if (w == "held_l") value = object_property(pawn, STR("Weapon L")) ? 1.0 : 0.0;
+                else if (w == "grabbed_r") value = bool_property(pawn, STR("Grabbed R")) ? 1.0 : 0.0;
+                else if (w == "grabbed_l") value = bool_property(pawn, STR("Grabbed L")) ? 1.0 : 0.0;
+                else if (w == "letgo") value = g_count_letgo.load();
+                else if (w == "kicks") value = g_count_kicks.load();
+                else if (w == "lag_r") value = g_worst_lag[1].load();
+                else if (w == "lag_l") value = g_worst_lag[0].load();
+                else known = false;
+                std::string o = op;
+                bool pass = false;
+                if (o == "<") pass = value < want;
+                else if (o == "<=") pass = value <= want;
+                else if (o == "=" || o == "==") pass = std::fabs(value - want) < 1e-6;
+                else if (o == ">=") pass = value >= want;
+                else if (o == ">") pass = value > want;
+                else known = false;
+                if (got_n < 3 || !known) HSVR_LOG("EXPECT FAIL: could not read \"%s\"", entry.command.c_str());
+                else HSVR_LOG("EXPECT %s: %s %s %g (is %g)%s%s", pass ? "PASS" : "FAIL", what, op, want, value, label[0] ? " - " : "", label);
                 continue;
             }
             if (entry.command.rfind("hsvr.joint_trace ", 0) == 0)

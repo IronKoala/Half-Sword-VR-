@@ -107,6 +107,8 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 |---|---|
 | `hsvr.give_weapon passport <inventory asset> <index>` | Equips a fully built weapon; replaces the one in the hand |
 | `hsvr.match_won [0]` | Sets (0 clears) what the game sets when the last enemy dies (GameMode "Match Won", his "Match Won (Player)"), to test continuing without a fight |
+| `hsvr.mark` | Clears the test counters (let-goes, kicks, worst hold lag) |
+| `hsvr.expect <what> <op> <value> [label]` | Logs "EXPECT PASS" or "EXPECT FAIL". what: held_r, held_l, grabbed_r, grabbed_l, letgo and kicks (counts since hsvr.mark), lag_r, lag_l (worst cm since hsvr.mark); op: < <= = >= > |
 | `hsvr.joint_trace 0/1` | Logs the right hand joint every tick before and after our free, with his soft-attach variables ("Joint:") |
 | `hsvr.stuck_check 0/1` | 0 pins his "Weapon Stuck In Static Mesh Check Rate" at 0 so his 1 s Check Stuck In Static Mesh loop never fires (the kick hunt). "Kick:" lines log every tick a held weapon's body (mass, centre of mass) or Unstuck flag changes |
 | `hsvr.weapon_dump [0/1]` | Logs the weapon in the left (0) or right (1, default) hand: its components with their spans along the blade, BaseMesh sockets, the hand joint point and its Length variables |
