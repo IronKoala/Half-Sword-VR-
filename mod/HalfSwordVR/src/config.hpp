@@ -257,6 +257,9 @@ namespace hsvr
         // the game then drops the first hand's two-handed grip type (11 -> 2) and with it its two-handed
         // rules (Master Stroke, the two-hand stamina factor, ...; fists_eating.md).
         bool pose_two_hand_curl = false;
+        // The second hand turns with the weapon (locked onto it as the first hand holds it, mirrored)
+        // instead of with your controller.
+        bool pose_two_hand_lock_rotation = true;
         // Fists: squeezing an empty grip with nothing in reach makes that hand a fist (the game's
         // Weapon_Fists_C); letting go opens it. pose_fist_class = its object path if it is not loaded.
         bool pose_fists = true;
