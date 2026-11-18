@@ -5432,6 +5432,86 @@ namespace
         return added;
     }
 
+    // ---- Variable watch (kick hunt, hsvr.watch_vars) -------------------------------------------
+    // Every tick, the number, yes/no, byte and enum variables of the player's pawn and of the weapon
+    // in each hand whose names contain one of the given words (case ignored) are read, and each
+    // change is logged with the time, so a game routine can be matched to a kick by its timing.
+    struct WatchedVar
+    {
+        UObject* owner;
+        FProperty* property;
+        std::string label;
+        double value;
+    };
+    std::vector<std::wstring> g_watch_words;
+    std::vector<WatchedVar> g_watched;
+    UObject* g_watch_owners[3] = {nullptr, nullptr, nullptr};
+
+    double watch_read(UObject* owner, FProperty* p)
+    {
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
+        auto kind = p->GetClass().GetName();
+        if (kind == STR("DoubleProperty")) return *reinterpret_cast<double*>(at);
+        if (kind == STR("FloatProperty")) return *reinterpret_cast<float*>(at);
+        if (kind == STR("IntProperty")) return *reinterpret_cast<int32_t*>(at);
+        if (kind == STR("ByteProperty") || kind == STR("EnumProperty")) return *at;
+        if (kind == STR("BoolProperty"))
+        {
+            auto* flag = static_cast<FBoolProperty*>(p);
+            return (at[flag->GetByteOffset()] & flag->GetFieldMask()) != 0 ? 1.0 : 0.0;
+        }
+        return 0.0;
+    }
+
+    void watch_collect(UObject* owner, const char* who)
+    {
+        if (!owner) return;
+        int found = 0;
+        for (UStruct* level = static_cast<UStruct*>(owner->GetClassPrivate()); level; level = level->GetSuperStruct())
+            for (FProperty* p : level->ForEachProperty())
+            {
+                auto kind = p->GetClass().GetName();
+                if (kind != STR("DoubleProperty") && kind != STR("FloatProperty") && kind != STR("IntProperty") && kind != STR("ByteProperty") &&
+                    kind != STR("EnumProperty") && kind != STR("BoolProperty"))
+                    continue;
+                std::wstring name = p->GetName(), lower = name;
+                for (auto& ch : lower) ch = (wchar_t)towlower(ch);
+                bool match = false;
+                for (auto& w : g_watch_words)
+                    if (lower.find(w) != std::wstring::npos) match = true;
+                if (!match) continue;
+                std::string label = who;
+                label += ".";
+                for (wchar_t ch : name) label += (char)(ch < 128 ? ch : '?');
+                g_watched.push_back({owner, p, label, watch_read(owner, p)});
+                ++found;
+            }
+        HSVR_LOG("Watch: %d variables on %s (%ls)", found, who, owner->GetName().c_str());
+    }
+
+    void watch_vars_tick()
+    {
+        if (g_watch_words.empty()) return;
+        UObject* pawn = g_pose.pawn;
+        UObject* owners[3] = {pawn, pawn ? object_property(pawn, STR("Weapon L")) : nullptr, pawn ? object_property(pawn, STR("Weapon R")) : nullptr};
+        if (owners[0] != g_watch_owners[0] || owners[1] != g_watch_owners[1] || owners[2] != g_watch_owners[2])
+        {
+            g_watched.clear();
+            for (int i = 0; i < 3; ++i) g_watch_owners[i] = owners[i];
+            watch_collect(owners[0], "pawn");
+            watch_collect(owners[1], "weaponL");
+            watch_collect(owners[2], "weaponR");
+        }
+        double now = hsvr::now_seconds();
+        for (auto& v : g_watched)
+        {
+            double value = watch_read(v.owner, v.property);
+            if (value == v.value) continue;
+            HSVR_LOG("Watch: %.3f %s %g -> %g", now, v.label.c_str(), v.value, value);
+            v.value = value;
+        }
+    }
+
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -6258,86 +6338,6 @@ namespace
         controllers_buzz(1, 0.6f);
         HSVR_LOG("Menu: A held %.1f s after a won fight: VO Deescalate called (Player Match End now %d)", cfg.menu_continue_hold_s,
                  (int)bool_property(pawn, STR("Player Match End")));
-    }
-
-    // ---- Variable watch (kick hunt, hsvr.watch_vars) -------------------------------------------
-    // Every tick, the number, yes/no, byte and enum variables of the player's pawn and of the weapon
-    // in each hand whose names contain one of the given words (case ignored) are read, and each
-    // change is logged with the time, so a game routine can be matched to a kick by its timing.
-    struct WatchedVar
-    {
-        UObject* owner;
-        FProperty* property;
-        std::string label;
-        double value;
-    };
-    std::vector<std::wstring> g_watch_words;
-    std::vector<WatchedVar> g_watched;
-    UObject* g_watch_owners[3] = {nullptr, nullptr, nullptr};
-
-    double watch_read(UObject* owner, FProperty* p)
-    {
-        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
-        auto kind = p->GetClass().GetName();
-        if (kind == STR("DoubleProperty")) return *reinterpret_cast<double*>(at);
-        if (kind == STR("FloatProperty")) return *reinterpret_cast<float*>(at);
-        if (kind == STR("IntProperty")) return *reinterpret_cast<int32_t*>(at);
-        if (kind == STR("ByteProperty") || kind == STR("EnumProperty")) return *at;
-        if (kind == STR("BoolProperty"))
-        {
-            auto* flag = static_cast<FBoolProperty*>(p);
-            return (at[flag->GetByteOffset()] & flag->GetFieldMask()) != 0 ? 1.0 : 0.0;
-        }
-        return 0.0;
-    }
-
-    void watch_collect(UObject* owner, const char* who)
-    {
-        if (!owner) return;
-        int found = 0;
-        for (UStruct* level = static_cast<UStruct*>(owner->GetClassPrivate()); level; level = level->GetSuperStruct())
-            for (FProperty* p : level->ForEachProperty())
-            {
-                auto kind = p->GetClass().GetName();
-                if (kind != STR("DoubleProperty") && kind != STR("FloatProperty") && kind != STR("IntProperty") && kind != STR("ByteProperty") &&
-                    kind != STR("EnumProperty") && kind != STR("BoolProperty"))
-                    continue;
-                std::wstring name = p->GetName(), lower = name;
-                for (auto& ch : lower) ch = (wchar_t)towlower(ch);
-                bool match = false;
-                for (auto& w : g_watch_words)
-                    if (lower.find(w) != std::wstring::npos) match = true;
-                if (!match) continue;
-                std::string label = who;
-                label += ".";
-                for (wchar_t ch : name) label += (char)(ch < 128 ? ch : '?');
-                g_watched.push_back({owner, p, label, watch_read(owner, p)});
-                ++found;
-            }
-        HSVR_LOG("Watch: %d variables on %s (%ls)", found, who, owner->GetName().c_str());
-    }
-
-    void watch_vars_tick()
-    {
-        if (g_watch_words.empty()) return;
-        UObject* pawn = g_pose.pawn;
-        UObject* owners[3] = {pawn, pawn ? object_property(pawn, STR("Weapon L")) : nullptr, pawn ? object_property(pawn, STR("Weapon R")) : nullptr};
-        if (owners[0] != g_watch_owners[0] || owners[1] != g_watch_owners[1] || owners[2] != g_watch_owners[2])
-        {
-            g_watched.clear();
-            for (int i = 0; i < 3; ++i) g_watch_owners[i] = owners[i];
-            watch_collect(owners[0], "pawn");
-            watch_collect(owners[1], "weaponL");
-            watch_collect(owners[2], "weaponR");
-        }
-        double now = hsvr::now_seconds();
-        for (auto& v : g_watched)
-        {
-            double value = watch_read(v.owner, v.property);
-            if (value == v.value) continue;
-            HSVR_LOG("Watch: %.3f %s %g -> %g", now, v.label.c_str(), v.value, value);
-            v.value = value;
-        }
     }
 
     void game_tick(UObject* engine, float delta_seconds)
