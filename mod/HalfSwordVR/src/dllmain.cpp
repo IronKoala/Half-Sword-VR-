@@ -3336,17 +3336,19 @@ namespace
     // Test (hsvr.bring_object): an object kept at the right hand each tick until it is grabbed or 4 s pass.
     UObject* g_bring = nullptr;
     double g_bring_until = -1.0;
+    int g_bring_side = 1;
 
     void keep_brought_object(UObject* pawn, UObject* mesh)
     {
         if (!g_bring) return;
-        if (hsvr::now_seconds() > g_bring_until || bool_property(pawn, STR("Grabbed R")))
+        const TCHAR* grabbed = g_bring_side == 0 ? STR("Grabbed L") : STR("Grabbed R");
+        if (hsvr::now_seconds() > g_bring_until || bool_property(pawn, grabbed))
         {
-            HSVR_LOG("Script: hsvr.bring_object: no longer kept at the hand (Grabbed R %d)", (int)bool_property(pawn, STR("Grabbed R")));
+            HSVR_LOG("Script: hsvr.bring_object: no longer kept at the %s hand (grabbed %d)", g_bring_side == 0 ? "left" : "right", (int)bool_property(pawn, grabbed));
             g_bring = nullptr;
             return;
         }
-        hsvr::Vec3 hand = hand_grab_point(mesh, 1);
+        hsvr::Vec3 hand = hand_grab_point(mesh, g_bring_side);
         Call move(g_bring, STR("K2_SetWorldLocation"));
         move.three(STR("NewLocation"), hand.x, hand.y, hand.z + 4.0);
         move.flag(STR("bTeleport"), true);
@@ -5260,6 +5262,10 @@ namespace
     {
         std::string path = step;
         while (!path.empty() && path.back() == ' ') path.pop_back();
+        // "left ..." = the left hand (Set Up Left Hand Weapon); otherwise the right.
+        bool left = path.rfind("left ", 0) == 0;
+        if (left) path = path.substr(5);
+        const TCHAR* setup_name = left ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
         // "passport <inventory data asset> <index>": hand him a fully built weapon from that list.
         std::wstring passport_asset;
         int passport_index = 0;
@@ -5302,10 +5308,10 @@ namespace
         }
         UObject* pawn = nullptr;
         find_pawn_mesh(&pawn);
-        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(STR("Set Up Right Hand Weapon")) : nullptr;
+        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(setup_name) : nullptr;
         if (!fn)
         {
-            HSVR_LOG("Script: hsvr.give_weapon: no character or no \"Set Up Right Hand Weapon\"");
+            HSVR_LOG("Script: hsvr.give_weapon: no character or no \"%ls\"", setup_name);
             return;
         }
         alignas(16) static uint8_t parameters[4096];
@@ -5363,7 +5369,7 @@ namespace
                 UScriptStruct* type = struct_type(p);
                 uint8_t* at = parameters + p->GetOffset_Internal();
                 hsvr::Vec3 hand{0, 0, 0};
-                if (UObject* mesh = find_pawn_mesh()) hand = socket_location(mesh, bone_fname("hand_r"));
+                if (UObject* mesh = find_pawn_mesh()) hand = socket_location(mesh, bone_fname(left ? "hand_l" : "hand_r"));
                 if (FProperty* r = struct_member(type, STR("Rotation")))
                 {
                     UScriptStruct* qt = struct_type(r);
@@ -5385,8 +5391,8 @@ namespace
             return;
         }
         pawn->ProcessEvent(fn, parameters);
-        UObject* weapon = object_property(pawn, STR("Weapon R"));
-        HSVR_LOG("Script: hsvr.give_weapon: right hand now holds %ls", weapon ? weapon->GetFullName().c_str() : STR("nothing"));
+        UObject* weapon = object_property(pawn, left ? STR("Weapon L") : STR("Weapon R"));
+        HSVR_LOG("Script: hsvr.give_weapon: %s hand now holds %ls", left ? "left" : "right", weapon ? weapon->GetFullName().c_str() : STR("nothing"));
     }
 
     // Parses "<time>: <command>" steps separated by ';' or new lines. Times are seconds from `base`
@@ -5682,7 +5688,9 @@ namespace
                 UObject* pawn = nullptr;
                 UObject* mesh = find_pawn_mesh(&pawn);
                 if (!mesh) continue;
-                hsvr::Vec3 hand = hand_grab_point(mesh, 1);
+                // "hsvr.bring_object left" = to the left hand.
+                int bring_side = entry.command.find("left", 17) != std::string::npos ? 0 : 1;
+                hsvr::Vec3 hand = hand_grab_point(mesh, bring_side);
                 std::vector<UObject*> comps;
                 UObjectGlobals::FindAllOf(STR("StaticMeshComponent"), comps);
                 UObject* best = nullptr;
@@ -5719,10 +5727,11 @@ namespace
                     Call stop(best, STR("SetPhysicsLinearVelocity"));
                     stop.run();
                     g_bring = best;
+                    g_bring_side = bring_side;
                     g_bring_until = hsvr::now_seconds() + 4.0;
                 }
-                HSVR_LOG("Script: hsvr.bring_object: %d loose objects; moved %ls (was %.0f cm away) to the right hand", loose,
-                         best ? best->GetFullName().c_str() : STR("nothing"), best_d);
+                HSVR_LOG("Script: hsvr.bring_object: %d loose objects; moved %ls (was %.0f cm away) to the %s hand", loose,
+                         best ? best->GetFullName().c_str() : STR("nothing"), best_d, bring_side == 0 ? "left" : "right");
                 continue;
             }
             if (entry.command.rfind("hsvr.trigger ", 0) == 0)
