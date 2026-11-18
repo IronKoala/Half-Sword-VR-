@@ -1285,9 +1285,11 @@ namespace
     }
 
     std::atomic<int> g_fake_arm_mode{0};
+    std::atomic<double> g_fake_two_up{20.0}; // hsvr.arm_move 7 <cm>: the left hand this far above the right
     std::atomic<bool> g_contact_log{true};
 
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
+    bool two_hand_pose(int side, hsvr::Vec3& target, const hsvr::Quat& hand_rot);
     std::atomic<bool> g_hold_reach_clamp{true};
     // Test counters since the last hsvr.mark (for hsvr.expect): stuck let-goes, kicks (a held weapon
     // ending a tick more than 8 cm from where it was sent) and the worst hold lag (cm) per hand.
@@ -1466,6 +1468,13 @@ namespace
             else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
             else if (mode == 5) local = Vec3{45.0, out * 15.0, -175.0}; // under the floor: the weapon is stopped by the ground
             else if (mode == 6) local = Vec3{62.0 + 8.0 * std::sin(now * 1.0), out * 10.0, 5.0}; // reaching out past his arm: the shoulder reaches
+            else if (mode == 7)
+            {
+                // Two hands on one upright weapon: the right still (as mode 1), the left straight above
+                // it by hsvr.arm_move 7 <cm>, from the right shoulder.
+                shoulder = socket_location(g_pose.driver, bone_fname("upperarm_r"));
+                local = Vec3{40.0, 15.0 * (side == 0 ? -1.0 : 1.0) * out, side == 0 ? -10.0 + g_fake_two_up.load() : -10.0};
+            }
             else
             {
                 double t = now * 1.5 + side * 1.5;
@@ -1509,6 +1518,7 @@ namespace
         Vec3 controller_wrist = target;
         Quat controller_rot = Wh;
         bool on_weapon = hand_on_weapon(side, cfg, target, Wh);
+        if (two_hand_pose(side, target, Wh)) on_weapon = true;
         // Where your real hand is, while his stays on a stopped weapon.
         ghost_hand(side, cfg, on_weapon && hand_on_weapon_amount(side) > 0.5 && length(controller_wrist - target) > cfg.pose_ghost_from_cm, controller_wrist,
                    controller_rot);
@@ -2956,6 +2966,7 @@ namespace
         double slide = 0.0;
         bool zone_known = false;
         double zone_lo = 0.0, zone_hi = 0.0;
+        double zone_stop = 0.0, zone_tip = 0.0; // the guard (top stop) and the tip, from the game's grip point
         bool sliding = false;
         double far_since = -1.0, far_logged = 0.0;
     };
@@ -3585,6 +3596,160 @@ namespace
     // grip drops what that hand holds (B&S-style hold-to-hold). A weapon he already holds when the
     // grip is not squeezed (one he spawned with) stays until the next squeeze-and-release.
     // Weapons only for now: objects and bodies need the game's latch tick (grab_pickup.md).
+    // ---- Two hands on one weapon ---------------------------------------------------------------
+    // B&S rules (Matthew's spec 2026-11-18): the free hand squeezes on a weapon the other hand holds,
+    // on its grip or directly on the blade anywhere along it (half-swording, as in real life and the
+    // B&S MegaPack). The first hand keeps the game's hold; the weapon then lies along the line from
+    // the first hand's grip point to the second's, the first hand sets its roll, and the hold is
+    // pose_two_hand_strength times as strong. The second hand's arm is posed onto its spot on the
+    // weapon. Its trigger slides it along the zone it is on, as the first hand's does.
+    struct TwoHand
+    {
+        bool active = false;
+        int main = 1, second = 0;
+        UObject* weapon = nullptr;
+        double z = 0.0;            // the second hand's spot along the weapon, cm from the game's grip point
+        bool on_blade = false;
+        hsvr::Vec3 local{0, 0, 0}; // that spot in BaseMesh's frame (set by the hold each tick)
+        hsvr::Vec3 in_hand{0, 0, 0}; // the palm point in the second hand bone's frame (the first's, mirrored)
+        bool have_local = false;
+        double far_since = -1.0;
+        bool sliding = false;
+    };
+    TwoHand g_two;
+
+    void end_two_hand(const char* why)
+    {
+        if (!g_two.active) return;
+        HSVR_LOG("Two hands: %s hand lets go of %ls (%s)", g_two.second == 0 ? "left" : "right", g_two.weapon ? g_two.weapon->GetName().c_str() : STR("?"), why);
+        g_two = TwoHand{};
+    }
+
+    // The zones the second hand may hold, cm from the game's grip point: the grip (the first hand's
+    // slide zone) and, past the guard, the blade up to half a hand short of the tip.
+    int two_hand_zones(const HoldState& h, const hsvr::Config& cfg, double lo[2], double hi[2])
+    {
+        int n = 0;
+        if (h.zone_hi > h.zone_lo)
+        {
+            lo[n] = h.zone_lo;
+            hi[n] = h.zone_hi;
+            ++n;
+        }
+        double half = cfg.pose_slide_hand_half_cm;
+        double blade_lo = h.zone_stop + half + cfg.pose_two_hand_blade_gap_cm, blade_hi = h.zone_tip - half;
+        if (h.zone_stop > 0.0 && blade_hi > blade_lo + 2.0)
+        {
+            lo[n] = blade_lo;
+            hi[n] = blade_hi;
+            ++n;
+        }
+        return n;
+    }
+
+    // Clamps z into the zone it is in or nearest (within reach); keeps a hand's width from the first
+    // hand at `main_z`. Returns the zone's index, or -1 when z is out of reach of every zone.
+    int two_hand_place(double& z, double main_z, const double lo[2], const double hi[2], int n, double reach, double half)
+    {
+        int best = -1;
+        double best_d = reach;
+        for (int i = 0; i < n; ++i)
+        {
+            double d = z < lo[i] ? lo[i] - z : (z > hi[i] ? z - hi[i] : 0.0);
+            if (d <= best_d)
+            {
+                best_d = d;
+                best = i;
+            }
+        }
+        if (best < 0) return -1;
+        z = (std::min)(hi[best], (std::max)(lo[best], z));
+        if (std::fabs(z - main_z) < 2.0 * half)
+        {
+            z = main_z + (z >= main_z ? 2.0 : -2.0) * half;
+            if (z < lo[best] || z > hi[best]) return -1;
+        }
+        return best;
+    }
+
+    void find_grip_zone(HoldState& h, UObject* weapon, UObject* base, const hsvr::Config& cfg);
+
+    // A squeeze with an empty hand: onto the weapon the other hand holds, if the hand is on it.
+    bool try_two_hand(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_two_hand) return false;
+        int other = 1 - side;
+        UObject* weapon = object_property(pawn, other == 0 ? STR("Weapon L") : STR("Weapon R"));
+        HoldState& h = g_hold[other];
+        if (!weapon || h.weapon != weapon || !h.have_last) return false;
+        UObject* base = object_property(weapon, STR("BaseMesh"));
+        if (!base) return false;
+        double game_z = h.pivot.z - h.slide;
+        if (!h.zone_known)
+        {
+            Vec3 keep = h.pivot;
+            h.pivot.z = game_z;
+            find_grip_zone(h, weapon, base, cfg);
+            h.pivot = keep;
+        }
+        Vec3 bp = component_location(base);
+        Quat bq = component_rotation(base);
+        Vec3 at = hand_grab_point(mesh, side);
+        Vec3 L = bq.inverse().rotate(at - bp);
+        double radial = std::hypot(L.x - h.pivot.x, L.y - h.pivot.y);
+        double want = L.z - game_z;
+        if (radial > cfg.pose_grab_radius_cm + 3.0)
+        {
+            HSVR_LOG("Two hands: %s grip squeezed %.0f cm off the axis of %ls (%.0f cm along it), not on it", side == 0 ? "left" : "right", radial,
+                     weapon->GetName().c_str(), want);
+            return false;
+        }
+        double lo[2], hi[2];
+        int n = two_hand_zones(h, cfg, lo, hi);
+        double z = want;
+        int zone = two_hand_place(z, h.slide, lo, hi, n, cfg.pose_two_hand_reach_cm, cfg.pose_slide_hand_half_cm);
+        if (zone < 0)
+        {
+            HSVR_LOG("Two hands: %s grip squeezed on %ls at %.1f cm, outside its zones (%d zones: %.1f..%.1f / %.1f..%.1f; first hand at %.1f)",
+                     side == 0 ? "left" : "right", weapon->GetName().c_str(), want, n, n > 0 ? lo[0] : 0.0, n > 0 ? hi[0] : 0.0, n > 1 ? lo[1] : 0.0,
+                     n > 1 ? hi[1] : 0.0, h.slide);
+            return false;
+        }
+        g_two = TwoHand{};
+        g_two.active = true;
+        g_two.main = other;
+        g_two.second = side;
+        g_two.weapon = weapon;
+        g_two.z = z;
+        g_two.on_blade = lo[zone] > h.zone_stop && h.zone_stop > 0.0;
+        // Willie's hands mirror across the hand bone's X (kick test 15: a weapon in the left hand sits
+        // at the right's place with X negated).
+        g_two.in_hand = Vec3{-h.in_hand.x, h.in_hand.y, h.in_hand.z};
+        controllers_buzz(side, 0.4f);
+        HSVR_LOG("Two hands: %s hand takes %ls on the %s at %.1f cm (squeezed at %.1f, %.1f cm off the axis; first hand at %.1f)", side == 0 ? "left" : "right",
+                 weapon->GetName().c_str(), g_two.on_blade ? "blade" : "grip", z, want, radial, h.slide);
+        return true;
+    }
+
+    // The second hand's arm: its palm on its spot on the weapon, turned as your hand is.
+    bool two_hand_pose(int side, hsvr::Vec3& target, const hsvr::Quat& hand_rot)
+    {
+        using namespace hsvr;
+        if (!g_two.active || side != g_two.second) return false;
+        if (!g_pose.pawn || object_property(g_pose.pawn, g_two.main == 0 ? STR("Weapon L") : STR("Weapon R")) != g_two.weapon)
+        {
+            end_two_hand("the first hand no longer holds it");
+            return false;
+        }
+        if (!g_two.have_local) return false;
+        UObject* base = object_property(g_two.weapon, STR("BaseMesh"));
+        if (!base) return false;
+        Vec3 spot = component_location(base) + component_rotation(base).rotate(g_two.local);
+        target = spot - hand_rot.rotate(g_two.in_hand);
+        return true;
+    }
+
     void grab_button(const hsvr::Config& cfg, const hsvr::ControllerState& state, bool menu_up)
     {
         using namespace hsvr;
@@ -3609,6 +3774,12 @@ namespace
             UObject* mine = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             if (!now_held)
             {
+                if (g_two.active && side == g_two.second)
+                {
+                    end_two_hand("grip released");
+                    continue;
+                }
+                if (g_two.active && side == g_two.main) end_two_hand("the other hand let go");
                 if (mine && cfg.pose_grab_release_drops)
                 {
                     drop_weapon(side, pawn);
@@ -3620,6 +3791,7 @@ namespace
             }
             if (!mine && bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R"))) continue; // already holds an object
             if (mine || menu_up) continue;
+            if (try_two_hand(side, pawn, mesh, cfg)) continue;
             Vec3 at = hand_grab_point(mesh, side);
             std::vector<UObject*> weapons, willies;
             UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
@@ -3813,6 +3985,8 @@ namespace
         double half = cfg.pose_slide_hand_half_cm;
         h.zone_lo = bottom > 0.0 ? (std::min)(0.0, -bottom + half) : 0.0;
         h.zone_hi = stop < 1e8 ? (std::max)(0.0, stop - half) : 0.0;
+        h.zone_stop = stop < 1e8 ? stop : 0.0;
+        h.zone_tip = top;
         HSVR_LOG("Slide: %ls grip zone %.1f .. %.1f cm from the game's grip (pommel end %.1f, top stop %.1f from the %s, tip %.1f)", weapon->GetName().c_str(),
                  h.zone_lo, h.zone_hi, -bottom, stop < 1e8 ? stop : 0.0, how, top);
     }
@@ -3908,6 +4082,78 @@ namespace
         // The weapon as the game's locked joint would sit it in that hand.
         Quat target_rot = (hand_rot * f2 * f1.inverse()).normalized();
         Vec3 target_pos = hand_pos + hand_rot.rotate(in_hand) - target_rot.rotate(pivot); // weapon origin
+        double two_hand_gain = 1.0;
+        if (g_two.active && g_two.main == side)
+        {
+            if (g_two.weapon != weapon) end_two_hand("the first hand holds another weapon");
+            else if (g_pose.hand_valid[g_two.second])
+            {
+                int s2 = g_two.second;
+                double game_z = pivot.z - h.slide;
+                Vec3 p1 = hand_pos + hand_rot.rotate(in_hand);
+                Vec3 p2 = g_pose.target[s2] + g_pose.hand_rot[s2].rotate(g_two.in_hand);
+                // The second hand's trigger slides it along the zone it is on.
+                ControllerState st2 = controllers_state();
+                float trig = g_fake_trigger[s2].load() >= 0.0f ? g_fake_trigger[s2].load() : st2.hand[s2].trigger;
+                bool on = g_two.sliding ? trig > 0.15f : trig > 0.3f;
+                if (on != g_two.sliding)
+                {
+                    g_two.sliding = on;
+                    HSVR_LOG("Two hands: %s hand %s at %.1f cm", s2 == 0 ? "left" : "right", on ? "starts sliding" : "holds", g_two.z);
+                }
+                Vec3 bp_now = component_location(base);
+                Quat bq_now = component_rotation(base);
+                if (on && h.have_last)
+                {
+                    double dt2 = (std::min)(1.0 / 30.0, (std::max)(1.0 / 240.0, now - h.last_time));
+                    double want = bq_now.inverse().rotate(p2 - bp_now).z - game_z;
+                    double rate = cfg.pose_slide_rate_min + (cfg.pose_slide_rate_max - cfg.pose_slide_rate_min) * (std::min)(1.0, (std::max)(0.0, (trig - 0.15) / 0.85));
+                    double step = (want - g_two.z) * (1.0 - std::exp(-rate * dt2));
+                    double most = cfg.pose_slide_max_cm_s * dt2;
+                    double z = g_two.z + (std::min)(most, (std::max)(-most, step));
+                    double lo[2], hi[2];
+                    int n = two_hand_zones(h, cfg, lo, hi);
+                    // Stays on the zone it is on: the guard stops it.
+                    for (int i = 0; i < n; ++i)
+                        if (g_two.z >= lo[i] - 0.01 && g_two.z <= hi[i] + 0.01)
+                        {
+                            z = (std::min)(hi[i], (std::max)(lo[i], z));
+                            if (std::fabs(z - h.slide) >= 2.0 * cfg.pose_slide_hand_half_cm) g_two.z = z;
+                        }
+                }
+                Vec3 local2{pivot.x, pivot.y, game_z + g_two.z};
+                g_two.local = local2;
+                g_two.have_local = true;
+                double dz = local2.z - pivot.z;
+                Vec3 between = p2 - p1;
+                if (std::fabs(dz) > 1.0 && length(between) > 1.0)
+                {
+                    Vec3 axis_now = target_rot.rotate(Vec3{0, 0, 1});
+                    Vec3 want_axis = normalized(between) * (dz > 0.0 ? 1.0 : -1.0);
+                    Vec3 c = cross(axis_now, want_axis);
+                    double d = dot(axis_now, want_axis);
+                    Quat swing = d < -0.9999 ? quat_axis_angle(normalized(target_rot.rotate(Vec3{1, 0, 0})), 3.14159265358979) : Quat{c.x, c.y, c.z, 1.0 + d}.normalized();
+                    target_rot = (swing * target_rot).normalized();
+                    // The point halfway between the hands on the weapon goes halfway between your hands.
+                    Vec3 mid_local = (pivot + local2) * 0.5;
+                    target_pos = (p1 + p2) * 0.5 - target_rot.rotate(mid_local);
+                    pivot = mid_local;
+                }
+                two_hand_gain = (std::max)(1.0, cfg.pose_two_hand_strength);
+                // A controller pulled well off its spot on the weapon lets go (B&S).
+                Vec3 spot = bp_now + bq_now.rotate(local2);
+                double off = length(p2 - spot);
+                if (off > cfg.pose_two_hand_let_go_cm)
+                {
+                    if (g_two.far_since < 0.0) g_two.far_since = now;
+                    else if (now - g_two.far_since > 0.3) end_two_hand("your hand was pulled off it");
+                }
+                else
+                    g_two.far_since = -1.0;
+                HSVR_LOG_EVERY(1.0, "Two hands: %s on the %s at %.1f cm, first hand at %.1f; hands %.1f cm apart for %.1f cm on the weapon; second hand %.1f cm off its spot",
+                               weapon->GetName().c_str(), g_two.on_blade ? "blade" : "grip", g_two.z, h.slide, length(between), std::fabs(dz), off);
+            }
+        }
 
         double dt = h.have_last ? now - h.last_time : 1.0 / 72.0;
         dt = (std::min)(1.0 / 30.0, (std::max)(1.0 / 240.0, dt));
@@ -3932,7 +4178,7 @@ namespace
 
         // The hand's hold (SI as in the framework, then in Unreal's units: cm, so a force x100, a
         // turning spring, damper and torque x100^2), times its strength (its dampers by half of it past 1).
-        double strength = (std::max)(0.0, cfg.pose_hold_strength);
+        double strength = (std::max)(0.0, cfg.pose_hold_strength) * two_hand_gain;
         double damp_strength = (std::max)(1.0, strength * 0.5);
         double k = cfg.pose_hold_spring * strength;
         double c = cfg.pose_hold_damper * damp_strength;
@@ -5934,6 +6180,8 @@ namespace
             if (entry.command.rfind("hsvr.arm_move ", 0) == 0)
             {
                 g_fake_arm_mode.store(atoi(entry.command.c_str() + 14));
+                size_t sp = entry.command.find(' ', 14);
+                if (sp != std::string::npos) g_fake_two_up.store(atof(entry.command.c_str() + sp + 1));
                 continue;
             }
             if (entry.command.rfind("hsvr.weapon_channel ", 0) == 0)

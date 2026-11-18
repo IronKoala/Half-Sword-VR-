@@ -63,6 +63,10 @@ Next: your strength from the game's stats instead of a fixed number, the hand st
 | `pose_slide_max_cm_s` | 250 | Fastest the hand runs along a weapon (a game hitch is not a slide). No slide in the first second a weapon is in the hand. |
 | `pose_hold_let_go_grace_s` | 1.0 | No stuck let-go this long after a weapon comes into the hand, or while it is still closing in (long weapons swing into place). |
 | `pose_hold_ignore_hand` | 1 | The held weapon never collides with the hand holding it (its forearm never does either). |
+| `pose_two_hand` | 1 | Two hands on one weapon: squeeze the free hand on a weapon the other hand holds, on the grip or anywhere along the blade (half-swording). The weapon lies along the line between the hands, the first hand sets its roll, and the hold is `pose_two_hand_strength` (2) times as strong. The second hand's trigger slides it along the zone it is on; the guard stops it. |
+| `pose_two_hand_blade_gap_cm` | 3 | The blade zone starts this far past the guard (plus half a hand). |
+| `pose_two_hand_reach_cm` | 6 | A squeeze this close to a zone (along the weapon) still lands on it. |
+| `pose_two_hand_let_go_cm` | 25 | The second hand lets go when its controller is pulled this far off its spot for 0.3 s. |
 | `pose_hold_block_offhand_search` | 1 | Keeps the game's off-hand search off for a free other hand while the mod holds a weapon ("Block <other> OffHand Grab" kept on and "<other> Offhand Searching Grip" off, just before his tick; a hand holding or grabbing something is left alone). With a longsword in one hand and the other free, the game re-seated the weapon about once a second (teleport to the hand socket and back), which shoved it across the blade. 0 = leave the game's search alone. |
 | `pose_hold_contact_cm` | 0.5 | The stuck rule only lets go of a weapon that is touching something: one that ended the last tick this far short of where the hold sent it (B&S also needs contact). A weapon that only lags is kept. |
 
@@ -111,6 +115,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `hsvr.mark` | Clears the test counters (let-goes, kicks, worst hold lag) |
 | `hsvr.expect <what> <op> <value> [label]` | Logs "EXPECT PASS" or "EXPECT FAIL". what: held_r, held_l, grabbed_r, grabbed_l, letgo and kicks (counts since hsvr.mark), lag_r, lag_l (worst cm since hsvr.mark); op: < <= = >= > |
 | `hsvr.joint_trace 0/1` | Logs the right hand joint every tick before and after our free, with his soft-attach variables ("Joint:") |
+| `hsvr.arm_move 7 <cm>` | Fake arms for two-hand tests: the right hand still in front, the left this many cm straight above it |
 | `hsvr.watch_vars grip,offhand,stuck` | Every tick, logs each change ("Watch: <time> pawn.<name> old -> new") of the number, yes/no and enum variables on his pawn and on the weapon in each hand whose names contain one of the words (case ignored). No words = stop. For matching a game routine to a kick by its timing |
 | `hsvr.passive_foe` | Makes every foe a training dummy: its AI controller stopped (DED, tick off, movement stopped) and its attack inputs cleared; its physics, balance and get-up keep working. Spawn one with Free Mode Foes Amount=1, Brawling off, and run this right after it spawns |
 | `hsvr.force_watch 0/1` | Logs ("Force:") every physics write from game script (impulses, forces, velocities, teleports, collision and physics switches) on a part of a weapon in his hands or his own body, with the calling Blueprint function and bytecode offset |

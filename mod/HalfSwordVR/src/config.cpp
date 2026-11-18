@@ -336,6 +336,11 @@ namespace hsvr
         num("pose_slide_max_cm_s", c.pose_slide_max_cm_s);
         flag("pose_grab_button", c.pose_grab_button);
         num("pose_grab_radius_cm", c.pose_grab_radius_cm);
+        flag("pose_two_hand", c.pose_two_hand);
+        num("pose_two_hand_strength", c.pose_two_hand_strength);
+        num("pose_two_hand_blade_gap_cm", c.pose_two_hand_blade_gap_cm);
+        num("pose_two_hand_reach_cm", c.pose_two_hand_reach_cm);
+        num("pose_two_hand_let_go_cm", c.pose_two_hand_let_go_cm);
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
         flag("pose_grab_objects", c.pose_grab_objects);
         flag("pose_ghost_hand", c.pose_ghost_hand);

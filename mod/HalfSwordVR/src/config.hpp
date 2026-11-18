@@ -232,6 +232,16 @@ namespace hsvr
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;
+        // Two hands on one weapon (B&S rules): squeeze the free hand on a weapon the other hand holds,
+        // on its grip or anywhere along its blade (half-swording, Matthew 2026-11-18). The weapon then
+        // lies along the line between the hands, the first hand sets its roll, and the hold is
+        // pose_two_hand_strength times as strong. The blade zone starts pose_two_hand_blade_gap_cm
+        // past the guard. A controller pulled more than pose_two_hand_let_go_cm off its spot lets go.
+        bool pose_two_hand = true;
+        double pose_two_hand_strength = 2.0;
+        double pose_two_hand_blade_gap_cm = 3.0;
+        double pose_two_hand_reach_cm = 6.0; // how far from the zones a squeeze still lands on them
+        double pose_two_hand_let_go_cm = 25.0;
         // The ghost hand: while his hand stays on a stopped weapon more than pose_ghost_from_cm from
         // your real hand, a see-through glove shows where your hand is. Mesh and material are object
         // paths in the cooked game; offset (cm) and turn (deg) from the hand bone, and scale, for fitting.
