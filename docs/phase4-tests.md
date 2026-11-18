@@ -69,7 +69,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | Step | What it does |
 |---|---|
 | `hsvr.give_weapon passport <inventory asset> <index>` | Equips a fully built weapon; replaces the one in the hand |
-| `hsvr.match_won` | Sets what the game sets when the last enemy dies (GameMode "Match Won", his "Match Won (Player)"), to test continuing without a fight |
+| `hsvr.match_won [0]` | Sets (0 clears) what the game sets when the last enemy dies (GameMode "Match Won", his "Match Won (Player)"), to test continuing without a fight |
 | `hsvr.press_a 0/1` | 1 holds right A for the menu buttons (continue after a win) |
 | `hsvr.ghost_show 0/1` | 1 shows the ghost hand at your hand all the time (for fitting it) |
 | `hsvr.hold_reach 0/1` | 0 lets the hold aim past his reach (to push a held weapon into the floor with arm_move 5); 1 (default) clamps it to his reach |

@@ -4733,9 +4733,10 @@ namespace
                 find_pawn_mesh(&pawn);
                 UObject* world = object_property(object_property(g_engine, STR("GameViewport")), STR("World"));
                 UObject* game_mode = object_property(world, STR("AuthorityGameMode"));
-                bool a = set_bool_property(game_mode, STR("Match Won"), true);
-                bool b = set_bool_property(pawn, STR("Match Won (Player)"), true);
-                HSVR_LOG("Script: hsvr.match_won: game mode %ls (Match Won set %d), character Match Won (Player) set %d",
+                bool won = entry.command.size() <= 15 || atoi(entry.command.c_str() + 15) != 0; // "hsvr.match_won 0" clears
+                bool a = set_bool_property(game_mode, STR("Match Won"), won);
+                bool b = set_bool_property(pawn, STR("Match Won (Player)"), won);
+                HSVR_LOG("Script: hsvr.match_won %d: game mode %ls (Match Won set %d), character Match Won (Player) set %d", (int)won,
                          game_mode ? game_mode->GetFullName().c_str() : STR("missing"), (int)a, (int)b);
                 continue;
             }
