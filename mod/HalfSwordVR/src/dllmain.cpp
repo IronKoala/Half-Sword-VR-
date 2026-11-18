@@ -394,6 +394,7 @@ namespace
     // the same Blueprint and are left alone.
     // -1 = follow dev_player_physics_off; 0/1 = set by the unattended script (hsvr.physics_off).
     int g_physics_override = -1;
+    std::atomic<bool> g_joint_trace{false}; // hsvr.joint_trace 1: the right hand joint every tick, before and after our free
 
     // Once a second while log_body is on or the physics test runs: where the character is.
     void log_body(UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
@@ -1837,6 +1838,7 @@ namespace
             if (is_simulating(mesh, "pelvis") == 1)
             {
                 HSVR_LOG_EVERY(5.0, "Pose: the game switched physics on again; switching it off");
+                if (g_joint_trace.load()) HSVR_LOG("Joint: physics found on at the pelvis and switched off again (this tick)");
                 apply_arm_physics(cfg);
             }
         }
@@ -4109,7 +4111,6 @@ namespace
     // mass and centre of mass). Logs each tick a held weapon's body changes, and the flags around it.
     // hsvr.stuck_check 0 pins Willie's check rate at 0 so his loop never fires (a test, not a fix).
     std::atomic<int> g_stuck_check{1};
-    std::atomic<bool> g_joint_trace{false}; // hsvr.joint_trace 1: the right hand joint every tick, before and after our free
     void watch_weapon_rebuild(int side, UObject* pawn, UObject* weapon, UObject* base, double mass)
     {
         using namespace hsvr;
