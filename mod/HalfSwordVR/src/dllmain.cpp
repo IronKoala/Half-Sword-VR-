@@ -3023,9 +3023,38 @@ namespace
         if (show)
         {
             double out = side == 0 ? -1.0 : 1.0;
-            Quat rot = (hand_rot * rot_to_quat(cfg.pose_ghost_pitch, cfg.pose_ghost_yaw * out, cfg.pose_ghost_roll * out)).normalized();
+            // The glove mesh (bounds from the cooked asset, run 32): its cuff at the origin, fingers
+            // along +Z, thumb toward -Y. Turned so its fingers and thumb lie along the hand bone's
+            // (measured at calibration); the left glove is the right one mirrored in Y (scale -1), so
+            // its thumb is toward +Y. The ini turn (pitch, yaw, roll) is applied on top, in the glove's frame.
+            const ArmCalibration& a = g_pose.arm[side];
+            Vec3 fingers = hand_rot.rotate(a.fingers_local), thumb = hand_rot.rotate(a.thumb_local);
+            Vec3 y = side == 0 ? thumb : thumb * -1.0;
+            Vec3 x = cross(y, fingers);
+            Quat glove = quat_from_axes(x, y);
+            Quat rot = (glove * rot_to_quat(cfg.pose_ghost_pitch, cfg.pose_ghost_yaw * out, cfg.pose_ghost_roll * out)).normalized();
             Vec3 at = wrist + hand_rot.rotate(Vec3{cfg.pose_ghost_x_cm, cfg.pose_ghost_y_cm * out, cfg.pose_ghost_z_cm});
             set_component_transform(g.comp, at, rot, true);
+            Call scale_set(g.comp, STR("SetWorldScale3D"));
+            scale_set.three(STR("NewScale"), cfg.pose_ghost_scale, cfg.pose_ghost_scale * (side == 0 ? -1.0 : 1.0), cfg.pose_ghost_scale);
+            scale_set.run();
+            static double last_log[2] = {0.0, 0.0};
+            double now = now_seconds();
+            if (now - last_log[side] >= 1.0 && g_pose.mesh)
+            {
+                last_log[side] = now;
+                FName hb = bone_fname(side == 0 ? "hand_l" : "hand_r");
+                Vec3 hand_at = socket_location(g_pose.mesh, hb);
+                Rot hr = quat_to_rot(socket_rotation(g_pose.mesh, hb)), gr = quat_to_rot(rot), cr = quat_to_rot(hand_rot);
+                Vec3 tip = at + rot.rotate(Vec3{0.0, 0.0, 20.0 * cfg.pose_ghost_scale});
+                Call sc(g.comp, STR("K2_GetComponentScale"));
+                sc.run();
+                Vec3 scale = sc.vec();
+                HSVR_LOG("Ghost: %s at (%.1f, %.1f, %.1f) rot (%.0f, %.0f, %.0f), its fingertips at (%.1f, %.1f, %.1f); your hand at (%.1f, %.1f, %.1f) "
+                         "rot (%.0f, %.0f, %.0f); his hand bone at (%.1f, %.1f, %.1f) rot (%.0f, %.0f, %.0f); scale (%.2f, %.2f, %.2f)",
+                         side == 0 ? "left" : "right", at.x, at.y, at.z, gr.pitch, gr.yaw, gr.roll, tip.x, tip.y, tip.z, wrist.x, wrist.y, wrist.z, cr.pitch,
+                         cr.yaw, cr.roll, hand_at.x, hand_at.y, hand_at.z, hr.pitch, hr.yaw, hr.roll, scale.x, scale.y, scale.z);
+            }
         }
         if (show != g.visible)
         {
