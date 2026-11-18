@@ -334,6 +334,7 @@ namespace hsvr
         flag("pose_grab_button", c.pose_grab_button);
         num("pose_grab_radius_cm", c.pose_grab_radius_cm);
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
+        flag("pose_grab_objects", c.pose_grab_objects);
         flag("pose_ghost_hand", c.pose_ghost_hand);
         num("pose_ghost_from_cm", c.pose_ghost_from_cm);
         text("pose_ghost_mesh", c.pose_ghost_mesh);

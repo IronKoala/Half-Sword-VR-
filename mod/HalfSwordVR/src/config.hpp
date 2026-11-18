@@ -225,6 +225,8 @@ namespace hsvr
         bool pose_grab_button = true;
         double pose_grab_radius_cm = 10.0;
         bool pose_grab_release_drops = true;
+        // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
+        bool pose_grab_objects = true;
         // The ghost hand: while his hand stays on a stopped weapon more than pose_ghost_from_cm from
         // your real hand, a see-through glove shows where your hand is. Mesh and material are object
         // paths in the cooked game; offset (cm) and turn (deg) from the hand bone, and scale, for fitting.

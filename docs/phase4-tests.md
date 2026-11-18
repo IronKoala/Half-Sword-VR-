@@ -53,7 +53,8 @@ Next: your strength from the game's stats instead of a fixed number, the hand st
 - Squeeze a controller's grip with that hand empty: the nearest loose weapon whose body is within `pose_grab_radius_cm` of the hand (the weapon socket the game snaps weapons to) is picked up with the game's own call, Set Up Right/Left Hand Weapon (what its grab does once the hand reaches a weapon; grab_pickup.md). The game snaps the weapon's default grip into the hand; the hold then takes over. The controller buzzes.
 - Let go of the grip: that hand drops what it holds (the game's own drop, no damage).
 - A weapon you already hold without squeezing (the one you spawn with) stays until you squeeze and let go.
-- Weapons only for now (anything the game counts as a ModularWeaponBP: weapons, shields, tools, bottles). Loose means not sheathed and not in anyone's hand. Objects and bodies come next, through the game's own latch.
+- Weapons are anything the game counts as a ModularWeaponBP (weapons, shields, tools, bottles). Loose means not sheathed and not in anyone's hand.
+- With no weapon in reach, the nearest other simulating body within the same distance (a loose object, armour, food, or anyone's bone) is handed to the game's own grab the way its search does it: Grab Component/Bone set, GrabPoint put on the spot, Stuck Meter 0, Grab Target Found (grab_pickup.md, UF @523112). Its next tick builds the hand joint with its own handling. If the game hasn't grabbed it 0.3 s later, a plain object goes to Grab Specific Object instead; a body is left. Letting go calls the game's Release Grab. Log lines: "Grab: ... handed to the game's latch", "the game grabbed", "Grab Specific Object", "Release Grab called".
 - Log lines: "Grab: ... took", "Grab: ... no loose weapon within", "Grab: ... let go: dropped".
 
 | Setting | Default | What it does |
@@ -61,6 +62,7 @@ Next: your strength from the game's stats instead of a fixed number, the hand st
 | `pose_grab_button` | 1 | The grab button. |
 | `pose_grab_radius_cm` | 10 | How near the weapon's body your hand must be. |
 | `pose_grab_release_drops` | 1 | Letting go of the grip drops the weapon. |
+| `pose_grab_objects` | 1 | Objects and bodies can be grabbed too. |
 
 ## Menu controls
 
@@ -84,6 +86,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 |---|---|
 | `hsvr.give_weapon passport <inventory asset> <index>` | Equips a fully built weapon; replaces the one in the hand |
 | `hsvr.match_won [0]` | Sets (0 clears) what the game sets when the last enemy dies (GameMode "Match Won", his "Match Won (Player)"), to test continuing without a fight |
+| `hsvr.bring_object` | Moves the nearest loose physics object (not a weapon or character) to the right hand with its gravity off, to test the object grab |
 | `hsvr.squeeze <0/1> <value>` | Fakes the left (0) or right (1) grip squeeze (0..1); -1 gives it back to the controller |
 | `hsvr.press_a 0/1` | 1 holds right A for the menu buttons (continue after a win) |
 | `hsvr.ghost_show 0/1` | 1 shows the ghost hand at your hand all the time (for fitting it) |

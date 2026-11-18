@@ -3262,6 +3262,231 @@ namespace
         return socket_location(mesh, exists ? sockets[side] : bone_fname(side == 0 ? "hand_l" : "hand_r"));
     }
 
+    // Writes a Blueprint variable of the character by name: a number, yes/no, object or name. False
+    // (and the name logged by the caller) if it has no such variable of a fitting kind.
+    bool set_variable(UObject* owner, const TCHAR* name, double number, UObject* object = nullptr, const FName* fname = nullptr)
+    {
+        if (!owner) return false;
+        FProperty* p = owner->GetPropertyByNameInChain(name);
+        if (!p) return false;
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
+        auto kind = p->GetClass().GetName();
+        if (kind == STR("DoubleProperty")) *reinterpret_cast<double*>(at) = number;
+        else if (kind == STR("FloatProperty")) *reinterpret_cast<float*>(at) = (float)number;
+        else if (kind == STR("BoolProperty")) return set_bool_property(owner, name, number != 0.0);
+        else if (kind == STR("ObjectProperty")) *reinterpret_cast<UObject**>(at) = object;
+        else if (kind == STR("NameProperty") && fname) *reinterpret_cast<FName*>(at) = *fname;
+        else return false;
+        return true;
+    }
+
+    // Is the object's class, or one it is built on, named `class_name` (e.g. ModularWeaponBP_C)?
+    bool is_a(UObject* object, const TCHAR* class_name)
+    {
+        if (!object) return false;
+        for (UStruct* level = object->GetClassPrivate(); level; level = level->GetSuperStruct())
+            if (level->GetName() == class_name) return true;
+        return false;
+    }
+
+    // Does a list of names (actor Tags / ComponentTags) hold this one?
+    bool has_tag(UObject* owner, const TCHAR* list, const TCHAR* tag)
+    {
+        if (!owner) return false;
+        RawArray* tags = owner->GetValuePtrByPropertyNameInChain<RawArray>(list);
+        if (!tags || !tags->Data) return false;
+        std::wstring want(tag);
+        const FName* names = reinterpret_cast<const FName*>(tags->Data);
+        for (int32_t i = 0; i < tags->Num; ++i)
+            if (names[i].ToString() == want) return true;
+        return false;
+    }
+
+    // An object or body grab in progress: handed to the game's own latch, checked a few ticks later.
+    struct ObjectGrab
+    {
+        UObject* component = nullptr;
+        FName bone;
+        hsvr::Vec3 point{0, 0, 0};
+        bool character = false;
+        double since = -1.0;
+        bool fallback_tried = false;
+    };
+    ObjectGrab g_object_grab[2];
+
+    // Squeezing near something that is not a weapon: a loose physics object (brick, barrel, armour
+    // piece, food) or a body (anyone's bone, the dead too). The nearest simulating body within
+    // pose_grab_radius_cm of the hand is handed to the game's own grab the way its search does it
+    // (grab_pickup.md "Grab button follow-up", UF @523112): Grab Component / Grab Bone set, GrabPoint
+    // put on the spot, Stuck Meter 0, then Grab Target Found, and its next tick builds the hand joint
+    // with its full handling (unbreakable joints and limb/throat flags on characters, carried armour).
+    // If the game has not grabbed it 0.3 s later, a plain object is given to Grab Specific Object
+    // (the game's direct grab, which has no special handling); a body is left.
+    bool grab_object(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg, const hsvr::Vec3& at)
+    {
+        using namespace hsvr;
+        const char* hand = side == 0 ? "left" : "right";
+        static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        if (!cdo) return false;
+        static uint8_t types[32];
+        for (int i = 0; i < 32; ++i) types[i] = (uint8_t)i;
+        Call ov(cdo, STR("SphereOverlapComponents"));
+        FProperty* ot = ov.param(STR("ObjectTypes"));
+        FProperty* out = ov.param(STR("OutComponents"));
+        if (!ot || !out)
+        {
+            HSVR_LOG("Grab: no SphereOverlapComponents, objects can't be grabbed");
+            return false;
+        }
+        ov.object(STR("WorldContextObject"), pawn);
+        ov.three(STR("SpherePos"), at.x, at.y, at.z);
+        ov.number(STR("SphereRadius"), cfg.pose_grab_radius_cm);
+        RawArray* list = reinterpret_cast<RawArray*>(ov.buffer.data() + ot->GetOffset_Internal());
+        list->Data = reinterpret_cast<void**>(types);
+        list->Num = list->Max = 32;
+        ov.run();
+        RawArray* found = reinterpret_cast<RawArray*>(ov.buffer.data() + out->GetOffset_Internal());
+        std::vector<UObject*> components;
+        for (int32_t i = 0; i < found->Num && found->Data; ++i) components.push_back(reinterpret_cast<UObject*>(found->Data[i]));
+        found->Data = nullptr; // the engine's list; left (a few bytes per grab)
+        found->Num = found->Max = 0;
+        list->Data = nullptr;
+        list->Num = list->Max = 0;
+
+        static const FName none_bone = FName(STR("None"), FNAME_Add);
+        UObject* best = nullptr;
+        FName best_bone = none_bone;
+        Vec3 best_point{0, 0, 0};
+        double best_d = cfg.pose_grab_radius_cm;
+        std::wstring seen;
+        for (UObject* c : components)
+        {
+            if (!c) continue;
+            Call owner_call(c, STR("GetOwner"));
+            owner_call.run();
+            UObject* owner = owner_call.object_result();
+            if (!owner || owner == pawn) continue;
+            if (is_a(owner, STR("ModularWeaponBP_C"))) continue;
+            if (has_tag(c, STR("ComponentTags"), STR("NoGrab")) || has_tag(owner, STR("Tags"), STR("Sheathed"))) continue;
+            FName bone = none_bone;
+            bool skeletal = c->GetFunctionByNameInChain(STR("FindClosestBone_K2")) != nullptr;
+            if (skeletal)
+            {
+                Call fb(c, STR("FindClosestBone_K2"));
+                fb.three(STR("TestLocation"), at.x, at.y, at.z);
+                fb.flag(STR("bRequirePhysicsAsset"), true);
+                fb.run();
+                if (FProperty* rp = fb.param(STR("ReturnValue"))) bone = *reinterpret_cast<FName*>(fb.buffer.data() + rp->GetOffset_Internal());
+            }
+            Call sim(c, STR("IsSimulatingPhysics"));
+            sim.name(STR("BoneName"), bone);
+            sim.run();
+            FProperty* sp = sim.param(STR("ReturnValue"));
+            bool simulating = sp && *(sim.buffer.data() + sp->GetOffset_Internal());
+            seen += owner->GetName() + STR(".") + c->GetName() + (skeletal ? STR(":") + bone.ToString() : std::wstring()) + (simulating ? STR(" sim, ") : STR(" still, "));
+            if (!simulating) continue;
+            Call closest(c, STR("GetClosestPointOnCollision"));
+            closest.three(STR("Point"), at.x, at.y, at.z);
+            closest.name(STR("BoneName"), bone);
+            closest.run();
+            double d = closest.number();
+            if (d < 0.0 || d > best_d) continue;
+            best_d = d;
+            best = c;
+            best_bone = bone;
+            best_point = d > 0.0 ? closest.vec(STR("OutPointOnBody")) : at;
+        }
+        if (!best)
+        {
+            HSVR_LOG("Grab: %s grip squeezed, nothing to grab within %.0f cm (overlapping: %ls)", hand, cfg.pose_grab_radius_cm, seen.empty() ? STR("none") : seen.c_str());
+            return false;
+        }
+        Call owner_call(best, STR("GetOwner"));
+        owner_call.run();
+        UObject* owner = owner_call.object_result();
+        bool character = is_a(owner, STR("Willie_BP_C"));
+        bool L = side == 0;
+        std::wstring missing;
+        auto need = [&](bool ok, const TCHAR* n) { if (!ok) missing += std::wstring(n) + STR(", "); };
+        bool blocked = bool_property(pawn, L ? STR("Block Grab L") : STR("Block Grab R")) || bool_property(pawn, L ? STR("Hand L Torn Off") : STR("Hand R Torn Off")) ||
+                       bool_property(pawn, STR("Swapping weapons"));
+        if (blocked) HSVR_LOG("Grab: %s hand: the game blocks grabbing right now (Block Grab / Torn Off / Swapping weapons)", hand);
+        need(set_variable(pawn, L ? STR("Grab Component L") : STR("Grab Component R"), 0, best), L ? STR("Grab Component L") : STR("Grab Component R"));
+        need(set_variable(pawn, L ? STR("Grab Bone L") : STR("Grab Bone R"), 0, nullptr, &best_bone), L ? STR("Grab Bone L") : STR("Grab Bone R"));
+        UObject* grab_point = object_property(pawn, L ? STR("GrabPoint L") : STR("GrabPoint R"));
+        need(grab_point != nullptr, L ? STR("GrabPoint L") : STR("GrabPoint R"));
+        if (grab_point)
+        {
+            Call move(grab_point, STR("K2_SetWorldLocation"));
+            move.three(STR("NewLocation"), best_point.x, best_point.y, best_point.z);
+            move.run();
+        }
+        need(set_variable(pawn, L ? STR("Stuck Meter L Hand") : STR("Stuck Meter R Hand"), 0.0), L ? STR("Stuck Meter L Hand") : STR("Stuck Meter R Hand"));
+        need(set_variable(pawn, L ? STR("Grab L Target Found") : STR("Grab R Target Found"), 1.0), L ? STR("Grab L Target Found") : STR("Grab R Target Found"));
+        ObjectGrab& g = g_object_grab[side];
+        g.component = best;
+        g.bone = best_bone;
+        g.point = best_point;
+        g.character = character;
+        g.since = now_seconds();
+        g.fallback_tried = false;
+        controllers_buzz(side, 0.4f);
+        HSVR_LOG("Grab: %s grip on %ls.%ls bone %ls (%.1f cm from the hand)%ls: handed to the game's latch%ls%ls", hand, owner ? owner->GetName().c_str() : STR("?"),
+                 best->GetName().c_str(), best_bone.ToString().c_str(), best_d, character ? STR(", a body") : STR(""), missing.empty() ? STR("") : STR("; missing: "),
+                 missing.c_str());
+        return true;
+    }
+
+    // A few ticks after handing an object to the game's latch: did the game grab it?
+    void check_object_grab(int side, UObject* pawn)
+    {
+        using namespace hsvr;
+        ObjectGrab& g = g_object_grab[side];
+        if (!g.component || g.since < 0.0 || g.fallback_tried) return;
+        double age = now_seconds() - g.since;
+        bool L = side == 0;
+        bool grabbed = bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R"));
+        if (grabbed)
+        {
+            HSVR_LOG("Grab: %s hand: the game grabbed %ls after %.2f s", L ? "left" : "right", g.component->GetName().c_str(), age);
+            g.fallback_tried = true;
+            return;
+        }
+        if (age < 0.3) return;
+        g.fallback_tried = true;
+        set_variable(pawn, L ? STR("Grab L Target Found") : STR("Grab R Target Found"), 0.0);
+        if (g.character)
+        {
+            HSVR_LOG("Grab: %s hand: the game did not take the body in 0.3 s; left", L ? "left" : "right");
+            return;
+        }
+        UFunction* fn = pawn->GetFunctionByNameInChain(L ? STR("Grab Specific Object L H") : STR("Grab Specific Object R H"));
+        if (!fn)
+        {
+            HSVR_LOG("Grab: %s hand: the game did not take it and there is no Grab Specific Object", L ? "left" : "right");
+            return;
+        }
+        Call c(pawn, L ? STR("Grab Specific Object L H") : STR("Grab Specific Object R H"));
+        for (FProperty* p : c.fn->ForEachProperty())
+            if (p->GetClass().GetName() == STR("ObjectProperty")) *reinterpret_cast<UObject**>(c.buffer.data() + p->GetOffset_Internal()) = g.component;
+            else if (p->GetClass().GetName() == STR("StructProperty")) write_three(c.buffer.data() + p->GetOffset_Internal(), p, g.point.x, g.point.y, g.point.z);
+        c.run();
+        HSVR_LOG("Grab: %s hand: the game did not take it in 0.3 s; Grab Specific Object -> Grabbed %d", L ? "left" : "right",
+                 (int)bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R")));
+    }
+
+    // Lets go of an object or body the game's grab holds in that hand (Release Grab R/L).
+    void release_object(int side, UObject* pawn)
+    {
+        bool L = side == 0;
+        g_object_grab[side] = ObjectGrab{};
+        if (!bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R"))) return;
+        Call c(pawn, L ? STR("Release Grab L") : STR("Release Grab R"));
+        bool ok = c.run();
+        HSVR_LOG("Grab: %s grip let go: %ls (Grabbed now %d)", L ? "left" : "right", ok ? STR("Release Grab called") : STR("no Release Grab function"),
+                 (int)bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R")));
+    }
+
     // The grab button (Phase 4): squeezing a controller's grip with that hand empty picks up the
     // nearest loose weapon whose body is within pose_grab_radius_cm of the hand; letting go of the
     // grip drops what that hand holds (B&S-style hold-to-hold). A weapon he already holds when the
@@ -3279,6 +3504,7 @@ namespace
             held[0] = held[1] = false;
             return;
         }
+        for (int side = 0; side < 2; ++side) check_object_grab(side, pawn);
         for (int side = 0; side < 2; ++side)
         {
             float squeeze = g_fake_squeeze[side].load() >= 0.0f ? g_fake_squeeze[side].load() : state.hand[side].squeeze;
@@ -3294,8 +3520,11 @@ namespace
                     drop_weapon(side, pawn);
                     HSVR_LOG("Grab: %s grip let go: dropped %ls", hand, mine->GetName().c_str());
                 }
+                else if (!mine)
+                    release_object(side, pawn);
                 continue;
             }
+            if (!mine && bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R"))) continue; // already holds an object
             if (mine || menu_up) continue;
             Vec3 at = hand_grab_point(mesh, side);
             std::vector<UObject*> weapons, willies;
@@ -3341,6 +3570,7 @@ namespace
                     best = w;
                 }
             }
+            if (!best && cfg.pose_grab_objects && grab_object(side, pawn, mesh, cfg, at)) continue;
             if (!best)
             {
                 HSVR_LOG("Grab: %s grip squeezed, no loose weapon within %.0f cm (%d loose of %d; nearest %ls at %.0f cm; hand at %.0f %.0f %.0f)", hand,
@@ -4863,6 +5093,54 @@ namespace
             if (entry.command.rfind("hsvr.ghost_show ", 0) == 0)
             {
                 g_ghost_force.store(atoi(entry.command.c_str() + 16) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.bring_object", 0) == 0)
+            {
+                // Test: the nearest loose physics object (not a weapon, not a character) is moved to
+                // the right hand with its gravity off, so the object grab can be tried unattended.
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                if (!mesh) continue;
+                hsvr::Vec3 hand = hand_grab_point(mesh, 1);
+                std::vector<UObject*> comps;
+                UObjectGlobals::FindAllOf(STR("StaticMeshComponent"), comps);
+                UObject* best = nullptr;
+                double best_d = 3000.0;
+                int loose = 0;
+                for (UObject* c : comps)
+                {
+                    if (!c || c->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                    Call owner_call(c, STR("GetOwner"));
+                    owner_call.run();
+                    UObject* owner = owner_call.object_result();
+                    if (!owner || owner == pawn || is_a(owner, STR("ModularWeaponBP_C")) || is_a(owner, STR("Willie_BP_C"))) continue;
+                    Call sim(c, STR("IsSimulatingPhysics"));
+                    sim.run();
+                    FProperty* sp = sim.param(STR("ReturnValue"));
+                    if (!sp || !*(sim.buffer.data() + sp->GetOffset_Internal())) continue;
+                    ++loose;
+                    double d = hsvr::length(component_location(c) - hand);
+                    if (d < best_d)
+                    {
+                        best_d = d;
+                        best = c;
+                    }
+                }
+                if (best)
+                {
+                    Call g(best, STR("SetEnableGravity"));
+                    g.first_flag(false);
+                    g.run();
+                    Call move(best, STR("K2_SetWorldLocation"));
+                    move.three(STR("NewLocation"), hand.x, hand.y, hand.z + 4.0);
+                    move.flag(STR("bTeleport"), true);
+                    move.run();
+                    Call stop(best, STR("SetPhysicsLinearVelocity"));
+                    stop.run();
+                }
+                HSVR_LOG("Script: hsvr.bring_object: %d loose objects; moved %ls (was %.0f cm away) to the right hand", loose,
+                         best ? best->GetFullName().c_str() : STR("nothing"), best_d);
                 continue;
             }
             if (entry.command.rfind("hsvr.squeeze ", 0) == 0)
