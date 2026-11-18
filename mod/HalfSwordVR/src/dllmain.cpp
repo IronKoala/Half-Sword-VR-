@@ -4100,6 +4100,50 @@ namespace
         h.turn_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(dq.w))) * 180.0 / 3.14159265358979;
     }
 
+    // The kick hunt (kick-test1): the game's Check Stuck In Static Mesh (MW @77374), run on a 1 s
+    // loop from Willie (UF @478416-@480455) and from the weapon itself once it has unstuck, toggles
+    // the collision of every part of a weapon, which in UE 5.4 rebuilds the welded body (new shapes,
+    // mass and centre of mass). Logs each tick a held weapon's body changes, and the flags around it.
+    // hsvr.stuck_check 0 pins Willie's check rate at 0 so his loop never fires (a test, not a fix).
+    std::atomic<int> g_stuck_check{1};
+    void watch_weapon_rebuild(int side, UObject* pawn, UObject* weapon, UObject* base, double mass)
+    {
+        using namespace hsvr;
+        struct Seen
+        {
+            UObject* weapon = nullptr;
+            double mass = 0.0;
+            Vec3 com_local{0, 0, 0};
+            bool unstuck = false;
+        };
+        static Seen seen[2];
+        if (!g_stuck_check.load()) set_variable(pawn, STR("Weapon Stuck In Static Mesh Check Rate"), 0.0);
+        Call cm(base, STR("GetCenterOfMass"));
+        cm.run();
+        Vec3 com_local = component_rotation(base).inverse().rotate(cm.vec() - component_location(base));
+        bool unstuck = bool_property(weapon, STR("Static Mesh Collision Disabled (Unstuck)"));
+        Seen& s = seen[side];
+        if (s.weapon == weapon)
+        {
+            double moved = length(com_local - s.com_local);
+            if (std::fabs(mass - s.mass) > 0.005 || moved > 0.3 || unstuck != s.unstuck)
+            {
+                double rate = 0.0;
+                if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Weapon Stuck In Static Mesh Check Rate"))) rate = number_property(pawn, p);
+                double md = 0.0;
+                if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Movement Dislocation"))) md = number_property(pawn, p);
+                HSVR_LOG("Kick: %s weapon body changed: mass %.3f -> %.3f kg, centre of mass moved %.1f cm in its frame, Unstuck %d -> %d, "
+                         "check rate %.2f, Movement Dislocation %.1f, Collisions Disabled Temporarily %d",
+                         side == 0 ? "left" : "right", s.mass, mass, moved, (int)s.unstuck, (int)unstuck, rate, md,
+                         (int)bool_property(pawn, side == 0 ? STR("Weapon L Collisions Disabled Temporarily") : STR("Weapon R Collisions Disabled Temporarily")));
+            }
+        }
+        s.weapon = weapon;
+        s.mass = mass;
+        s.com_local = com_local;
+        s.unstuck = unstuck;
+    }
+
     void weapon_spring_after_tick(UObject* pawn)
     {
         using namespace hsvr;
@@ -4137,6 +4181,7 @@ namespace
             Call m(base, STR("GetMass"));
             m.run();
             double mass = (std::max)(0.05, m.number());
+            watch_weapon_rebuild(side, pawn, weapon, base, mass);
             {
                 static double last_before = 0.0;
                 double t = now_seconds();
@@ -5339,6 +5384,12 @@ namespace
             if (entry.command.rfind("hsvr.ghost_show ", 0) == 0)
             {
                 g_ghost_force.store(atoi(entry.command.c_str() + 16) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.stuck_check ", 0) == 0)
+            {
+                g_stuck_check.store(atoi(entry.command.c_str() + 17));
+                HSVR_LOG("Script: hsvr.stuck_check %d", g_stuck_check.load());
                 continue;
             }
             if (entry.command.rfind("hsvr.weapon_dump", 0) == 0)
