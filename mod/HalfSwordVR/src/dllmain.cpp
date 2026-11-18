@@ -1210,10 +1210,17 @@ namespace
         g_hold_have = false;
         using namespace hsvr;
         Vec3 now_at = actor_location(context);
-        Vec3 moved = now_at - g_hold_location;
+        // Sideways the capsule goes back where it was. Its height is the game's own: it sets it
+        // from where his feet stand (so he lands and follows the floor), except a rise of more
+        // than 30 cm in one tick (the game's climb over an opponent's head), which is undone.
+        Vec3 moved{now_at.x - g_hold_location.x, now_at.y - g_hold_location.y, 0.0};
+        double rise = now_at.z - g_hold_location.z;
+        Vec3 keep{g_hold_location.x, g_hold_location.y, rise > 30.0 ? g_hold_location.z : now_at.z};
         static double last_line = 0.0;
         static double moved_max = 0.0;
+        static int climbs = 0;
         moved_max = (std::max)(moved_max, length(moved));
+        if (rise > 30.0) ++climbs;
         double now = now_seconds();
         if (now - last_line >= 0.25)
         {
@@ -1227,13 +1234,15 @@ namespace
                 std::snprintf(part, sizeof(part), ", %ls %.1f", name, p ? number_property(context, p) : -1.0);
                 values += part;
             }
-            HSVR_LOG("Capsule: the game moved it up to %.1f cm in a tick (put back)%s", moved_max, values.c_str());
+            HSVR_LOG("Capsule: the game moved it sideways up to %.1f cm in a tick (put back), height %.1f, climbs undone %d%s", moved_max, keep.z, climbs,
+                     values.c_str());
             moved_max = 0.0;
+            climbs = 0;
         }
-        if (length(moved) > 0.01)
+        if (length(moved) > 0.01 || keep.z != now_at.z)
         {
             Call put(context, STR("K2_SetActorLocation"));
-            put.three(STR("NewLocation"), g_hold_location.x, g_hold_location.y, g_hold_location.z);
+            put.three(STR("NewLocation"), keep.x, keep.y, keep.z);
             put.flag(STR("bSweep"), false);
             put.flag(STR("bTeleport"), true);
             put.run();

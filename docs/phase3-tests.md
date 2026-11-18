@@ -15,7 +15,7 @@ How it works (from the decompile, `HalfSwordDecomp\internals-map.md`, "Posing fo
 | --- | --- | --- |
 | `pose_body` | 0 | 1 = posing on (physics off on your character). Can be flipped while playing; restart the fight after switching it off. |
 | `pose_head`, `pose_arms`, `pose_follow_room` | 1 | Turn each part off on its own. |
-| `pose_hold_capsule` | 1 | While posed, the capsule moves only when you walk. Willie's own tick pulls the capsule toward his body and adds the hit stumble, dodge and lean offsets. With the body posed on the capsule, that pull never settled, so hits slid him across the arena. The mod puts the capsule back after each of his ticks and clears those offsets. It also means the game's dodge does not move you. |
+| `pose_hold_capsule` | 1 | While posed, the capsule moves only when you walk. Willie's own tick pulls the capsule toward his body and adds the hit stumble, dodge and lean offsets. With the body posed on the capsule, that pull never settled, so hits slid him across the arena. The mod puts the capsule back sideways after each of his ticks and clears those offsets. Its height stays the game's own, which follows his feet, except a rise of more than 30 cm in one tick (the game's climb over an opponent), which is undone. It also means the game's dodge does not move you. |
 | `pose_arm_style` | exact | `exact` = arms posed exactly; `muscle` = arms on physics, pulled to the pose by the game's muscles. |
 | `pose_wrist_forward_cm`, `pose_wrist_right_cm`, `pose_wrist_up_cm` | -6, 0, -2 | Where the wrist sits relative to the controller grip. |
 | `pose_hand_pitch`, `pose_hand_yaw`, `pose_hand_roll` | 0 | Turns the hand relative to the controller. |
