@@ -2908,6 +2908,7 @@ namespace
         // and how much of that the hand took (0 follows the controller, 1 sits on the weapon).
         double blocked_cm = 0.0, on_weapon = 0.0;
         double stuck_since = -1.0;
+        double far_since = -1.0, far_logged = 0.0;
     };
     HoldState g_hold[2];
 
@@ -3163,6 +3164,10 @@ namespace
         Quat rot_next = (from_scaled_axis(w_next * dt) * rot).normalized();
         Vec3 local_com = rot.inverse().rotate(com - pos);
         Vec3 com_next = pivot_now + v_next * dt + rot_next.rotate(local_com - pivot);
+        // Wake it first: a body the solver has put to sleep (a weapon lying still on the ground) may
+        // keep the velocity it is given without moving (run 29: the knife stayed frozen on the floor).
+        Call wake(base, STR("WakeRigidBody"));
+        wake.run();
         Call slv(base, STR("SetPhysicsLinearVelocity"));
         Vec3 set_v = (com_next - com) * (1.0 / dt);
         slv.three(STR("NewVel"), set_v.x, set_v.y, set_v.z);
@@ -3173,6 +3178,47 @@ namespace
         sav.flag(STR("bAddToCurrent"), false);
         sav.run();
         h.lag = length(to);
+        // Far behind for a while: why it isn't coming (asleep, not simulating, what it does with the
+        // velocity it was given, its damping, and how it answers the world's channels).
+        if (h.lag > 20.0)
+        {
+            if (h.far_since < 0.0) h.far_since = now;
+            if (now - h.far_since > 0.5 && now - h.far_logged > 1.0)
+            {
+                h.far_logged = now;
+                Call sim(base, STR("IsSimulatingPhysics"));
+                sim.run();
+                Call awake(base, STR("RigidBodyIsAwake"));
+                awake.run();
+                Call back(base, STR("GetPhysicsLinearVelocity"));
+                back.run();
+                Call ld(base, STR("GetLinearDamping"));
+                ld.run();
+                Call ad(base, STR("GetAngularDamping"));
+                ad.run();
+                auto boolean = [](Call& c) {
+                    FProperty* rp = c.param(STR("ReturnValue"));
+                    return rp ? (int)(*(c.buffer.data() + rp->GetOffset_Internal()) != 0) : -1;
+                };
+                int resp[3] = {-1, -1, -1};
+                const uint8_t channels[3] = {0, 1, 5};
+                for (int i = 0; i < 3; ++i)
+                {
+                    Call r(base, STR("GetCollisionResponseToChannel"));
+                    r.byte(STR("Channel"), channels[i]);
+                    r.run();
+                    FProperty* rp = r.param(STR("ReturnValue"));
+                    resp[i] = rp ? *(r.buffer.data() + rp->GetOffset_Internal()) : -1;
+                }
+                Vec3 got = back.vec();
+                HSVR_LOG("Hold: %s weapon %.0f cm behind for %.1f s: simulating %d, awake %d, velocity set (%.0f, %.0f, %.0f) reads back (%.0f, %.0f, %.0f), "
+                         "damping %.2f / %.2f, responses to channels 0/1/5: %d %d %d, at (%.1f, %.1f, %.1f)",
+                         side == 0 ? "left" : "right", h.lag, now - h.far_since, boolean(sim), boolean(awake), set_v.x, set_v.y, set_v.z, got.x, got.y,
+                         got.z, ld.number(), ad.number(), resp[0], resp[1], resp[2], pos.x, pos.y, pos.z);
+            }
+        }
+        else
+            h.far_since = -1.0;
         Quat dq = (target_rot * rot.inverse()).normalized();
         h.turn_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(dq.w))) * 180.0 / 3.14159265358979;
     }
