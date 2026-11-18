@@ -333,6 +333,7 @@ namespace hsvr
         num("pose_hold_let_go_s", c.pose_hold_let_go_s);
         num("pose_hold_let_go_grace_s", c.pose_hold_let_go_grace_s);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
+        flag("pose_hold_ignore_hand", c.pose_hold_ignore_hand);
         flag("pose_slide", c.pose_slide);
         num("pose_slide_hand_half_cm", c.pose_slide_hand_half_cm);
         num("pose_slide_rate_min", c.pose_slide_rate_min);

@@ -225,6 +225,8 @@ namespace hsvr
         // Something is in the held weapon's way when it ends a tick this far (cm) short of where the
         // hold sent it; the stuck rule only lets go of a weapon that is in contact like that.
         double pose_hold_contact_cm = 0.5;
+        // The held weapon never collides with the hand holding it (as with the forearm).
+        bool pose_hold_ignore_hand = true;
         // The slide: hold the trigger while holding a weapon and that hand slides along it, within its
         // grip zone (stops half a hand inside the guard and the pommel end). Rate (1/s) at a light and
         // a full trigger squeeze.

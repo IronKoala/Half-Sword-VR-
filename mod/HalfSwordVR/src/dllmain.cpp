@@ -2624,7 +2624,10 @@ namespace
         std::wstring names;
         for (FName bone : physics_body_bones(mesh))
         {
-            if (bone.ToString() == hand.ToString() || !in_forearm(mesh, bone, side)) continue;
+            // The hand too (kick-test3: the hand body, 7.4 cm off the bone, sits in the grip; when the
+            // pair collides it shoves the weapon out across the palm about twice a second). B&S never
+            // lets a held item touch the hand that holds it.
+            if ((!hsvr::config().pose_hold_ignore_hand && bone.ToString() == hand.ToString()) || !in_forearm(mesh, bone, side)) continue;
             Call add(pawn, STR("AddComponentByClass"));
             add.object(STR("Class"), cls);
             add.flag(STR("bManualAttachment"), false);
