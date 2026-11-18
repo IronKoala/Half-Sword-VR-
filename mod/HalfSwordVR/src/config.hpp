@@ -170,8 +170,11 @@ namespace hsvr
         // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
         // turns you as well.
         bool pose_body_turn = true;
-        double pose_turn_dead_zone_deg = 35.0;
+        double pose_turn_dead_zone_deg = 60.0;
         double pose_turn_speed_dps = 150.0;
+        // The most your head can be turned from his hips (a neck's reach): past it the hips come
+        // round with you at once.
+        double pose_turn_max_deg = 85.0;
         // 1 = he crouches as low as you do (your headset below where you stood when you recentred,
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;

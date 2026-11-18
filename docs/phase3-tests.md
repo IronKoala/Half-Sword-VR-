@@ -22,7 +22,7 @@ How it works (from the decompile, `HalfSwordDecomp\internals-map.md`, "Posing fo
 
 The hand's direction comes from Willie's own finger bones, measured when posing starts. The log line "hand frame from finger bones" shows it. The grip geometry follows the hand model in Matthew's Chasms VR Framework (MIT).
 | `pose_body_turn` | 1 | His body faces where you face (see below). |
-| `pose_turn_dead_zone_deg`, `pose_turn_speed_dps` | 35, 150 | How far you look away before the body turns, and how fast it turns. |
+| `pose_turn_dead_zone_deg`, `pose_turn_speed_dps`, `pose_turn_max_deg` | 60, 150, 85 | How far you look away before the body turns, how fast it turns, and the furthest your head can be from his hips (past it the hips come round with you at once, so a quick spin doesn't leave his body behind). |
 | `pose_torso_twist` | 0.7 | How much of your head's turn away from the hips the spine and neck take, more toward the top (spine_02 to neck_02), on top of the game's own animation. Your hips only turn with the body turning above. 0 = off. |
 | `pose_feet` | 1 | His feet stay where they were put down and step (lift and place, one at a time) instead of sliding with the body. 0 = the game's own feet. |
 | `pose_step_distance_cm`, `pose_step_angle_deg` | 10, 30 | A foot steps once it is this far from where it would stand under the hips, or turned this far from them. |
@@ -36,7 +36,7 @@ The hand's direction comes from Willie's own finger bones, measured when posing 
 ## Known limits of this first version
 
 - Crouching lowers the body by as much as your headset drops, and his leg IK bends the knees with the feet planted. The game's own crouch values follow (kept at 61 or more, so the game's canned kneel never starts). There's no voluntary kneel or prone yet.
-- The body faces where you face: it follows the headset once you look more than 35 degrees away (`pose_turn_dead_zone_deg`) at 150 degrees a second (`pose_turn_speed_dps`). The mouse or stick still turns you too. Turn the game's "Camera Lock On" off: lock-on fights this. Stick movement is relative to your body. Turning in place steps the feet only after a large turn.
+- The body faces where you face: it follows the headset once you look more than 60 degrees away (`pose_turn_dead_zone_deg`) at 150 degrees a second (`pose_turn_speed_dps`). The mouse or stick still turns you too. Turn the game's "Camera Lock On" off: lock-on fights this. Stick movement is relative to your body. Turning in place steps the feet only after a large turn.
 - Wrist offset and hand rotation come from the grip geometry, to be tuned in the headset.
 
 ## Arm style decision (2026-11-18)

@@ -927,7 +927,7 @@ namespace
     // Crouch: how far your headset is below where you stood at recentering (cm, 0 standing).
     double g_crouch_drop = 0.0;
     bool g_pose_cfg_turn = true, g_pose_cfg_crouch = true, g_pose_fake = false;
-    double g_turn_dead_deg = 35.0, g_turn_speed_dps = 150.0;
+    double g_turn_dead_deg = 60.0, g_turn_speed_dps = 150.0, g_turn_max_deg = 85.0;
 
     const char* side_suffix(int side) { return side == 0 ? "_l" : "_r"; }
 
@@ -1597,6 +1597,7 @@ namespace
         g_pose_fake = cfg.dev_pose_fake_tracking;
         g_turn_dead_deg = cfg.pose_turn_dead_zone_deg;
         g_turn_speed_dps = cfg.pose_turn_speed_dps;
+        g_turn_max_deg = (std::max)(g_turn_dead_deg, cfg.pose_turn_max_deg);
         if (!g_pose_active.load()) g_turn_valid = false;
         if (!cfg.pose_body || !abp || !mesh)
         {
@@ -1651,8 +1652,15 @@ namespace
             Quat head_rot;
             if (stereo_tracking_to_world(state.head, head_world, head_rot))
             {
+                // Walking is measured at your neck, not your eyes: your eyes swing round your neck when
+                // you turn or nod, and that is not a step (a 180 degree turn moved the eyes ~18 cm and
+                // walked his body out in front of you). The view's anchor is the eye point when you
+                // recentred, so the neck then was eye_forward/eye_up behind and below it.
                 Quat base = quat_from_yaw_deg(base_yaw);
-                Vec3 total = base.inverse().rotate(Vec3{head_world.x - anchor.x, head_world.y - anchor.y, 0.0});
+                Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
+                Vec3 neck_now = head_world - head_rot.rotate(eye_offset);
+                Vec3 neck_then = anchor - base.rotate(eye_offset);
+                Vec3 total = base.inverse().rotate(Vec3{neck_now.x - neck_then.x, neck_now.y - neck_then.y, 0.0});
                 total.z = 0.0;
                 Vec3 delta = total - g_pose_room_moved_local;
                 if (length(delta) > 50.0)
@@ -1700,7 +1708,11 @@ namespace
             if (stereo_view_anchor(view_anchor, unused_yaw) && stereo_tracking_to_world(state.head, head_world, head_rot))
             {
                 double scale = component_scale_z(mesh);
-                double drop = (view_anchor.z - head_world.z) - cfg.pose_crouch_dead_zone_cm;
+                // Measured at the neck too, so looking down is not crouching.
+                Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
+                double neck_now_z = (head_world - head_rot.rotate(eye_offset)).z;
+                double neck_then_z = view_anchor.z - cfg.eye_up_cm;
+                double drop = (neck_then_z - neck_now_z) - cfg.pose_crouch_dead_zone_cm;
                 g_crouch_drop = (std::min)(55.0 * scale, (std::max)(0.0, drop));
             }
         }
@@ -1889,6 +1901,10 @@ namespace
                 g_body_rel = wrap(g_body_rel + (diff > 0 ? step : -step));
                 if (std::fabs(diff) - step < 5.0) g_body_turning = false;
             }
+            // A neck turns only so far: on a quick spin the hips are dragged round with you at once
+            // rather than trailing, so his shoulders stay under your eyes.
+            double left = wrap(head_rel - g_body_rel);
+            if (std::fabs(left) > g_turn_max_deg) g_body_rel = wrap(head_rel - (left > 0 ? g_turn_max_deg : -g_turn_max_deg));
         }
         double body_yaw = wrap(g_turn_yaw + g_body_rel);
         rotation->Yaw = body_yaw;
