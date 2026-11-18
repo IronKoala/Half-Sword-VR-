@@ -1114,11 +1114,22 @@ namespace
                     if (ModifyBoneNode* n = chain_node(std::string(b) + side_suffix(side))) node_release(*n);
         }
         static double last_line = 0.0;
-        if (now - last_line >= 1.0)
+        if (now - last_line >= 0.25)
         {
             last_line = now;
             Vec3 pelvis = socket_location(driver, bone_fname("pelvis"));
             Vec3 hl = socket_location(driver, bone_fname("hand_l")), hr = socket_location(driver, bone_fname("hand_r"));
+            UObject* movement = object_property(pawn, STR("CharacterMovement"));
+            double v[3] = {0, 0, 0};
+            int mode = -1;
+            if (movement)
+            {
+                if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+                    read_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v);
+                if (FProperty* mp = movement->GetPropertyByNameInChain(STR("MovementMode")))
+                    mode = *(reinterpret_cast<uint8_t*>(movement) + mp->GetOffset_Internal());
+            }
+            HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d", v[0], v[1], v[2], mode);
             HSVR_LOG("Pose: actor (%.0f, %.0f, %.0f) heading %.0f, pelvis gap %.0f cm, room moved (%.0f, %.0f) this frame (%.1f, %.1f), head %s, hands %s/%s, "
                      "hand_l (%.0f, %.0f, %.0f) target (%.0f, %.0f, %.0f), hand_r (%.0f, %.0f, %.0f) target (%.0f, %.0f, %.0f)",
                      actor.x, actor.y, actor.z, heading, length(Vec3{pelvis.x - actor.x, pelvis.y - actor.y, 0.0}), g_pose_room_moved_local.x,
