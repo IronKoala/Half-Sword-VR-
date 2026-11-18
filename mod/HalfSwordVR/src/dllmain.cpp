@@ -506,6 +506,12 @@ namespace
         }
     }
 
+    struct SocketRotationParams
+    {
+        FName InSocketName;
+        ue::FRotator ReturnValue;
+    };
+
     struct ModifyBoneNode
     {
         std::wstring bone;
@@ -604,8 +610,21 @@ namespace
         if (!active || active->bone != wanted)
         {
             active = nullptr;
-            for (ModifyBoneNode& n : nodes)
-                if (_wcsicmp(n.bone.c_str(), wanted.c_str()) == 0 && n.rotation && n.rotation_mode && n.rotation_space) active = &n;
+            // A bone can have several nodes (Head: the game's world-space head lock, a roll, and the
+            // end-of-graph one). Take the end-of-graph one: the game leaves it at Ignore, component space.
+            int index = -1;
+            for (size_t i = 0; i < nodes.size(); ++i)
+            {
+                ModifyBoneNode& n = nodes[i];
+                if (_wcsicmp(n.bone.c_str(), wanted.c_str()) != 0 || !n.rotation || !n.rotation_mode || !n.rotation_space) continue;
+                bool final_chain = *(n.node + n.rotation_mode->GetOffset_Internal()) == 0 && *(n.node + n.rotation_space->GetOffset_Internal()) == 1;
+                if (final_chain || !active)
+                {
+                    active = &n;
+                    index = (int)i;
+                }
+            }
+            if (active) HSVR_LOG("Pose probe: using node %d of the table for %ls", index, active->bone.c_str());
             if (!active)
             {
                 static std::string missing;
@@ -633,7 +652,13 @@ namespace
             hsvr::Vec3 at;
             UObject* mesh = find_pawn_mesh();
             std::string bone(cfg.dev_pose_bone);
-            if (mesh && bone_location(mesh, bone, at)) HSVR_LOG("Pose probe: %s now at (%.0f, %.0f, %.0f)", bone.c_str(), at.x, at.y, at.z);
+            UFunction* rotation_fn = mesh ? mesh->GetFunctionByNameInChain(STR("GetSocketRotation")) : nullptr;
+            SocketRotationParams r{};
+            r.InSocketName = bone_fname(bone);
+            if (rotation_fn) mesh->ProcessEvent(rotation_fn, &r);
+            if (mesh && bone_location(mesh, bone, at))
+                HSVR_LOG("Pose probe: %s now at (%.0f, %.0f, %.0f), world rotation pitch %.0f yaw %.0f roll %.0f", bone.c_str(), at.x, at.y, at.z,
+                         r.ReturnValue.Pitch, r.ReturnValue.Yaw, r.ReturnValue.Roll);
         }
     }
 
