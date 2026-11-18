@@ -216,7 +216,7 @@ namespace hsvr
         // your real hand, a see-through glove shows where your hand is. Mesh and material are object
         // paths in the cooked game; offset (cm) and turn (deg) from the hand bone, and scale, for fitting.
         // The glove is turned so its fingers and thumb follow the hand bone's; the turn is extra, in the glove's frame.
-        bool pose_ghost_hand = true;
+        bool pose_ghost_hand = false; // off: Matthew 2026-11-18, it popped up on every strike
         double pose_ghost_from_cm = 4.0;
         std::string pose_ghost_mesh = "/Game/Assets/Armor/Hand/Gauntlet/StaticMeshes/WM_Armor_Hand_Gauntlet_Glove_003.WM_Armor_Hand_Gauntlet_Glove_003";
         std::string pose_ghost_material = "/Engine/EngineDebugMaterials/M_SimpleUnlitTranslucent.M_SimpleUnlitTranslucent";
