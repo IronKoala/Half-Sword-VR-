@@ -2270,6 +2270,7 @@ namespace
                                              vp ? (*(pv.buffer.data() + vp->GetOffset_Internal()) ? 1 : 0) : -1, at.x, at.y, at.z);
                                 }
                             }
+                        log.weapon_seen = weapon;
                         log.rest = hand_rot.inverse().rotate(log.weapon_at - log.hand_at);
                     }
                     // How far the weapon is from where it sat in the hand when it was seated.
