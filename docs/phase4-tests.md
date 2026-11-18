@@ -33,3 +33,23 @@ For unattended tests the dev_script step `hsvr.give_weapon <class path>` equips 
 A bare class gives an unbuilt weapon (no blade, guard, grip or pommel), because the modular weapon builds itself only from its passport. To get a complete one, use `hsvr.give_weapon passport <inventory data asset> <index>`, which copies `Inventory.WeaponPssports[index]` from that asset into the call. The arming sword is `hsvr.give_weapon passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Beggar.DA_FreeMode_Inventory_Tier_Beggar 0`.
 
 Next: your strength from the game's stats instead of a fixed number, the hand staying on the weapon with a ghost hand at the controller, two hands, grab button, slide grip.
+
+
+## Unattended test tools (dev_script steps)
+
+The grip settings in the ini (pose_grip_*) are re-read every second during a run, so a test can change them live by editing the ini. Engine console commands in the dev_script (for example `shot`) take a screenshot at that step.
+
+| Step | What it does |
+|---|---|
+| `hsvr.give_weapon passport <inventory asset> <index>` | Equips a fully built weapon; replaces the one in the hand |
+| `hsvr.grip_spring 0/1/2` | 0 leaves the game's locked joint alone (still measured), 1 our spring every tick, 2 our spring written once |
+| `hsvr.grip_k_scale <x>` | Multiplies the spring's stiffness, damping and force caps |
+| `hsvr.grip_frame_offset x y z` | Moves the joint's hand anchor (Frame2) by that much, to check the joint is live |
+| `hsvr.grip_target x y z` | Linear drive target |
+| `hsvr.grip_ignore_arm 0/1` | Weapon ignores collision with the forearm bodies |
+| `hsvr.grip_rejoin` | Re-creates the hand joint |
+| `hsvr.weapon_gravity 0/1` | Weapon gravity |
+| `hsvr.weapon_channel <channel> <response>` | Weapon's response to one collision channel (0 ignore, 1 overlap, 2 block) |
+| `hsvr.weapon_collision <n>` | Switches the weapon's collision mode. This rebuilds the body and breaks the hand joint; don't use it to test the grip |
+| `hsvr.contact_log 0/1` | Logs which of his bodies, and which other components, touch the weapon (on by default) |
+| `hsvr.arm_move <mode>` | Fake-tracking arms: 0 circles, 1 still, 2 slow swing, 3 fast swing, 4 overhead |

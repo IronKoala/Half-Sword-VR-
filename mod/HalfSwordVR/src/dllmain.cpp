@@ -1362,6 +1362,9 @@ namespace
         g_pose.twist_deg = total;
     }
 
+    std::atomic<int> g_fake_arm_mode{0};
+    std::atomic<bool> g_contact_log{true};
+
     void pose_arm(int side, const hsvr::Config& cfg, const hsvr::ControllerState& state, const hsvr::Quat& body, const hsvr::Quat& component_inv)
     {
         using namespace hsvr;
@@ -1382,10 +1385,26 @@ namespace
                     if (ModifyBoneNode* n = chain_node(std::string(b) + sx)) node_release(*n);
                 return;
             }
-            // Made-up path: each hand circles slowly in front of its shoulder.
-            double t = now_seconds() * 1.5 + side * 1.5;
+            // Made-up path for unattended tests (dev_script "hsvr.arm_move <mode>"): 0 each hand circles
+            // slowly in front of its shoulder; 1 holds still; 2 slow swing and 3 fast swing (side to
+            // side and down, a cut); 4 raised overhead.
             Vec3 shoulder = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
-            grip = shoulder + body.rotate(Vec3{35.0 + 10.0 * std::sin(t), out * 15.0, -15.0 + 20.0 * std::cos(t)});
+            int mode = g_fake_arm_mode.load();
+            double now = now_seconds();
+            Vec3 local;
+            if (mode == 1) local = Vec3{40.0, out * 15.0, -10.0};
+            else if (mode == 2 || mode == 3)
+            {
+                double t = now * (mode == 2 ? 1.2 : 6.0) + side * 0.3;
+                local = Vec3{45.0, out * 10.0 + 35.0 * std::sin(t), 5.0 - 30.0 * std::fabs(std::sin(t))};
+            }
+            else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
+            else
+            {
+                double t = now * 1.5 + side * 1.5;
+                local = Vec3{35.0 + 10.0 * std::sin(t), out * 15.0, -15.0 + 20.0 * std::cos(t)};
+            }
+            grip = shoulder + body.rotate(local);
             grip_rot = (body * rot_to_quat(60.0, 0.0, 0.0)).normalized(); // controller handle tilted forward, as held
         }
         Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
@@ -2311,6 +2330,42 @@ namespace
     };
     ArmIgnore g_arm_ignore[2];
     std::atomic<int> g_grip_ignore_arm{1};
+    // hsvr.weapon_channel <channel> <response>: sets the held weapon's response to one collision
+    // channel (0 ignore, 1 overlap, 2 block). Changing responses only updates the physics filter,
+    // unlike switching collision off, which rebuilt the body and orphaned the hand joint (test 21).
+    std::atomic<int> g_weapon_channel_cmd{-1}, g_weapon_channel_resp{2};
+
+    int byte_result(Call& c)
+    {
+        FProperty* rp = c.param(STR("ReturnValue"));
+        return rp ? *(c.buffer.data() + rp->GetOffset_Internal()) : -1;
+    }
+
+    // What his own bodies are to the physics (object channel), and how the weapon responds to each.
+    void log_collision_types(UObject* pawn, UObject* base)
+    {
+        std::vector<std::pair<std::wstring, UObject*>> parts;
+        parts.push_back({STR("Mesh"), object_property(pawn, STR("Mesh"))});
+        parts.push_back({STR("Capsule"), object_property(pawn, STR("CapsuleComponent"))});
+        for (const TCHAR* n : {STR("CM_Arm_R"), STR("CM_Arm_L"), STR("CM_Cuirass"), STR("CM_Helmet"), STR("CM_Leg_L"), STR("CM_Leg_R")})
+            parts.push_back({n, object_property(pawn, n)});
+        for (auto& [name, comp] : parts)
+        {
+            if (!comp) continue;
+            Call t(comp, STR("GetCollisionObjectType"));
+            t.run();
+            int type = byte_result(t);
+            Call e(comp, STR("GetCollisionEnabled"));
+            e.run();
+            Call r(base, STR("GetCollisionResponseToChannel"));
+            r.byte(STR("Channel"), (uint8_t)(type < 0 ? 0 : type));
+            r.run();
+            HSVR_LOG("Grip: his %ls is channel %d (collision %d); the weapon's response to that channel is %d", name.c_str(), type, byte_result(e), byte_result(r));
+        }
+        Call t(base, STR("GetCollisionObjectType"));
+        t.run();
+        HSVR_LOG("Grip: the weapon itself is channel %d", byte_result(t));
+    }
 
     void clear_arm_ignore(int side)
     {
@@ -2383,6 +2438,79 @@ namespace
             names += bone.ToString() + STR(" ");
         }
         HSVR_LOG("Grip: %s weapon no longer collides with: %ls", side == 0 ? "left" : "right", names.empty() ? STR("(no forearm bodies found)") : names.c_str());
+    }
+
+    // ---- what the held weapon is touching (test tool) ----------------------------------------------
+    // For each of his physics bodies, the closest distance from the weapon's axis (pommel end to tip,
+    // 12 points) to that body's collision. Bodies within 4 cm of the axis are touching or nearly
+    // (a grip is ~1.5 cm in radius). Also every other component overlapping the weapon's meshes.
+    void log_weapon_contacts(UObject* pawn, UObject* weapon, UObject* base)
+    {
+        using namespace hsvr;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        UObject* pommel = object_property(weapon, STR("PommelSk"));
+        UObject* tip = object_property(weapon, STR("TippyTipScene"));
+        if (!mesh || !pommel || !tip) return;
+        Vec3 a = component_location(pommel), b = component_location(tip);
+        std::wstring near_list;
+        for (FName bone : physics_body_bones(mesh))
+        {
+            double best = 1e9;
+            for (int i = 0; i <= 11; ++i)
+            {
+                Vec3 pt = a + (b - a) * (i / 11.0);
+                Call c(mesh, STR("GetClosestPointOnCollision"));
+                c.three(STR("Point"), pt.x, pt.y, pt.z);
+                c.name(STR("BoneName"), bone);
+                if (!c.run()) break;
+                double d = c.number();
+                if (d >= 0.0 && d < best) best = d;
+            }
+            if (best < 4.0)
+            {
+                wchar_t one[96];
+                swprintf(one, 96, L"%ls %.1f, ", bone.ToString().c_str(), best);
+                near_list += one;
+            }
+        }
+        HSVR_LOG("Grip: contacts: his bodies within 4 cm of the weapon axis: %ls", near_list.empty() ? STR("none") : near_list.c_str());
+        static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        if (!cdo) return;
+        static uint8_t types[32];
+        for (int i = 0; i < 32; ++i) types[i] = (uint8_t)i;
+        std::wstring others;
+        for (const TCHAR* part : {STR("Head"), STR("Guard"), STR("Grip"), STR("Pommel"), STR("BaseMesh")})
+        {
+            UObject* comp = object_property(weapon, part);
+            if (!comp) continue;
+            Call world(comp, STR("K2_GetComponentToWorld"));
+            if (!world.run()) continue;
+            FProperty* wr = world.param(STR("ReturnValue"));
+            Call ov(cdo, STR("ComponentOverlapComponents"));
+            FProperty* ct = ov.param(STR("ComponentTransform"));
+            FProperty* ot = ov.param(STR("ObjectTypes"));
+            FProperty* out = ov.param(STR("OutComponents"));
+            if (!wr || !ct || !ot || !out) continue;
+            ov.object(STR("Component"), comp);
+            std::memcpy(ov.buffer.data() + ct->GetOffset_Internal(), world.buffer.data() + wr->GetOffset_Internal(), ct->GetSize());
+            RawArray* list = reinterpret_cast<RawArray*>(ov.buffer.data() + ot->GetOffset_Internal());
+            list->Data = reinterpret_cast<void**>(types);
+            list->Num = list->Max = 32;
+            if (!ov.run()) continue;
+            RawArray* found = reinterpret_cast<RawArray*>(ov.buffer.data() + out->GetOffset_Internal());
+            for (int32_t i = 0; i < found->Num && found->Data; ++i)
+            {
+                UObject* o = reinterpret_cast<UObject*>(found->Data[i]);
+                if (!o || o->GetOuterPrivate() == weapon) continue;
+                others += std::wstring(part) + STR(" touches ") + o->GetFullName() + STR("; ");
+            }
+            // The engine allocated that list; leave it (a few bytes per test log line).
+            found->Data = nullptr;
+            found->Num = found->Max = 0;
+            list->Data = nullptr;
+            list->Num = list->Max = 0;
+        }
+        HSVR_LOG("Grip: contacts: overlapping components: %ls", others.empty() ? STR("none") : others.c_str());
     }
 
     void dump_joint(UObject* joint)
@@ -2472,6 +2600,26 @@ namespace
                     }
                 }
                 else if (spring_on) spring_joint(joint, mass, cfg);
+                {
+                    static UObject* typed = nullptr;
+                    if (side == 1 && typed != weapon)
+                    {
+                        typed = weapon;
+                        log_collision_types(pawn, base);
+                    }
+                    int ch = g_weapon_channel_cmd.exchange(-1);
+                    if (side == 1 && ch >= 0)
+                    {
+                        Call r(base, STR("SetCollisionResponseToChannel"));
+                        r.byte(STR("Channel"), (uint8_t)ch);
+                        r.byte(STR("NewResponse"), (uint8_t)g_weapon_channel_resp.load());
+                        r.run();
+                        Call check(base, STR("GetCollisionResponseToChannel"));
+                        check.byte(STR("Channel"), (uint8_t)ch);
+                        check.run();
+                        HSVR_LOG("Grip: weapon response to channel %d set to %d, reads %d", ch, g_weapon_channel_resp.load(), byte_result(check));
+                    }
+                }
                 if (spring_on && g_grip_ignore_arm.load())
                     ignore_arm_collision(pawn, object_property(pawn, STR("Mesh")), weapon, base, side);
                 else if (g_arm_ignore[side].weapon)
@@ -2662,6 +2810,9 @@ namespace
                      g_grip_log[0].active ? "spring" : "-", g_grip_log[0].mass, g_grip_log[0].force, g_grip_log[0].gap, rate[0], g_grip_log[0].hand_dist,
                      g_grip_log[0].simulating, g_grip_log[0].scale, g_grip_log[1].active ? "spring" : "-", g_grip_log[1].mass, g_grip_log[1].force,
                      g_grip_log[1].gap, rate[1], g_grip_log[1].hand_dist, g_grip_log[1].simulating, g_grip_log[1].scale);
+            if (g_grip_log[1].active && g_contact_log.load())
+                if (UObject* w = object_property(pawn, STR("Weapon R")))
+                    log_weapon_contacts(pawn, w, object_property(w, STR("BaseMesh")));
             for (int side = 0; side < 2; ++side)
                 if (g_grip_log[side].active)
                 {
@@ -3425,6 +3576,12 @@ namespace
                 set = true;
             }
             // A zeroed transform has scale 0 and no valid rotation: give it the right hand's spot.
+            // Replace the weapon he holds instead of dropping it, so repeated tests don't pile swords up.
+            if (n == STR("Destroy Previous") && kind == STR("BoolProperty"))
+            {
+                auto* flag = static_cast<FBoolProperty*>(p);
+                parameters[p->GetOffset_Internal() + flag->GetByteOffset()] |= flag->GetFieldMask();
+            }
             if (n == STR("Weapon Origin Transform"))
             {
                 UScriptStruct* type = struct_type(p);
@@ -3536,6 +3693,24 @@ namespace
                 g_grip_frame_offset[1].store(y);
                 g_grip_frame_offset[2].store(z);
                 g_grip_frame_serial.fetch_add(1);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.contact_log ", 0) == 0)
+            {
+                g_contact_log.store(atoi(entry.command.c_str() + 17) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.arm_move ", 0) == 0)
+            {
+                g_fake_arm_mode.store(atoi(entry.command.c_str() + 14));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.weapon_channel ", 0) == 0)
+            {
+                int ch = -1, resp = 2;
+                sscanf(entry.command.c_str() + 20, "%d %d", &ch, &resp);
+                g_weapon_channel_resp.store(resp);
+                g_weapon_channel_cmd.store(ch);
                 continue;
             }
             if (entry.command.rfind("hsvr.grip_ignore_arm ", 0) == 0)
