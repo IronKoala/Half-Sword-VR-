@@ -147,6 +147,72 @@ namespace hsvr
         bool dev_player_arm_physics = false;
         std::string arm_bone_left = "clavicle_l";
         std::string arm_bone_right = "clavicle_r";
+        // TEST ONLY (Phase 3 probe). 1 = on your character's animation (ABP_Willie on the hidden
+        // DriverSkeleton), set the end-of-graph "Modify Bone" node for dev_pose_bone to this
+        // rotation (degrees, component space, replacing the animation), to check that the mod can
+        // pose bones that way. The node table is logged once.
+        bool dev_pose_probe = false;
+        std::string dev_pose_bone = "head";
+        double dev_pose_pitch = 0.0, dev_pose_yaw = 0.0, dev_pose_roll = 0.0;
+
+        // ---- Phase 3: your body posed by you (off until tested) ----
+        // 1 = your character's physics off; his head turns with the headset, his arms reach for
+        // the controllers, and his body moves with you around the room. Can be flipped while
+        // playing; switching back restarts nothing, so restart the fight afterwards.
+        bool pose_body = false;
+        bool pose_head = true;
+        bool pose_arms = true;
+        bool pose_follow_room = true;
+        // 1 = while posed, your character's capsule only moves when you walk: the game's own pull
+        // toward the body (and hit stumbles, dodges and leans) is undone after each of his ticks.
+        bool pose_hold_capsule = true;
+        // 1 = his body faces where you face: it follows your headset once you look more than
+        // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
+        // turns you as well.
+        bool pose_body_turn = true;
+        double pose_turn_dead_zone_deg = 60.0;
+        double pose_turn_speed_dps = 150.0;
+        // The most your head can be turned from his hips (a neck's reach): past it the hips come
+        // round with you at once.
+        double pose_turn_max_deg = 85.0;
+        // 1 = he crouches as low as you do (your headset below where you stood when you recentred,
+        // less pose_crouch_dead_zone_cm).
+        bool pose_crouch = true;
+        double pose_crouch_dead_zone_cm = 3.0;
+        // Where the wrist sits relative to the controller's grip, in the controller's frame
+        // (forward, right, up, cm), and how the hand is turned relative to the controller (degrees).
+        // Defaults: the wrist 8 cm from the palm centre back along the fingers and 2 cm toward the
+        // back of the hand, with the fingers tilted pose_knuckle_deg from the handle (right is
+        // mirrored for the left hand, so + is toward the back of either hand).
+        double pose_wrist_forward_cm = -2.7, pose_wrist_right_cm = 2.0, pose_wrist_up_cm = 7.5;
+        double pose_hand_pitch = 0.0, pose_hand_yaw = 0.0, pose_hand_roll = 0.0;
+        double pose_knuckle_deg = 20.0;
+        // How much of the hand's turn about the forearm the forearm bone takes (0 to 1); the rest
+        // shows at the wrist. Willie's forearm has no twist bones.
+        double pose_forearm_twist_share = 0.5;
+        // How much of your head's turn away from the hips the spine and neck take together (0 to 1;
+        // the head is always exactly the headset).
+        double pose_torso_twist = 0.7;
+        // Feet stay where they were put down and step (lift and place) when the hips have moved or
+        // turned away from them: 1 = on, 0 = the game's own feet.
+        bool pose_feet = true;
+        double pose_step_distance_cm = 10.0, pose_step_angle_deg = 30.0; // when a foot steps
+        double pose_step_time_s = 0.3;  // how long a step takes standing (shorter when moving)
+        double pose_step_lift_cm = 10.0; // how high the foot lifts
+        double pose_step_lead_s = 0.2;   // how far ahead (in seconds of movement) a foot lands when walking
+        // How quickly the elbow's swing around the arm follows (seconds; the hand is never smoothed).
+        double pose_swivel_smooth_s = 0.06;
+        // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and
+        // controllers, so an unattended run (no one wearing the headset) can check the posing.
+        bool dev_pose_fake_tracking = false;
+        // 1 = your character's head (and hair) is not drawn in your own view while you look out of
+        // it; it still casts its shadow and is there for the game (hits, other characters). Helmets
+        // and other headwear stay visible.
+        bool hide_own_head = true;
+        // The gore skeleton under his skin (skull, jaw, teeth, throat) would show from inside the
+        // hidden head: it is hidden from this bone up. Empty = not hidden. Wounds elsewhere still
+        // show their bones.
+        std::string hide_own_gore_from = "neck_01";
     };
 
     // Current settings (copy). Cheap enough to call once per frame.

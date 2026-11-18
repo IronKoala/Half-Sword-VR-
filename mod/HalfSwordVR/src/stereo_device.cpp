@@ -365,6 +365,14 @@ namespace hsvr
         return true;
     }
 
+    bool stereo_view_anchor(Vec3& anchor, double& base_yaw)
+    {
+        if (!g_view.valid) return false;
+        anchor = g_view.anchor;
+        base_yaw = g_view.base_yaw;
+        return true;
+    }
+
     bool stereo_separate_target()
     {
         return g_separate.load();

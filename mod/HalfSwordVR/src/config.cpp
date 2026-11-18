@@ -6,9 +6,11 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace hsvr
 {
@@ -169,13 +171,26 @@ namespace hsvr
         fclose(f);
 
         Config c;
+        // Settings added in newer versions are missing from an older file: they get added at their
+        // defaults (test switches, dev_*, are left out), so every setting can be found in the file.
+        std::vector<std::string> missing;
+        auto note_missing = [&](const char* key, const std::string& value) {
+            if (kv.find(key) != kv.end() || std::strncmp(key, "dev_", 4) == 0) return;
+            for (const std::string& m : missing)
+                if (m.compare(0, std::strlen(key) + 1, std::string(key) + "=") == 0) return;
+            missing.push_back(std::string(key) + "=" + value);
+        };
         auto num = [&](const char* key, double& out) {
             auto it = kv.find(key);
             if (it != kv.end() && !it->second.empty()) out = strtod(it->second.c_str(), nullptr);
+            char v[64];
+            std::snprintf(v, sizeof(v), "%g", out);
+            note_missing(key, v);
         };
         auto integer = [&](const char* key, int& out) {
             auto it = kv.find(key);
             if (it != kv.end() && !it->second.empty()) out = (int)strtol(it->second.c_str(), nullptr, 0);
+            note_missing(key, std::to_string(out));
         };
         auto flag = [&](const char* key, bool& out) {
             int v = out ? 1 : 0;
@@ -185,6 +200,7 @@ namespace hsvr
         auto text = [&](const char* key, std::string& out) {
             auto it = kv.find(key);
             if (it != kv.end() && !it->second.empty()) out = it->second;
+            note_missing(key, out);
         };
         flag("enabled", c.enabled);
         flag("require_steamvr_running", c.require_steamvr_running);
@@ -243,6 +259,41 @@ namespace hsvr
         flag("dev_player_arm_physics", c.dev_player_arm_physics);
         text("arm_bone_left", c.arm_bone_left);
         text("arm_bone_right", c.arm_bone_right);
+        flag("dev_pose_probe", c.dev_pose_probe);
+        text("dev_pose_bone", c.dev_pose_bone);
+        num("dev_pose_pitch", c.dev_pose_pitch);
+        num("dev_pose_yaw", c.dev_pose_yaw);
+        num("dev_pose_roll", c.dev_pose_roll);
+        flag("pose_body", c.pose_body);
+        flag("pose_head", c.pose_head);
+        flag("pose_arms", c.pose_arms);
+        flag("pose_follow_room", c.pose_follow_room);
+        flag("pose_hold_capsule", c.pose_hold_capsule);
+        flag("pose_body_turn", c.pose_body_turn);
+        num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
+        num("pose_turn_speed_dps", c.pose_turn_speed_dps);
+        num("pose_turn_max_deg", c.pose_turn_max_deg);
+        flag("pose_crouch", c.pose_crouch);
+        num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
+        num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);
+        num("pose_wrist_right_cm", c.pose_wrist_right_cm);
+        num("pose_wrist_up_cm", c.pose_wrist_up_cm);
+        num("pose_hand_pitch", c.pose_hand_pitch);
+        num("pose_hand_yaw", c.pose_hand_yaw);
+        num("pose_hand_roll", c.pose_hand_roll);
+        num("pose_knuckle_deg", c.pose_knuckle_deg);
+        num("pose_swivel_smooth_s", c.pose_swivel_smooth_s);
+        num("pose_forearm_twist_share", c.pose_forearm_twist_share);
+        num("pose_torso_twist", c.pose_torso_twist);
+        flag("pose_feet", c.pose_feet);
+        num("pose_step_distance_cm", c.pose_step_distance_cm);
+        num("pose_step_angle_deg", c.pose_step_angle_deg);
+        num("pose_step_time_s", c.pose_step_time_s);
+        num("pose_step_lift_cm", c.pose_step_lift_cm);
+        num("pose_step_lead_s", c.pose_step_lead_s);
+        flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
+        flag("hide_own_head", c.hide_own_head);
+        text("hide_own_gore_from", c.hide_own_gore_from);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;
@@ -250,6 +301,16 @@ namespace hsvr
         {
             std::lock_guard<std::mutex> lock(g_cfg_mutex);
             g_cfg = c;
+        }
+        if (!missing.empty())
+        {
+            if (FILE* out = _wfopen(ini_path().c_str(), L"a"))
+            {
+                std::fputs("\n; Added by HalfSwordVR: settings from a newer version, at their defaults (see the docs for what each does).\n", out);
+                for (const std::string& m : missing) std::fprintf(out, "%s\n", m.c_str());
+                fclose(out);
+                HSVR_LOG("Settings: added %d new settings to the ini at their defaults", (int)missing.size());
+            }
         }
         HSVR_LOG("Settings loaded: render_scale=%.2f world_scale=%.2f anchor=%s head_bone=%s eye_fwd=%.1f eye_up=%.1f smoothing=%.3f "
                  "near=%.1f gamma=%d ui_panel=%d separate_rt=%d",
