@@ -9,7 +9,7 @@ How it works (from the decompile, `HalfSwordDecomp\internals-map.md`, "Posing fo
 - Legs, spine and stepping: the game's own animation.
 - The view is anchored at the head height taken when posing starts, so it no longer follows the head bone (which now follows the view).
 
-## Settings (`HalfSwordVR.ini`, add by hand on an existing install)
+## Settings (`HalfSwordVR.ini`; new ones are added to an existing file at their defaults)
 
 | Setting | Default | What it does |
 | --- | --- | --- |

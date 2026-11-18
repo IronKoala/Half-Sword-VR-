@@ -6,9 +6,11 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace hsvr
 {
@@ -169,13 +171,26 @@ namespace hsvr
         fclose(f);
 
         Config c;
+        // Settings added in newer versions are missing from an older file: they get added at their
+        // defaults (test switches, dev_*, are left out), so every setting can be found in the file.
+        std::vector<std::string> missing;
+        auto note_missing = [&](const char* key, const std::string& value) {
+            if (kv.find(key) != kv.end() || std::strncmp(key, "dev_", 4) == 0) return;
+            for (const std::string& m : missing)
+                if (m.compare(0, std::strlen(key) + 1, std::string(key) + "=") == 0) return;
+            missing.push_back(std::string(key) + "=" + value);
+        };
         auto num = [&](const char* key, double& out) {
             auto it = kv.find(key);
             if (it != kv.end() && !it->second.empty()) out = strtod(it->second.c_str(), nullptr);
+            char v[64];
+            std::snprintf(v, sizeof(v), "%g", out);
+            note_missing(key, v);
         };
         auto integer = [&](const char* key, int& out) {
             auto it = kv.find(key);
             if (it != kv.end() && !it->second.empty()) out = (int)strtol(it->second.c_str(), nullptr, 0);
+            note_missing(key, std::to_string(out));
         };
         auto flag = [&](const char* key, bool& out) {
             int v = out ? 1 : 0;
@@ -185,6 +200,7 @@ namespace hsvr
         auto text = [&](const char* key, std::string& out) {
             auto it = kv.find(key);
             if (it != kv.end() && !it->second.empty()) out = it->second;
+            note_missing(key, out);
         };
         flag("enabled", c.enabled);
         flag("require_steamvr_running", c.require_steamvr_running);
@@ -284,6 +300,16 @@ namespace hsvr
         {
             std::lock_guard<std::mutex> lock(g_cfg_mutex);
             g_cfg = c;
+        }
+        if (!missing.empty())
+        {
+            if (FILE* out = _wfopen(ini_path().c_str(), L"a"))
+            {
+                std::fputs("\n; Added by HalfSwordVR: settings from a newer version, at their defaults (see the docs for what each does).\n", out);
+                for (const std::string& m : missing) std::fprintf(out, "%s\n", m.c_str());
+                fclose(out);
+                HSVR_LOG("Settings: added %d new settings to the ini at their defaults", (int)missing.size());
+            }
         }
         HSVR_LOG("Settings loaded: render_scale=%.2f world_scale=%.2f anchor=%s head_bone=%s eye_fwd=%.1f eye_up=%.1f smoothing=%.3f "
                  "near=%.1f gamma=%d ui_panel=%d separate_rt=%d",
