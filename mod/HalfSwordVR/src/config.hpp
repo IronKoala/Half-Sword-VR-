@@ -40,6 +40,14 @@ namespace hsvr
         double ui_opacity_gain = 2.0;
         // Darkness of the sheet behind the panel while a menu is up (0 = none, 1 = solid).
         double ui_menu_backdrop = 0.92;
+        // While a menu is up, point a controller at the panel to move the mouse pointer there; the
+        // trigger clicks (held drags).
+        bool ui_pointer = true;
+        // Menu buttons on the controllers: left menu button = Escape (pause / close the pause menu,
+        // held while held); right A held menu_continue_hold_s after a won fight = the game's "Hold G
+        // to continue" (only then, so it can never surrender or bite).
+        bool menu_buttons = true;
+        double menu_continue_hold_s = 1.0;
         // Also use the coverage the game's UI pass leaves in the window's alpha channel. Off by
         // default: the window only has four levels of alpha, which shows as rings on soft overlays,
         // and the dark sheet behind menus already keeps dark menu parts visible.

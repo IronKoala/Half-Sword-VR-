@@ -1380,6 +1380,20 @@ namespace
 
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     std::atomic<bool> g_hold_reach_clamp{true};
+    std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
+
+    // Sets a yes/no property that the engine packs into a single bit (tests only).
+    bool set_bool_property(UObject* owner, const TCHAR* name, bool value)
+    {
+        if (!owner) return false;
+        FProperty* property = owner->GetPropertyByNameInChain(name);
+        if (!property || property->GetClass().GetName() != STR("BoolProperty")) return false;
+        auto* flag = static_cast<FBoolProperty*>(property);
+        uint8_t* byte = reinterpret_cast<uint8_t*>(owner) + property->GetOffset_Internal() + flag->GetByteOffset();
+        if (value) *byte |= flag->GetFieldMask();
+        else *byte &= (uint8_t)~flag->GetFieldMask();
+        return true;
+    }
     void ghost_hand(int side, const hsvr::Config& cfg, bool show, const hsvr::Vec3& wrist, const hsvr::Quat& hand_rot);
     double hand_on_weapon_amount(int side);
     UObject* load_asset_object(const std::wstring& object_path);
@@ -4706,6 +4720,25 @@ namespace
                 g_ghost_force.store(atoi(entry.command.c_str() + 16) != 0);
                 continue;
             }
+            if (entry.command.rfind("hsvr.press_a ", 0) == 0)
+            {
+                g_fake_continue.store(atoi(entry.command.c_str() + 13) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.match_won", 0) == 0)
+            {
+                // What the GameMode's Minus Enemy sets when the last enemy dies, so the "Hold G to
+                // continue" path can be tested without a fight.
+                UObject* pawn = nullptr;
+                find_pawn_mesh(&pawn);
+                UObject* world = object_property(object_property(g_engine, STR("GameViewport")), STR("World"));
+                UObject* game_mode = object_property(world, STR("AuthorityGameMode"));
+                bool a = set_bool_property(game_mode, STR("Match Won"), true);
+                bool b = set_bool_property(pawn, STR("Match Won (Player)"), true);
+                HSVR_LOG("Script: hsvr.match_won: game mode %ls (Match Won set %d), character Match Won (Player) set %d",
+                         game_mode ? game_mode->GetFullName().c_str() : STR("missing"), (int)a, (int)b);
+                continue;
+            }
             if (entry.command.rfind("hsvr.hold_reach ", 0) == 0)
             {
                 g_hold_reach_clamp.store(atoi(entry.command.c_str() + 16) != 0);
@@ -5131,6 +5164,73 @@ namespace
         return pressed;
     }
 
+    // The game's menu keys from the controllers (its menus take only the keyboard and mouse;
+    // menus_and_prompts.md). Called only while the game window is in front.
+    //  - Left menu button = Escape, down while held: opens the pause menu, and holding it closes the
+    //    pause menu (UI_Pause_Eng's Tick closes itself while Escape is held).
+    //  - Right A held menu_continue_hold_s = "Hold G to continue": calls the player's VO Deescalate
+    //    (what the game's held Talk calls after a win: UI_WIN, then UI_NextFIght), only while the
+    //    GameMode's "Match Won" is set and his "Player Match End" is not. G itself also surrenders
+    //    (held when not won) and bites (double press), so the key is never sent.
+    void menu_buttons(const hsvr::Config& cfg, HWND game_window)
+    {
+        using namespace hsvr;
+        static bool escape_down = false;
+        static HWND escape_window = nullptr;
+        static double continue_since = -1.0;
+        static bool continue_done = false;
+        ControllerState state = controllers_state();
+        bool live = cfg.menu_buttons && state.active && state.focused && game_window;
+        const LPARAM escape_scan = (LPARAM)MapVirtualKeyW(VK_ESCAPE, MAPVK_VK_TO_VSC) << 16;
+
+        bool menu = live && state.hand[0].menu;
+        if (menu && !escape_down)
+        {
+            escape_down = true;
+            escape_window = game_window;
+            PostMessageW(game_window, WM_KEYDOWN, VK_ESCAPE, escape_scan | 1);
+            HSVR_LOG("Menu: left menu button down (Escape)");
+        }
+        else if (!menu && escape_down)
+        {
+            escape_down = false;
+            PostMessageW(escape_window, WM_KEYUP, VK_ESCAPE, escape_scan | 1 | (LPARAM)0xC0000000);
+            HSVR_LOG("Menu: left menu button up");
+        }
+
+        bool a = (live && state.hand[1].primary) || g_fake_continue.load();
+        if (!a)
+        {
+            continue_since = -1.0;
+            continue_done = false;
+            return;
+        }
+        double now = now_seconds();
+        if (continue_since < 0.0) continue_since = now;
+        if (continue_done || now - continue_since < cfg.menu_continue_hold_s) return;
+        continue_done = true; // once per hold
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        UObject* viewport = object_property(g_engine, STR("GameViewport"));
+        UObject* world = object_property(viewport, STR("World"));
+        UObject* game_mode = object_property(world, STR("AuthorityGameMode"));
+        bool won = bool_property(game_mode, STR("Match Won"));
+        bool ended = bool_property(pawn, STR("Player Match End"));
+        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(STR("VO Deescalate")) : nullptr;
+        if (!pawn || !game_mode || !fn || !won || ended)
+        {
+            HSVR_LOG("Menu: A held, not continuing (character %s, game mode %s, VO Deescalate %s, Match Won %d, Player Match End %d)",
+                     pawn ? "found" : "missing", game_mode ? "found" : "missing", fn ? "found" : "missing", (int)won, (int)ended);
+            return;
+        }
+        alignas(16) static uint8_t parameters[256];
+        memset(parameters, 0, sizeof(parameters));
+        pawn->ProcessEvent(fn, parameters);
+        controllers_buzz(1, 0.6f);
+        HSVR_LOG("Menu: A held %.1f s after a won fight: VO Deescalate called (Player Match End now %d)", cfg.menu_continue_hold_s,
+                 (int)bool_property(pawn, STR("Player Match End")));
+    }
+
     void game_tick(UObject* engine, float delta_seconds)
     {
         g_engine = engine;
@@ -5180,7 +5280,12 @@ namespace
         bool view = key_pressed_once(cfg.toggle_view_key, view_down);
         DWORD front_process = 0;
         if (HWND front = GetForegroundWindow()) GetWindowThreadProcessId(front, &front_process);
-        if (front_process != GetCurrentProcessId()) return;
+        if (front_process != GetCurrentProcessId())
+        {
+            menu_buttons(cfg, nullptr); // lets a held Escape go
+            return;
+        }
+        menu_buttons(cfg, GetForegroundWindow());
         if (recenter)
         {
             shared.recenter_requested.store(true);

@@ -252,6 +252,9 @@ namespace hsvr
         integer("gamma_mode", c.gamma_mode);
         flag("ui_panel", c.ui_panel);
         flag("ui_panel_auto", c.ui_panel_auto);
+        flag("ui_pointer", c.ui_pointer);
+        flag("menu_buttons", c.menu_buttons);
+        num("menu_continue_hold_s", c.menu_continue_hold_s);
         num("ui_distance_m", c.ui_distance_m);
         num("ui_width_m", c.ui_width_m);
         num("ui_height_offset_m", c.ui_height_offset_m);
