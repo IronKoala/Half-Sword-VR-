@@ -209,17 +209,23 @@ namespace
         out.head_position = {socket.ReturnValue.X, socket.ReturnValue.Y, socket.ReturnValue.Z};
         out.actor_position = {actor.ReturnValue.X, actor.ReturnValue.Y, actor.ReturnValue.Z};
         out.has_head = true;
+        double body_yaw = 0.0;
         if (UObject* controller = find_player_controller())
         {
             if (ue::FRotator* rotation = controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")))
             {
                 out.has_heading = true;
+                body_yaw = rotation->Yaw; // with body turning on, the mod writes the body's yaw here
                 out.heading_yaw = (g_pose_anchor_fixed && g_turn_valid) ? g_turn_yaw : rotation->Yaw;
             }
         }
+        // The view sits where his head is: the head's spot on his body turns with his body, while the
+        // distance walked in the room is kept in the view's own frame (straight ahead = mouse/stick turn).
+        // Turning both with the view's frame put the eyes in front of or behind his neck once the body
+        // faced elsewhere (180 degrees round: looking down at his own shoulders from behind).
         if (g_pose_anchor_fixed)
-            out.head_position = out.actor_position +
-                                hsvr::quat_from_yaw_deg(out.has_heading ? out.heading_yaw : 0.0).rotate(g_pose_anchor_local - g_pose_room_moved_local);
+            out.head_position = out.actor_position + hsvr::quat_from_yaw_deg(body_yaw).rotate(g_pose_anchor_local) -
+                                hsvr::quat_from_yaw_deg(out.has_heading ? out.heading_yaw : 0.0).rotate(g_pose_room_moved_local);
         return true;
     }
 
