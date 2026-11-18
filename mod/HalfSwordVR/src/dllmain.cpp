@@ -1847,6 +1847,60 @@ namespace
     // pose_turn_dead_zone_deg away, at pose_turn_speed_dps, until it is lined up again. The view's
     // straight ahead keeps only the mouse or stick turn, so turning your head never turns the view
     // twice. Pitch is left as the game has it, so mouse up and down still aims.
+    // ---- The left stick walks you ---------------------------------------------------------------
+    // The game walks him through Unreal's character movement: its own stick and WASD handlers call
+    // AddMovementInput and set "Movement Input Vector", whose length scales his walk speed (decompile:
+    // Willie_BP @768801, @768447, @760861, @563757). Just before his tick the mod does the same with
+    // the left stick, pointed where you look (pose_move_relative=head) or where your body faces
+    // (=body). The capsule hold keeps what the character movement did (it runs before his tick).
+    bool g_stick_walking = false;
+    double g_stick_walk_until = 0.0;
+
+    void stick_walk_before_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        ControllerState state = controllers_state();
+        double x = 0.0, y = 0.0;
+        if (cfg.pose_stick_walk && state.active && state.focused)
+        {
+            x = state.hand[0].stick_x;
+            y = state.hand[0].stick_y;
+        }
+        double m = std::sqrt(x * x + y * y);
+        double dz = cfg.pose_stick_dead_zone;
+        g_stick_walking = m > dz;
+        if (!g_stick_walking) return;
+        double scale = (std::min)(1.0, (m - dz) / (1.0 - dz));
+        double yaw = g_turn_valid ? wrap_deg(g_turn_yaw + g_body_rel) : actor_heading(pawn);
+        if (cfg.pose_move_relative == "head")
+        {
+            Vec3 head_world;
+            Quat head_rot;
+            if (state.head_valid && stereo_tracking_to_world(state.head, head_world, head_rot)) yaw = quat_yaw_deg(head_rot);
+        }
+        // Stick up = forward (+X), right = right (+Y).
+        Vec3 dir = quat_from_yaw_deg(yaw).rotate(Vec3{y / m, x / m, 0.0});
+        Call add(pawn, STR("AddMovementInput"));
+        add.three(STR("WorldDirection"), dir.x, dir.y, 0.0);
+        add.number(STR("ScaleValue"), scale);
+        add.run();
+        if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Movement Input Vector")))
+            write_three(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal(), p, dir.x * scale, dir.y * scale, 0.0);
+        g_stick_walk_until = now_seconds() + 0.5;
+        static double last = 0.0;
+        double now = now_seconds();
+        if (now - last >= 1.0)
+        {
+            last = now;
+            double v[3] = {0, 0, 0};
+            if (UObject* movement = object_property(pawn, STR("CharacterMovement")))
+                if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+                    read_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v);
+            HSVR_LOG("Walk: stick %.2f toward %.0f deg, speed %.0f cm/s", scale, yaw, std::sqrt(v[0] * v[0] + v[1] * v[1]));
+        }
+    }
+
     void turn_body_before_tick()
     {
         using namespace hsvr;
@@ -1880,6 +1934,31 @@ namespace
         double dt = (std::min)(0.1, (std::max)(0.0, now - g_turn_time));
         g_turn_time = now;
         ControllerState state = controllers_state();
+        // The right stick turns you (view and body together), smoothly or in snaps.
+        {
+            Config cfg = config();
+            double x = state.active && state.focused ? state.hand[1].stick_x : 0.0;
+            static bool snap_armed = true;
+            if (cfg.pose_stick_turn == "smooth")
+            {
+                double dz = cfg.pose_stick_dead_zone;
+                if (std::fabs(x) > dz)
+                {
+                    double v = (std::fabs(x) - dz) / (1.0 - dz);
+                    g_turn_yaw = wrap(g_turn_yaw + (x > 0 ? v : -v) * cfg.pose_stick_turn_dps * dt);
+                }
+            }
+            else if (cfg.pose_stick_turn == "snap")
+            {
+                if (snap_armed && std::fabs(x) > 0.6)
+                {
+                    g_turn_yaw = wrap(g_turn_yaw + (x > 0 ? cfg.pose_snap_turn_deg : -cfg.pose_snap_turn_deg));
+                    snap_armed = false;
+                }
+                else if (std::fabs(x) < 0.3)
+                    snap_armed = true;
+            }
+        }
         Vec3 head_world;
         Quat head_rot;
         bool have_head = !g_pose_fake && state.head_valid && stereo_tracking_to_world(state.head, head_world, head_rot);
@@ -1948,7 +2027,11 @@ namespace
         if (!is_receive_tick(context, function)) return;
         g_hold_location = actor_location(context);
         g_hold_have = true;
-        if (g_pose_active.load()) turn_body_before_tick();
+        if (g_pose_active.load())
+        {
+            turn_body_before_tick();
+            stick_walk_before_tick(context);
+        }
     }
 
     void capsule_after_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
@@ -2002,9 +2085,12 @@ namespace
             if (p && p->GetClass().GetName() == STR("StructProperty"))
                 std::memset(reinterpret_cast<uint8_t*>(context) + p->GetOffset_Internal(), 0, p->GetSize());
         }
-        if (UObject* movement = object_property(context, STR("CharacterMovement")))
-            if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
-                write_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, 0.0, 0.0, 0.0);
+        // His speed is cleared so the game's pull doesn't carry over, except while you walk with the
+        // stick (and half a second after, so he slows down by the game's own braking).
+        if (!g_stick_walking && now_seconds() > g_stick_walk_until)
+            if (UObject* movement = object_property(context, STR("CharacterMovement")))
+                if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+                    write_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, 0.0, 0.0, 0.0);
     }
 
     // ---- Your own head, hidden from your view only --------------------------------------------

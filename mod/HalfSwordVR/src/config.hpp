@@ -175,6 +175,14 @@ namespace hsvr
         // The most your head can be turned from his hips (a neck's reach): past it the hips come
         // round with you at once.
         double pose_turn_max_deg = 85.0;
+        // Controller sticks: the left stick walks (toward where you look with "head", or where your
+        // body faces with "body"), the right stick turns you ("smooth", "snap" or "off").
+        bool pose_stick_walk = true;
+        std::string pose_move_relative = "head";
+        std::string pose_stick_turn = "smooth";
+        double pose_stick_turn_dps = 150.0;
+        double pose_snap_turn_deg = 30.0;
+        double pose_stick_dead_zone = 0.15;
         // 1 = he crouches as low as you do (your headset below where you stood when you recentred,
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;

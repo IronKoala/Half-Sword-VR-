@@ -273,6 +273,12 @@ namespace hsvr
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);
+        flag("pose_stick_walk", c.pose_stick_walk);
+        text("pose_move_relative", c.pose_move_relative);
+        text("pose_stick_turn", c.pose_stick_turn);
+        num("pose_stick_turn_dps", c.pose_stick_turn_dps);
+        num("pose_snap_turn_deg", c.pose_snap_turn_deg);
+        num("pose_stick_dead_zone", c.pose_stick_dead_zone);
         flag("pose_crouch", c.pose_crouch);
         num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);
