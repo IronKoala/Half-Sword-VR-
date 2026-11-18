@@ -119,6 +119,42 @@ namespace hsvr
         fclose(f);
     }
 
+    // Writes one setting into the ini (replacing its line, or adding it), for values the mod measures
+    // itself (your arm length). The 1 s reload then picks it up.
+    void config_set(const std::string& key, const std::string& value)
+    {
+        std::vector<std::string> lines;
+        bool found = false;
+        if (FILE* f = _wfopen(ini_path().c_str(), L"r"))
+        {
+            char chunk[512];
+            std::string line;
+            while (fgets(chunk, sizeof(chunk), f))
+            {
+                line += chunk;
+                if (line.back() != '\n') continue;
+                std::string t = trim(line);
+                size_t eq = t.find('=');
+                if (!found && eq != std::string::npos && trim(t.substr(0, eq)) == key)
+                {
+                    line = key + "=" + value + "\n";
+                    found = true;
+                }
+                lines.push_back(line);
+                line.clear();
+            }
+            if (!line.empty()) lines.push_back(line + "\n");
+            fclose(f);
+        }
+        if (!found) lines.push_back(key + "=" + value + "\n");
+        if (FILE* out = _wfopen(ini_path().c_str(), L"w"))
+        {
+            for (const std::string& l : lines) std::fputs(l.c_str(), out);
+            fclose(out);
+        }
+        HSVR_LOG("Settings: %s set to %s", key.c_str(), value.c_str());
+    }
+
     Config config()
     {
         std::lock_guard<std::mutex> lock(g_cfg_mutex);
@@ -288,6 +324,9 @@ namespace hsvr
         num("pose_hold_turn_spring", c.pose_hold_turn_spring);
         num("pose_hold_turn_damper", c.pose_hold_turn_damper);
         num("pose_hold_max_torque", c.pose_hold_max_torque);
+        flag("pose_hold_hand_on_weapon", c.pose_hold_hand_on_weapon);
+        num("pose_hold_blocked_from_cm", c.pose_hold_blocked_from_cm);
+        num("pose_user_arm_cm", c.pose_user_arm_cm);
         num("pose_grip_strength_kg", c.pose_grip_strength_kg);
         num("pose_grip_hz", c.pose_grip_hz);
         num("pose_grip_damping", c.pose_grip_damping);

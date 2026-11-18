@@ -914,6 +914,7 @@ namespace
         double last_check = 0.0;
         hsvr::Vec3 target[2]; // last hand targets (where the hand bone goes, from the controller)
         hsvr::Quat hand_rot[2]; // and the hand bone's world rotation there
+        hsvr::Vec3 raw_target[2]; // the same before scaling your reach to his (for measuring your arm)
         bool hand_valid[2] = {false, false};
         hsvr::Vec3 swivel_local[2]; // smoothed elbow direction, in the body's frame
         bool swivel_valid[2] = {false, false};
@@ -1367,6 +1368,54 @@ namespace
     std::atomic<int> g_fake_arm_mode{0};
     std::atomic<bool> g_contact_log{true};
 
+    bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
+
+    // Measuring your arm length: arms straight out to the sides, B and Y held together for 2 s. Your
+    // wrist-to-wrist span (from the controllers), less his shoulder width (yours is taken as his),
+    // halved, is your arm from shoulder to wrist; it goes into the ini (pose_user_arm_cm) and both
+    // controllers buzz. Holding B and Y with the arms not spread (under 100 cm) does nothing.
+    void measure_arms(const hsvr::ControllerState& state)
+    {
+        using namespace hsvr;
+        static double held_since = -1.0;
+        static double done_at = -100.0;
+        static bool measured = false;
+        double now = now_seconds();
+        if (measured && now - done_at < 0.4)
+        {
+            controllers_buzz(0, 0.8f);
+            controllers_buzz(1, 0.8f);
+        }
+        bool both = state.hand[0].grip_valid && state.hand[1].grip_valid && state.hand[0].secondary && state.hand[1].secondary &&
+                    g_pose.hand_valid[0] && g_pose.hand_valid[1];
+        if (!both)
+        {
+            held_since = -1.0;
+            return;
+        }
+        if (held_since < 0.0) held_since = now;
+        if (now - held_since < 2.0 || now - done_at < 3.0) return;
+        double span = length(g_pose.raw_target[0] - g_pose.raw_target[1]);
+        Vec3 sl = socket_location(g_pose.driver, bone_fname("upperarm_l")), sr = socket_location(g_pose.driver, bone_fname("upperarm_r"));
+        double shoulders = length(sl - sr);
+        double arm = (span - shoulders) * 0.5;
+        double his = (g_pose.arm[0].upper_length + g_pose.arm[0].lower_length + g_pose.arm[1].upper_length + g_pose.arm[1].lower_length) * 0.5;
+        done_at = now;
+        held_since = -1.0;
+        measured = false;
+        if (span < 100.0 || arm < 35.0 || arm > 110.0)
+        {
+            HSVR_LOG("Arms: not measured: wrist-to-wrist %.0f cm (his shoulders %.0f apart) gives an arm of %.0f cm, out of range", span, shoulders, arm);
+            return;
+        }
+        char v[32];
+        std::snprintf(v, sizeof(v), "%.1f", arm);
+        config_set("pose_user_arm_cm", v);
+        HSVR_LOG("Arms: measured: wrist-to-wrist %.0f cm, his shoulders %.0f apart, so your arm is %.1f cm (his %.1f): your reach is scaled by %.2f",
+                 span, shoulders, arm, his, his / arm);
+        measured = true;
+    }
+
     void pose_arm(int side, const hsvr::Config& cfg, const hsvr::ControllerState& state, const hsvr::Quat& body, const hsvr::Quat& component_inv)
     {
         using namespace hsvr;
@@ -1390,7 +1439,7 @@ namespace
             }
             // Made-up path for unattended tests (dev_script "hsvr.arm_move <mode>"): 0 each hand circles
             // slowly in front of its shoulder; 1 holds still; 2 slow swing and 3 fast swing (side to
-            // side and down, a cut); 4 raised overhead.
+            // side and down, a cut); 4 raised overhead; 5 pushed down through the floor.
             Vec3 shoulder = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
             int mode = g_fake_arm_mode.load();
             double now = now_seconds();
@@ -1402,6 +1451,7 @@ namespace
                 local = Vec3{45.0, out * 10.0 + 35.0 * std::sin(t), 5.0 - 30.0 * std::fabs(std::sin(t))};
             }
             else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
+            else if (mode == 5) local = Vec3{45.0, out * 15.0, -175.0}; // under the floor: the weapon is stopped by the ground
             else
             {
                 double t = now * 1.5 + side * 1.5;
@@ -1411,9 +1461,13 @@ namespace
             grip_rot = (body * rot_to_quat(60.0, 0.0, 0.0)).normalized(); // controller handle tilted forward, as held
         }
         Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
+        g_pose.raw_target[side] = target;
+        Vec3 S = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
+        // Your reach scaled to his (once your arm length is measured): from his shoulder, your hand is
+        // as far out along his arm as it is along yours.
+        if (cfg.pose_user_arm_cm > 1.0 && tracked) target = S + (target - S) * ((a.upper_length + a.lower_length) / cfg.pose_user_arm_cm);
         g_pose.target[side] = target;
 
-        Vec3 S = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
         Vec3 to = target - S;
         double D = length(to);
         double L1 = a.upper_length, L2 = a.lower_length;
@@ -1433,6 +1487,15 @@ namespace
         Quat Wh = (quat_from_two(fingers_world, thumb_world) * quat_from_two(a.fingers_local, a.thumb_local).inverse()).normalized();
         g_pose.hand_rot[side] = Wh;
         g_pose.hand_valid[side] = true;
+        // Holding a weapon that something has stopped: his hand stays on the weapon (Matthew's framework).
+        if (hand_on_weapon(side, cfg, target, Wh))
+        {
+            to = target - S;
+            double d = length(to);
+            if (d < 1e-3) return;
+            dir = to * (1.0 / d);
+            D = (std::min)((std::max)(d, lo), hi);
+        }
 
         // Where the elbow points around the shoulder-to-wrist line (the swivel): ported from the
         // arm solver in Matthew's Chasms VR Framework (crates/ik/src/arm.rs, MIT, Copyright (c) 2026
@@ -1797,6 +1860,7 @@ namespace
         for (int side = 0; side < 2; ++side)
         {
             if (cfg.pose_arms) pose_arm(side, cfg, state, body, component_inv);
+            if (side == 1 && cfg.pose_arms) measure_arms(state);
             else
                 for (const char* b : {"upperarm", "lowerarm", "hand"})
                     if (ModifyBoneNode* n = chain_node(std::string(b) + side_suffix(side))) node_release(*n);
@@ -2835,8 +2899,51 @@ namespace
         // (deg), the hand's force (N) and torque (N m) this tick, and whether either hit its cap.
         double lag = 0.0, turn_deg = 0.0, force_n = 0.0, torque_nm = 0.0, dt = 0.0;
         bool force_capped = false, torque_capped = false;
+        // The joint's frames, for placing the hand on the weapon.
+        hsvr::Vec3 pivot, in_hand;
+        hsvr::Quat f1, f2;
+        // His hand on the weapon this frame: how far the weapon is from where the hold sent it (cm),
+        // and how much of that the hand took (0 follows the controller, 1 sits on the weapon).
+        double blocked_cm = 0.0, on_weapon = 0.0;
     };
     HoldState g_hold[2];
+
+    // Where his hand goes while it holds a weapon. The hold sent the weapon (last tick) to where the
+    // controller had the hand; if it is not there now, something stopped it, and the hand goes onto
+    // the weapon by the same amount, so a stopped weapon keeps his hand on it while a free one leaves
+    // the hand exactly on the controller ("a holding hand sits on its object", Matthew's framework,
+    // rig/mod.rs). It eases in from 1 cm to pose_hold_blocked_from_cm, so the hold's few millimetres
+    // of play never shake the hand.
+    bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot)
+    {
+        using namespace hsvr;
+        HoldState& h = g_hold[side];
+        h.blocked_cm = 0.0;
+        h.on_weapon = 0.0;
+        if (!cfg.pose_hold_hand_on_weapon || !h.weapon || !h.have_last || !g_pose.pawn) return false;
+        if (object_property(g_pose.pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != h.weapon) return false;
+        UObject* base = object_property(h.weapon, STR("BaseMesh"));
+        if (!base) return false;
+        Vec3 pos = component_location(base);
+        Quat rot = component_rotation(base);
+        // Where it is against where the hold sent it.
+        Vec3 off = (pos + rot.rotate(h.pivot)) - (h.last_target_pos + h.last_target_rot.rotate(h.pivot));
+        Vec3 turn = scaled_axis((rot * h.last_target_rot.inverse()).normalized());
+        h.blocked_cm = length(off);
+        double from = 1.0, full = (std::max)(from + 0.5, cfg.pose_hold_blocked_from_cm);
+        double turn_cm = length(turn) * 10.0; // a turn counts as its movement 10 cm out
+        double amount = (std::max)(h.blocked_cm, turn_cm);
+        double t = (std::min)(1.0, (std::max)(0.0, (amount - from) / (full - from)));
+        t = t * t * (3.0 - 2.0 * t);
+        h.on_weapon = t;
+        if (t <= 0.0) return false;
+        // The hand where it holds the weapon, moved and turned as the weapon was kept from following.
+        Quat dr = from_scaled_axis(turn * t);
+        Vec3 point = target + hand_rot.rotate(h.in_hand) + off * t;
+        hand_rot = (dr * hand_rot).normalized();
+        target = point - hand_rot.rotate(h.in_hand);
+        return true;
+    }
 
     // One tick of the hold for one hand. `joint` is the game's hand joint (its frames say where on the
     // weapon the hand holds it and how the weapon sits in the hand); `base` the weapon's BaseMesh.
@@ -2875,6 +2982,10 @@ namespace
         Vec3 in_hand = ax(STR("Pos2")); // where the hand holds it, in the hand bone's frame
         Quat f1 = quat_from_axes(ax(STR("PriAxis1")), ax(STR("SecAxis1")));
         Quat f2 = quat_from_axes(ax(STR("PriAxis2")), ax(STR("SecAxis2")));
+        h.pivot = pivot;
+        h.in_hand = in_hand;
+        h.f1 = f1;
+        h.f2 = f2;
         // The weapon as the game's locked joint would sit it in that hand.
         Quat target_rot = (hand_rot * f2 * f1.inverse()).normalized();
         Vec3 target_pos = hand_pos + hand_rot.rotate(in_hand) - target_rot.rotate(pivot); // weapon origin
@@ -3360,10 +3471,11 @@ namespace
                              g_grip_log[side].same_mesh, g_grip_log[side].mesh_hand_diff);
                     HSVR_LOG("Grip: %s turning error %.1f deg", side == 0 ? "left" : "right", g_grip_log[side].turn_err_deg);
                     if (g_hold[side].weapon)
-                        HSVR_LOG("Hold: %s point held %.1f cm and %.1f deg behind the controller, hand force %.0f N%s, torque %.1f N m%s, dt %.4f",
+                        HSVR_LOG("Hold: %s point held %.1f cm and %.1f deg behind the controller, hand force %.0f N%s, torque %.1f N m%s, dt %.4f, "
+                                 "stopped %.1f cm, hand on weapon %.2f",
                                  side == 0 ? "left" : "right", g_hold[side].lag, g_hold[side].turn_deg, g_hold[side].force_n,
                                  g_hold[side].force_capped ? " (at its cap)" : "", g_hold[side].torque_nm, g_hold[side].torque_capped ? " (at its cap)" : "",
-                                 g_hold[side].dt);
+                                 g_hold[side].dt, g_hold[side].blocked_cm, g_hold[side].on_weapon);
                     HSVR_LOG("Grip: %s bodies: hand body centre (%.1f, %.1f, %.1f) in the hand bone's frame, weapon body centre (%.1f, %.1f, %.1f) in its frame",
                              side == 0 ? "left" : "right", g_grip_log[side].hand_com_local.x, g_grip_log[side].hand_com_local.y,
                              g_grip_log[side].hand_com_local.z, g_grip_log[side].weapon_com_local.x, g_grip_log[side].weapon_com_local.y,

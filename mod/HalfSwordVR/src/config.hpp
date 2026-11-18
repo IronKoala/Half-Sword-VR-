@@ -203,6 +203,15 @@ namespace hsvr
         double pose_hold_turn_spring = 1100.0;
         double pose_hold_turn_damper = 45.0;
         double pose_hold_max_torque = 250.0;
+        // While held, his visible hand sits on the weapon (1): when the weapon is stopped by something,
+        // the hand stays on it instead of going on with your controller. It eases from following the
+        // controller to sitting on the weapon as the weapon falls 1 to pose_hold_blocked_from_cm behind.
+        bool pose_hold_hand_on_weapon = true;
+        double pose_hold_blocked_from_cm = 3.0;
+        // Your arm length (shoulder to wrist, cm), measured by holding both arms straight out to the
+        // sides and holding B and Y for 2 s. 0 = not measured: your hands go exactly where the
+        // controllers are. Measured, your reach is scaled to his so full reach is full reach.
+        double pose_user_arm_cm = 0.0;
         double pose_grip_strength_kg = 20.0;
         double pose_grip_hz = 20.0;
         double pose_grip_damping = 0.3;
@@ -271,4 +280,5 @@ namespace hsvr
     Config config();
     // Loads the file, writing a default one if it is missing. Returns true if values changed.
     bool config_reload_if_changed(bool force = false);
+    void config_set(const std::string& key, const std::string& value);
 } // namespace hsvr

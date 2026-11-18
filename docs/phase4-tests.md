@@ -26,6 +26,8 @@ The game holds a weapon with a physics joint between the weapon and the hand bon
 | `pose_hold_strength` | 1 | Multiplies every hold value (dampers by half of it past 1). Game stats will drive this later. |
 | `pose_hold_spring`, `pose_hold_damper`, `pose_hold_max_force` | 5000, 100, 3000 | The hold's spring (N/m), damper (N s/m) and most force (N), the framework's one-hand values. |
 | `pose_hold_turn_spring`, `pose_hold_turn_damper`, `pose_hold_max_torque` | 1100, 45, 250 | Its turning spring (N m/rad), damper and most torque (N m), the framework's values with its handle multipliers (x1.1, x0.9). |
+| `pose_hold_hand_on_weapon`, `pose_hold_blocked_from_cm` | 1, 3 | While held, his visible hand sits on the weapon when something stops it, instead of going on with your controller (Matthew's framework). It eases in as the weapon falls 1 to 3 cm behind where the hold sent it. |
+| `pose_user_arm_cm` | 0 | Your arm, shoulder to wrist, in cm. Measure it in the headset: arms straight out to the sides, hold B and Y together for 2 s; both controllers buzz and the value is written here. 0 = your hands go exactly where the controllers are; measured, your reach is scaled to his. |
 | `pose_grip_spring` | 1 | With the hold off: 1 = spring, 0 = the game's locked joint. |
 | `pose_grip_strength_kg` | 20 | The most weight the grip holds up, in kg. Turning strength is this times `pose_grip_radius_cm`. |
 | `pose_grip_hz`, `pose_grip_damping` | 20, 0.3 | How briskly the weapon follows (natural frequency) and the damping ratio. Chaos runs drives in acceleration mode and solves their damping against the spring's own correction, so damping 1 makes the weapon sag ~16 cm; 0.3 holds as well as the game's locked grip (tests 25-26). |
@@ -59,4 +61,4 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `hsvr.weapon_channel <channel> <response>` | Weapon's response to one collision channel (0 ignore, 1 overlap, 2 block) |
 | `hsvr.weapon_collision <n>` | Switches the weapon's collision mode. This rebuilds the body and breaks the hand joint; don't use it to test the grip |
 | `hsvr.contact_log 0/1` | Logs which of his bodies, and which other components, touch the weapon (on by default) |
-| `hsvr.arm_move <mode>` | Fake-tracking arms: 0 circles, 1 still, 2 slow swing, 3 fast swing, 4 overhead |
+| `hsvr.arm_move <mode>` | Fake-tracking arms: 0 circles, 1 still, 2 slow swing, 3 fast swing, 4 overhead, 5 pushed down through the floor (the weapon is stopped by the ground) |
