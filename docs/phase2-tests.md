@@ -55,3 +55,8 @@ This saves the game, so the save is left in Free Mode, as after pressing Free Mo
 - The body freezes standing in the pose it had, while the collision capsule keeps moving under the opponent's pushes. Nothing fell, sank or slid. The opponent stood face to face with him and no damage showed (no red screen, no death).
 - Physics back on recovered him at once: he moved and fought normally.
 - An idle character at the easiest tier is killed in about 33 s, so the unattended script switches physics off about 3 s after the spawn.
+
+### Result in the headset (2026-11-18)
+
+- Test 1: every button, stick and trigger read and both controllers buzzed (Matthew; this run's log was lost to a restart, the inputs were already confirmed in the 2026-11-17 headset log). In the physics-test run both hands tracked the whole time (410 readings, none lost) on the Oculus Touch layout, about 70 fps.
+- Test 2: as expected, no issues in the headset. The game turns physics back on once, about 2 s after each spawn, then leaves it off once the mod switches it off again; Phase 3 has to switch it off after that point or keep checking. Switching back on after about 90 s frozen made him collapse this time (yesterday he recovered), so restart the fight after the test.
