@@ -1480,8 +1480,8 @@ namespace
 
     void hide_own_head(const hsvr::Config& cfg)
     {
-        constexpr int N = 3;
-        static UObject* hidden[N] = {nullptr, nullptr, nullptr};
+        constexpr int N = 2;
+        static UObject* hidden[N] = {nullptr, nullptr};
         static double last = 0.0;
         double now = hsvr::now_seconds();
         if (now - last < 1.0) return;
@@ -1490,12 +1490,54 @@ namespace
         find_pawn_mesh(&pawn);
         bool willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
         bool want = cfg.hide_own_head && willie && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().stereo_installed.load();
-        UObject* parts[N] = {nullptr, nullptr, nullptr};
+        UObject* parts[N] = {nullptr, nullptr};
         if (willie)
         {
             parts[0] = object_property(pawn, STR("CharacterMesh_Head"));
             parts[1] = object_property(pawn, STR("Hair"));
-            if (cfg.hide_own_gore_skeleton) parts[2] = object_property(pawn, STR("SK_Skeleton"));
+        }
+        // The gore skeleton: only its part from hide_own_gore_from (the neck) up is hidden, by
+        // folding those bones away, so your own wounds elsewhere still show their bones. This is
+        // not owner-only, but nobody else looks out from inside your head, and your head is
+        // hidden from you anyway.
+        {
+            static UObject* gore = nullptr;
+            static std::string gore_bone;
+            UObject* skeleton = willie ? object_property(pawn, STR("SK_Skeleton")) : nullptr;
+            bool hide_gore = want && skeleton && !cfg.hide_own_gore_from.empty();
+            auto bone_call = [](UObject* c, const TCHAR* fn, const std::string& bone) {
+                Call call(c, fn);
+                call.name(STR("BoneName"), bone_fname(bone));
+                call.run();
+                return call;
+            };
+            if (gore && (gore != skeleton || !hide_gore || gore_bone != cfg.hide_own_gore_from))
+            {
+                if (gore == skeleton) bone_call(gore, STR("UnHideBoneByName"), gore_bone);
+                HSVR_LOG("Head: gore skeleton from %s up shown again", gore_bone.c_str());
+                gore = nullptr;
+            }
+            if (hide_gore)
+            {
+                Call check = bone_call(skeleton, STR("IsBoneHiddenByName"), cfg.hide_own_gore_from);
+                bool already = false;
+                if (FProperty* r = check.param(STR("ReturnValue")))
+                    already = (check.buffer[r->GetOffset_Internal()] & static_cast<FBoolProperty*>(r)->GetFieldMask()) != 0;
+                if (!already)
+                {
+                    if (!bone_exists(skeleton, cfg.hide_own_gore_from))
+                        HSVR_LOG_EVERY(30.0, "Head: the gore skeleton has no bone %s; set hide_own_gore_from", cfg.hide_own_gore_from.c_str());
+                    else
+                    {
+                        Call hide(skeleton, STR("HideBoneByName"));
+                        hide.name(STR("BoneName"), bone_fname(cfg.hide_own_gore_from));
+                        hide.run(); // PhysBodyOption stays 0: no physics change
+                        HSVR_LOG_EVERY(10.0, "Head: gore skeleton (%ls) hidden from bone %s up", skeleton->GetFullName().c_str(), cfg.hide_own_gore_from.c_str());
+                    }
+                }
+                gore = skeleton;
+                gore_bone = cfg.hide_own_gore_from;
+            }
         }
         for (int i = 0; i < N; ++i)
         {
