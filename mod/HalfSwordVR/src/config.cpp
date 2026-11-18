@@ -261,6 +261,7 @@ namespace hsvr
         num("pose_hand_yaw", c.pose_hand_yaw);
         num("pose_hand_roll", c.pose_hand_roll);
         num("pose_knuckle_deg", c.pose_knuckle_deg);
+        num("pose_forearm_twist_share", c.pose_forearm_twist_share);
         num("pose_elbow_back", c.pose_elbow_back);
         num("pose_elbow_out", c.pose_elbow_out);
         num("pose_elbow_down", c.pose_elbow_down);

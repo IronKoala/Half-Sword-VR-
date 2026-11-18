@@ -177,6 +177,9 @@ namespace hsvr
         double pose_wrist_forward_cm = -2.7, pose_wrist_right_cm = 2.0, pose_wrist_up_cm = 7.5;
         double pose_hand_pitch = 0.0, pose_hand_yaw = 0.0, pose_hand_roll = 0.0;
         double pose_knuckle_deg = 20.0;
+        // How much of the hand's turn about the forearm the forearm bone takes (0 to 1); the rest
+        // shows at the wrist. Willie's forearm has no twist bones.
+        double pose_forearm_twist_share = 0.5;
         // Which way the elbows point (in the body's frame: back, out, down; any length).
         double pose_elbow_back = 0.3, pose_elbow_out = 0.6, pose_elbow_down = 1.0;
         // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and

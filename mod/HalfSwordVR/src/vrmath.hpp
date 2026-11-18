@@ -49,6 +49,13 @@ namespace hsvr
         }
     };
 
+    // Rotation by `radians` about the unit vector `axis` (right-hand rule).
+    inline Quat quat_axis_angle(const Vec3& axis, double radians)
+    {
+        double s = std::sin(radians * 0.5);
+        return {axis.x * s, axis.y * s, axis.z * s, std::cos(radians * 0.5)};
+    }
+
     // Rotation about Unreal's up axis. Positive yaw turns right (clockwise seen from above).
     inline Quat quat_from_yaw_deg(double yaw_deg)
     {

@@ -833,6 +833,8 @@ namespace
         hsvr::Vec3 upper_dir_local, upper_normal_local; // in the upperarm bone's frame
         hsvr::Vec3 lower_dir_local, lower_normal_local; // in the lowerarm bone's frame
         hsvr::Vec3 fingers_local, thumb_local;           // in the hand bone's frame: toward the fingers, toward the thumb side
+        hsvr::Quat wrist_rest;                           // forearm -> hand at calibration (the game's relaxed wrist)
+        double twist_deg = 0, bend_deg = 0;              // last frame, for the log
     };
 
     struct PoseState
@@ -956,6 +958,7 @@ namespace
                 across = socket_location(d, bone_fname("index_01" + sx)) - socket_location(d, bone_fname("pinky_01" + sx));
                 how = "finger bones";
             }
+            a.wrist_rest = (Wl.inverse() * Wh).normalized();
             a.fingers_local = normalized(Wh.inverse().rotate(fingers));
             Vec3 t = Wh.inverse().rotate(across);
             a.thumb_local = normalized(t - a.fingers_local * dot(t, a.fingers_local));
@@ -1036,6 +1039,19 @@ namespace
         Vec3 fingers_world = hand_grip.rotate(Vec3{std::sin(k), 0.0, -std::cos(k)});
         Vec3 thumb_world = hand_grip.rotate(Vec3{std::cos(k), 0.0, std::sin(k)});
         Quat Wh = (quat_from_two(fingers_world, thumb_world) * quat_from_two(a.fingers_local, a.thumb_local).inverse()).normalized();
+        // The forearm has no twist bones, so a hand turned about the forearm's axis would wring
+        // the wrist. Measure that turn against the game's relaxed wrist and give the forearm bone
+        // its share (pose_forearm_twist_share; the hand keeps its exact rotation).
+        Vec3 axis = normalized(H - E);
+        Quat delta = (Wh * (Wl * a.wrist_rest).inverse()).normalized();
+        double proj = delta.x * axis.x + delta.y * axis.y + delta.z * axis.z;
+        double twist = 2.0 * std::atan2(proj, delta.w);
+        if (twist > 3.14159265358979323846) twist -= 2.0 * 3.14159265358979323846;
+        if (twist < -3.14159265358979323846) twist += 2.0 * 3.14159265358979323846;
+        Wl = (quat_axis_angle(axis, twist * cfg.pose_forearm_twist_share) * Wl).normalized();
+        a.twist_deg = twist * 180.0 / 3.14159265358979323846;
+        double c = dot(normalized(Wh.rotate(a.fingers_local)), axis);
+        a.bend_deg = std::acos((std::max)(-1.0, (std::min)(1.0, c))) * 180.0 / 3.14159265358979323846;
         node_set_rotation(*chain_node("upperarm" + sx), component_inv * Wu);
         node_set_rotation(*chain_node("lowerarm" + sx), component_inv * Wl);
         node_set_rotation(*chain_node("hand" + sx), component_inv * Wh);
@@ -1181,6 +1197,8 @@ namespace
                     mode = *(reinterpret_cast<uint8_t*>(movement) + mp->GetOffset_Internal());
             }
             HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d", v[0], v[1], v[2], mode);
+            HSVR_LOG("Pose: wrists: left twist %.0f deg, bend %.0f deg; right twist %.0f deg, bend %.0f deg (twist before the forearm's share)",
+                     g_pose.arm[0].twist_deg, g_pose.arm[0].bend_deg, g_pose.arm[1].twist_deg, g_pose.arm[1].bend_deg);
             HSVR_LOG("Pose: actor (%.0f, %.0f, %.0f) heading %.0f, pelvis gap %.0f cm, room moved (%.0f, %.0f) this frame (%.1f, %.1f), head %s, hands %s/%s, "
                      "hand_l (%.0f, %.0f, %.0f) target (%.0f, %.0f, %.0f), hand_r (%.0f, %.0f, %.0f) target (%.0f, %.0f, %.0f)",
                      actor.x, actor.y, actor.z, heading, length(Vec3{pelvis.x - actor.x, pelvis.y - actor.y, 0.0}), g_pose_room_moved_local.x,
