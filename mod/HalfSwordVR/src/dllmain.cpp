@@ -1179,7 +1179,7 @@ namespace
         UObject* pawn = nullptr;
         find_pawn_mesh(&pawn);
         bool willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
-        bool want = cfg.hide_own_head && willie && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().xr_running.load();
+        bool want = cfg.hide_own_head && willie && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().stereo_installed.load();
         UObject* parts[2] = {nullptr, nullptr};
         if (willie)
         {
