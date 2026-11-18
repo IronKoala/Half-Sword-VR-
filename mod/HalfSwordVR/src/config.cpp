@@ -252,6 +252,7 @@ namespace hsvr
         flag("pose_head", c.pose_head);
         flag("pose_arms", c.pose_arms);
         flag("pose_follow_room", c.pose_follow_room);
+        flag("pose_hold_capsule", c.pose_hold_capsule);
         text("pose_arm_style", c.pose_arm_style);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);
         num("pose_wrist_right_cm", c.pose_wrist_right_cm);

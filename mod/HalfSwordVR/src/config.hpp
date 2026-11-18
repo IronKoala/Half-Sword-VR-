@@ -163,6 +163,9 @@ namespace hsvr
         bool pose_head = true;
         bool pose_arms = true;
         bool pose_follow_room = true;
+        // 1 = while posed, your character's capsule only moves when you walk: the game's own pull
+        // toward the body (and hit stumbles, dodges and leans) is undone after each of his ticks.
+        bool pose_hold_capsule = true;
         // "exact": arms posed exactly. "muscle": arms back on physics, pulled to the pose by the
         // game's own muscles (strength, stamina and injury act on them as in the game).
         std::string pose_arm_style = "exact";

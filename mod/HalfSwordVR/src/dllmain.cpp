@@ -1014,6 +1014,7 @@ namespace
         UObject* driver = willie ? object_property(pawn, STR("DriverSkeleton")) : nullptr;
         UObject* instance = object_property(driver, STR("AnimScriptInstance"));
         bool abp = instance && instance->GetClassPrivate()->GetName().find(STR("ABP_Willie")) != std::wstring::npos;
+        g_hold_capsule.store(cfg.pose_body && cfg.pose_hold_capsule && abp && mesh && g_pose.calibrated && g_pose.pawn == pawn);
         if (!cfg.pose_body || !abp || !mesh)
         {
             if (g_pose.pawn && (pawn == g_pose.pawn)) pose_release();
@@ -1152,6 +1153,100 @@ namespace
                      state.hand[1].grip_valid ? "tracked" : (cfg.dev_pose_fake_tracking ? "fake" : "-"), hl.x, hl.y, hl.z, g_pose.target[0].x,
                      g_pose.target[0].y, g_pose.target[0].z, hr.x, hr.y, hr.z, g_pose.target[1].x, g_pose.target[1].y, g_pose.target[1].z);
         }
+    }
+
+    // ---- The capsule stays where you are --------------------------------------------------------
+    // Willie's tick (ReceiveTick) pulls his capsule toward a point worked out from his pelvis and
+    // spine plus the game's stumble, pain, dodge and lean offsets, and sets its height from his
+    // steps. With the body posed on the capsule that pull never closes, so a hit (pain stumble)
+    // slid him across the arena. While the body is posed, the mod notes where the capsule is just
+    // before his tick and puts it back just after, so only your walking moves it. The stumble and
+    // dodge offsets are cleared after each tick so they don't build up.
+    std::atomic<bool> g_hold_capsule{false};
+    UFunction* g_receive_tick = nullptr;
+    bool g_hold_have = false;
+    hsvr::Vec3 g_hold_location;
+
+    double number_property(UObject* owner, FProperty* p)
+    {
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
+        auto kind = p->GetClass().GetName();
+        if (kind == STR("DoubleProperty")) return *reinterpret_cast<double*>(at);
+        if (kind == STR("FloatProperty")) return *reinterpret_cast<float*>(at);
+        if (kind == STR("BoolProperty"))
+        {
+            auto* flag = static_cast<FBoolProperty*>(p);
+            return (at[flag->GetByteOffset()] & flag->GetFieldMask()) != 0 ? 1.0 : 0.0;
+        }
+        if (kind == STR("StructProperty"))
+        {
+            double v[3];
+            read_three(at, p, v);
+            return hsvr::length(hsvr::Vec3{v[0], v[1], v[2]});
+        }
+        return -1.0;
+    }
+
+    bool is_receive_tick(UObject* context, UFunction* function)
+    {
+        if (!g_hold_capsule.load() || !context || context != g_pose.pawn || !function) return false;
+        if (g_receive_tick) return function == g_receive_tick;
+        if (function->GetName() != STR("ReceiveTick")) return false;
+        g_receive_tick = function;
+        HSVR_LOG("Capsule: found your character's tick (%ls)", function->GetFullName().c_str());
+        return true;
+    }
+
+    void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        if (!is_receive_tick(context, function)) return;
+        g_hold_location = actor_location(context);
+        g_hold_have = true;
+    }
+
+    void capsule_after_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        if (!is_receive_tick(context, function) || !g_hold_have) return;
+        g_hold_have = false;
+        using namespace hsvr;
+        Vec3 now_at = actor_location(context);
+        Vec3 moved = now_at - g_hold_location;
+        static double last_line = 0.0;
+        static double moved_max = 0.0;
+        moved_max = (std::max)(moved_max, length(moved));
+        double now = now_seconds();
+        if (now - last_line >= 0.25)
+        {
+            last_line = now;
+            std::string values;
+            for (const TCHAR* name : {STR("Pain Stumble Immediate"), STR("Pain Stumble Delayed"), STR("Stumble Direction"), STR("Dodge Vector"),
+                                      STR("Capsule Max Dislocation"), STR("Climbing In Air")})
+            {
+                FProperty* p = context->GetPropertyByNameInChain(name);
+                char part[96];
+                std::snprintf(part, sizeof(part), ", %ls %.1f", name, p ? number_property(context, p) : -1.0);
+                values += part;
+            }
+            HSVR_LOG("Capsule: the game moved it up to %.1f cm in a tick (put back)%s", moved_max, values.c_str());
+            moved_max = 0.0;
+        }
+        if (length(moved) > 0.01)
+        {
+            Call put(context, STR("K2_SetActorLocation"));
+            put.three(STR("NewLocation"), g_hold_location.x, g_hold_location.y, g_hold_location.z);
+            put.flag(STR("bSweep"), false);
+            put.flag(STR("bTeleport"), true);
+            put.run();
+        }
+        for (const TCHAR* name : {STR("Pain Stumble Immediate"), STR("Pain Stumble Delayed"), STR("Stumble Direction"), STR("Dodge Vector")})
+        {
+            FProperty* p = context->GetPropertyByNameInChain(name);
+            if (p && p->GetClass().GetName() == STR("StructProperty"))
+                std::memset(reinterpret_cast<uint8_t*>(context) + p->GetOffset_Internal(), 0, p->GetSize());
+        }
+        if (UObject* movement = object_property(context, STR("CharacterMovement")))
+            if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+                write_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, 0.0, 0.0, 0.0);
     }
 
     // ---- Your own head, hidden from your view only --------------------------------------------
@@ -2133,6 +2228,8 @@ class HalfSwordVR : public CppUserModBase
             hsvr::stereo_set_anchor_provider(&provide_anchor);
             hsvr::vr_install_present_hook();
         }
+        Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});
+        Hook::RegisterProcessEventPostCallback(&capsule_after_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleAfter")});
         Hook::RegisterEngineTickPreCallback(
                 [](auto&, UEngine* engine, float delta_seconds, bool) {
                     game_tick(reinterpret_cast<UObject*>(engine), delta_seconds);
