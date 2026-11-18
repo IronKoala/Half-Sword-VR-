@@ -30,7 +30,7 @@ The game holds a weapon with a physics joint between the weapon and the hand bon
 | `pose_hold_let_go`, `pose_hold_let_go_s` | 1, 0.15 | The stuck rule: a stopped weapon whose grip is out of his reach from the shoulder, or more than an arm's length from your hand, for 0.15 s, is let go with the game's own drop (Set Up Right/Left Hand Weapon with no weapon, dropped with no damage). |
 | `pose_ghost_hand`, `pose_ghost_from_cm` | 1, 4 | The ghost hand: while his hand stays on a stopped weapon more than 4 cm from your real hand, a see-through glove shows where your hand is. |
 | `pose_ghost_mesh`, `pose_ghost_material` | a game glove, the engine's unlit translucent | Object paths in the cooked game (see HalfSwordDecomp ghost_hand_assets.md for others). |
-| `pose_ghost_x_cm/y_cm/z_cm`, `pose_ghost_pitch/yaw/roll`, `pose_ghost_scale` | 0 | Fitting the glove onto the hand bone. |
+| `pose_ghost_x_cm/y_cm/z_cm`, `pose_ghost_pitch/yaw/roll`, `pose_ghost_scale` | 0, pitch 180, scale 0.8 | Fitting the glove onto the hand bone. |
 | `pose_user_arm_cm` | 0 | Your arm, shoulder to wrist, in cm. Measure it in the headset: arms straight out to the sides, hold B and Y together for 2 s; both controllers buzz and the value is written here. 0 = your hands go exactly where the controllers are; measured, your reach is scaled to his. |
 | `pose_grip_spring` | 1 | With the hold off: 1 = spring, 0 = the game's locked joint. |
 | `pose_grip_strength_kg` | 20 | The most weight the grip holds up, in kg. Turning strength is this times `pose_grip_radius_cm`. |

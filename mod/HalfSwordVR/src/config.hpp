@@ -221,7 +221,7 @@ namespace hsvr
         std::string pose_ghost_mesh = "/Game/Assets/Armor/Hand/Gauntlet/StaticMeshes/WM_Armor_Hand_Gauntlet_Glove_003.WM_Armor_Hand_Gauntlet_Glove_003";
         std::string pose_ghost_material = "/Engine/EngineDebugMaterials/M_SimpleUnlitTranslucent.M_SimpleUnlitTranslucent";
         double pose_ghost_x_cm = 0.0, pose_ghost_y_cm = 0.0, pose_ghost_z_cm = 0.0;
-        double pose_ghost_pitch = 0.0, pose_ghost_yaw = 0.0, pose_ghost_roll = 0.0;
+        double pose_ghost_pitch = 180.0, pose_ghost_yaw = 0.0, pose_ghost_roll = 0.0; // 180: run 33b, fingertips along his fingers
         double pose_ghost_scale = 0.8;
         // Your arm length (shoulder to wrist, cm), measured by holding both arms straight out to the
         // sides and holding B and Y for 2 s. 0 = not measured: your hands go exactly where the
