@@ -1381,6 +1381,7 @@ namespace
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     std::atomic<bool> g_hold_reach_clamp{true};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
+    std::atomic<float> g_fake_trigger[2] = {-1.0f, -1.0f}; // test: hsvr.trigger <0|1> <value>, -1 = the controller
     std::atomic<float> g_fake_squeeze[2] = {-1.0f, -1.0f}; // test: hsvr.squeeze <0|1> <value>, -1 = the controller
 
     // Sets a yes/no property that the engine packs into a single bit (tests only).
@@ -3019,6 +3020,14 @@ namespace
         // and how much of that the hand took (0 follows the controller, 1 sits on the weapon).
         double blocked_cm = 0.0, on_weapon = 0.0;
         double stuck_since = -1.0;
+        double started = -1.0;        // when this hand began holding this weapon
+        double last_blocked_cm = -1.0; // last tick's blocked_cm (a weapon still coming is not stuck)
+        // The slide: how far the hand has moved along the weapon (cm along its +Z from the game's grip
+        // point), and the grip zone it may move in (found once per weapon).
+        double slide = 0.0;
+        bool zone_known = false;
+        double zone_lo = 0.0, zone_hi = 0.0;
+        bool sliding = false;
         double far_since = -1.0, far_logged = 0.0;
     };
     HoldState g_hold[2];
@@ -3209,6 +3218,7 @@ namespace
                 }
         }
         pawn->ProcessEvent(fn, parameters);
+        g_hold[side] = HoldState{}; // a new hold (and slide) when anything is next held
         HSVR_LOG("Hold: dropped with %ls(%ls)", name, names.c_str());
     }
 
@@ -3247,6 +3257,7 @@ namespace
         }
         if (!set) return false;
         pawn->ProcessEvent(fn, parameters);
+        g_hold[side] = HoldState{};
         return true;
     }
 
@@ -3714,7 +3725,9 @@ namespace
         // Where it is against where the hold sent it.
         Vec3 off = (pos + rot.rotate(h.pivot)) - (h.last_target_pos + h.last_target_rot.rotate(h.pivot));
         Vec3 turn = scaled_axis((rot * h.last_target_rot.inverse()).normalized());
+        double coming = h.last_blocked_cm >= 0.0 ? h.last_blocked_cm - length(off) : 0.0;
         h.blocked_cm = length(off);
+        h.last_blocked_cm = h.blocked_cm;
         double from = 1.0, full = (std::max)(from + 0.5, cfg.pose_hold_blocked_from_cm);
         double turn_cm = length(turn) * 10.0; // a turn counts as its movement 10 cm out
         double amount = (std::max)(h.blocked_cm, turn_cm);
@@ -3736,7 +3749,10 @@ namespace
             double from_shoulder = length(grip_at - shoulder) - length(h.in_hand);
             double from_hand = length(grip_at - hand_point);
             bool out = from_shoulder > reach + 2.0 || from_hand > reach;
-            if (!out) h.stuck_since = -1.0;
+            // Not right after it came into the hand (a new or long weapon swings into place first),
+            // and not while it is still closing in on where the hold sends it.
+            bool settling = h.started < 0.0 || now_seconds() - h.started < cfg.pose_hold_let_go_grace_s || coming > 0.3;
+            if (!out || settling) h.stuck_since = -1.0;
             else
             {
                 double now = now_seconds();
@@ -3762,6 +3778,101 @@ namespace
         return true;
     }
 
+    // The grip zone of a weapon along its blade axis (BaseMesh +Z, cm from the game's grip point
+    // Pos1), from the game's own data (hsvr.weapon_dump of 7 weapons, 2026-11-18):
+    //  - the pommel end is "Length to Bottom" below the grip point;
+    //  - the top stop is the Head module's start when it is offset (modular weapons: a sword's guard,
+    //    a mace's or pollaxe's head), else the highest "base"-tagged scene below the tip (reforged
+    //    weapons' guard, tools' head). A pollaxe's "Guard" sits on the haft, so Head is used, not Guard.
+    // The hand's centre stays half a hand (pose_slide_hand_half_cm) inside both ends: the hand stops
+    // at the guard instead of going through it (Matthew: hands can't slide through hand guards).
+    void find_grip_zone(HoldState& h, UObject* weapon, UObject* base, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        h.zone_known = true;
+        Vec3 bp = component_location(base);
+        Quat binv = component_rotation(base).inverse();
+        auto z_of = [&](UObject* c) { return binv.rotate(component_location(c) - bp).z - h.pivot.z; };
+        double bottom = 0.0, top = 0.0;
+        if (FProperty* p = weapon->GetPropertyByNameInChain(STR("Length to Bottom"))) bottom = number_property(weapon, p);
+        if (FProperty* p = weapon->GetPropertyByNameInChain(STR("Length to Top R Default"))) top = number_property(weapon, p);
+        double stop = 1e9;
+        const char* how = "none";
+        if (UObject* head = object_property(weapon, STR("Head")))
+        {
+            double z = z_of(head);
+            if (std::fabs(z) > 0.5)
+            {
+                stop = z;
+                how = "Head module";
+            }
+        }
+        if (stop > 1e8)
+        {
+            std::vector<UObject*> comps;
+            UObjectGlobals::FindAllOf(STR("SceneComponent"), comps);
+            for (UObject* c : comps)
+            {
+                if (!c || c->GetOuterPrivate() != weapon) continue;
+                RawArray* t = c->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags"));
+                bool tagged = false;
+                for (int32_t i = 0; t && t->Data && i < t->Num; ++i)
+                {
+                    std::wstring n = reinterpret_cast<const FName*>(t->Data)[i].ToString();
+                    for (auto& ch : n) ch = (wchar_t)towlower(ch);
+                    if (n == STR("base")) tagged = true;
+                }
+                if (!tagged) continue;
+                double z = z_of(c);
+                if (z > 0.0 && (top <= 0.0 || z < top) && (stop > 1e8 || z > stop))
+                {
+                    stop = z;
+                    how = "base-tagged scene";
+                }
+            }
+        }
+        double half = cfg.pose_slide_hand_half_cm;
+        h.zone_lo = bottom > 0.0 ? (std::min)(0.0, -bottom + half) : 0.0;
+        h.zone_hi = stop < 1e8 ? (std::max)(0.0, stop - half) : 0.0;
+        HSVR_LOG("Slide: %ls grip zone %.1f .. %.1f cm from the game's grip (pommel end %.1f, top stop %.1f from the %s, tip %.1f)", weapon->GetName().c_str(),
+                 h.zone_lo, h.zone_hi, -bottom, stop < 1e8 ? stop : 0.0, how, top);
+    }
+
+    // The slide (Matthew: hold the trigger and that hand slides along the shaft, B&S-style, either
+    // way, one-handed too). While the trigger is held, the point held moves toward where your hand
+    // is along the weapon's axis, faster the harder you squeeze (B&S: a light squeeze drags, a full
+    // one slides freely), so the weapon is no longer held along its length: it can slip through a
+    // loose hand, or the hand runs up and down it. It stops at the ends of the grip zone. Let go of
+    // the trigger and the hand holds there.
+    void slide_grip(int side, HoldState& h, UObject* weapon, UObject* base, const hsvr::Vec3& hand_point, const hsvr::Config& cfg, double dt)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_slide) return;
+        if (!h.zone_known) find_grip_zone(h, weapon, base, cfg);
+        ControllerState st = controllers_state();
+        float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : st.hand[side].trigger;
+        bool on = h.sliding ? trig > 0.15f : trig > 0.3f;
+        if (on != h.sliding)
+        {
+            h.sliding = on;
+            HSVR_LOG("Slide: %s hand %s at %.1f cm (zone %.1f .. %.1f)", side == 0 ? "left" : "right", on ? "starts sliding" : "holds", h.slide, h.zone_lo, h.zone_hi);
+        }
+        if (!on) return;
+        Vec3 bp = component_location(base);
+        Quat binv = component_rotation(base).inverse();
+        double want = binv.rotate(hand_point - bp).z - h.pivot.z; // along the axis, from the game's grip point
+        double k = cfg.pose_slide_rate_min + (cfg.pose_slide_rate_max - cfg.pose_slide_rate_min) * (std::min)(1.0, (std::max)(0.0, (trig - 0.15) / 0.85));
+        double before = h.slide;
+        h.slide += (want - h.slide) * (1.0 - std::exp(-k * dt));
+        h.slide = (std::min)(h.zone_hi, (std::max)(h.zone_lo, h.slide));
+        bool at_end = (h.slide <= h.zone_lo + 0.01 && want < h.zone_lo) || (h.slide >= h.zone_hi - 0.01 && want > h.zone_hi);
+        static bool was_at_end[2] = {false, false};
+        if (at_end && !was_at_end[side]) controllers_buzz(side, 0.5f);
+        was_at_end[side] = at_end;
+        HSVR_LOG_EVERY(0.5, "Slide: %s hand at %.1f cm (wants %.1f, zone %.1f .. %.1f, trigger %.2f, moved %.2f this tick)%s", side == 0 ? "left" : "right", h.slide,
+                       want, h.zone_lo, h.zone_hi, trig, h.slide - before, at_end ? " at the stop" : "");
+    }
+
     // One tick of the hold for one hand. `joint` is the game's hand joint (its frames say where on the
     // weapon the hand holds it and how the weapon sits in the hand); `base` the weapon's BaseMesh.
     void hold_weapon(int side, UObject* pawn, UObject* joint, UObject* base, UObject* weapon, double mass, const hsvr::Config& cfg)
@@ -3773,6 +3884,7 @@ namespace
         {
             h = HoldState{};
             h.weapon = weapon;
+            h.started = now;
         }
         // Where the controller has the hand: the hand bone's target this frame (exact arms), or the
         // bone itself when there is no controller.
@@ -3799,6 +3911,13 @@ namespace
         Vec3 in_hand = ax(STR("Pos2")); // where the hand holds it, in the hand bone's frame
         Quat f1 = quat_from_axes(ax(STR("PriAxis1")), ax(STR("SecAxis1")));
         Quat f2 = quat_from_axes(ax(STR("PriAxis2")), ax(STR("SecAxis2")));
+        {
+            // The slide moves the point held along the weapon (its +Z) from the game's grip point.
+            h.pivot = pivot; // the game's grip point, for the zone and the slide
+            double dt_slide = h.have_last ? (std::min)(1.0 / 30.0, (std::max)(1.0 / 240.0, now - h.last_time)) : 1.0 / 72.0;
+            slide_grip(side, h, weapon, base, hand_pos + hand_rot.rotate(in_hand), cfg, dt_slide);
+            pivot.z += h.slide;
+        }
         h.pivot = pivot;
         h.in_hand = in_hand;
         h.f1 = f1;
@@ -5257,6 +5376,15 @@ namespace
                 }
                 HSVR_LOG("Script: hsvr.bring_object: %d loose objects; moved %ls (was %.0f cm away) to the right hand", loose,
                          best ? best->GetFullName().c_str() : STR("nothing"), best_d);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.trigger ", 0) == 0)
+            {
+                int side = atoi(entry.command.c_str() + 13) != 0 ? 1 : 0;
+                size_t sp = entry.command.find(' ', 13);
+                float v = sp == std::string::npos ? -1.0f : (float)atof(entry.command.c_str() + sp + 1);
+                g_fake_trigger[side].store(v);
+                HSVR_LOG("Script: hsvr.trigger %d %.2f", side, v);
                 continue;
             }
             if (entry.command.rfind("hsvr.squeeze ", 0) == 0)

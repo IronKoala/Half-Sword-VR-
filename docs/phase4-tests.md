@@ -48,6 +48,20 @@ A bare class gives an unbuilt weapon (no blade, guard, grip or pommel), because 
 Next: your strength from the game's stats instead of a fixed number, the hand staying on the weapon with a ghost hand at the controller, two hands, grab button, slide grip.
 
 
+## Slide along the grip
+
+- While a hand holds a weapon, hold that controller's trigger: the point held moves toward where your hand is along the weapon's axis, faster the harder you squeeze (a light squeeze drags, a full one slides freely, B&S-style). It works either way and one-handed; a loose grip lets the weapon slip through the hand. Let go of the trigger and the hand holds there.
+- The hand stops at the ends of the weapon's grip zone and the controller buzzes: half a hand inside the pommel end ("Length to Bottom") and inside the top stop, which is the Head module's start on modular weapons (a sword's guard, a mace or pollaxe head) or the highest "base"-tagged scene on reforged weapons and tools (from hsvr.weapon_dump of 7 weapons). Hands can't slide through a guard.
+- Half-swording (the free hand on the blade) comes with the two-handed grip.
+- Log lines: "Slide: ... grip zone", "starts sliding", "holds", and twice a second while sliding.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `pose_slide` | 1 | The slide. |
+| `pose_slide_hand_half_cm` | 4.5 | How far inside each end of the zone the hand's centre stops. |
+| `pose_slide_rate_min`, `pose_slide_rate_max` | 3, 40 | How fast (1/s) the hand catches up along the weapon at a light and a full trigger squeeze. |
+| `pose_hold_let_go_grace_s` | 1.0 | No stuck let-go this long after a weapon comes into the hand, or while it is still closing in (long weapons swing into place). |
+
 ## Grab button
 
 - Squeeze a controller's grip with that hand empty: the nearest loose weapon whose body is within `pose_grab_radius_cm` of the hand (the weapon socket the game snaps weapons to) is picked up with the game's own call, Set Up Right/Left Hand Weapon (what its grab does once the hand reaches a weapon; grab_pickup.md). The game snaps the weapon's default grip into the hand; the hold then takes over. The controller buzzes.
@@ -88,6 +102,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `hsvr.match_won [0]` | Sets (0 clears) what the game sets when the last enemy dies (GameMode "Match Won", his "Match Won (Player)"), to test continuing without a fight |
 | `hsvr.weapon_dump [0/1]` | Logs the weapon in the left (0) or right (1, default) hand: its components with their spans along the blade, BaseMesh sockets, the hand joint point and its Length variables |
 | `hsvr.bring_object` | Moves the nearest loose physics object (not a weapon or character) to the right hand with its gravity off and keeps it there for 4 s or until grabbed, to test the object grab |
+| `hsvr.trigger <0/1> <value>` | Fakes the left (0) or right (1) trigger (0..1); -1 gives it back to the controller |
 | `hsvr.squeeze <0/1> <value>` | Fakes the left (0) or right (1) grip squeeze (0..1); -1 gives it back to the controller |
 | `hsvr.press_a 0/1` | 1 holds right A for the menu buttons (continue after a win) |
 | `hsvr.ghost_show 0/1` | 1 shows the ghost hand at your hand all the time (for fitting it) |

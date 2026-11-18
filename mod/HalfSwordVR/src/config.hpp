@@ -220,6 +220,15 @@ namespace hsvr
         // than an arm's length from your hand, for pose_hold_let_go_s, is let go (the game's own drop).
         bool pose_hold_let_go = true;
         double pose_hold_let_go_s = 0.15;
+        // No let-go for this long after a weapon comes into the hand (long weapons swing into place).
+        double pose_hold_let_go_grace_s = 1.0;
+        // The slide: hold the trigger while holding a weapon and that hand slides along it, within its
+        // grip zone (stops half a hand inside the guard and the pommel end). Rate (1/s) at a light and
+        // a full trigger squeeze.
+        bool pose_slide = true;
+        double pose_slide_hand_half_cm = 4.5;
+        double pose_slide_rate_min = 3.0;
+        double pose_slide_rate_max = 40.0;
         // The grab button: squeeze a grip near a loose weapon to pick it up; let go of the grip to
         // drop what that hand holds (pose_grab_release_drops).
         bool pose_grab_button = true;
