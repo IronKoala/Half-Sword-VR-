@@ -829,14 +829,14 @@ namespace
         return c.vec();
     }
 
-    void set_component_transform(UObject* component, const hsvr::Vec3& location, const hsvr::Quat& rotation)
+    void set_component_transform(UObject* component, const hsvr::Vec3& location, const hsvr::Quat& rotation, bool teleport = true)
     {
         Call c(component, STR("K2_SetWorldLocationAndRotation"));
         hsvr::Rot r = hsvr::quat_to_rot(rotation);
         c.three(STR("NewLocation"), location.x, location.y, location.z);
         c.three(STR("NewRotation"), r.pitch, r.yaw, r.roll);
         c.flag(STR("bSweep"), false);
-        c.flag(STR("bTeleport"), true);
+        c.flag(STR("bTeleport"), teleport);
         c.run();
     }
 
@@ -1743,7 +1743,20 @@ namespace
             }
         }
         place.z -= g_crouch_drop;
-        set_component_transform(mesh, place, (body * g_pose.mesh_rotation_local).normalized());
+        // Moved, not teleported: a teleport snaps his kinematic physics bodies (the hand holding a
+        // weapon) to the new spot with no velocity in the first physics substep, and the held weapon
+        // jolts every frame (headset tests 2-3: even the game's locked grip wobbled ~14 deg). A plain
+        // move gives the bodies kinematic targets that the substeps interpolate (UE 5.4
+        // SkeletalMeshComponentPhysics OnUpdateTransform -> UpdateKinematicBonesToAnim). Large jumps
+        // (first placement, recentre) still teleport.
+        {
+            static Vec3 last_place;
+            static bool have_last = false;
+            bool jump = !have_last || length(place - last_place) > cfg.pose_teleport_above_cm;
+            set_component_transform(mesh, place, (body * g_pose.mesh_rotation_local).normalized(), jump || !cfg.pose_move_bodies);
+            last_place = place;
+            have_last = true;
+        }
 
         Quat component_inv = component_rotation(driver).inverse();
         bool have_look = false;

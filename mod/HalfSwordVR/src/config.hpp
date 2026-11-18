@@ -208,6 +208,10 @@ namespace hsvr
         // Where on the weapon the hand holds it: 0 = the game's joint anchor; 1 = the weapon's own
         // "Grip R/L Hand Default Pos" marker (the handle), when it has one.
         bool pose_grip_anchor_marker = false;
+        // Move his body each frame without teleporting its physics bodies (1), so held weapons follow
+        // smoothly; jumps over pose_teleport_above_cm per frame still teleport.
+        bool pose_move_bodies = true;
+        double pose_teleport_above_cm = 30.0;
         // 1 = he crouches as low as you do (your headset below where you stood when you recentred,
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;
