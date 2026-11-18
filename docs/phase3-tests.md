@@ -22,6 +22,8 @@ How it works (from the decompile, `HalfSwordDecomp\internals-map.md`, "Posing fo
 | `pose_knuckle_deg` | 20 | How far the fingers tilt from straight down the controller's handle toward its front. |
 
 The hand's direction comes from Willie's own finger bones, measured when posing starts. The log line "hand frame from finger bones" shows it. The grip geometry follows the hand model in Matthew's Chasms VR Framework (MIT).
+| `pose_muscle_gain` | 1 | Muscle style only: how hard his arm muscles pull toward your hands, times the game's own strength. Tonus, stamina, injury and dislocation still count. 1 is the game's own strength without its falling penalty. |
+| `pose_muscle_fix_mass` | 1 | Muscle style only: undo the game doubling his body's weight when its foot traces read the posed body as falling (it makes the arms weaker). |
 | `pose_swivel_smooth_s` | 0.06 | How quickly the elbow follows as it swings around the arm. The hand itself is never smoothed. Where the elbow points is chosen each frame by the swivel search ported from the Chasms VR Framework (`crates/ik/src/arm.rs`, MIT). The search keeps the wrist bend and forearm twist in comfortable ranges and the elbow out of the ribcage. |
 | `hide_own_head` | 1 | Your character's head and hair are not drawn in your own view while you look out of it (first person through the mod). They still cast their shadow and stay in the game. Helmets and other headwear stay visible. |
 | `hide_own_gore_from` | neck_01 | The gore skeleton under his skin (SK_Skeleton) is hidden from this bone up, so its skull, jaw, teeth and throat don't show from inside your hidden head. The bones in wounds elsewhere on your body still show. Leave it empty to turn this off. |

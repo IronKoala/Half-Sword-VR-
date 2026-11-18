@@ -254,6 +254,8 @@ namespace hsvr
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);
         text("pose_arm_style", c.pose_arm_style);
+        num("pose_muscle_gain", c.pose_muscle_gain);
+        flag("pose_muscle_fix_mass", c.pose_muscle_fix_mass);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);
         num("pose_wrist_right_cm", c.pose_wrist_right_cm);
         num("pose_wrist_up_cm", c.pose_wrist_up_cm);

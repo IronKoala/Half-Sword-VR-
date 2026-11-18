@@ -169,6 +169,11 @@ namespace hsvr
         // "exact": arms posed exactly. "muscle": arms back on physics, pulled to the pose by the
         // game's own muscles (strength, stamina and injury act on them as in the game).
         std::string pose_arm_style = "exact";
+        // Muscle style only: how strong his arm muscles pull toward your hands, times the game's own
+        // strength (1 = as the game sets it, without its falling penalty). And whether to undo the
+        // game doubling his body's weight when it thinks the posed body is falling.
+        double pose_muscle_gain = 1.0;
+        bool pose_muscle_fix_mass = true;
         // Where the wrist sits relative to the controller's grip, in the controller's frame
         // (forward, right, up, cm), and how the hand is turned relative to the controller (degrees).
         // Defaults: the wrist 8 cm from the palm centre back along the fingers and 2 cm toward the
