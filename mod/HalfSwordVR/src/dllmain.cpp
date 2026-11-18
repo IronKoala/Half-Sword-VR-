@@ -3650,7 +3650,13 @@ namespace
     void end_two_hand(const char* why)
     {
         if (!g_two.active) return;
-        if (g_two.grip_type_before >= 0.0 && g_pose.pawn) set_variable(g_pose.pawn, grip_type_name(g_two.second), g_two.grip_type_before);
+        if (g_two.grip_type_before >= 0.0 && g_pose.pawn)
+        {
+            double was = read_number_variable(g_pose.pawn, grip_type_name(g_two.second));
+            bool ok = set_variable(g_pose.pawn, grip_type_name(g_two.second), g_two.grip_type_before);
+            HSVR_LOG("Two hands: %s hand's grip type %.0f -> %.0f restored%s (first hand's now %.0f)", g_two.second == 0 ? "left" : "right", was, g_two.grip_type_before,
+                     ok ? "" : ": NOT SET", read_number_variable(g_pose.pawn, grip_type_name(g_two.main)));
+        }
         HSVR_LOG("Two hands: %s hand lets go of %ls (%s)", g_two.second == 0 ? "left" : "right", g_two.weapon ? g_two.weapon->GetName().c_str() : STR("?"), why);
         g_two = TwoHand{};
     }
@@ -4077,7 +4083,9 @@ namespace
         if (on != h.sliding)
         {
             h.sliding = on;
-            HSVR_LOG("Slide: %s hand %s at %.1f cm (zone %.1f .. %.1f)", side == 0 ? "left" : "right", on ? "starts sliding" : "holds", h.slide, h.zone_lo, h.zone_hi);
+            bool blade = h.slide > h.zone_hi + 0.5;
+            HSVR_LOG("Slide: %s hand %s at %.1f cm (%s; grip zone %.1f .. %.1f, blade from %.1f)", side == 0 ? "left" : "right", on ? "starts sliding" : "holds", h.slide,
+                     blade ? "on the blade" : "on the grip", h.zone_lo, h.zone_hi, h.zone_stop + cfg.pose_slide_hand_half_cm + cfg.pose_two_hand_blade_gap_cm);
         }
         if (!on) return;
         // Not while a weapon that just came into the hand swings into place.
