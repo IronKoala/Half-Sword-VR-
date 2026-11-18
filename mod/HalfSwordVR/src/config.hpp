@@ -253,7 +253,20 @@ namespace hsvr
         double pose_two_hand_blade_gap_cm = 3.0;
         double pose_two_hand_reach_cm = 6.0; // how far from the zones a squeeze still lands on them
         double pose_two_hand_let_go_cm = 25.0;
-        bool pose_two_hand_curl = true; // the second hand's fingers close (its grip type set to the sword grip while it holds)
+        // The second hand's fingers close (its grip type set to the sword grip while it holds). Off:
+        // the game then drops the first hand's two-handed grip type (11 -> 2) and with it its two-handed
+        // rules (Master Stroke, the two-hand stamina factor, ...; fists_eating.md).
+        bool pose_two_hand_curl = false;
+        // Fists: squeezing an empty grip with nothing in reach makes that hand a fist (the game's
+        // Weapon_Fists_C); letting go opens it. pose_fist_class = its object path if it is not loaded.
+        bool pose_fists = true;
+        std::string pose_fist_class;
+        // Eating and drinking: grabbed food within pose_eat_cm of your mouth is bitten (the game's
+        // Bite Event); a held bottle at your mouth with its neck below pose_drink_tip (the dot of its
+        // axis with up) is drunk from, at most once a second.
+        bool pose_eat = true;
+        double pose_eat_cm = 12.0;
+        double pose_drink_tip = 0.0;
         // The ghost hand: while his hand stays on a stopped weapon more than pose_ghost_from_cm from
         // your real hand, a see-through glove shows where your hand is. Mesh and material are object
         // paths in the cooked game; offset (cm) and turn (deg) from the hand bone, and scale, for fitting.

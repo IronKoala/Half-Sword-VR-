@@ -348,6 +348,11 @@ namespace hsvr
         num("pose_two_hand_reach_cm", c.pose_two_hand_reach_cm);
         num("pose_two_hand_let_go_cm", c.pose_two_hand_let_go_cm);
         flag("pose_two_hand_curl", c.pose_two_hand_curl);
+        flag("pose_fists", c.pose_fists);
+        text("pose_fist_class", c.pose_fist_class);
+        flag("pose_eat", c.pose_eat);
+        num("pose_eat_cm", c.pose_eat_cm);
+        num("pose_drink_tip", c.pose_drink_tip);
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
         flag("pose_grab_objects", c.pose_grab_objects);
         flag("pose_ghost_hand", c.pose_ghost_hand);

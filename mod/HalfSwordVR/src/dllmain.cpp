@@ -1285,7 +1285,8 @@ namespace
     }
 
     std::atomic<int> g_fake_arm_mode{0};
-    std::atomic<double> g_fake_two_up{20.0}; // hsvr.arm_move 7 <cm>: the left hand this far above the right
+    std::atomic<double> g_fake_two_up{20.0};
+    bool mouth_point(UObject* pawn, hsvr::Vec3& out); // hsvr.arm_move 7 <cm>: the left hand this far above the right
     std::atomic<bool> g_contact_log{true};
 
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
@@ -1468,6 +1469,11 @@ namespace
             else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
             else if (mode == 5) local = Vec3{45.0, out * 15.0, -175.0}; // under the floor: the weapon is stopped by the ground
             else if (mode == 6) local = Vec3{62.0 + 8.0 * std::sin(now * 1.0), out * 10.0, 5.0}; // reaching out past his arm: the shoulder reaches
+            else if (mode == 8 && g_pose.pawn && mouth_point(g_pose.pawn, grip))
+            {
+                // At his mouth (eating and drinking tests): the hand a little in front of and below it.
+                local = body.inverse().rotate(grip - shoulder) + Vec3{6.0, 0.0, -4.0};
+            }
             else if (mode == 7)
             {
                 // Two hands on one weapon: the right still (as mode 1); the left hsvr.arm_move 7 <cm>
@@ -3167,8 +3173,16 @@ namespace
     // Lets go of the weapon in that hand the game's own way: Set Up Right/Left Hand Weapon with no
     // weapon and "Dropped With no Damage" (decompile: what the game's tap on grab does; it breaks the
     // hand joint, detaches the weapon and gives it its dropped damping).
+    bool is_fist(UObject* weapon);
+    void remove_fist(int side, UObject* pawn, const char* why);
     void drop_weapon(int side, UObject* pawn)
     {
+        // A fist is not a weapon to drop: it goes.
+        if (is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))))
+        {
+            remove_fist(side, pawn, "dropped");
+            return;
+        }
         const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
         UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
         if (!fn)
@@ -3751,7 +3765,7 @@ namespace
         int other = 1 - side;
         UObject* weapon = object_property(pawn, other == 0 ? STR("Weapon L") : STR("Weapon R"));
         HoldState& h = g_hold[other];
-        if (!weapon || h.weapon != weapon || !h.have_last) return false;
+        if (!weapon || h.weapon != weapon || !h.have_last || is_fist(weapon)) return false;
         UObject* base = object_property(weapon, STR("BaseMesh"));
         if (!base) return false;
         double game_z = h.pivot.z - h.slide;
@@ -3826,6 +3840,246 @@ namespace
         return true;
     }
 
+    // ---- Fists ---------------------------------------------------------------------------------
+    // The game punches with an invisible weapon, Weapon_Fists_C (a ModularWeaponBP child: a 13 cm
+    // flesh sphere of 0.01 kg, grip type 0), which Willie's tick puts in an empty hand once the
+    // mouse's "Aim Swing Speed" reaches 30 and takes away when the hand grabs, falls or he is out
+    // (fists_eating.md, UF @556975-@560200). VR never moves that aim speed, so the mod puts it there
+    // itself, the game's way (Set Up Hand Weapon(Weapon_Fists_C, none, not dropped, don't destroy,
+    // empty passport, don't save) with "Fist R/L Spawned" set, so the game's own removal still
+    // works): while you squeeze an empty grip, that hand is a fist. Damage is the game's blunt hit
+    // from the fist's speed; the hold moves it with your hand like any weapon.
+    UClass* g_fist_class = nullptr;
+    bool g_fist_looked = false;
+
+    bool is_fist(UObject* weapon) { return weapon && is_a(weapon, STR("Weapon_Fists_C")); }
+
+    UClass* fist_class(const hsvr::Config& cfg)
+    {
+        if (g_fist_class) return g_fist_class;
+        if (!cfg.pose_fist_class.empty())
+        {
+            std::wstring path(cfg.pose_fist_class.begin(), cfg.pose_fist_class.end());
+            g_fist_class = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
+            if (!g_fist_class)
+            {
+                std::wstring asset = path;
+                if (asset.size() > 2 && asset.substr(asset.size() - 2) == STR("_C")) asset.resize(asset.size() - 2);
+                load_asset_object(asset);
+                g_fist_class = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
+            }
+        }
+        if (!g_fist_class)
+        {
+            // Already loaded by the game: any Blueprint class of that name.
+            std::vector<UObject*> classes;
+            UObjectGlobals::FindAllOf(STR("BlueprintGeneratedClass"), classes);
+            for (UObject* c : classes)
+                if (c && c->GetName() == STR("Weapon_Fists_C"))
+                {
+                    g_fist_class = static_cast<UClass*>(c);
+                    break;
+                }
+        }
+        if (!g_fist_looked || g_fist_class)
+        {
+            if (!g_fist_looked)
+                HSVR_LOG("Fist: class %ls", g_fist_class ? g_fist_class->GetFullName().c_str() : STR("NOT FOUND (set pose_fist_class to its object path)"));
+            g_fist_looked = true;
+        }
+        return g_fist_class;
+    }
+
+    // Set Up Right/Left Hand Weapon with a class (or none), and its yes/no switches by name.
+    bool set_up_hand(int side, UObject* pawn, UClass* cls, bool dropped, bool destroy_previous, bool dont_save)
+    {
+        const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
+        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
+        if (!fn) return false;
+        alignas(16) static uint8_t parameters[4096];
+        memset(parameters, 0, sizeof(parameters));
+        bool class_set = false;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        hsvr::Vec3 hand = mesh ? hand_grab_point(mesh, side) : hsvr::Vec3{0, 0, 0};
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            auto kind = p->GetClass().GetName();
+            if (kind == STR("ClassProperty") && !class_set)
+            {
+                *reinterpret_cast<UClass**>(parameters + p->GetOffset_Internal()) = cls;
+                class_set = true;
+            }
+            if (kind == STR("BoolProperty"))
+            {
+                bool value = n.find(STR("Dropped")) != std::wstring::npos   ? dropped
+                             : n.find(STR("Destroy")) != std::wstring::npos ? destroy_previous
+                             : n.find(STR("Save")) != std::wstring::npos    ? dont_save
+                                                                            : false;
+                auto* flag = static_cast<FBoolProperty*>(p);
+                if (value) parameters[p->GetOffset_Internal() + flag->GetByteOffset()] |= flag->GetFieldMask();
+            }
+            if (kind == STR("StructProperty"))
+                if (UScriptStruct* type = struct_type(p))
+                {
+                    uint8_t* at = parameters + p->GetOffset_Internal();
+                    if (FProperty* r = struct_member(type, STR("Rotation")))
+                        if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                        {
+                            uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                            if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                            else *reinterpret_cast<float*>(wat) = 1.0f;
+                        }
+                    if (FProperty* t = struct_member(type, STR("Translation"))) write_three(at + t->GetOffset_Internal(), t, hand.x, hand.y, hand.z);
+                    if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+                }
+        }
+        pawn->ProcessEvent(fn, parameters);
+        g_hold[side] = HoldState{};
+        return true;
+    }
+
+    const TCHAR* fist_spawned_name(int side) { return side == 0 ? STR("Fist L Spawned") : STR("Fist R Spawned"); }
+
+    bool make_fist(int side, UObject* pawn, const hsvr::Config& cfg)
+    {
+        if (!cfg.pose_fists) return false;
+        UClass* cls = fist_class(cfg);
+        if (!cls) return false;
+        if (object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))) return false;
+        set_up_hand(side, pawn, cls, false, false, true);
+        UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+        bool ok = is_fist(now);
+        set_bool_property(pawn, fist_spawned_name(side), ok);
+        HSVR_LOG("Fist: %s hand %s", side == 0 ? "left" : "right", ok ? "is a fist" : "could not be made a fist");
+        return ok;
+    }
+
+    void remove_fist(int side, UObject* pawn, const char* why)
+    {
+        UObject* mine = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+        if (!is_fist(mine)) return;
+        set_up_hand(side, pawn, nullptr, false, true, true);
+        // The game destroys a fist on any set-up but leaves "Fist Spawned" set (fists_eating.md).
+        set_bool_property(pawn, fist_spawned_name(side), false);
+        HSVR_LOG("Fist: %s hand opens (%s)", side == 0 ? "left" : "right", why);
+    }
+
+    // ---- Eating and drinking -------------------------------------------------------------------
+    // Eating (fists_eating.md): the game's "Bite Event" looks for food at his mouth (a 20 cm sphere
+    // trace from VoiceScene + Right x10..15 during its 1 s timeline) and bites it; the mod calls it
+    // once each time a grabbed food item (BP_Food_Master_C) comes within pose_eat_cm of that point.
+    // Drinking: the game's "Drink From Bottle"(bottle), or "Event Gulp" once "Liquid In Mouth" is
+    // 0.5 or more, at most once a second, while a held bottle (BP_Weapon_Consumable_Bottle*) is at
+    // the mouth with its neck tipped below level.
+    bool class_name_starts(UObject* object, const TCHAR* prefix)
+    {
+        if (!object) return false;
+        std::wstring want = prefix;
+        for (UStruct* level = object->GetClassPrivate(); level; level = level->GetSuperStruct())
+            if (level->GetName().rfind(want, 0) == 0) return true;
+        return false;
+    }
+
+    bool mouth_point(UObject* pawn, hsvr::Vec3& out)
+    {
+        UObject* voice = object_property(pawn, STR("VoiceScene"));
+        if (!voice) return false;
+        Call right(pawn, STR("GetActorRightVector"));
+        right.run();
+        out = component_location(voice) + right.vec() * 12.5;
+        return true;
+    }
+
+    void eat_and_drink(UObject* pawn, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_eat || !pawn) return;
+        Vec3 mouth;
+        if (!mouth_point(pawn, mouth))
+        {
+            HSVR_LOG_EVERY(30.0, "Eat: no VoiceScene on the character, eating and drinking off");
+            return;
+        }
+        static bool at_mouth[2] = {false, false};
+        static double last_drink = -10.0, last_bite = -10.0;
+        double now = now_seconds();
+        for (int side = 0; side < 2; ++side)
+        {
+            // Food in a grabbing hand.
+            UObject* food = nullptr;
+            if (bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")))
+            {
+                UObject* comp = object_property(pawn, side == 0 ? STR("Grab Component L") : STR("Grab Component R"));
+                if (comp)
+                {
+                    Call owner_call(comp, STR("GetOwner"));
+                    owner_call.run();
+                    UObject* owner = owner_call.object_result();
+                    if (is_a(owner, STR("BP_Food_Master_C")) || is_a(comp, STR("BP_Food_Master_C"))) food = comp;
+                }
+            }
+            UObject* bottle = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (!class_name_starts(bottle, STR("BP_Weapon_Consumable_Bottle"))) bottle = nullptr;
+            UObject* item = food ? food : (bottle ? object_property(bottle, STR("BaseMesh")) : nullptr);
+            if (!item)
+            {
+                at_mouth[side] = false;
+                continue;
+            }
+            Call closest(item, STR("GetClosestPointOnCollision"));
+            closest.three(STR("Point"), mouth.x, mouth.y, mouth.z);
+            closest.run();
+            double d = closest.number();
+            if (d < 0.0) d = length(component_location(item) - mouth);
+            bool close = d <= (at_mouth[side] ? cfg.pose_eat_cm + 10.0 : cfg.pose_eat_cm);
+            if (food)
+            {
+                if (close && !at_mouth[side] && now - last_bite > 1.0)
+                {
+                    Call bite(pawn, STR("Bite Event"));
+                    bool ok = bite.run();
+                    last_bite = now;
+                    HSVR_LOG("Eat: %s hand's food at your mouth (%.0f cm): %s", side == 0 ? "left" : "right", d, ok ? "Bite Event called" : "no Bite Event");
+                }
+            }
+            else if (close && now - last_drink >= 1.0)
+            {
+                Quat r = component_rotation(item);
+                double tip = dot(r.rotate(Vec3{0, 0, 1}), Vec3{0, 0, 1});
+                if (tip < cfg.pose_drink_tip)
+                {
+                    last_drink = now;
+                    double in_mouth = read_number_variable(pawn, STR("Liquid In Mouth"));
+                    bool ok;
+                    const char* what;
+                    if (in_mouth >= 0.5)
+                    {
+                        Call gulp(pawn, STR("Event Gulp"));
+                        ok = gulp.run();
+                        what = "Event Gulp";
+                    }
+                    else
+                    {
+                        Call drink(pawn, STR("Drink From Bottle"));
+                        if (drink.fn)
+                            for (FProperty* p : drink.fn->ForEachProperty())
+                                if (p->GetClass().GetName() == STR("ObjectProperty"))
+                                {
+                                    *reinterpret_cast<UObject**>(drink.buffer.data() + p->GetOffset_Internal()) = bottle;
+                                    break;
+                                }
+                        ok = drink.run();
+                        what = "Drink From Bottle";
+                    }
+                    HSVR_LOG("Drink: %s hand's %ls at your mouth (%.0f cm, neck %.2f): %s %s (liquid in mouth %.2f)", side == 0 ? "left" : "right",
+                             bottle->GetName().c_str(), d, tip, what, ok ? "called" : "MISSING", in_mouth);
+                }
+            }
+            at_mouth[side] = close;
+        }
+    }
+
     void grab_button(const hsvr::Config& cfg, const hsvr::ControllerState& state, bool menu_up)
     {
         using namespace hsvr;
@@ -3840,6 +4094,7 @@ namespace
         }
         keep_brought_object(pawn, mesh);
         for (int side = 0; side < 2; ++side) check_object_grab(side, pawn);
+        eat_and_drink(pawn, cfg);
         for (int side = 0; side < 2; ++side)
         {
             float squeeze = g_fake_squeeze[side].load() >= 0.0f ? g_fake_squeeze[side].load() : state.hand[side].squeeze;
@@ -3848,6 +4103,13 @@ namespace
             held[side] = now_held;
             const char* hand = side == 0 ? "left" : "right";
             UObject* mine = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (is_fist(mine))
+            {
+                // A squeeze opens the fist before it looks for something to take.
+                remove_fist(side, pawn, now_held ? "grabbing" : "grip released");
+                mine = nullptr;
+                if (!now_held) continue;
+            }
             if (!now_held)
             {
                 if (g_two.active && side == g_two.second)
@@ -3884,7 +4146,7 @@ namespace
             for (UObject* w : weapons)
             {
                 if (!w || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
-                if (bool_property(w, STR("Is Sheathed"))) continue;
+                if (bool_property(w, STR("Is Sheathed")) || is_fist(w)) continue;
                 bool taken = false;
                 for (UObject* c : willies)
                     if (c && (object_property(c, STR("Weapon R")) == w || object_property(c, STR("Weapon L")) == w)) taken = true;
@@ -3919,6 +4181,8 @@ namespace
             if (!best && cfg.pose_grab_objects && grab_object(side, pawn, mesh, cfg, at)) continue;
             if (!best)
             {
+                // Nothing to take: the hand closes into a fist.
+                make_fist(side, pawn, cfg);
                 HSVR_LOG("Grab: %s grip squeezed, no loose weapon within %.0f cm (%d loose of %d; nearest %ls at %.0f cm; hand at %.0f %.0f %.0f)", hand,
                          cfg.pose_grab_radius_cm, looked, (int)weapons.size(), nearest ? nearest->GetName().c_str() : STR("none"), nearest ? nearest_d : -1.0,
                          at.x, at.y, at.z);
@@ -6123,6 +6387,10 @@ namespace
                 else if (w == "strength_r") value = g_hold[1].body_strength;
                 else if (w == "strength_l") value = g_hold[0].body_strength;
                 else if (w == "two_hand") value = g_two.active ? 1.0 : 0.0;
+                else if (w == "fist_r") value = is_fist(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
+                else if (w == "fist_l") value = is_fist(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
+                else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
+                else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
                 else known = false;
                 std::string o = op;
                 bool pass = false;
@@ -6262,6 +6530,7 @@ namespace
                 if (!mesh) continue;
                 // "hsvr.bring_object left" = to the left hand.
                 int bring_side = entry.command.find("left", 17) != std::string::npos ? 0 : 1;
+                bool want_food = entry.command.find("food", 17) != std::string::npos; // "hsvr.bring_object [left] food": food only
                 hsvr::Vec3 hand = hand_grab_point(mesh, bring_side);
                 std::vector<UObject*> comps;
                 UObjectGlobals::FindAllOf(STR("StaticMeshComponent"), comps);
@@ -6275,6 +6544,7 @@ namespace
                     owner_call.run();
                     UObject* owner = owner_call.object_result();
                     if (!owner || owner == pawn || is_a(owner, STR("ModularWeaponBP_C")) || is_a(owner, STR("Willie_BP_C"))) continue;
+                    if (want_food && !is_a(owner, STR("BP_Food_Master_C"))) continue;
                     Call sim(c, STR("IsSimulatingPhysics"));
                     sim.run();
                     FProperty* sp = sim.param(STR("ReturnValue"));
