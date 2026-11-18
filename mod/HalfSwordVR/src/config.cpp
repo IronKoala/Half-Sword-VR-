@@ -285,6 +285,7 @@ namespace hsvr
         num("pose_grip_damping", c.pose_grip_damping);
         num("pose_grip_radius_cm", c.pose_grip_radius_cm);
         num("pose_grip_buzz", c.pose_grip_buzz);
+        num("pose_grip_buzz_from_cm", c.pose_grip_buzz_from_cm);
         flag("pose_crouch", c.pose_crouch);
         num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);

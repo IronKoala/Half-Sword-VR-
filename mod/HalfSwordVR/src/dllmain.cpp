@@ -2859,9 +2859,10 @@ namespace
                     if (FProperty* rp = br.param(STR("ReturnValue"))) log.broken = *(br.buffer.data() + rp->GetOffset_Internal()) ? 1 : 0;
 
             }
-            // Buzz with the joint's stretch: nothing within 2 cm, full at 15 cm.
+            // Buzz with the joint's stretch: nothing up to pose_grip_buzz_from_cm, full 13 cm past it.
             ControllerState state = controllers_state();
-            if (state.hand[side].grip_valid && log.stretch > 2.0) controllers_buzz(side, (float)(std::min)(1.0, (log.stretch - 2.0) / 13.0) * (float)cfg.pose_grip_buzz);
+            if (state.hand[side].grip_valid && log.stretch > cfg.pose_grip_buzz_from_cm)
+                controllers_buzz(side, (float)(std::min)(1.0, (log.stretch - cfg.pose_grip_buzz_from_cm) / 13.0) * (float)cfg.pose_grip_buzz);
         }
         static double last = 0.0;
         double now = now_seconds();

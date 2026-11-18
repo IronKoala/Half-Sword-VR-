@@ -185,14 +185,19 @@ namespace hsvr
         double pose_stick_dead_zone = 0.15;
         // Weapon in hand: the game's hand joint becomes a spring toward your hand (1) instead of
         // locked (0). pose_grip_strength_kg is the most it can hold up (kg weight), pose_grip_hz how
-        // briskly it follows (natural frequency), pose_grip_damping 1 = no wobble, pose_grip_radius_cm
+        // briskly it follows (natural frequency), pose_grip_damping the damping ratio (Chaos solves
+        // drive damping against the spring's own correction each step, so 1 makes it sag ~16 cm; 0.3
+        // holds as well as the game's locked grip, tests 25-26), pose_grip_radius_cm
         // the lever used for the turning strength, pose_grip_buzz the buzz strength for the gap (0 off).
         bool pose_grip_spring = true;
         double pose_grip_strength_kg = 20.0;
-        double pose_grip_hz = 8.0;
-        double pose_grip_damping = 1.0;
+        double pose_grip_hz = 20.0;
+        double pose_grip_damping = 0.3;
         double pose_grip_radius_cm = 30.0;
         double pose_grip_buzz = 0.6;
+        // The buzz starts when the joint stretches past this (cm). Even the game's locked grip
+        // reads ~4.5 cm on this measure, so below ~6 is normal holding.
+        double pose_grip_buzz_from_cm = 6.0;
         // 1 = he crouches as low as you do (your headset below where you stood when you recentred,
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;
