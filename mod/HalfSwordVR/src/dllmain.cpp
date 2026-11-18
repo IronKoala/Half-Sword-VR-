@@ -907,6 +907,8 @@ namespace
         hsvr::Vec3 foot_home_local[2];   // where each foot stands relative to the actor, in the body's frame
         hsvr::Quat foot_rot_local[2];    // body frame -> foot bone, standing
         double ankle_height[2] = {10.0, 10.0}; // foot bone above the floor, standing
+        bool ankle_measured[2] = {false, false};
+        double calibrated_at = 0.0;
         hsvr::Quat chest_rot_local, pelvis_rot_local; // body frame -> spine_05 / pelvis at calibration, for the twist log
         bool feet_calibrated = false;
         double swivel_time[2] = {0.0, 0.0};
@@ -1012,10 +1014,15 @@ namespace
             double floor_z = 0.0;
             bool hit = ground_below(g_pose.pawn, foot_at.x, foot_at.y, actor.z, floor_z);
             bool used = hit && foot_at.z - floor_z > 2.0 && foot_at.z - floor_z < 30.0;
-            if (used) g_pose.ankle_height[side] = foot_at.z - floor_z;
+            if (used)
+            {
+                g_pose.ankle_height[side] = foot_at.z - floor_z;
+                g_pose.ankle_measured[side] = true;
+            }
+            g_pose.calibrated_at = now_seconds();
             if (hit)
                 HSVR_LOG("Pose: %s ankle %.1f cm above the floor (foot bone at %.1f, floor at %.1f%s)", side == 0 ? "left" : "right",
-                         g_pose.ankle_height[side], foot_at.z, floor_z, used ? "" : ", out of range: 10 cm used");
+                         g_pose.ankle_height[side], foot_at.z, floor_z, used ? "" : ", out of range: measured again once he stands");
             else
                 HSVR_LOG("Pose: %s ankle: no floor found under the foot (trace from %.0f down), 10 cm used", side == 0 ? "left" : "right", actor.z);
             HSVR_LOG("Pose: %s foot stands at (%.0f, %.0f, %.0f) from the actor", side == 0 ? "left" : "right", g_pose.foot_home_local[side].x,
@@ -1229,6 +1236,24 @@ namespace
                 if (u >= 1.0) f.stepping = false;
             }
             double floor_z = 0.0;
+            if (!g_pose.ankle_measured[side])
+            {
+                // Posing can start while he is still dropping onto the floor after spawning: measure
+                // the ankle once the game's own foot is down (the game keeps the feet until then).
+                Vec3 foot_at = socket_location(g_pose.mesh, bone_fname(side == 0 ? "foot_l" : "foot_r"));
+                if (ground_below(pawn, foot_at.x, foot_at.y, actor.z, floor_z) && foot_at.z - floor_z > 2.0 && foot_at.z - floor_z < 30.0)
+                {
+                    g_pose.ankle_height[side] = foot_at.z - floor_z;
+                    g_pose.ankle_measured[side] = true;
+                    HSVR_LOG("Pose: %s ankle %.1f cm above the floor (measured once he stood)", side == 0 ? "left" : "right", g_pose.ankle_height[side]);
+                }
+                else if (now - g_pose.calibrated_at > 3.0)
+                {
+                    g_pose.ankle_measured[side] = true;
+                    HSVR_LOG("Pose: %s ankle could not be measured in 3 s; 10 cm used", side == 0 ? "left" : "right");
+                }
+                if (!g_pose.ankle_measured[side]) continue; // the game's own foot until then
+            }
             if (ground_below(pawn, f.at.x, f.at.y, actor.z, floor_z))
             {
                 f.ground_z = floor_z + g_pose.ankle_height[side];
