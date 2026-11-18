@@ -1470,10 +1470,18 @@ namespace
             else if (mode == 6) local = Vec3{62.0 + 8.0 * std::sin(now * 1.0), out * 10.0, 5.0}; // reaching out past his arm: the shoulder reaches
             else if (mode == 7)
             {
-                // Two hands on one upright weapon: the right still (as mode 1), the left straight above
-                // it by hsvr.arm_move 7 <cm>, from the right shoulder.
+                // Two hands on one weapon: the right still (as mode 1); the left hsvr.arm_move 7 <cm>
+                // from it along the weapon the right hand holds (+ toward the tip, - toward the pommel),
+                // or straight up when it holds none.
                 shoulder = socket_location(g_pose.driver, bone_fname("upperarm_r"));
-                local = Vec3{40.0, 15.0 * (side == 0 ? -1.0 : 1.0) * out, side == 0 ? -10.0 + g_fake_two_up.load() : -10.0};
+                local = Vec3{40.0, 15.0, -10.0};
+                if (side == 0)
+                {
+                    Vec3 along{0, 0, 1};
+                    UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
+                    if (UObject* wb = held ? object_property(held, STR("BaseMesh")) : nullptr) along = body.inverse().rotate(component_rotation(wb).rotate(Vec3{0, 0, 1}));
+                    local = local + along * g_fake_two_up.load();
+                }
             }
             else
             {
@@ -3699,7 +3707,7 @@ namespace
         Vec3 L = bq.inverse().rotate(at - bp);
         double radial = std::hypot(L.x - h.pivot.x, L.y - h.pivot.y);
         double want = L.z - game_z;
-        if (radial > cfg.pose_grab_radius_cm + 3.0)
+        if (radial > cfg.pose_grab_radius_cm)
         {
             HSVR_LOG("Two hands: %s grip squeezed %.0f cm off the axis of %ls (%.0f cm along it), not on it", side == 0 ? "left" : "right", radial,
                      weapon->GetName().c_str(), want);
@@ -4150,7 +4158,7 @@ namespace
                 }
                 else
                     g_two.far_since = -1.0;
-                HSVR_LOG_EVERY(1.0, "Two hands: %s on the %s at %.1f cm, first hand at %.1f; hands %.1f cm apart for %.1f cm on the weapon; second hand %.1f cm off its spot",
+                HSVR_LOG_EVERY(1.0, "Two hands: %ls on the %s at %.1f cm, first hand at %.1f; hands %.1f cm apart for %.1f cm on the weapon; second hand %.1f cm off its spot",
                                weapon->GetName().c_str(), g_two.on_blade ? "blade" : "grip", g_two.z, h.slide, length(between), std::fabs(dz), off);
             }
         }
