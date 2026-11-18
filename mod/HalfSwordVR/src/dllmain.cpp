@@ -2061,6 +2061,11 @@ namespace
         hsvr::Vec3 weapon_at, hand_at;
         UObject* weapon_seen = nullptr;
         hsvr::Vec3 rest; // weapon relative to the hand bone when it was seated (hand frame)
+        // The joint's own stretch: its weapon-side anchor (BaseMesh origin + Pos1) minus its hand-side
+        // anchor (hand bone + Pos2, in the bone's frame). Zero when the spring holds perfectly.
+        hsvr::Vec3 stretch_vec;
+        double stretch = 0.0;
+        hsvr::Vec3 pos2;
         int visible = -1;
         std::wstring joined;
         int simulating = -1;
@@ -2314,6 +2319,17 @@ namespace
                     }
                     // How far the weapon is from where it sat in the hand when it was seated.
                     log.gap = length(log.weapon_at - (log.hand_at + hand_rot.rotate(log.rest)));
+                    auto jn = [&](const TCHAR* vec, const TCHAR* axis) {
+                        double v = nested_number(joint, {STR("ConstraintInstance"), vec, axis});
+                        return std::isnan(v) ? 0.0 : v;
+                    };
+                    Vec3 pos1{jn(STR("Pos1"), STR("X")), jn(STR("Pos1"), STR("Y")), jn(STR("Pos1"), STR("Z"))};
+                    log.pos2 = Vec3{jn(STR("Pos2"), STR("X")), jn(STR("Pos2"), STR("Y")), jn(STR("Pos2"), STR("Z"))};
+                    Quat base_rot = component_rotation(base);
+                    Vec3 weapon_anchor = log.weapon_at + base_rot.rotate(pos1);
+                    Vec3 hand_anchor = log.hand_at + hand_rot.rotate(log.pos2);
+                    log.stretch_vec = weapon_anchor - hand_anchor;
+                    log.stretch = length(log.stretch_vec);
                 }
                 Call vis(base, STR("IsVisible"));
                 vis.run();
@@ -2346,9 +2362,9 @@ namespace
                 log.force = length(lf);
 
             }
-            // Buzz with the gap: nothing within 2 cm, full at 15 cm.
+            // Buzz with the joint's stretch: nothing within 2 cm, full at 15 cm.
             ControllerState state = controllers_state();
-            if (state.hand[side].grip_valid && log.gap > 2.0) controllers_buzz(side, (float)(std::min)(1.0, (log.gap - 2.0) / 13.0) * (float)cfg.pose_grip_buzz);
+            if (state.hand[side].grip_valid && log.stretch > 2.0) controllers_buzz(side, (float)(std::min)(1.0, (log.stretch - 2.0) / 13.0) * (float)cfg.pose_grip_buzz);
         }
         static double last = 0.0;
         double now = now_seconds();
@@ -2365,9 +2381,14 @@ namespace
                      g_grip_log[1].gap, rate[1], g_grip_log[1].hand_dist, g_grip_log[1].simulating, g_grip_log[1].scale);
             for (int side = 0; side < 2; ++side)
                 if (g_grip_log[side].active)
+                {
                     HSVR_LOG("Grip: %s weapon at (%.0f, %.0f, %.0f), hand at (%.0f, %.0f, %.0f), visible %d, joint between %ls", side == 0 ? "left" : "right",
                              g_grip_log[side].weapon_at.x, g_grip_log[side].weapon_at.y, g_grip_log[side].weapon_at.z, g_grip_log[side].hand_at.x,
                              g_grip_log[side].hand_at.y, g_grip_log[side].hand_at.z, g_grip_log[side].visible, g_grip_log[side].joined.c_str());
+                    HSVR_LOG("Grip: %s joint stretch %.1f cm (%.1f, %.1f, %.1f) world, hand anchor Pos2 (%.1f, %.1f, %.1f)", side == 0 ? "left" : "right",
+                             g_grip_log[side].stretch, g_grip_log[side].stretch_vec.x, g_grip_log[side].stretch_vec.y, g_grip_log[side].stretch_vec.z,
+                             g_grip_log[side].pos2.x, g_grip_log[side].pos2.y, g_grip_log[side].pos2.z);
+                }
         }
     }
 
