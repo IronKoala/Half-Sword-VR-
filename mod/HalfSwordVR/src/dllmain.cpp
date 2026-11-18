@@ -2059,6 +2059,11 @@ namespace
     std::atomic<int> g_grip_spring_override{-1};
     std::atomic<double> g_grip_k_scale{1.0};
     std::atomic<int> g_weapon_gravity{-1};
+    // -1 = leave alone; otherwise the ECollisionEnabled value to give the held weapon's BaseMesh
+    // (0 none, 1 query only, 3 query and physics).
+    std::atomic<int> g_weapon_collision{-1};
+    // Linear drive target for the test (the joint's own frame, cm); zero is the normal spring.
+    std::atomic<double> g_grip_target[3] = {0.0, 0.0, 0.0};
 
     struct GripLog
     {
@@ -2070,7 +2075,7 @@ namespace
         hsvr::Vec3 rest; // weapon relative to the hand bone when it was seated (hand frame)
         // The joint's own stretch: its weapon-side anchor (BaseMesh origin + Pos1) minus its hand-side
         // anchor (hand bone + Pos2, in the bone's frame). Zero when the spring holds perfectly.
-        hsvr::Vec3 stretch_vec;
+        hsvr::Vec3 stretch_vec, stretch_hand;
         double stretch = 0.0;
         hsvr::Vec3 pos2;
         int visible = -1;
@@ -2089,7 +2094,7 @@ namespace
         double c = scale * 2.0 * cfg.pose_grip_damping * mass * w;
         double max_force = scale * cfg.pose_grip_strength_kg * 980.0; // kg weight in kg*cm/s^2
         double inertia = mass * cfg.pose_grip_radius_cm * cfg.pose_grip_radius_cm; // rough, kg*cm^2
-        double ka = inertia * w * w, ca = 2.0 * cfg.pose_grip_damping * inertia * w;
+        double ka = scale * inertia * w * w, ca = scale * 2.0 * cfg.pose_grip_damping * inertia * w;
         double max_torque = max_force * cfg.pose_grip_radius_cm;
         for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
         {
@@ -2115,7 +2120,7 @@ namespace
         vel.flag(STR("bEnableDriveZ"), true);
         vel.run();
         Call target(joint, STR("SetLinearPositionTarget"));
-        target.three(STR("InPosTarget"), 0.0, 0.0, 0.0);
+        target.three(STR("InPosTarget"), g_grip_target[0].load(), g_grip_target[1].load(), g_grip_target[2].load());
         target.run();
         Call vtarget(joint, STR("SetLinearVelocityTarget"));
         vtarget.three(STR("InVelTarget"), 0.0, 0.0, 0.0);
@@ -2309,6 +2314,25 @@ namespace
                     HSVR_LOG("Grip: right joint after his tick (the game's): %s", joint_settings(joint).c_str());
                 }
                 if (spring_on) spring_joint(joint, mass, cfg);
+                int collision = g_weapon_collision.load();
+                if (collision >= 0)
+                {
+                    static int applied = -1;
+                    static UObject* applied_to = nullptr;
+                    if (applied != collision || applied_to != base)
+                    {
+                        applied = collision;
+                        applied_to = base;
+                        Call before(base, STR("GetCollisionEnabled"));
+                        before.run();
+                        FProperty* rp = before.param(STR("ReturnValue"));
+                        int was = rp ? *(before.buffer.data() + rp->GetOffset_Internal()) : -1;
+                        Call ce(base, STR("SetCollisionEnabled"));
+                        ce.byte(STR("NewType"), (uint8_t)collision);
+                        ce.run();
+                        HSVR_LOG("Grip: weapon BaseMesh collision was %d, now %d", was, collision);
+                    }
+                }
                 int gravity = g_weapon_gravity.load();
                 if (gravity >= 0)
                 {
@@ -2385,6 +2409,7 @@ namespace
                     Vec3 hand_anchor = log.hand_at + hand_rot.rotate(log.pos2);
                     log.stretch_vec = weapon_anchor - hand_anchor;
                     log.stretch = length(log.stretch_vec);
+                    log.stretch_hand = hand_rot.inverse().rotate(log.stretch_vec);
                 }
                 Call vis(base, STR("IsVisible"));
                 vis.run();
@@ -2440,10 +2465,12 @@ namespace
                     HSVR_LOG("Grip: %s weapon at (%.0f, %.0f, %.0f), hand at (%.0f, %.0f, %.0f), visible %d, joint between %ls", side == 0 ? "left" : "right",
                              g_grip_log[side].weapon_at.x, g_grip_log[side].weapon_at.y, g_grip_log[side].weapon_at.z, g_grip_log[side].hand_at.x,
                              g_grip_log[side].hand_at.y, g_grip_log[side].hand_at.z, g_grip_log[side].visible, g_grip_log[side].joined.c_str());
-                    HSVR_LOG("Grip: %s joint stretch %.1f cm (%.1f, %.1f, %.1f) world, hand anchor Pos2 (%.1f, %.1f, %.1f) [spring %d, k x%g, gravity %d]",
+                    HSVR_LOG("Grip: %s joint stretch %.1f cm (%.1f, %.1f, %.1f) world, (%.1f, %.1f, %.1f) hand frame, hand anchor Pos2 (%.1f, %.1f, %.1f) [spring %d, k x%g, gravity %d, collision %d, target (%g, %g, %g)]",
                              side == 0 ? "left" : "right", g_grip_log[side].stretch, g_grip_log[side].stretch_vec.x, g_grip_log[side].stretch_vec.y, g_grip_log[side].stretch_vec.z,
+                             g_grip_log[side].stretch_hand.x, g_grip_log[side].stretch_hand.y, g_grip_log[side].stretch_hand.z,
                              g_grip_log[side].pos2.x, g_grip_log[side].pos2.y, g_grip_log[side].pos2.z, g_grip_spring_override.load(),
-                             g_grip_k_scale.load(), g_weapon_gravity.load());
+                             g_grip_k_scale.load(), g_weapon_gravity.load(), g_weapon_collision.load(), g_grip_target[0].load(), g_grip_target[1].load(),
+                             g_grip_target[2].load());
                 }
         }
     }
@@ -3296,6 +3323,20 @@ namespace
             if (entry.command.rfind("hsvr.grip_k_scale ", 0) == 0)
             {
                 g_grip_k_scale.store(atof(entry.command.c_str() + 18));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.weapon_collision ", 0) == 0)
+            {
+                g_weapon_collision.store(atoi(entry.command.c_str() + 22));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.grip_target ", 0) == 0)
+            {
+                double x = 0, y = 0, z = 0;
+                sscanf(entry.command.c_str() + 17, "%lf %lf %lf", &x, &y, &z);
+                g_grip_target[0].store(x);
+                g_grip_target[1].store(y);
+                g_grip_target[2].store(z);
                 continue;
             }
             if (entry.command.rfind("hsvr.weapon_gravity ", 0) == 0)
