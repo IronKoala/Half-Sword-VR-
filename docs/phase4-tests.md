@@ -63,6 +63,7 @@ Next: your strength from the game's stats instead of a fixed number, the hand st
 | `pose_slide_max_cm_s` | 250 | Fastest the hand runs along a weapon (a game hitch is not a slide). No slide in the first second a weapon is in the hand. |
 | `pose_hold_let_go_grace_s` | 1.0 | No stuck let-go this long after a weapon comes into the hand, or while it is still closing in (long weapons swing into place). |
 | `pose_hold_ignore_hand` | 1 | The held weapon never collides with the hand holding it (its forearm never does either). |
+| `pose_hold_block_offhand_search` | 1 | Keeps the game's off-hand search ("R/L Offhand Searching Grip") off while the mod holds a weapon. With a longsword in one hand and the other free, the game re-seated the weapon about once a second (teleport to the hand socket and back), which shoved it across the blade. 0 = leave the game's search alone. |
 | `pose_hold_contact_cm` | 0.5 | The stuck rule only lets go of a weapon that is touching something: one that ended the last tick this far short of where the hold sent it (B&S also needs contact). A weapon that only lags is kept. |
 
 ## Grab button

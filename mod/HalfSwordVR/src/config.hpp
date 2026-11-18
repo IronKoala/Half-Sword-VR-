@@ -214,6 +214,9 @@ namespace hsvr
         double pose_hold_contact_cm = 0.5;
         // The held weapon never collides with the hand holding it (as with the forearm).
         bool pose_hold_ignore_hand = true;
+        // Keeps the game's off-hand search ("R/L Offhand Searching Grip") off while the mod holds a
+        // weapon; its re-seat shoved longswords about once a second.
+        bool pose_hold_block_offhand_search = true;
         // The slide: hold the trigger while holding a weapon and that hand slides along it, within its
         // grip zone (stops half a hand inside the guard and the pommel end). Rate (1/s) at a light and
         // a full trigger squeeze.

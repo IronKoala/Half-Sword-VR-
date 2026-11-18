@@ -3821,6 +3821,21 @@ namespace
             h.weapon = weapon;
             h.started = now;
         }
+        // The game's off-hand search: with a two-handed weapon (longswords) in one hand and the other
+        // free, it sets "<side> Offhand Searching Grip" and about once a second re-seats the weapon in
+        // the hand (teleports BaseMesh to the hand socket and back, UF @499290-@504348). Under the
+        // hold that teleport is a one-tick shove across the blade (kick test 13). The mod owns grips,
+        // so the search is kept off while it holds a weapon.
+        if (cfg.pose_hold_block_offhand_search)
+        {
+            bool r = bool_property(pawn, STR("R Offhand Searching Grip")), l = bool_property(pawn, STR("L Offhand Searching Grip"));
+            if (r || l)
+            {
+                set_bool_property(pawn, STR("R Offhand Searching Grip"), false);
+                set_bool_property(pawn, STR("L Offhand Searching Grip"), false);
+                HSVR_LOG_EVERY(5.0, "Hold: the game's off-hand search was on (R %d, L %d); switched off", (int)r, (int)l);
+            }
+        }
         // Where the controller has the hand: the hand bone's target this frame (exact arms), or the
         // bone itself when there is no controller.
         Vec3 hand_pos;
@@ -5327,7 +5342,7 @@ namespace
             names += " (";
             for (wchar_t ch : kind) names += (char)(ch < 128 ? ch : '?');
             names += ")";
-            if (!passport_asset.empty() && !set && n.rfind(STR("Str Weapon Passport"), 0) == 0)
+            if (!passport_asset.empty() && !set && n.find(STR("Weapon Passport")) != std::wstring::npos)
             {
                 int32_t count = 0;
                 const uint8_t* first = inventory_passport(passport_asset, passport_index, &count);
