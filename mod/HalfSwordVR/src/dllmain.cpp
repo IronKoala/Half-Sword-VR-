@@ -2053,6 +2053,9 @@ namespace
     {
         double gap = 0.0, mass = 0.0, force = 0.0;
         bool active = false;
+        double hand_dist = 0.0; // weapon body to the hand bone, measured directly
+        int simulating = -1;
+        double scale = 0.0;
     };
     GripLog g_grip_log[2];
 
@@ -2144,6 +2147,17 @@ namespace
             spring_joint(joint, mass, cfg);
             log.active = true;
             log.mass = mass;
+            {
+                Call sim(base, STR("IsSimulatingPhysics"));
+                sim.run();
+                FProperty* rp = sim.param(STR("ReturnValue"));
+                log.simulating = rp ? (*(sim.buffer.data() + rp->GetOffset_Internal()) ? 1 : 0) : -1;
+                Call sc(base, STR("K2_GetComponentScale"));
+                sc.run();
+                log.scale = sc.vec().x;
+                if (g_pose.mesh)
+                    log.hand_dist = length(component_location(base) - socket_location(g_pose.mesh, bone_fname(side == 0 ? "hand_l" : "hand_r")));
+            }
             // How far the weapon is from where the hand holds it, from the joint's own force.
             Call f(joint, STR("GetConstraintForce"));
             if (f.run())
@@ -2164,9 +2178,11 @@ namespace
             double rate[2] = {-1, -1};
             if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Grab L Release Rate"))) rate[0] = number_property(pawn, p);
             if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Grab R Release Rate"))) rate[1] = number_property(pawn, p);
-            HSVR_LOG("Grip: left %s mass %.2f kg force %.0f gap %.1f cm slip %.2f; right %s mass %.2f kg force %.0f gap %.1f cm slip %.2f",
-                     g_grip_log[0].active ? "spring" : "-", g_grip_log[0].mass, g_grip_log[0].force, g_grip_log[0].gap, rate[0],
-                     g_grip_log[1].active ? "spring" : "-", g_grip_log[1].mass, g_grip_log[1].force, g_grip_log[1].gap, rate[1]);
+            HSVR_LOG("Grip: left %s mass %.2f kg force %.0f gap %.1f cm slip %.2f, weapon %.0f cm from hand, simulating %d, scale %.2f; "
+                     "right %s mass %.2f kg force %.0f gap %.1f cm slip %.2f, weapon %.0f cm from hand, simulating %d, scale %.2f",
+                     g_grip_log[0].active ? "spring" : "-", g_grip_log[0].mass, g_grip_log[0].force, g_grip_log[0].gap, rate[0], g_grip_log[0].hand_dist,
+                     g_grip_log[0].simulating, g_grip_log[0].scale, g_grip_log[1].active ? "spring" : "-", g_grip_log[1].mass, g_grip_log[1].force,
+                     g_grip_log[1].gap, rate[1], g_grip_log[1].hand_dist, g_grip_log[1].simulating, g_grip_log[1].scale);
         }
     }
 
@@ -2811,6 +2827,26 @@ namespace
             {
                 *reinterpret_cast<UClass**>(parameters + p->GetOffset_Internal()) = cls;
                 set = true;
+            }
+            // A zeroed transform has scale 0 and no valid rotation: give it the right hand's spot.
+            if (n == STR("Weapon Origin Transform"))
+            {
+                UScriptStruct* type = struct_type(p);
+                uint8_t* at = parameters + p->GetOffset_Internal();
+                hsvr::Vec3 hand{0, 0, 0};
+                if (UObject* mesh = find_pawn_mesh()) hand = socket_location(mesh, bone_fname("hand_r"));
+                if (FProperty* r = struct_member(type, STR("Rotation")))
+                {
+                    UScriptStruct* qt = struct_type(r);
+                    if (FProperty* w = struct_member(qt, STR("W")))
+                    {
+                        uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                        if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                        else *reinterpret_cast<float*>(wat) = 1.0f;
+                    }
+                }
+                if (FProperty* t = struct_member(type, STR("Translation"))) write_three(at + t->GetOffset_Internal(), t, hand.x, hand.y, hand.z);
+                if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
             }
         }
         HSVR_LOG("Script: hsvr.give_weapon: parameters %s", names.c_str());
