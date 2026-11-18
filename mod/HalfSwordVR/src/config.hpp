@@ -196,8 +196,8 @@ namespace hsvr
         double pose_grip_radius_cm = 30.0;
         double pose_grip_buzz = 0.6;
         // The buzz starts when the joint stretches past this (cm). Even the game's locked grip
-        // reads ~4.5 cm on this measure, so below ~6 is normal holding.
-        double pose_grip_buzz_from_cm = 6.0;
+        // reads ~4.5-5.5 cm on this measure (headset test 1: buzzing at 6 fired a third of the time).
+        double pose_grip_buzz_from_cm = 10.0;
         // 1 = he crouches as low as you do (your headset below where you stood when you recentred,
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;

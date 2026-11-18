@@ -2106,6 +2106,7 @@ namespace
         int broken = -1;
         double mesh_hand_diff = -1.0;
         hsvr::Vec3 hand_com_local, weapon_com_local;
+        double turn_err_deg = 0.0;
         int same_mesh = -1;
         double stretch = 0.0;
         hsvr::Vec3 pos2;
@@ -2560,6 +2561,40 @@ namespace
         }
     }
 
+    // Rotation whose X, Y, Z axes are the given (orthonormalised) X and Y axes and their cross product.
+    hsvr::Quat quat_from_axes(hsvr::Vec3 x, hsvr::Vec3 y)
+    {
+        using namespace hsvr;
+        x = x * (1.0 / (std::max)(1e-9, length(x)));
+        Vec3 z = cross(x, y);
+        z = z * (1.0 / (std::max)(1e-9, length(z)));
+        y = cross(z, x);
+        double m00 = x.x, m10 = x.y, m20 = x.z, m01 = y.x, m11 = y.y, m21 = y.z, m02 = z.x, m12 = z.y, m22 = z.z;
+        double tr = m00 + m11 + m22;
+        Quat q;
+        if (tr > 0)
+        {
+            double s = std::sqrt(tr + 1.0) * 2;
+            q = Quat{(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25 * s};
+        }
+        else if (m00 > m11 && m00 > m22)
+        {
+            double s = std::sqrt(1.0 + m00 - m11 - m22) * 2;
+            q = Quat{0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s};
+        }
+        else if (m11 > m22)
+        {
+            double s = std::sqrt(1.0 + m11 - m00 - m22) * 2;
+            q = Quat{(m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s};
+        }
+        else
+        {
+            double s = std::sqrt(1.0 + m22 - m00 - m11) * 2;
+            q = Quat{(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s};
+        }
+        return q.normalized();
+    }
+
     void dump_joint(UObject* joint)
     {
         FProperty* p = joint ? joint->GetPropertyByNameInChain(STR("ConstraintInstance")) : nullptr;
@@ -2806,6 +2841,17 @@ namespace
                     log.stretch_vec = weapon_anchor - hand_anchor;
                     log.stretch = length(log.stretch_vec);
                     log.stretch_hand = hand_rot.inverse().rotate(log.stretch_vec);
+                    // Turning error: the joint's two frames (PriAxis/SecAxis on each side) should line up.
+                    {
+                        auto ax = [&](const TCHAR* v) {
+                            return Vec3{jn(v, STR("X")), jn(v, STR("Y")), jn(v, STR("Z"))};
+                        };
+                        Quat f1 = base_rot * quat_from_axes(ax(STR("PriAxis1")), ax(STR("SecAxis1")));
+                        Quat f2 = hand_rot * quat_from_axes(ax(STR("PriAxis2")), ax(STR("SecAxis2")));
+                        Quat d = (f2.inverse() * f1).normalized();
+                        double w = (std::min)(1.0, std::fabs(d.w));
+                        log.turn_err_deg = 2.0 * std::acos(w) * 180.0 / 3.14159265358979;
+                    }
                     // Where the physics bodies themselves are (centre of mass of the hand_r body and of the
                     // weapon body), in the bone's / component's own frame. Constant = just a local offset;
                     // changing with the arm's motion = the physics body is not where the bone is.
@@ -2893,6 +2939,7 @@ namespace
                              g_grip_k_scale.load(), g_weapon_gravity.load(), g_weapon_collision.load(), g_grip_target[0].load(), g_grip_target[1].load(),
                              g_grip_target[2].load(), g_grip_log[side].broken, (int)g_arm_ignore[side].joints.size(),
                              g_grip_log[side].same_mesh, g_grip_log[side].mesh_hand_diff);
+                    HSVR_LOG("Grip: %s turning error %.1f deg", side == 0 ? "left" : "right", g_grip_log[side].turn_err_deg);
                     HSVR_LOG("Grip: %s bodies: hand body centre (%.1f, %.1f, %.1f) in the hand bone's frame, weapon body centre (%.1f, %.1f, %.1f) in its frame",
                              side == 0 ? "left" : "right", g_grip_log[side].hand_com_local.x, g_grip_log[side].hand_com_local.y,
                              g_grip_log[side].hand_com_local.z, g_grip_log[side].weapon_com_local.x, g_grip_log[side].weapon_com_local.y,
