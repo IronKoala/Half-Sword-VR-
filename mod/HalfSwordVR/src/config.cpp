@@ -349,6 +349,11 @@ namespace hsvr
         num("pose_two_hand_let_go_cm", c.pose_two_hand_let_go_cm);
         flag("pose_two_hand_curl", c.pose_two_hand_curl);
         flag("pose_two_hand_lock_rotation", c.pose_two_hand_lock_rotation);
+        {
+            double m = c.pose_two_hand_mirror;
+            num("pose_two_hand_mirror", m);
+            c.pose_two_hand_mirror = (int)m;
+        }
         flag("pose_fists", c.pose_fists);
         text("pose_fist_class", c.pose_fist_class);
         flag("pose_eat", c.pose_eat);

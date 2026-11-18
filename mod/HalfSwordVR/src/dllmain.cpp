@@ -2388,6 +2388,29 @@ namespace
         return NAN;
     }
 
+    // A name inside nested structs (e.g. ConstraintInstance.ConstraintBone2), or "" if missing.
+    std::string nested_name(UObject* owner, std::initializer_list<const TCHAR*> path)
+    {
+        if (!owner) return {};
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner);
+        FProperty* p = nullptr;
+        UScriptStruct* type = nullptr;
+        bool first = true;
+        for (const TCHAR* name : path)
+        {
+            p = first ? owner->GetPropertyByNameInChain(name) : struct_member(type, name);
+            first = false;
+            if (!p) return {};
+            at += p->GetOffset_Internal();
+            type = struct_type(p);
+        }
+        if (p->GetClass().GetName() != STR("NameProperty")) return {};
+        std::wstring w = reinterpret_cast<FName*>(at)->ToString();
+        std::string out;
+        for (wchar_t ch : w) out += (char)(ch < 128 ? ch : '?');
+        return out;
+    }
+
     // Logs every number, flag and enum inside a struct (recursing into nested structs), one line
     // per value, so the joint's whole ConstraintInstance can be read instead of guessed.
     void dump_struct(const std::wstring& prefix, UScriptStruct* type, const uint8_t* at, int depth)
@@ -2989,6 +3012,8 @@ namespace
         double zone_lo = 0.0, zone_hi = 0.0;
         double zone_stop = 0.0, zone_tip = 0.0; // the guard (top stop) and the tip, from the game's grip point
         double body_strength = 1.0; // the game's stats on this hand's hold (strength x injury x stamina)
+        bool forearm = false;       // held on the forearm (strap shields: the game's joint is to the lower arm)
+        std::string anchor_bone;    // the bone the game's joint holds it to
         bool sliding = false;
         double far_since = -1.0, far_logged = 0.0;
     };
@@ -3768,7 +3793,7 @@ namespace
         int other = 1 - side;
         UObject* weapon = object_property(pawn, other == 0 ? STR("Weapon L") : STR("Weapon R"));
         HoldState& h = g_hold[other];
-        if (!weapon || h.weapon != weapon || !h.have_last || is_fist(weapon)) return false;
+        if (!weapon || h.weapon != weapon || !h.have_last || is_fist(weapon) || h.forearm) return false;
         UObject* base = object_property(weapon, STR("BaseMesh"));
         if (!base) return false;
         double game_z = h.pivot.z - h.slide;
@@ -3863,7 +3888,13 @@ namespace
         {
             Quat r = (first.f2 * first.f1.inverse()).normalized(); // the weapon in the first hand's frame
             Vec3 x = r.rotate(Vec3{1, 0, 0}), y = r.rotate(Vec3{0, 1, 0}), z = r.rotate(Vec3{0, 0, 1});
-            Vec3 mx{-x.x, x.y, x.z}, my{y.x, -y.y, -y.z}, mz{-z.x, z.y, z.z};
+            // The mirror plane on the weapon: the one through its axis whose normal is the palm's
+            // (pose_two_hand_mirror: which weapon axis to flip, 0 = X, 1 = Y; Y from kick test 15).
+            int flip = hsvr::config().pose_two_hand_mirror;
+            double fx = flip == 0 ? -1.0 : 1.0, fy = flip == 1 ? -1.0 : 1.0;
+            x = x * fx;
+            y = y * fy;
+            Vec3 mx{-x.x, x.y, x.z}, my{-y.x, y.y, y.z}, mz{-z.x, z.y, z.z};
             Quat mirrored = quat_from_axes(mx, my, mz).normalized();
             hand_rot = (weapon_rot * mirrored.inverse()).normalized();
         }
@@ -4139,6 +4170,18 @@ namespace
                              bottle->GetName().c_str(), d, tip, what, ok ? "called" : "MISSING", in_mouth);
                 }
             }
+            // A bottle taken from the mouth with liquid in it: he swallows (the game's own Gulp
+            // needs 0.5 in the mouth, which short sips never reach: fist-eat test 4).
+            if (bottle && at_mouth[side] && !close)
+            {
+                double in_mouth = read_number_variable(pawn, STR("Liquid In Mouth"));
+                if (in_mouth > 0.01)
+                {
+                    Call gulp(pawn, STR("Event Gulp"));
+                    bool ok = gulp.run();
+                    HSVR_LOG("Drink: bottle away from your mouth, swallowing (liquid in mouth %.2f): Event Gulp %s", in_mouth, ok ? "called" : "MISSING");
+                }
+            }
             at_mouth[side] = close;
         }
     }
@@ -4176,6 +4219,17 @@ namespace
             if (now_held == held[side]) continue;
             held[side] = now_held;
             const char* hand = side == 0 ? "left" : "right";
+            {
+                static uint64_t calls = 0;
+                static double last_edge[2] = {-1.0, -1.0};
+                ++calls;
+                double t = now_seconds();
+                // Two edges within 50 ms are not a hand: say what the grip read (fist flicker hunt).
+                if (t - last_edge[side] < 0.05)
+                    HSVR_LOG("Grab: %s grip changed again after %.3f s (now %s, squeeze %.2f, fake %.2f, call %llu, pawn %p)", hand, t - last_edge[side],
+                             now_held ? "held" : "open", squeeze, g_fake_squeeze[side].load(), (unsigned long long)calls, (void*)pawn);
+                last_edge[side] = t;
+            }
             UObject* mine = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             if (is_fist(mine))
             {
@@ -4282,7 +4336,7 @@ namespace
         HoldState& h = g_hold[side];
         h.blocked_cm = 0.0;
         h.on_weapon = 0.0;
-        if (!cfg.pose_hold_hand_on_weapon || !h.weapon || !h.have_last || !g_pose.pawn) return false;
+        if (!cfg.pose_hold_hand_on_weapon || !h.weapon || !h.have_last || !g_pose.pawn || h.forearm) return false;
         if (object_property(g_pose.pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != h.weapon) return false;
         UObject* base = object_property(h.weapon, STR("BaseMesh"));
         if (!base) return false;
@@ -4418,7 +4472,7 @@ namespace
     void slide_grip(int side, HoldState& h, UObject* weapon, UObject* base, const hsvr::Vec3& hand_point, const hsvr::Config& cfg, double dt)
     {
         using namespace hsvr;
-        if (!cfg.pose_slide) return;
+        if (!cfg.pose_slide || h.forearm) return;
         if (!h.zone_known) find_grip_zone(h, weapon, base, cfg);
         ControllerState st = controllers_state();
         float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : st.hand[side].trigger;
@@ -4560,6 +4614,29 @@ namespace
             if (!mesh) return;
             hand_pos = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
             hand_rot = socket_rotation(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+        }
+        // Strap shields (grip types 6/7) are held on the forearm: the game's joint is to the lower arm
+        // (shield_x_socket), and its frame there is in that bone's space (shield_grips.md). Reading
+        // it as the hand's put the strap ~10 cm toward the fingers (playtest 2026-11-18).
+        {
+            std::string bone2 = nested_name(joint, {STR("ConstraintInstance"), STR("ConstraintBone2")});
+            std::string lower = bone2;
+            for (auto& ch : lower) ch = (char)tolower((unsigned char)ch);
+            bool forearm = lower.rfind("lowerarm", 0) == 0;
+            if (forearm)
+            {
+                UObject* mesh = object_property(pawn, STR("Mesh"));
+                if (!mesh) return;
+                hand_pos = socket_location(mesh, bone_fname(bone2));
+                hand_rot = socket_rotation(mesh, bone_fname(bone2));
+            }
+            if (bone2 != h.anchor_bone)
+            {
+                h.anchor_bone = bone2;
+                HSVR_LOG("Hold: %s hand's %ls is held to %s%s", side == 0 ? "left" : "right", weapon->GetName().c_str(), bone2.empty() ? "(no bone name)" : bone2.c_str(),
+                         forearm ? " (on the forearm: strap shield)" : "");
+            }
+            h.forearm = forearm;
         }
         auto jn = [&](const TCHAR* v, const TCHAR* axis) {
             double x = nested_number(joint, {STR("ConstraintInstance"), v, axis});
