@@ -2130,8 +2130,9 @@ namespace
         double k = scale * w * w;
         double c = scale * 2.0 * cfg.pose_grip_damping * w;
         double max_force = scale * cfg.pose_grip_strength_kg * 980.0 / (std::max)(0.05, mass); // cm/s^2
-        double ka = scale * w * w, ca = scale * 2.0 * cfg.pose_grip_damping * w;
-        double max_torque = max_force / (std::max)(1.0, cfg.pose_grip_radius_cm); // rad/s^2 for that pull at the radius
+        double wa = w * std::sqrt((std::max)(0.0, cfg.pose_grip_turn_scale));
+        double ka = scale * wa * wa, ca = scale * 2.0 * cfg.pose_grip_turn_damping * wa;
+        double max_torque = cfg.pose_grip_turn_max_scale * max_force / (std::max)(1.0, cfg.pose_grip_radius_cm); // rad/s^2 for that pull at the radius
         for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
         {
             Call c1(joint, fn);
