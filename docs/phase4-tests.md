@@ -93,6 +93,8 @@ Next: your strength from the game's stats instead of a fixed number, the hand st
 |---|---|---|
 | `pose_grab_button` | 1 | The grab button. |
 | `pose_grab_radius_cm` | 10 | How near the weapon's body your hand must be. |
+| `pose_shield_free_grip` | 1 | A shield grabbed more than `pose_shield_snap_cm` from its own grip is held where the hand touched it (the rim or any edge), turned as it was; near its own grip the game's grip is used. |
+| `pose_shield_snap_cm` | 10 | How near the shield's own grip counts as taking it by that grip. |
 | `pose_grab_release_drops` | 1 | Letting go of the grip drops the weapon. |
 | `pose_grab_objects` | 1 | Objects and bodies can be grabbed too. |
 
