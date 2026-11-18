@@ -171,8 +171,12 @@ namespace hsvr
         std::string pose_arm_style = "exact";
         // Where the wrist sits relative to the controller's grip, in the controller's frame
         // (forward, right, up, cm), and how the hand is turned relative to the controller (degrees).
-        double pose_wrist_forward_cm = -6.0, pose_wrist_right_cm = 0.0, pose_wrist_up_cm = -2.0;
+        // Defaults: the wrist 8 cm from the palm centre back along the fingers and 2 cm toward the
+        // back of the hand, with the fingers tilted pose_knuckle_deg from the handle (right is
+        // mirrored for the left hand, so + is toward the back of either hand).
+        double pose_wrist_forward_cm = -2.7, pose_wrist_right_cm = 2.0, pose_wrist_up_cm = 7.5;
         double pose_hand_pitch = 0.0, pose_hand_yaw = 0.0, pose_hand_roll = 0.0;
+        double pose_knuckle_deg = 20.0;
         // Which way the elbows point (in the body's frame: back, out, down; any length).
         double pose_elbow_back = 0.3, pose_elbow_out = 0.6, pose_elbow_down = 1.0;
         // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and

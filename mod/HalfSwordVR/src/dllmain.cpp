@@ -742,6 +742,11 @@ namespace
             if (FProperty* p = param(name)) read_three(buffer.data() + p->GetOffset_Internal(), p, v);
             return {v[0], v[1], v[2]};
         }
+        int32_t integer(const TCHAR* name = STR("ReturnValue"))
+        {
+            FProperty* p = param(name);
+            return p ? *reinterpret_cast<int32_t*>(buffer.data() + p->GetOffset_Internal()) : -1;
+        }
         hsvr::Quat rot(const TCHAR* name = STR("ReturnValue"))
         {
             hsvr::Vec3 r = vec(name);
@@ -827,7 +832,7 @@ namespace
         double upper_length = 0, lower_length = 0;
         hsvr::Vec3 upper_dir_local, upper_normal_local; // in the upperarm bone's frame
         hsvr::Vec3 lower_dir_local, lower_normal_local; // in the lowerarm bone's frame
-        hsvr::Quat hand_offset;                          // body frame -> hand bone, at calibration
+        hsvr::Vec3 fingers_local, thumb_local;           // in the hand bone's frame: toward the fingers, toward the thumb side
     };
 
     struct PoseState
@@ -887,6 +892,13 @@ namespace
         return c.vec();
     }
 
+    bool bone_exists(UObject* mesh, const std::string& bone)
+    {
+        Call c(mesh, STR("GetBoneIndex"));
+        c.name(STR("BoneName"), bone_fname(bone));
+        return c.run() && c.integer() >= 0;
+    }
+
     void apply_arm_physics(const hsvr::Config& cfg)
     {
         set_simulate(g_pose.mesh, false);
@@ -933,7 +945,22 @@ namespace
             a.upper_normal_local = Wu.inverse().rotate(normalized(n));
             a.lower_dir_local = Wl.inverse().rotate(normalized(H - E));
             a.lower_normal_local = Wl.inverse().rotate(normalized(n));
-            a.hand_offset = (body_inv * Wh).normalized();
+            // Which way his hand points, in the hand bone's own frame: from the hand to the middle
+            // finger's first bone, and from the little finger across to the index finger (the
+            // thumb side). Without finger bones, along the forearm, with the elbow's bend as the side.
+            Vec3 fingers = H - E, across = n;
+            const char* how = "forearm (no finger bones)";
+            if (bone_exists(d, "middle_01" + sx) && bone_exists(d, "index_01" + sx) && bone_exists(d, "pinky_01" + sx))
+            {
+                fingers = socket_location(d, bone_fname("middle_01" + sx)) - H;
+                across = socket_location(d, bone_fname("index_01" + sx)) - socket_location(d, bone_fname("pinky_01" + sx));
+                how = "finger bones";
+            }
+            a.fingers_local = normalized(Wh.inverse().rotate(fingers));
+            Vec3 t = Wh.inverse().rotate(across);
+            a.thumb_local = normalized(t - a.fingers_local * dot(t, a.fingers_local));
+            HSVR_LOG("Pose: %s hand frame from %s: fingers (%.2f, %.2f, %.2f), thumb side (%.2f, %.2f, %.2f) in the hand bone", side == 0 ? "left" : "right",
+                     how, a.fingers_local.x, a.fingers_local.y, a.fingers_local.z, a.thumb_local.x, a.thumb_local.y, a.thumb_local.z);
             a.valid = a.upper_length > 5.0 && a.lower_length > 5.0 && chain_node("upperarm" + sx) && chain_node("lowerarm" + sx) && chain_node("hand" + sx);
             HSVR_LOG("Pose: %s arm upper %.1f cm, lower %.1f cm%s", side == 0 ? "left" : "right", a.upper_length, a.lower_length, a.valid ? "" : " (not usable)");
         }
@@ -973,7 +1000,7 @@ namespace
             double t = now_seconds() * 1.5 + side * 1.5;
             Vec3 shoulder = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
             grip = shoulder + body.rotate(Vec3{35.0 + 10.0 * std::sin(t), out * 15.0, -15.0 + 20.0 * std::cos(t)});
-            grip_rot = body;
+            grip_rot = (body * rot_to_quat(60.0, 0.0, 0.0)).normalized(); // controller handle tilted forward, as held
         }
         Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
         g_pose.target[side] = target;
@@ -999,8 +1026,16 @@ namespace
 
         Quat Wu = aim_bone(a.upper_dir_local, a.upper_normal_local, E - S, n);
         Quat Wl = aim_bone(a.lower_dir_local, a.lower_normal_local, H - E, n);
+        // The hand in the controller's grip (OpenXR grip pose, here X forward through the fist from
+        // the little finger to the thumb, Y right, Z up): the fingers run down the handle, tilted
+        // pose_knuckle_deg toward the front; the thumb side is the front. The same for both hands
+        // (each palm faces the other hand). Geometry as in Matthew's Chasms VR Framework (MIT).
         Quat offset = rot_to_quat(cfg.pose_hand_pitch, cfg.pose_hand_yaw * out, cfg.pose_hand_roll * out);
-        Quat Wh = (grip_rot * offset * a.hand_offset).normalized();
+        Quat hand_grip = (grip_rot * offset).normalized();
+        double k = cfg.pose_knuckle_deg * 3.14159265358979323846 / 180.0;
+        Vec3 fingers_world = hand_grip.rotate(Vec3{std::sin(k), 0.0, -std::cos(k)});
+        Vec3 thumb_world = hand_grip.rotate(Vec3{std::cos(k), 0.0, std::sin(k)});
+        Quat Wh = (quat_from_two(fingers_world, thumb_world) * quat_from_two(a.fingers_local, a.thumb_local).inverse()).normalized();
         node_set_rotation(*chain_node("upperarm" + sx), component_inv * Wu);
         node_set_rotation(*chain_node("lowerarm" + sx), component_inv * Wl);
         node_set_rotation(*chain_node("hand" + sx), component_inv * Wh);
