@@ -3625,6 +3625,7 @@ namespace
         bool sliding = false;
     };
     TwoHand g_two;
+    double g_pending_slide[2] = {1e9, 1e9}; // a hand-over: where the new hand holds, applied when its hold starts
 
     void end_two_hand(const char* why)
     {
@@ -3681,6 +3682,34 @@ namespace
     }
 
     void find_grip_zone(HoldState& h, UObject* weapon, UObject* base, const hsvr::Config& cfg);
+
+    // The first hand lets go while both hold (B&S): the weapon stays in the second hand, where it holds
+    // it. The game moves it into that hand (Set Up Hand Weapon snaps its grip to the hand socket), so
+    // it is put back where it was, and the new hold starts at the second hand's spot.
+    bool hand_over(UObject* pawn)
+    {
+        using namespace hsvr;
+        if (!g_two.active) return false;
+        int to = g_two.second, from = g_two.main;
+        UObject* weapon = g_two.weapon;
+        UObject* base = weapon ? object_property(weapon, STR("BaseMesh")) : nullptr;
+        if (!base) return false;
+        double z = g_two.z;
+        Vec3 pos = component_location(base);
+        Quat rot = component_rotation(base);
+        g_two = TwoHand{};
+        drop_weapon(from, pawn);
+        bool ok = give_hand_weapon(to, pawn, weapon);
+        UObject* now = object_property(pawn, to == 0 ? STR("Weapon L") : STR("Weapon R"));
+        if (now == weapon)
+        {
+            set_component_transform(base, pos, rot, true);
+            g_pending_slide[to] = z;
+        }
+        HSVR_LOG("Two hands: %s hand lets go, %ls handed to the %s hand at %.1f cm (%s, %s hand now holds %ls)", from == 0 ? "left" : "right", weapon->GetName().c_str(),
+                 to == 0 ? "left" : "right", z, ok ? "set up" : "set-up call missing", to == 0 ? "left" : "right", now ? now->GetName().c_str() : STR("nothing"));
+        return now == weapon;
+    }
 
     // A squeeze with an empty hand: onto the weapon the other hand holds, if the hand is on it.
     bool try_two_hand(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
@@ -3787,7 +3816,11 @@ namespace
                     end_two_hand("grip released");
                     continue;
                 }
-                if (g_two.active && side == g_two.main) end_two_hand("the other hand let go");
+                if (g_two.active && side == g_two.main)
+                {
+                    if (cfg.pose_grab_release_drops && hand_over(pawn)) continue;
+                    end_two_hand("the other hand let go");
+                }
                 if (mine && cfg.pose_grab_release_drops)
                 {
                     drop_weapon(side, pawn);
@@ -4028,9 +4061,22 @@ namespace
         double before = h.slide;
         double step = (want - h.slide) * (1.0 - std::exp(-k * dt));
         double most = cfg.pose_slide_max_cm_s * dt; // a hitch or a jump is not a slide
+        // The zone the hand is on: the grip, or the blade after a hand-over from two hands.
+        double zlo = h.zone_lo, zhi = h.zone_hi;
+        if (before > h.zone_hi + 0.5)
+        {
+            double lo[2], hi[2];
+            int n = two_hand_zones(h, cfg, lo, hi);
+            for (int i = 0; i < n; ++i)
+                if (lo[i] > h.zone_hi)
+                {
+                    zlo = lo[i];
+                    zhi = hi[i];
+                }
+        }
         h.slide += (std::min)(most, (std::max)(-most, step));
-        h.slide = (std::min)(h.zone_hi, (std::max)(h.zone_lo, h.slide));
-        bool at_end = (h.slide <= h.zone_lo + 0.01 && want < h.zone_lo) || (h.slide >= h.zone_hi - 0.01 && want > h.zone_hi);
+        h.slide = (std::min)(zhi, (std::max)(zlo, h.slide));
+        bool at_end = (h.slide <= zlo + 0.01 && want < zlo) || (h.slide >= zhi - 0.01 && want > zhi);
         static bool was_at_end[2] = {false, false};
         if (at_end && !was_at_end[side]) controllers_buzz(side, 0.5f);
         was_at_end[side] = at_end;
@@ -4050,6 +4096,12 @@ namespace
             h = HoldState{};
             h.weapon = weapon;
             h.started = now;
+            if (g_pending_slide[side] < 1e8)
+            {
+                h.slide = g_pending_slide[side];
+                h.started = now - cfg.pose_hold_let_go_grace_s; // handed over, already in place: no settling grace
+                g_pending_slide[side] = 1e9;
+            }
         }
         // Where the controller has the hand: the hand bone's target this frame (exact arms), or the
         // bone itself when there is no controller.
