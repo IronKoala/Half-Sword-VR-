@@ -3021,6 +3021,13 @@ namespace
         double blocked_cm = 0.0, on_weapon = 0.0;
         double stuck_since = -1.0;
         double started = -1.0;        // when this hand began holding this weapon
+        // Contact, from the physics' answer: where the hold sent the weapon's centre of mass last tick
+        // against where it got to. Free, it gets there (within gravity's share of a step); something in
+        // the way (the floor, a body, a shield) stops it short. The stuck rule needs this, so a weapon
+        // that only lags (a long spear swinging up at the hand's torque limit) is never let go.
+        bool have_expected = false;
+        hsvr::Vec3 expected_com;
+        double miss_cm = 0.0, last_contact = -100.0;
         double last_blocked_cm = -1.0; // last tick's blocked_cm (a weapon still coming is not stuck)
         // The slide: how far the hand has moved along the weapon (cm along its +Z from the game's grip
         // point), and the grip zone it may move in (found once per weapon).
@@ -3751,7 +3758,9 @@ namespace
             bool out = from_shoulder > reach + 2.0 || from_hand > reach;
             // Not right after it came into the hand (a new or long weapon swings into place first),
             // and not while it is still closing in on where the hold sends it.
-            bool settling = h.started < 0.0 || now_seconds() - h.started < cfg.pose_hold_let_go_grace_s || coming > 0.3;
+            double t_now = now_seconds();
+            bool touching = t_now - h.last_contact < 0.15;
+            bool settling = h.started < 0.0 || t_now - h.started < cfg.pose_hold_let_go_grace_s || coming > 0.3 || !touching;
             if (!out || settling) h.stuck_since = -1.0;
             else
             {
@@ -3760,8 +3769,8 @@ namespace
                 else if (now - h.stuck_since >= cfg.pose_hold_let_go_s)
                 {
                     HSVR_LOG("Hold: %s hand lets go of %ls: stopped %.0f cm from where you hold it, its grip %.0f cm from the shoulder (reach %.0f), "
-                             "your hand %.0f cm from it",
-                             side == 0 ? "left" : "right", h.weapon->GetName().c_str(), h.blocked_cm, from_shoulder, reach, from_hand);
+                             "your hand %.0f cm from it (stopped %.1f cm short of where it was sent)",
+                             side == 0 ? "left" : "right", h.weapon->GetName().c_str(), h.blocked_cm, from_shoulder, reach, from_hand, h.miss_cm);
                     h.stuck_since = -1.0;
                     drop_weapon(side, g_pose.pawn);
                     return false;
@@ -3973,6 +3982,11 @@ namespace
         Call av(base, STR("GetPhysicsAngularVelocityInRadians"));
         av.run();
         Vec3 w_now = av.vec();
+        if (h.have_expected)
+        {
+            h.miss_cm = length(com - h.expected_com);
+            if (h.miss_cm > cfg.pose_hold_contact_cm) h.last_contact = now;
+        }
         Vec3 pivot_now = pos + rot.rotate(pivot);
         Vec3 v = lv.vec() + cross(w_now, pivot_now - com);
         Vec3 w = w_now;
@@ -4025,6 +4039,8 @@ namespace
         Quat rot_next = (from_scaled_axis(w_next * dt) * rot).normalized();
         Vec3 local_com = rot.inverse().rotate(com - pos);
         Vec3 com_next = pivot_now + v_next * dt + rot_next.rotate(local_com - pivot);
+        h.expected_com = com_next;
+        h.have_expected = true;
         // Wake it first: a body the solver has put to sleep (a weapon lying still on the ground) may
         // keep the velocity it is given without moving (run 29: the knife stayed frozen on the floor).
         Call wake(base, STR("WakeRigidBody"));
@@ -4457,10 +4473,10 @@ namespace
                     HSVR_LOG("Grip: %s turning error %.1f deg", side == 0 ? "left" : "right", g_grip_log[side].turn_err_deg);
                     if (g_hold[side].weapon)
                         HSVR_LOG("Hold: %s point held %.1f cm and %.1f deg behind the controller, hand force %.0f N%s, torque %.1f N m%s, dt %.4f, "
-                                 "stopped %.1f cm, hand on weapon %.2f",
+                                 "stopped %.1f cm, hand on weapon %.2f, contact miss %.2f cm",
                                  side == 0 ? "left" : "right", g_hold[side].lag, g_hold[side].turn_deg, g_hold[side].force_n,
                                  g_hold[side].force_capped ? " (at its cap)" : "", g_hold[side].torque_nm, g_hold[side].torque_capped ? " (at its cap)" : "",
-                                 g_hold[side].dt, g_hold[side].blocked_cm, g_hold[side].on_weapon);
+                                 g_hold[side].dt, g_hold[side].blocked_cm, g_hold[side].on_weapon, g_hold[side].miss_cm);
                     HSVR_LOG("Grip: %s bodies: hand body centre (%.1f, %.1f, %.1f) in the hand bone's frame, weapon body centre (%.1f, %.1f, %.1f) in its frame",
                              side == 0 ? "left" : "right", g_grip_log[side].hand_com_local.x, g_grip_log[side].hand_com_local.y,
                              g_grip_log[side].hand_com_local.z, g_grip_log[side].weapon_com_local.x, g_grip_log[side].weapon_com_local.y,

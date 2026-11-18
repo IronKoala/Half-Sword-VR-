@@ -222,6 +222,9 @@ namespace hsvr
         double pose_hold_let_go_s = 0.15;
         // No let-go for this long after a weapon comes into the hand (long weapons swing into place).
         double pose_hold_let_go_grace_s = 1.0;
+        // Something is in the held weapon's way when it ends a tick this far (cm) short of where the
+        // hold sent it; the stuck rule only lets go of a weapon that is in contact like that.
+        double pose_hold_contact_cm = 0.5;
         // The slide: hold the trigger while holding a weapon and that hand slides along it, within its
         // grip zone (stops half a hand inside the guard and the pommel end). Rate (1/s) at a light and
         // a full trigger squeeze.
