@@ -112,6 +112,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `hsvr.joint_trace 0/1` | Logs the right hand joint every tick before and after our free, with his soft-attach variables ("Joint:") |
 | `hsvr.passive_foe` | Makes every foe a training dummy: its AI controller stopped (DED, tick off, movement stopped) and its attack inputs cleared; its physics, balance and get-up keep working. Spawn one with Free Mode Foes Amount=1, Brawling off, and run this right after it spawns |
 | `hsvr.force_watch 0/1` | Logs ("Force:") every physics write from game script (impulses, forces, velocities, teleports, collision and physics switches) on a part of a weapon in his hands or his own body, with the calling Blueprint function and bytecode offset |
+| `hsvr.break_joint 0/1` | Breaks the game's hand joint on the held weapon (test: only the mod's hold links them) |
 | `hsvr.pin_disabled 0/1` | Keeps his "Weapon R/L Collisions Disabled Temporarily" set (gates his back sweep) |
 | `hsvr.stuck_check 0/1` | 0 pins his "Weapon Stuck In Static Mesh Check Rate" at 0 so his 1 s Check Stuck In Static Mesh loop never fires (the kick hunt). "Kick:" lines log every tick a held weapon's body (mass, centre of mass) or Unstuck flag changes |
 | `hsvr.weapon_dump [0/1]` | Logs the weapon in the left (0) or right (1, default) hand: its components with their spans along the blade, BaseMesh sockets, the hand joint point and its Length variables |

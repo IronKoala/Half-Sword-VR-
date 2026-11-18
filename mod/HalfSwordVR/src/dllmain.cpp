@@ -4150,6 +4150,7 @@ namespace
     // hsvr.stuck_check 0 pins Willie's check rate at 0 so his loop never fires (a test, not a fix).
     std::atomic<int> g_stuck_check{1};
     std::atomic<bool> g_pin_disabled{false};
+    std::atomic<bool> g_break_joint{false};
     void watch_weapon_rebuild(int side, UObject* pawn, UObject* weapon, UObject* base, double mass)
     {
         using namespace hsvr;
@@ -4350,6 +4351,18 @@ namespace
                     }
                     free_joint(joint);
                     if (g_joint_trace.load() && side == 1) HSVR_LOG("Joint: after free: %s", joint_settings(joint).c_str());
+                    // Test (hsvr.break_joint 1): break the game's hand joint outright, so nothing links
+                    // the hand and the weapon but the mod's hold (decoded default: a 50 cm linear limit).
+                    static UObject* broken[2] = {nullptr, nullptr};
+                    if (g_break_joint.load() && broken[side] != joint)
+                    {
+                        broken[side] = joint;
+                        Call b(joint, STR("BreakConstraint"));
+                        b.run();
+                        HSVR_LOG("Joint: %s hand joint broken (test); the game still holds %ls: %d", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                                 (int)(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) == weapon));
+                    }
+                    if (!g_break_joint.load()) broken[side] = nullptr;
                 }
                 else if (spring_on) spring_joint(joint, mass, cfg);
                 {
@@ -5712,6 +5725,11 @@ namespace
             {
                 install_force_watch();
                 g_force_watch.store(atoi(entry.command.c_str() + 17) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.break_joint ", 0) == 0)
+            {
+                g_break_joint.store(atoi(entry.command.c_str() + 17) != 0);
                 continue;
             }
             if (entry.command.rfind("hsvr.pin_disabled ", 0) == 0)
