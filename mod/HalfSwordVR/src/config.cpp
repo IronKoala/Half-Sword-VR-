@@ -359,6 +359,7 @@ namespace hsvr
         flag("pose_eat", c.pose_eat);
         num("pose_eat_cm", c.pose_eat_cm);
         num("pose_drink_tip", c.pose_drink_tip);
+        num("pose_drink_sip_s", c.pose_drink_sip_s);
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
         flag("pose_grab_objects", c.pose_grab_objects);
         flag("pose_ghost_hand", c.pose_ghost_hand);

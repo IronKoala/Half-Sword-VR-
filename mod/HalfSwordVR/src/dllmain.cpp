@@ -600,6 +600,17 @@ namespace
     // ---- Phase 3: the body posed from the headset and controllers ------------------------------
     // Calls a Blueprint-callable function with named parameters, laid out by reflection (so no
     // parameter struct has to match the engine by hand).
+    // A zeroed parameter block big enough for every parameter of the function.
+    std::vector<uint8_t> param_block(UFunction* fn)
+    {
+        size_t size = 16;
+        if (fn)
+        {
+            for (FProperty* p : fn->ForEachProperty()) size = (std::max)(size, (size_t)p->GetOffset_Internal() + (size_t)p->GetSize());
+        }
+        return std::vector<uint8_t>(size + 64, 0);
+    }
+
     struct Call
     {
         UObject* target = nullptr;
@@ -3218,8 +3229,10 @@ namespace
             HSVR_LOG("Hold: no \"%ls\" on the character, the weapon is not dropped", name);
             return;
         }
-        alignas(16) static uint8_t parameters[4096];
-        memset(parameters, 0, sizeof(parameters));
+        // Sized from the function. The fixed 4096-byte static block this replaced was overrun: the
+        // hand position written for the fist landed on the grab button's state (fist-eat test 4).
+        std::vector<uint8_t> block = param_block(fn);
+        uint8_t* parameters = block.data();
         std::wstring names;
         for (FProperty* p : fn->ForEachProperty())
         {
@@ -3259,8 +3272,10 @@ namespace
         const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
         UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
         if (!fn || !weapon) return false;
-        alignas(16) static uint8_t parameters[4096];
-        memset(parameters, 0, sizeof(parameters));
+        // Sized from the function. The fixed 4096-byte static block this replaced was overrun: the
+        // hand position written for the fist landed on the grab button's state (fist-eat test 4).
+        std::vector<uint8_t> block = param_block(fn);
+        uint8_t* parameters = block.data();
         bool set = false;
         for (FProperty* p : fn->ForEachProperty())
         {
@@ -3959,9 +3974,17 @@ namespace
         const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
         UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
         if (!fn) return false;
-        alignas(16) static uint8_t parameters[4096];
-        memset(parameters, 0, sizeof(parameters));
+        // Sized from the function. The fixed 4096-byte static block this replaced was overrun: the
+        // hand position written for the fist landed on the grab button's state (fist-eat test 4).
+        std::vector<uint8_t> block = param_block(fn);
+        uint8_t* parameters = block.data();
         bool class_set = false;
+        static bool sized_logged = false;
+        if (!sized_logged)
+        {
+            sized_logged = true;
+            HSVR_LOG("Fist: %ls takes a %zu-byte parameter block", name, block.size() - 64);
+        }
         UObject* mesh = object_property(pawn, STR("Mesh"));
         hsvr::Vec3 hand = mesh ? hand_grab_point(mesh, side) : hsvr::Vec3{0, 0, 0};
         for (FProperty* p : fn->ForEachProperty())
@@ -4137,7 +4160,7 @@ namespace
                     HSVR_LOG("Eat: %s hand's food at your mouth (%.0f cm): %s", side == 0 ? "left" : "right", d, ok ? "Bite Event called" : "no Bite Event");
                 }
             }
-            else if (close && now - last_drink >= 1.0)
+            else if (close && now - last_drink >= cfg.pose_drink_sip_s)
             {
                 Quat r = component_rotation(item);
                 double tip = dot(r.rotate(Vec3{0, 0, 1}), Vec3{0, 0, 1});
@@ -6061,8 +6084,8 @@ namespace
             return;
         }
         // Zeroed room for the parameter block; the functions this is meant for have none.
-        alignas(16) static uint8_t parameters[1024];
-        memset(parameters, 0, sizeof(parameters));
+        std::vector<uint8_t> block = param_block(function);
+        uint8_t* parameters = block.data();
         game_instance->ProcessEvent(function, parameters);
         HSVR_LOG("Script: called %ls on the game instance", function->GetFullName().c_str());
     }
@@ -6206,8 +6229,10 @@ namespace
             HSVR_LOG("Script: hsvr.give_weapon: no character or no \"%ls\"", setup_name);
             return;
         }
-        alignas(16) static uint8_t parameters[4096];
-        memset(parameters, 0, sizeof(parameters));
+        // Sized from the function. The fixed 4096-byte static block this replaced was overrun: the
+        // hand position written for the fist landed on the grab button's state (fist-eat test 4).
+        std::vector<uint8_t> block = param_block(fn);
+        uint8_t* parameters = block.data();
         std::string names;
         bool set = false;
         for (FProperty* p : fn->ForEachProperty())
@@ -7321,8 +7346,8 @@ namespace
                      pawn ? "found" : "missing", game_mode ? "found" : "missing", fn ? "found" : "missing", (int)won, (int)ended);
             return;
         }
-        alignas(16) static uint8_t parameters[256];
-        memset(parameters, 0, sizeof(parameters));
+        std::vector<uint8_t> block = param_block(fn);
+        uint8_t* parameters = block.data();
         pawn->ProcessEvent(fn, parameters);
         controllers_buzz(1, 0.6f);
         HSVR_LOG("Menu: A held %.1f s after a won fight: VO Deescalate called (Player Match End now %d)", cfg.menu_continue_hold_s,
