@@ -2197,7 +2197,6 @@ namespace
                 else
                     log.joined = STR("(no GetConstrainedComponents)");
             }
-            }
             // How far the weapon is from where the hand holds it, from the joint's own force.
             Call f(joint, STR("GetConstraintForce"));
             if (f.run())
