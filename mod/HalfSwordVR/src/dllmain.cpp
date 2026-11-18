@@ -3858,12 +3858,16 @@ namespace
             HSVR_LOG("Slide: %s hand %s at %.1f cm (zone %.1f .. %.1f)", side == 0 ? "left" : "right", on ? "starts sliding" : "holds", h.slide, h.zone_lo, h.zone_hi);
         }
         if (!on) return;
+        // Not while a weapon that just came into the hand swings into place.
+        if (h.started >= 0.0 && now_seconds() - h.started < cfg.pose_hold_let_go_grace_s) return;
         Vec3 bp = component_location(base);
         Quat binv = component_rotation(base).inverse();
         double want = binv.rotate(hand_point - bp).z - h.pivot.z; // along the axis, from the game's grip point
         double k = cfg.pose_slide_rate_min + (cfg.pose_slide_rate_max - cfg.pose_slide_rate_min) * (std::min)(1.0, (std::max)(0.0, (trig - 0.15) / 0.85));
         double before = h.slide;
-        h.slide += (want - h.slide) * (1.0 - std::exp(-k * dt));
+        double step = (want - h.slide) * (1.0 - std::exp(-k * dt));
+        double most = cfg.pose_slide_max_cm_s * dt; // a hitch or a jump is not a slide
+        h.slide += (std::min)(most, (std::max)(-most, step));
         h.slide = (std::min)(h.zone_hi, (std::max)(h.zone_lo, h.slide));
         bool at_end = (h.slide <= h.zone_lo + 0.01 && want < h.zone_lo) || (h.slide >= h.zone_hi - 0.01 && want > h.zone_hi);
         static bool was_at_end[2] = {false, false};

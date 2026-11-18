@@ -229,6 +229,7 @@ namespace hsvr
         double pose_slide_hand_half_cm = 4.5;
         double pose_slide_rate_min = 3.0;
         double pose_slide_rate_max = 40.0;
+        double pose_slide_max_cm_s = 250.0; // fastest the hand runs along a weapon
         // The grab button: squeeze a grip near a loose weapon to pick it up; let go of the grip to
         // drop what that hand holds (pose_grab_release_drops).
         bool pose_grab_button = true;

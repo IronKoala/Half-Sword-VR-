@@ -60,6 +60,7 @@ Next: your strength from the game's stats instead of a fixed number, the hand st
 | `pose_slide` | 1 | The slide. |
 | `pose_slide_hand_half_cm` | 4.5 | How far inside each end of the zone the hand's centre stops. |
 | `pose_slide_rate_min`, `pose_slide_rate_max` | 3, 40 | How fast (1/s) the hand catches up along the weapon at a light and a full trigger squeeze. |
+| `pose_slide_max_cm_s` | 250 | Fastest the hand runs along a weapon (a game hitch is not a slide). No slide in the first second a weapon is in the hand. |
 | `pose_hold_let_go_grace_s` | 1.0 | No stuck let-go this long after a weapon comes into the hand, or while it is still closing in (long weapons swing into place). |
 
 ## Grab button

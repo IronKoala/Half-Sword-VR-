@@ -336,6 +336,7 @@ namespace hsvr
         num("pose_slide_hand_half_cm", c.pose_slide_hand_half_cm);
         num("pose_slide_rate_min", c.pose_slide_rate_min);
         num("pose_slide_rate_max", c.pose_slide_rate_max);
+        num("pose_slide_max_cm_s", c.pose_slide_max_cm_s);
         flag("pose_grab_button", c.pose_grab_button);
         num("pose_grab_radius_cm", c.pose_grab_radius_cm);
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
