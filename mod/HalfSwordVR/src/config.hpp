@@ -276,7 +276,7 @@ namespace hsvr
         double pose_eat_cm = 12.0;
         double pose_drink_tip = 0.0;
         // Seconds between sips while the bottle stays tipped at your mouth.
-        double pose_drink_sip_s = 0.3;
+        double pose_drink_sip_s = 1.0;
         // The ghost hand: while his hand stays on a stopped weapon more than pose_ghost_from_cm from
         // your real hand, a see-through glove shows where your hand is. Mesh and material are object
         // paths in the cooked game; offset (cm) and turn (deg) from the hand bone, and scale, for fitting.
