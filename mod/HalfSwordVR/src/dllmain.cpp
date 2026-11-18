@@ -861,6 +861,16 @@ namespace
         *(n.node + n.rotation_mode->GetOffset_Internal()) = 1; // replace
     }
 
+    // Adds a turn on top of whatever the game's animation gives the bone (component space), so his
+    // own breathing, leaning and crouch bend stay underneath.
+    void node_add_rotation(ModifyBoneNode& n, const hsvr::Quat& component_space)
+    {
+        hsvr::Rot r = hsvr::quat_to_rot(component_space);
+        *(n.node + n.rotation_space->GetOffset_Internal()) = 1; // component space
+        write_three(n.node + n.rotation->GetOffset_Internal(), n.rotation, r.pitch, r.yaw, r.roll);
+        *(n.node + n.rotation_mode->GetOffset_Internal()) = 2; // additive
+    }
+
     void node_release(ModifyBoneNode& n)
     {
         *(n.node + n.rotation_mode->GetOffset_Internal()) = 0;
@@ -892,6 +902,7 @@ namespace
         hsvr::Vec3 target[2]; // last hand targets, for the log
         hsvr::Vec3 swivel_local[2]; // smoothed elbow direction, in the body's frame
         bool swivel_valid[2] = {false, false};
+        double twist_deg = 0.0; // how far the spine and neck together turned this frame, for the log
         double swivel_time[2] = {0.0, 0.0};
     };
     PoseState g_pose;
@@ -1018,6 +1029,40 @@ namespace
     hsvr::Quat aim_bone(const hsvr::Vec3& dir_local, const hsvr::Vec3& normal_local, const hsvr::Vec3& dir, const hsvr::Vec3& normal)
     {
         return (hsvr::quat_from_two(dir, normal) * hsvr::quat_from_two(dir_local, normal_local).inverse()).normalized();
+    }
+
+    // ---- Torso twist ----------------------------------------------------------------------------
+    // Your head turns first, then the neck and chest, and the hips last (they follow with the body
+    // turning, outside its dead zone). The spine and neck bones share pose_torso_twist of how far
+    // your head is turned from the hips, more toward the top, on top of the game's own animation.
+    // The head itself is always exactly the headset; the arms are placed in the world, so they stay
+    // on your hands whatever the chest does.
+    void pose_torso_twist(const hsvr::Config& cfg, bool have_look, const hsvr::Quat& look_rot, double hips_yaw, const hsvr::Quat& component_inv)
+    {
+        using namespace hsvr;
+        static const struct
+        {
+            const char* bone;
+            double weight;
+        } chain[] = {{"spine_02", 0.10}, {"spine_03", 0.12}, {"spine_04", 0.14}, {"spine_05", 0.16}, {"neck_01", 0.22}, {"neck_02", 0.26}};
+        double rel = 0.0;
+        if (have_look && cfg.pose_torso_twist > 0.0)
+        {
+            rel = quat_yaw_deg(look_rot) - hips_yaw;
+            while (rel > 180.0) rel -= 360.0;
+            while (rel < -180.0) rel += 360.0;
+            rel = (std::max)(-90.0, (std::min)(90.0, rel));
+        }
+        Vec3 up = component_inv.rotate({0.0, 0.0, 1.0});
+        double total = rel * (std::min)(1.0, cfg.pose_torso_twist);
+        for (const auto& link : chain)
+        {
+            ModifyBoneNode* n = chain_node(link.bone);
+            if (!n) continue;
+            if (total == 0.0) node_release(*n);
+            else node_add_rotation(*n, quat_axis_angle(up, total * link.weight * 3.14159265358979 / 180.0));
+        }
+        g_pose.twist_deg = total;
     }
 
     void pose_arm(int side, const hsvr::Config& cfg, const hsvr::ControllerState& state, const hsvr::Quat& body, const hsvr::Quat& component_inv)
@@ -1369,6 +1414,8 @@ namespace
         set_component_transform(mesh, place, (body * g_pose.mesh_rotation_local).normalized());
 
         Quat component_inv = component_rotation(driver).inverse();
+        bool have_look = false;
+        Quat look_rot;
         if (cfg.pose_head)
         {
             Vec3 head_world;
@@ -1388,11 +1435,14 @@ namespace
                 if (have) node_set_rotation(*n, component_inv * (head_rot * g_pose.head_offset));
                 else node_release(*n);
             }
+            have_look = have;
+            look_rot = head_rot;
         }
         else if (ModifyBoneNode* n = chain_node("head"))
         {
             node_release(*n);
         }
+        pose_torso_twist(cfg, have_look, look_rot, heading, component_inv);
         for (int side = 0; side < 2; ++side)
         {
             if (cfg.pose_arms) pose_arm(side, cfg, state, body, component_inv);
@@ -1416,7 +1466,7 @@ namespace
                 if (FProperty* mp = movement->GetPropertyByNameInChain(STR("MovementMode")))
                     mode = *(reinterpret_cast<uint8_t*>(movement) + mp->GetOffset_Internal());
             }
-            HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d", v[0], v[1], v[2], mode);
+            HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d, torso twist %.0f deg", v[0], v[1], v[2], mode, g_pose.twist_deg);
             HSVR_LOG("Pose: wrists: left twist %.0f deg, bend %.0f deg; right twist %.0f deg, bend %.0f deg (twist before the forearm's share)",
                      g_pose.arm[0].twist_deg, g_pose.arm[0].bend_deg, g_pose.arm[1].twist_deg, g_pose.arm[1].bend_deg);
             HSVR_LOG("Pose: actor (%.0f, %.0f, %.0f) heading %.0f, pelvis gap %.0f cm, room moved (%.0f, %.0f) this frame (%.1f, %.1f), head %s, hands %s/%s, "

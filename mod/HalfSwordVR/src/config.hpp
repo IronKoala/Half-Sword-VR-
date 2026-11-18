@@ -187,6 +187,9 @@ namespace hsvr
         // How much of the hand's turn about the forearm the forearm bone takes (0 to 1); the rest
         // shows at the wrist. Willie's forearm has no twist bones.
         double pose_forearm_twist_share = 0.5;
+        // How much of your head's turn away from the hips the spine and neck take together (0 to 1;
+        // the head is always exactly the headset).
+        double pose_torso_twist = 0.7;
         // How quickly the elbow's swing around the arm follows (seconds; the hand is never smoothed).
         double pose_swivel_smooth_s = 0.06;
         // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and

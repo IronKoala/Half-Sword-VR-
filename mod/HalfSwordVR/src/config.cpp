@@ -267,6 +267,7 @@ namespace hsvr
         num("pose_knuckle_deg", c.pose_knuckle_deg);
         num("pose_swivel_smooth_s", c.pose_swivel_smooth_s);
         num("pose_forearm_twist_share", c.pose_forearm_twist_share);
+        num("pose_torso_twist", c.pose_torso_twist);
         flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
         flag("hide_own_head", c.hide_own_head);
         text("hide_own_gore_from", c.hide_own_gore_from);
