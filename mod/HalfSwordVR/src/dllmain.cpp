@@ -930,6 +930,7 @@ namespace
     }
 
     void feet_reset();
+    bool ground_below(UObject* pawn, double x, double y, double from_z, double& ground_z);
 
     void pose_release()
     {
