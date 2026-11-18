@@ -166,6 +166,16 @@ namespace hsvr
         // 1 = while posed, your character's capsule only moves when you walk: the game's own pull
         // toward the body (and hit stumbles, dodges and leans) is undone after each of his ticks.
         bool pose_hold_capsule = true;
+        // 1 = his body faces where you face: it follows your headset once you look more than
+        // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
+        // turns you as well.
+        bool pose_body_turn = true;
+        double pose_turn_dead_zone_deg = 35.0;
+        double pose_turn_speed_dps = 150.0;
+        // 1 = he crouches as low as you do (your headset below where you stood when you recentred,
+        // less pose_crouch_dead_zone_cm).
+        bool pose_crouch = true;
+        double pose_crouch_dead_zone_cm = 3.0;
         // Where the wrist sits relative to the controller's grip, in the controller's frame
         // (forward, right, up, cm), and how the hand is turned relative to the controller (degrees).
         // Defaults: the wrist 8 cm from the palm centre back along the fingers and 2 cm toward the

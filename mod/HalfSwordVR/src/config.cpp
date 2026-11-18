@@ -253,6 +253,11 @@ namespace hsvr
         flag("pose_arms", c.pose_arms);
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);
+        flag("pose_body_turn", c.pose_body_turn);
+        num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
+        num("pose_turn_speed_dps", c.pose_turn_speed_dps);
+        flag("pose_crouch", c.pose_crouch);
+        num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);
         num("pose_wrist_right_cm", c.pose_wrist_right_cm);
         num("pose_wrist_up_cm", c.pose_wrist_up_cm);

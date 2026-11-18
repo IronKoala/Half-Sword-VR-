@@ -184,6 +184,10 @@ namespace
     // How far your walking in the room has already been handed to the game's capsule (in the
     // view's heading frame), so it is not counted twice.
     hsvr::Vec3 g_pose_room_moved_local;
+    // Body turning (see "Your body faces where you face"): the turn you make with the mouse or
+    // stick (the view's straight ahead), and the body's yaw relative to it.
+    bool g_turn_valid = false;
+    double g_turn_yaw = 0.0, g_body_rel = 0.0, g_last_written_yaw = 0.0, g_turn_time = 0.0;
 
     // Called by the stereo device while the frame's views are being set up (game thread).
     bool provide_anchor(hsvr::PlayerAnchor& out)
@@ -210,7 +214,7 @@ namespace
             if (ue::FRotator* rotation = controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")))
             {
                 out.has_heading = true;
-                out.heading_yaw = rotation->Yaw;
+                out.heading_yaw = (g_pose_anchor_fixed && g_turn_valid) ? g_turn_yaw : rotation->Yaw;
             }
         }
         if (g_pose_anchor_fixed)
@@ -823,6 +827,14 @@ namespace
         c.run();
     }
 
+    double component_scale_z(UObject* component)
+    {
+        Call c(component, STR("K2_GetComponentScale"));
+        c.run();
+        double z = c.vec().z;
+        return z > 0.01 ? z : 1.0;
+    }
+
     // The end-of-graph Modify Bone node of each bone (the game leaves them at Ignore, component space).
     std::map<std::wstring, ModifyBoneNode> final_chain_nodes(UObject* instance)
     {
@@ -884,6 +896,13 @@ namespace
     };
     PoseState g_pose;
     std::atomic<bool> g_hold_capsule{false}; // see "The capsule stays where you are" below
+    // Posed and calibrated this frame (crouch and body turning run around his tick).
+    std::atomic<bool> g_pose_active{false};
+    bool g_body_turning = false;
+    // Crouch: how far your headset is below where you stood at recentering (cm, 0 standing).
+    double g_crouch_drop = 0.0;
+    bool g_pose_cfg_turn = true, g_pose_cfg_crouch = true, g_pose_fake = false;
+    double g_turn_dead_deg = 35.0, g_turn_speed_dps = 150.0;
 
     const char* side_suffix(int side) { return side == 0 ? "_l" : "_r"; }
 
@@ -1237,6 +1256,13 @@ namespace
         UObject* instance = object_property(driver, STR("AnimScriptInstance"));
         bool abp = instance && instance->GetClassPrivate()->GetName().find(STR("ABP_Willie")) != std::wstring::npos;
         g_hold_capsule.store(cfg.pose_body && cfg.pose_hold_capsule && abp && mesh && g_pose.calibrated && g_pose.pawn == pawn);
+        g_pose_active.store(cfg.pose_body && abp && mesh && g_pose.calibrated && g_pose.pawn == pawn);
+        g_pose_cfg_turn = cfg.pose_body_turn;
+        g_pose_cfg_crouch = cfg.pose_crouch;
+        g_pose_fake = cfg.dev_pose_fake_tracking;
+        g_turn_dead_deg = cfg.pose_turn_dead_zone_deg;
+        g_turn_speed_dps = cfg.pose_turn_speed_dps;
+        if (!g_pose_active.load()) g_turn_valid = false;
         if (!cfg.pose_body || !abp || !mesh)
         {
             if (g_pose.pawn && (pawn == g_pose.pawn)) pose_release();
@@ -1318,6 +1344,28 @@ namespace
         Vec3 place = actor + body.rotate(g_pose.mesh_offset_local);
         place.x = actor.x - pelvis_off.x;
         place.y = actor.y - pelvis_off.y;
+        // Crouching: the body goes down by as much as your headset is below where you stood when
+        // you recentred. His leg IK keeps the feet planted, so the knees bend. Never raised above
+        // standing (the leg IK only stretches 1.1x), and at most 55 cm (times his size) down.
+        g_crouch_drop = 0.0;
+        if (cfg.pose_crouch && cfg.dev_pose_fake_tracking)
+        {
+            // Made-up path: slowly down to 40 cm and back up.
+            g_crouch_drop = 20.0 - 20.0 * std::cos(now_seconds() * 0.4);
+        }
+        else if (cfg.pose_crouch && state.head_valid)
+        {
+            Vec3 view_anchor, head_world;
+            Quat head_rot;
+            double unused_yaw = 0.0;
+            if (stereo_view_anchor(view_anchor, unused_yaw) && stereo_tracking_to_world(state.head, head_world, head_rot))
+            {
+                double scale = component_scale_z(mesh);
+                double drop = (view_anchor.z - head_world.z) - cfg.pose_crouch_dead_zone_cm;
+                g_crouch_drop = (std::min)(55.0 * scale, (std::max)(0.0, drop));
+            }
+        }
+        place.z -= g_crouch_drop;
         set_component_transform(mesh, place, (body * g_pose.mesh_rotation_local).normalized());
 
         Quat component_inv = component_rotation(driver).inverse();
@@ -1331,6 +1379,8 @@ namespace
                 // Made-up path: looks left and right, and up and down.
                 double t = now_seconds();
                 head_rot = (body * rot_to_quat(20.0 * std::sin(t * 0.7), 40.0 * std::sin(t * 0.5), 0.0)).normalized();
+                if (g_turn_valid && cfg.pose_body_turn) // the same made-up look the body turning follows
+                    head_rot = (quat_from_yaw_deg(g_turn_yaw + 80.0 * std::sin(t * 0.25)) * rot_to_quat(20.0 * std::sin(t * 0.7), 0.0, 0.0)).normalized();
                 have = true;
             }
             if (ModifyBoneNode* n = chain_node("head"))
@@ -1412,7 +1462,7 @@ namespace
 
     bool is_receive_tick(UObject* context, UFunction* function)
     {
-        if (!g_hold_capsule.load() || !context || context != g_pose.pawn || !function) return false;
+        if (!(g_hold_capsule.load() || g_pose_active.load()) || !context || context != g_pose.pawn || !function) return false;
         if (g_receive_tick) return function == g_receive_tick;
         if (function->GetName() != STR("ReceiveTick")) return false;
         g_receive_tick = function;
@@ -1420,16 +1470,118 @@ namespace
         return true;
     }
 
+    // ---- Your body faces where you face --------------------------------------------------------
+    // The game turns Willie's capsule toward the control rotation's yaw (and nothing else turns
+    // him); turning that way is not a swing or aim input (the aim reads only the mouse and pitch).
+    // So just before his tick the mod sets the control yaw to the body's yaw: your mouse or stick
+    // turn plus your real facing, which follows the headset once you look more than
+    // pose_turn_dead_zone_deg away, at pose_turn_speed_dps, until it is lined up again. The view's
+    // straight ahead keeps only the mouse or stick turn, so turning your head never turns the view
+    // twice. Pitch is left as the game has it, so mouse up and down still aims.
+    void turn_body_before_tick()
+    {
+        using namespace hsvr;
+        UObject* controller = find_player_controller();
+        ue::FRotator* rotation = controller ? controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")) : nullptr;
+        if (!rotation) return;
+        auto wrap = [](double a) {
+            while (a > 180.0) a -= 360.0;
+            while (a < -180.0) a += 360.0;
+            return a;
+        };
+        double now = now_seconds();
+        if (!g_pose_cfg_turn)
+        {
+            if (g_turn_valid) HSVR_LOG("Turn: body turning off; the mouse turns the body again");
+            g_turn_valid = false;
+            return;
+        }
+        if (!g_turn_valid)
+        {
+            g_turn_yaw = rotation->Yaw;
+            g_body_rel = 0.0;
+            g_last_written_yaw = rotation->Yaw;
+            g_turn_time = now;
+            g_body_turning = false;
+            g_turn_valid = true;
+            HSVR_LOG("Turn: your body now faces where you face (start %.0f)", g_turn_yaw);
+        }
+        // Whatever turned the control yaw since we last wrote it (mouse, stick) is your turn.
+        g_turn_yaw = wrap(g_turn_yaw + wrap(rotation->Yaw - g_last_written_yaw));
+        double dt = (std::min)(0.1, (std::max)(0.0, now - g_turn_time));
+        g_turn_time = now;
+        ControllerState state = controllers_state();
+        Vec3 head_world;
+        Quat head_rot;
+        bool have_head = !g_pose_fake && state.head_valid && stereo_tracking_to_world(state.head, head_world, head_rot);
+        double head_rel = 0.0;
+        if (have_head) head_rel = wrap(quat_yaw_deg(head_rot) - g_turn_yaw);
+        else if (g_pose_fake)
+        {
+            // Made-up path: looks up to 80 degrees left and right, slowly.
+            head_rel = 80.0 * std::sin(now * 0.25);
+            have_head = true;
+        }
+        if (have_head)
+        {
+            double diff = wrap(head_rel - g_body_rel);
+            if (std::fabs(diff) > g_turn_dead_deg) g_body_turning = true;
+            if (g_body_turning)
+            {
+                double step = (std::min)(std::fabs(diff), g_turn_speed_dps * dt);
+                g_body_rel = wrap(g_body_rel + (diff > 0 ? step : -step));
+                if (std::fabs(diff) - step < 5.0) g_body_turning = false;
+            }
+        }
+        double body_yaw = wrap(g_turn_yaw + g_body_rel);
+        rotation->Yaw = body_yaw;
+        rotation->Roll = 0.0;
+        g_last_written_yaw = body_yaw;
+        static double last = 0.0;
+        if (now - last >= 1.0)
+        {
+            last = now;
+            HSVR_LOG("Turn: view straight ahead %.0f, body %.0f (%+.0f from it)%s, crouch %.0f cm", g_turn_yaw, body_yaw, g_body_rel,
+                     g_body_turning ? ", turning" : "", g_crouch_drop);
+        }
+    }
+
+    // ---- Crouching: the game's own crouch values follow yours ----------------------------------
+    // The game rewrites "Crouched Height" and "Root Height" every tick (85 standing, 25 a standing
+    // crouch, times his size). After his tick the mod sets them from how far you are down, so his
+    // torso bend, stamina, step size and leg logic match. They are kept at 61 or more, because 60
+    // or less while standing still starts the game's canned kneel (legs without IK).
+    void set_named_number(UObject* owner, const TCHAR* name, double value)
+    {
+        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        if (!p) return;
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
+        auto kind = p->GetClass().GetName();
+        if (kind == STR("DoubleProperty")) *reinterpret_cast<double*>(at) = value;
+        else if (kind == STR("FloatProperty")) *reinterpret_cast<float*>(at) = (float)value;
+    }
+
+    void crouch_after_tick(UObject* pawn)
+    {
+        if (!g_pose_cfg_crouch || !g_pose.mesh) return;
+        double scale = component_scale_z(g_pose.mesh);
+        double height = (std::min)(85.0 * scale, (std::max)(61.0, 85.0 * scale - g_crouch_drop));
+        set_named_number(pawn, STR("Crouched Height"), height);
+        set_named_number(pawn, STR("Root Height"), height);
+    }
+
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
         g_hold_location = actor_location(context);
         g_hold_have = true;
+        if (g_pose_active.load()) turn_body_before_tick();
     }
 
     void capsule_after_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
+        if (g_pose_active.load()) crouch_after_tick(context);
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
         using namespace hsvr;
