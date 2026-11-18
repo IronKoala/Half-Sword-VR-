@@ -4149,6 +4149,7 @@ namespace
     // mass and centre of mass). Logs each tick a held weapon's body changes, and the flags around it.
     // hsvr.stuck_check 0 pins Willie's check rate at 0 so his loop never fires (a test, not a fix).
     std::atomic<int> g_stuck_check{1};
+    std::atomic<bool> g_pin_disabled{false};
     void watch_weapon_rebuild(int side, UObject* pawn, UObject* weapon, UObject* base, double mass)
     {
         using namespace hsvr;
@@ -4161,6 +4162,11 @@ namespace
         };
         static Seen seen[2];
         if (!g_stuck_check.load()) set_variable(pawn, STR("Weapon Stuck In Static Mesh Check Rate"), 0.0);
+        // Test (hsvr.pin_disabled 1): keep his "Weapon R/L Collisions Disabled Temporarily" set, which
+        // gates his back sweep (UF @478227 -> @95012) that disables skeleton-vs-weapon collision and
+        // re-enables it 1 s later (@96043, @96667 -> @801723) - suspected to undo our hand ignore.
+        if (g_pin_disabled.load())
+            set_variable(pawn, side == 0 ? STR("Weapon L Collisions Disabled Temporarily") : STR("Weapon R Collisions Disabled Temporarily"), 1.0);
         Call cm(base, STR("GetCenterOfMass"));
         cm.run();
         Vec3 com_local = component_rotation(base).inverse().rotate(cm.vec() - component_location(base));
@@ -4253,8 +4259,9 @@ namespace
                             FProperty* p = pawn->GetPropertyByNameInChain(n);
                             return p ? number_property(pawn, p) : -999.0;
                         };
-                        HSVR_LOG("Joint: before free: %s | Soft Not Attached %.0f, Soft Attach Distance %.1f, Attached Correctly %.0f", joint_settings(joint).c_str(),
-                                 var(STR("R Hand Soft Not Attached")), var(STR("R Hand Soft Attach Distance")), var(STR("R Hand Attached Correctly")));
+                        HSVR_LOG("Joint: before free: %s | Soft Not Attached %.0f, Soft Attach Distance %.1f, Attached Correctly %.0f, Weapon R Collisions Disabled Temporarily %.0f",
+                                 joint_settings(joint).c_str(), var(STR("R Hand Soft Not Attached")), var(STR("R Hand Soft Attach Distance")),
+                                 var(STR("R Hand Attached Correctly")), var(STR("Weapon R Collisions Disabled Temporarily")));
                     }
                     free_joint(joint);
                     if (g_joint_trace.load() && side == 1) HSVR_LOG("Joint: after free: %s", joint_settings(joint).c_str());
@@ -5577,6 +5584,12 @@ namespace
             if (entry.command.rfind("hsvr.joint_trace ", 0) == 0)
             {
                 g_joint_trace.store(atoi(entry.command.c_str() + 17) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.pin_disabled ", 0) == 0)
+            {
+                g_pin_disabled.store(atoi(entry.command.c_str() + 18) != 0);
+                HSVR_LOG("Script: hsvr.pin_disabled %d", (int)g_pin_disabled.load());
                 continue;
             }
             if (entry.command.rfind("hsvr.stuck_check ", 0) == 0)
