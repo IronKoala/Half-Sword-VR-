@@ -906,6 +906,7 @@ namespace
         // Feet (see "Feet that stand and step" below).
         hsvr::Vec3 foot_home_local[2];   // where each foot stands relative to the actor, in the body's frame
         hsvr::Quat foot_rot_local[2];    // body frame -> foot bone, standing
+        double ankle_height[2] = {10.0, 10.0}; // foot bone above the floor, standing
         bool feet_calibrated = false;
         double swivel_time[2] = {0.0, 0.0};
     };
@@ -1003,6 +1004,11 @@ namespace
             }
             g_pose.foot_home_local[side] = body_inv.rotate(socket_location(g_pose.mesh, foot) - actor);
             g_pose.foot_rot_local[side] = (body_inv * socket_rotation(d, foot)).normalized();
+            Vec3 foot_at = socket_location(g_pose.mesh, foot);
+            double floor_z = 0.0;
+            if (ground_below(g_pose.pawn, foot_at.x, foot_at.y, actor.z, floor_z) && foot_at.z - floor_z > 2.0 && foot_at.z - floor_z < 30.0)
+                g_pose.ankle_height[side] = foot_at.z - floor_z;
+            HSVR_LOG("Pose: %s ankle %.1f cm above the floor", side == 0 ? "left" : "right", g_pose.ankle_height[side]);
             HSVR_LOG("Pose: %s foot stands at (%.0f, %.0f, %.0f) from the actor", side == 0 ? "left" : "right", g_pose.foot_home_local[side].x,
                      g_pose.foot_home_local[side].y, g_pose.foot_home_local[side].z);
         }
@@ -1061,8 +1067,33 @@ namespace
     // pose_step_distance_cm from where it would stand under the hips, or turned more than
     // pose_step_angle_deg from them. The foot positions go into ABP_Willie's two foot IK effectors
     // (in the pelvis's frame) right after the game's animation update writes its own; the leg IK
-    // bends the knees. The height is the game's own (its ground under the foot), held while the game
-    // runs one of its own (hidden) steps.
+    // bends the knees. The height is the floor under the foot (a trace straight down) plus his ankle
+    // height when standing; the game's own foot height drifts 20-45 cm off in a deep crouch.
+    // The floor's height under a point: a straight-down trace on the Visibility channel that ignores
+    // your own character. False if nothing is hit within 2 m below `from_z`.
+    bool ground_below(UObject* pawn, double x, double y, double from_z, double& ground_z)
+    {
+        static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        if (!cdo || !pawn) return false;
+        Call trace(cdo, STR("LineTraceSingle"));
+        if (!trace.fn) return false;
+        trace.object(STR("WorldContextObject"), pawn);
+        trace.three(STR("Start"), x, y, from_z);
+        trace.three(STR("End"), x, y, from_z - 200.0);
+        trace.flag(STR("bIgnoreSelf"), true);
+        if (!trace.run()) return false;
+        FProperty* ret = trace.param(STR("ReturnValue"));
+        if (!ret || !(*(trace.buffer.data() + ret->GetOffset_Internal()) & 1)) return false;
+        FProperty* hit = trace.param(STR("OutHit"));
+        FProperty* point = hit ? struct_member(struct_type(hit), STR("ImpactPoint")) : nullptr;
+        UScriptStruct* vec_type = struct_type(point);
+        FProperty* z = vec_type ? struct_member(vec_type, STR("Z")) : nullptr;
+        if (!z) return false;
+        const uint8_t* at = trace.buffer.data() + hit->GetOffset_Internal() + point->GetOffset_Internal() + z->GetOffset_Internal();
+        ground_z = z->GetClass().GetName() == STR("DoubleProperty") ? *reinterpret_cast<const double*>(at) : *reinterpret_cast<const float*>(at);
+        return true;
+    }
+
     struct FootState
     {
         bool valid = false;
@@ -1073,7 +1104,7 @@ namespace
         hsvr::Vec3 from;
         double yaw_from = 0.0;
         double lift = 0.0;      // this frame's height above the ground (cm)
-        double ground_z = 0.0;  // the game's height for this foot
+        double ground_z = 0.0;  // where the foot bone sits when the foot is down: the floor plus the ankle height
         bool have_ground = false;
         int steps = 0;
     };
@@ -1188,6 +1219,12 @@ namespace
                 f.lift = std::sin(u * 3.14159265358979) * cfg.pose_step_lift_cm;
                 if (u >= 1.0) f.stepping = false;
             }
+            double floor_z = 0.0;
+            if (ground_below(pawn, f.at.x, f.at.y, actor.z, floor_z))
+            {
+                f.ground_z = floor_z + g_pose.ankle_height[side];
+                f.have_ground = true;
+            }
             // The foot points where it was put down, flat (the leg IK takes its turn from the hips otherwise).
             if (ModifyBoneNode* n = chain_node(side == 0 ? "foot_l" : "foot_r"))
                 node_set_rotation(*n, component_inv * (quat_from_yaw_deg(f.yaw) * g_pose.foot_rot_local[side]));
@@ -1234,22 +1271,7 @@ namespace
             FootState& f = g_feet[side];
             if (!p || !f.valid) continue;
             uint8_t* field = reinterpret_cast<uint8_t*>(context) + p->GetOffset_Internal();
-            // The game's own target: its height is the ground under the foot (held during its own steps).
-            double local[3];
-            read_three(field, p, local);
-            bool game_stepping = bool_property(pawn, side == 0 ? STR("L Stepping") : STR("R Stepping"));
-            if (!game_stepping || !f.have_ground)
-            {
-                Call from(mesh, STR("TransformFromBoneSpace"));
-                from.name(STR("BoneName"), pelvis);
-                from.three(STR("InPosition"), local[0], local[1], local[2]);
-                if (from.run())
-                {
-                    f.ground_z = from.vec(STR("OutPosition")).z;
-                    f.have_ground = true;
-                }
-            }
-            if (!f.have_ground) continue;
+            if (!f.have_ground) continue; // no floor found yet: the game's own target this frame
             Call to(mesh, STR("TransformToBoneSpace"));
             to.name(STR("BoneName"), pelvis);
             to.three(STR("InPosition"), f.at.x, f.at.y, f.ground_z + f.lift);
