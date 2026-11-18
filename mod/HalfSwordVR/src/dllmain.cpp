@@ -3303,6 +3303,8 @@ namespace
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
             UObject* best = nullptr;
             double best_d = cfg.pose_grab_radius_cm;
+            UObject* nearest = nullptr;
+            double nearest_d = 1e9;
             int looked = 0;
             for (UObject* w : weapons)
             {
@@ -3328,6 +3330,11 @@ namespace
                 closest.three(STR("Point"), at.x, at.y, at.z);
                 closest.run();
                 double d = closest.number();
+                if (d >= 0.0 && d < nearest_d)
+                {
+                    nearest_d = d;
+                    nearest = w;
+                }
                 if (d >= 0.0 && d <= best_d)
                 {
                     best_d = d;
@@ -3336,7 +3343,9 @@ namespace
             }
             if (!best)
             {
-                HSVR_LOG("Grab: %s grip squeezed, no loose weapon within %.0f cm (%d loose of %d)", hand, cfg.pose_grab_radius_cm, looked, (int)weapons.size());
+                HSVR_LOG("Grab: %s grip squeezed, no loose weapon within %.0f cm (%d loose of %d; nearest %ls at %.0f cm; hand at %.0f %.0f %.0f)", hand,
+                         cfg.pose_grab_radius_cm, looked, (int)weapons.size(), nearest ? nearest->GetName().c_str() : STR("none"), nearest ? nearest_d : -1.0,
+                         at.x, at.y, at.z);
                 continue;
             }
             bool ok = give_hand_weapon(side, pawn, best);
@@ -4881,8 +4890,9 @@ namespace
                 bool won = entry.command.size() <= 15 || atoi(entry.command.c_str() + 15) != 0; // "hsvr.match_won 0" clears
                 bool a = set_bool_property(game_mode, STR("Match Won"), won);
                 bool b = set_bool_property(pawn, STR("Match Won (Player)"), won);
-                HSVR_LOG("Script: hsvr.match_won %d: game mode %ls (Match Won set %d), character Match Won (Player) set %d", (int)won,
-                         game_mode ? game_mode->GetFullName().c_str() : STR("missing"), (int)a, (int)b);
+                HSVR_LOG("Script: hsvr.match_won %d: game mode %ls (written %d, Match Won now %d), character (written %d, Match Won (Player) now %d)", (int)won,
+                         game_mode ? game_mode->GetFullName().c_str() : STR("missing"), (int)a, (int)bool_property(game_mode, STR("Match Won")), (int)b,
+                         (int)bool_property(pawn, STR("Match Won (Player)")));
                 continue;
             }
             if (entry.command.rfind("hsvr.hold_reach ", 0) == 0)
