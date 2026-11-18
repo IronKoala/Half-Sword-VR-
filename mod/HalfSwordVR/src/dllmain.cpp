@@ -2117,6 +2117,34 @@ namespace
     };
     GripLog g_grip_log[2];
 
+    // The game's own weapon grip: every direction locked, no drives (as the joint starts out).
+    void lock_joint(UObject* joint)
+    {
+        for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
+        {
+            Call c1(joint, fn);
+            c1.byte(STR("ConstraintType"), 2); // locked
+            c1.number(STR("LimitSize"), 0.0);
+            c1.run();
+        }
+        for (const TCHAR* fn : {STR("SetAngularSwing1Limit"), STR("SetAngularSwing2Limit"), STR("SetAngularTwistLimit")})
+        {
+            Call c1(joint, fn);
+            c1.byte(STR("MotionType"), 2); // locked
+            c1.run();
+        }
+        Call pos(joint, STR("SetLinearPositionDrive"));
+        pos.run(); // all three off
+        Call vel(joint, STR("SetLinearVelocityDrive"));
+        vel.run();
+        Call slerp(joint, STR("SetOrientationDriveSLERP"));
+        slerp.first_flag(false);
+        slerp.run();
+        Call aslerp(joint, STR("SetAngularVelocityDriveSLERP"));
+        aslerp.first_flag(false);
+        aslerp.run();
+    }
+
     void spring_joint(UObject* joint, double mass, const hsvr::Config& cfg)
     {
         const double pi = 3.14159265358979;
@@ -2647,8 +2675,17 @@ namespace
             log.active = false;
             int spring_override = g_grip_spring_override.load();
             bool spring_on = spring_override < 0 ? cfg.pose_grip_spring != 0 : spring_override != 0;
-            if (!cfg.pose_grip_spring && spring_override < 0) continue;
             UObject* joint = object_property(pawn, side == 0 ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand"));
+            // Switching the spring off (ini, live) puts the game's own locked grip back on a joint we sprung.
+            static UObject* sprung[2] = {nullptr, nullptr};
+            if (!spring_on && joint && sprung[side] == joint)
+            {
+                sprung[side] = nullptr;
+                lock_joint(joint);
+                HSVR_LOG("Grip: %s hand back on the game's locked grip: %s", side == 0 ? "left" : "right", joint_settings(joint).c_str());
+            }
+            if (spring_on && joint) sprung[side] = joint;
+            if (!cfg.pose_grip_spring && spring_override < 0) continue;
             UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             if (g_arm_ignore[side].weapon && g_arm_ignore[side].weapon != weapon) clear_arm_ignore(side);
             if (!joint || !weapon) continue;
