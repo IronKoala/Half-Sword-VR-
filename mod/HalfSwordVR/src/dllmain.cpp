@@ -3360,6 +3360,8 @@ namespace
         auto kind = p->GetClass().GetName();
         if (kind == STR("DoubleProperty")) *reinterpret_cast<double*>(at) = number;
         else if (kind == STR("FloatProperty")) *reinterpret_cast<float*>(at) = (float)number;
+        else if (kind == STR("IntProperty")) *reinterpret_cast<int32_t*>(at) = (int32_t)number;
+        else if (kind == STR("ByteProperty") || kind == STR("EnumProperty")) *at = (uint8_t)number;
         else if (kind == STR("BoolProperty")) return set_bool_property(owner, name, number != 0.0);
         else if (kind == STR("ObjectProperty")) *reinterpret_cast<UObject**>(at) = object;
         else if (kind == STR("NameProperty") && fname) *reinterpret_cast<FName*>(at) = *fname;
@@ -3623,13 +3625,32 @@ namespace
         bool have_local = false;
         double far_since = -1.0;
         bool sliding = false;
+        double grip_type_before = -1.0; // the second hand's grip type before it took hold (its finger pose)
     };
     TwoHand g_two;
+
+    // The second hand's fingers: the game curls a hand's fingers from its grip type (ABP_Willie copies
+    // L/R_GripType_Current, @153084; 1-4 play the sword grip, hand_pose.md), which it sets only for a
+    // hand it gave a weapon. While the second hand holds, its grip type is the sword grip (2).
+    const TCHAR* grip_type_name(int side) { return side == 0 ? STR("L_GripType_Current") : STR("R_GripType_Current"); }
+    double read_number_variable(UObject* owner, const TCHAR* name)
+    {
+        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        if (!p) return -1.0;
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
+        auto kind = p->GetClass().GetName();
+        if (kind == STR("IntProperty")) return *reinterpret_cast<int32_t*>(at);
+        if (kind == STR("ByteProperty") || kind == STR("EnumProperty")) return *at;
+        if (kind == STR("DoubleProperty")) return *reinterpret_cast<double*>(at);
+        if (kind == STR("FloatProperty")) return *reinterpret_cast<float*>(at);
+        return -1.0;
+    }
     double g_pending_slide[2] = {1e9, 1e9}; // a hand-over: where the new hand holds, applied when its hold starts
 
     void end_two_hand(const char* why)
     {
         if (!g_two.active) return;
+        if (g_two.grip_type_before >= 0.0 && g_pose.pawn) set_variable(g_pose.pawn, grip_type_name(g_two.second), g_two.grip_type_before);
         HSVR_LOG("Two hands: %s hand lets go of %ls (%s)", g_two.second == 0 ? "left" : "right", g_two.weapon ? g_two.weapon->GetName().c_str() : STR("?"), why);
         g_two = TwoHand{};
     }
@@ -3763,6 +3784,13 @@ namespace
         // Willie's hands mirror across the hand bone's X (kick test 15: a weapon in the left hand sits
         // at the right's place with X negated).
         g_two.in_hand = Vec3{-h.in_hand.x, h.in_hand.y, h.in_hand.z};
+        if (cfg.pose_two_hand_curl)
+        {
+            g_two.grip_type_before = read_number_variable(pawn, grip_type_name(side));
+            bool ok = set_variable(pawn, grip_type_name(side), 2.0);
+            HSVR_LOG("Two hands: %s hand's grip type %.0f -> 2 (sword grip fingers)%s", side == 0 ? "left" : "right", g_two.grip_type_before, ok ? "" : ": NOT SET");
+            if (!ok) g_two.grip_type_before = -1.0;
+        }
         controllers_buzz(side, 0.4f);
         HSVR_LOG("Two hands: %s hand takes %ls on the %s at %.1f cm (squeezed at %.1f, %.1f cm off the axis; first hand at %.1f)", side == 0 ? "left" : "right",
                  weapon->GetName().c_str(), g_two.on_blade ? "blade" : "grip", z, want, radial, h.slide);

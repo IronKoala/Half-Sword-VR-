@@ -242,6 +242,7 @@ namespace hsvr
         double pose_two_hand_blade_gap_cm = 3.0;
         double pose_two_hand_reach_cm = 6.0; // how far from the zones a squeeze still lands on them
         double pose_two_hand_let_go_cm = 25.0;
+        bool pose_two_hand_curl = true; // the second hand's fingers close (its grip type set to the sword grip while it holds)
         // The ghost hand: while his hand stays on a stopped weapon more than pose_ghost_from_cm from
         // your real hand, a see-through glove shows where your hand is. Mesh and material are object
         // paths in the cooked game; offset (cm) and turn (deg) from the hand bone, and scale, for fitting.

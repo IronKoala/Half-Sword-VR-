@@ -341,6 +341,7 @@ namespace hsvr
         num("pose_two_hand_blade_gap_cm", c.pose_two_hand_blade_gap_cm);
         num("pose_two_hand_reach_cm", c.pose_two_hand_reach_cm);
         num("pose_two_hand_let_go_cm", c.pose_two_hand_let_go_cm);
+        flag("pose_two_hand_curl", c.pose_two_hand_curl);
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
         flag("pose_grab_objects", c.pose_grab_objects);
         flag("pose_ghost_hand", c.pose_ghost_hand);
