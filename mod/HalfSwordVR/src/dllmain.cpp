@@ -4109,6 +4109,7 @@ namespace
     // mass and centre of mass). Logs each tick a held weapon's body changes, and the flags around it.
     // hsvr.stuck_check 0 pins Willie's check rate at 0 so his loop never fires (a test, not a fix).
     std::atomic<int> g_stuck_check{1};
+    std::atomic<bool> g_joint_trace{false}; // hsvr.joint_trace 1: the right hand joint every tick, before and after our free
     void watch_weapon_rebuild(int side, UObject* pawn, UObject* weapon, UObject* base, double mass)
     {
         using namespace hsvr;
@@ -4205,7 +4206,20 @@ namespace
                         HSVR_LOG("Grip: spring written once: %s", joint_settings(joint).c_str());
                     }
                 }
-                else if (hold_on) free_joint(joint);
+                else if (hold_on)
+                {
+                    if (g_joint_trace.load() && side == 1)
+                    {
+                        auto var = [&](const TCHAR* n) {
+                            FProperty* p = pawn->GetPropertyByNameInChain(n);
+                            return p ? number_property(pawn, p) : -999.0;
+                        };
+                        HSVR_LOG("Joint: before free: %s | Soft Not Attached %.0f, Soft Attach Distance %.1f, Attached Correctly %.0f", joint_settings(joint).c_str(),
+                                 var(STR("R Hand Soft Not Attached")), var(STR("R Hand Soft Attach Distance")), var(STR("R Hand Attached Correctly")));
+                    }
+                    free_joint(joint);
+                    if (g_joint_trace.load() && side == 1) HSVR_LOG("Joint: after free: %s", joint_settings(joint).c_str());
+                }
                 else if (spring_on) spring_joint(joint, mass, cfg);
                 {
                     static UObject* typed = nullptr;
@@ -5387,6 +5401,11 @@ namespace
             if (entry.command.rfind("hsvr.ghost_show ", 0) == 0)
             {
                 g_ghost_force.store(atoi(entry.command.c_str() + 16) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.joint_trace ", 0) == 0)
+            {
+                g_joint_trace.store(atoi(entry.command.c_str() + 17) != 0);
                 continue;
             }
             if (entry.command.rfind("hsvr.stuck_check ", 0) == 0)
