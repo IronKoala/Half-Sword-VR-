@@ -51,6 +51,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | Step | What it does |
 |---|---|
 | `hsvr.give_weapon passport <inventory asset> <index>` | Equips a fully built weapon; replaces the one in the hand |
+| `hsvr.hold_reach 0/1` | 0 lets the hold aim past his reach (to push a held weapon into the floor with arm_move 5); 1 (default) clamps it to his reach |
 | `hsvr.grip_hold 0/1` | Turns the framework hold off or on for the test, whatever the ini says |
 | `hsvr.grip_spring 0/1/2` | 0 leaves the game's locked joint alone (still measured), 1 our spring every tick, 2 our spring written once |
 | `hsvr.grip_k_scale <x>` | Multiplies the spring's stiffness, damping and force caps |

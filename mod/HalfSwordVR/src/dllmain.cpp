@@ -1369,6 +1369,7 @@ namespace
     std::atomic<bool> g_contact_log{true};
 
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
+    std::atomic<bool> g_hold_reach_clamp{true};
 
     // Measuring your arm length: arms straight out to the sides, B and Y held together for 2 s. Your
     // wrist-to-wrist span (from the controllers), less his shoulder width (yours is taken as his),
@@ -1475,8 +1476,9 @@ namespace
         if (D < 1e-3) return;
         Vec3 dir = to * (1.0 / D);
         D = (std::min)((std::max)(D, lo), hi);
-        // A held weapon goes where his hand can be: past his reach, as far as his arm goes.
-        g_pose.target[side] = S + dir * D;
+        // A held weapon goes where his hand can be: past his reach, as far as his arm goes (the test
+        // switch hsvr.hold_reach 0 leaves the target unclamped, to push a weapon into the floor).
+        if (g_hold_reach_clamp.load()) g_pose.target[side] = S + dir * D;
         // The hand in the controller's grip (OpenXR grip pose, here X forward through the fist from
         // the little finger to the thumb, Y right, Z up): the fingers run down the handle, tilted
         // pose_knuckle_deg toward the front; the thumb side is the front. The same for both hands
@@ -4457,6 +4459,11 @@ namespace
             if (entry.command.rfind("hsvr.grip_spring ", 0) == 0)
             {
                 g_grip_spring_override.store(atoi(entry.command.c_str() + 17));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.hold_reach ", 0) == 0)
+            {
+                g_hold_reach_clamp.store(atoi(entry.command.c_str() + 16) != 0);
                 continue;
             }
             if (entry.command.rfind("hsvr.grip_hold ", 0) == 0)
