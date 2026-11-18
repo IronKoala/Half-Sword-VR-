@@ -2685,7 +2685,7 @@ namespace
                 HSVR_LOG("Grip: %s hand back on the game's locked grip: %s", side == 0 ? "left" : "right", joint_settings(joint).c_str());
             }
             if (spring_on && joint) sprung[side] = joint;
-            if (!cfg.pose_grip_spring && spring_override < 0) continue;
+            // With the spring off the game's own locked grip holds the weapon; it is still measured and logged.
             UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             if (g_arm_ignore[side].weapon && g_arm_ignore[side].weapon != weapon) clear_arm_ignore(side);
             if (!joint || !weapon) continue;
