@@ -86,6 +86,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 |---|---|
 | `hsvr.give_weapon passport <inventory asset> <index>` | Equips a fully built weapon; replaces the one in the hand |
 | `hsvr.match_won [0]` | Sets (0 clears) what the game sets when the last enemy dies (GameMode "Match Won", his "Match Won (Player)"), to test continuing without a fight |
+| `hsvr.weapon_dump [0/1]` | Logs the weapon in the left (0) or right (1, default) hand: its components with their spans along the blade, BaseMesh sockets, the hand joint point and its Length variables |
 | `hsvr.bring_object` | Moves the nearest loose physics object (not a weapon or character) to the right hand with its gravity off and keeps it there for 4 s or until grabbed, to test the object grab |
 | `hsvr.squeeze <0/1> <value>` | Fakes the left (0) or right (1) grip squeeze (0..1); -1 gives it back to the controller |
 | `hsvr.press_a 0/1` | 1 holds right A for the menu buttons (continue after a win) |

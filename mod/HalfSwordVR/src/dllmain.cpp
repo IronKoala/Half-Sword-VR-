@@ -3262,6 +3262,89 @@ namespace
         return socket_location(mesh, exists ? sockets[side] : bone_fname(side == 0 ? "hand_l" : "hand_r"));
     }
 
+    // Test (hsvr.weapon_dump): everything about the weapon in a hand that shapes its grip zones, in
+    // its BaseMesh's frame (cm; the blade is along +Z): every component of the weapon (class, tags,
+    // origin, local bounds), the BaseMesh's sockets, the hand joint's weapon point (Pos1), and every
+    // number variable with "Length" in its name. Facts for the slide's zones, not guesses.
+    void weapon_dump(int side, UObject* pawn)
+    {
+        using namespace hsvr;
+        UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+        UObject* base = object_property(weapon, STR("BaseMesh"));
+        if (!base)
+        {
+            HSVR_LOG("Dump: no weapon in the %s hand", side == 0 ? "left" : "right");
+            return;
+        }
+        Vec3 bp = component_location(base);
+        Quat bq = component_rotation(base);
+        Quat binv = bq.inverse();
+        auto local = [&](const Vec3& w) { return binv.rotate(w - bp); };
+        HSVR_LOG("Dump: %ls (class %ls), BaseMesh %ls", weapon->GetFullName().c_str(), weapon->GetClassPrivate()->GetName().c_str(), base->GetFullName().c_str());
+        for (UStruct* level = weapon->GetClassPrivate(); level; level = level->GetSuperStruct())
+            for (FProperty* p : level->ForEachProperty())
+            {
+                std::wstring n = p->GetName();
+                auto kind = p->GetClass().GetName();
+                if (n.find(STR("Length")) != std::wstring::npos && (kind == STR("DoubleProperty") || kind == STR("FloatProperty")))
+                    HSVR_LOG("Dump:   var %ls = %.2f", n.c_str(), number_property(weapon, p));
+            }
+        std::vector<UObject*> comps;
+        UObjectGlobals::FindAllOf(STR("SceneComponent"), comps);
+        for (UObject* c : comps)
+        {
+            if (!c || c->GetOuterPrivate() != weapon) continue;
+            Vec3 o = local(component_location(c));
+            std::wstring tags;
+            if (RawArray* t = c->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")))
+                for (int32_t i = 0; i < t->Num && t->Data; ++i) tags += reinterpret_cast<const FName*>(t->Data)[i].ToString() + STR(" ");
+            double lo = 0, hi = 0;
+            bool have_bounds = false;
+            Call lb(c, STR("GetLocalBounds"));
+            if (lb.fn && lb.run())
+            {
+                // Local bounds are in the component's own frame; take their Z ends along the BaseMesh axis.
+                Vec3 mn = lb.vec(STR("Min")), mx = lb.vec(STR("Max"));
+                Quat cq = component_rotation(c);
+                Vec3 cp = component_location(c);
+                double zs[8];
+                for (int k = 0; k < 8; ++k)
+                {
+                    Vec3 corner{(k & 1) ? mx.x : mn.x, (k & 2) ? mx.y : mn.y, (k & 4) ? mx.z : mn.z};
+                    zs[k] = local(cp + cq.rotate(corner)).z;
+                }
+                lo = *std::min_element(zs, zs + 8);
+                hi = *std::max_element(zs, zs + 8);
+                have_bounds = true;
+            }
+            std::wstring span = have_bounds ? STR(", z ") + std::to_wstring(lo) + STR(" .. ") + std::to_wstring(hi) : std::wstring();
+            HSVR_LOG("Dump:   comp %ls (%ls) at %.1f %.1f %.1f%ls tags [%ls]", c->GetName().c_str(), c->GetClassPrivate()->GetName().c_str(), o.x, o.y, o.z,
+                     span.c_str(), tags.c_str());
+        }
+        Call sn(base, STR("GetAllSocketNames"));
+        if (sn.run())
+            if (FProperty* rp = sn.param(STR("ReturnValue")))
+            {
+                RawArray* names = reinterpret_cast<RawArray*>(sn.buffer.data() + rp->GetOffset_Internal());
+                for (int32_t i = 0; i < names->Num && names->Data; ++i)
+                {
+                    FName n = reinterpret_cast<const FName*>(names->Data)[i];
+                    Vec3 at = local(socket_location(base, n));
+                    HSVR_LOG("Dump:   socket %ls at %.1f %.1f %.1f", n.ToString().c_str(), at.x, at.y, at.z);
+                }
+                names->Data = nullptr; // the engine's list; left
+                names->Num = names->Max = 0;
+            }
+        HoldState& h = g_hold[side];
+        if (h.weapon == weapon) HSVR_LOG("Dump:   hand joint weapon point (Pos1) %.1f %.1f %.1f", h.pivot.x, h.pivot.y, h.pivot.z);
+        Call ext(base, STR("GetLocalBounds"));
+        if (ext.run())
+        {
+            Vec3 mn = ext.vec(STR("Min")), mx = ext.vec(STR("Max"));
+            HSVR_LOG("Dump:   BaseMesh local bounds %.1f %.1f %.1f .. %.1f %.1f %.1f", mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
+        }
+    }
+
     // Writes a Blueprint variable of the character by name: a number, yes/no, object or name. False
     // (and the name logged by the caller) if it has no such variable of a fitting kind.
     bool set_variable(UObject* owner, const TCHAR* name, double number, UObject* object = nullptr, const FName* fname = nullptr)
@@ -5117,6 +5200,13 @@ namespace
             if (entry.command.rfind("hsvr.ghost_show ", 0) == 0)
             {
                 g_ghost_force.store(atoi(entry.command.c_str() + 16) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.weapon_dump", 0) == 0)
+            {
+                UObject* pawn = nullptr;
+                find_pawn_mesh(&pawn);
+                if (pawn) weapon_dump(entry.command.size() > 17 && entry.command[17] == '0' ? 0 : 1, pawn);
                 continue;
             }
             if (entry.command.rfind("hsvr.bring_object", 0) == 0)
