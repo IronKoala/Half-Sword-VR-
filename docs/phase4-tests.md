@@ -97,6 +97,8 @@ The game's menus take only the mouse and keyboard (no focus or gamepad navigatio
 
 ## Unattended test tools (dev_script steps)
 
+A step's time can be written `M+<seconds>:` to count from when the first menu is on screen (logged as "Script: first menu on screen at") instead of from when the script loaded, so a run doesn't need a fixed wait that covers the slowest start.
+
 The grip settings in the ini (pose_grip_*) are re-read every second during a run, so a test can change them live by editing the ini. Engine console commands in the dev_script (for example `shot`) take a screenshot at that step.
 
 | Step | What it does |

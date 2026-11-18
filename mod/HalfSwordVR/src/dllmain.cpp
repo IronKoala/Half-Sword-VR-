@@ -4930,11 +4930,17 @@ namespace
 
     // ---- unattended tests (ini dev_script) -------------------------------------------------------
     // Runs console commands at set times, so that a test needs no key or click.
+    struct BoolReturnParams
+    {
+        bool ReturnValue;
+    };
+
     struct ScriptEntry
     {
         double at = 0.0;
         std::string command;
         bool done = false;
+        bool after_menu = false; // "M+<s>:" steps count from when the first menu is on screen
     };
 
     // dev_script step "hsvr.set <Name>=<value>": writes one variable of the game instance (GI_Settings
@@ -5351,7 +5357,15 @@ namespace
                 size_t colon = one.find(':');
                 if (colon == std::string::npos) continue;
                 ScriptEntry entry;
-                entry.at = atof(one.substr(0, colon).c_str());
+                std::string when = one.substr(0, colon);
+                size_t w0 = when.find_first_not_of(" \t\r\n");
+                if (w0 != std::string::npos && (when[w0] == 'M' || when[w0] == 'm'))
+                {
+                    entry.after_menu = true;
+                    when = when.substr(w0 + 1);
+                    if (!when.empty() && when[0] == '+') when = when.substr(1);
+                }
+                entry.at = atof(when.c_str());
                 entry.command = one.substr(colon + 1);
                 size_t first = entry.command.find_first_not_of(" \t");
                 size_t last = entry.command.find_last_not_of(" \t\r\n");
@@ -5363,13 +5377,38 @@ namespace
         }
         if (entries.empty()) return;
         double now = (double)(GetTickCount64() - start) / 1000.0;
+        // The first menu on screen (the startup movie is not a widget, so this is the main menu):
+        // "M+" steps count from here instead of a fixed wait that must cover the slowest load.
+        static double menu_at = -1.0;
+        static double menu_checked = -1.0;
+        if (menu_at < 0.0 && now - menu_checked >= 0.25)
+        {
+            menu_checked = now;
+            int shown = 0;
+            std::vector<UObject*> widgets;
+            UObjectGlobals::FindAllOf(STR("UserWidget"), widgets);
+            for (UObject* widget : widgets)
+            {
+                UFunction* in_viewport_fn = widget ? widget->GetFunctionByNameInChain(STR("IsInViewport")) : nullptr;
+                if (!in_viewport_fn) continue;
+                BoolReturnParams in_viewport{};
+                widget->ProcessEvent(in_viewport_fn, &in_viewport);
+                if (in_viewport.ReturnValue) ++shown;
+            }
+            if (shown > 0)
+            {
+                menu_at = now;
+                HSVR_LOG("Script: first menu on screen at %.1f s; M+ steps count from here", now);
+            }
+        }
         for (ScriptEntry& entry : entries)
         {
-            if (entry.done || now < entry.at) continue;
+            if (entry.done) continue;
+            if (entry.after_menu ? (menu_at < 0.0 || now - menu_at < entry.at) : now < entry.at) continue;
             entry.done = true;
             SYSTEMTIME utc{};
             GetSystemTime(&utc);
-            HSVR_LOG("Script: %.0f s: %s (%02d:%02d:%02d.%03d UTC)", entry.at, entry.command.c_str(), (int)utc.wHour, (int)utc.wMinute, (int)utc.wSecond,
+            HSVR_LOG("Script: %s%.0f s: %s (%02d:%02d:%02d.%03d UTC)", entry.after_menu ? "M+" : "", entry.at, entry.command.c_str(), (int)utc.wHour, (int)utc.wMinute, (int)utc.wSecond,
                      (int)utc.wMilliseconds);
             // Mod commands for unattended tests; everything else goes to the engine console.
             if (entry.command.rfind("hsvr.physics_off ", 0) == 0)
@@ -5656,11 +5695,6 @@ namespace
     };
 
     // ---- what the game's menus and HUD are made of (for the log) --------------------------------
-    struct BoolReturnParams
-    {
-        bool ReturnValue;
-    };
-
     struct ByteReturnParams
     {
         uint8_t ReturnValue;
