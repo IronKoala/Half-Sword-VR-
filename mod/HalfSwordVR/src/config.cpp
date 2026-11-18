@@ -279,6 +279,12 @@ namespace hsvr
         num("pose_stick_turn_dps", c.pose_stick_turn_dps);
         num("pose_snap_turn_deg", c.pose_snap_turn_deg);
         num("pose_stick_dead_zone", c.pose_stick_dead_zone);
+        flag("pose_grip_spring", c.pose_grip_spring);
+        num("pose_grip_strength_kg", c.pose_grip_strength_kg);
+        num("pose_grip_hz", c.pose_grip_hz);
+        num("pose_grip_damping", c.pose_grip_damping);
+        num("pose_grip_radius_cm", c.pose_grip_radius_cm);
+        num("pose_grip_buzz", c.pose_grip_buzz);
         flag("pose_crouch", c.pose_crouch);
         num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);

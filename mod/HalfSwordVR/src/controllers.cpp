@@ -3,6 +3,8 @@
 #include "config.hpp"
 #include "log.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -32,6 +34,7 @@ namespace hsvr
         std::mutex g_state_mutex;
         ControllerState g_state;
         bool g_trigger_was_down[2] = {false, false};
+        std::atomic<float> g_buzz[2] = {0.0f, 0.0f};
 
         const char* kHandName[2] = {"left", "right"};
 
@@ -306,6 +309,8 @@ namespace hsvr
                 HSVR_LOG("Controllers: test buzz on the %s hand", kHandName[h]);
             }
             g_trigger_was_down[h] = down;
+            float buzz = g_buzz[h].exchange(0.0f);
+            if (buzz > 0.01f) pulse(xr, session, h, (std::min)(1.0f, buzz), 0.02);
         }
         std::lock_guard<std::mutex> lock(g_state_mutex);
         g_state = s;
@@ -339,5 +344,12 @@ namespace hsvr
     {
         std::lock_guard<std::mutex> lock(g_state_mutex);
         return g_state;
+    }
+
+    void controllers_buzz(int hand, float amplitude)
+    {
+        if (hand < 0 || hand > 1) return;
+        float old = g_buzz[hand].load();
+        while (amplitude > old && !g_buzz[hand].compare_exchange_weak(old, amplitude)) {}
     }
 } // namespace hsvr

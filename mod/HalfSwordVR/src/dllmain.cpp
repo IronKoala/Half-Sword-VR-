@@ -736,6 +736,10 @@ namespace
                 return;
             }
         }
+        void byte(const TCHAR* param_name, uint8_t value)
+        {
+            if (FProperty* p = param(param_name)) *(buffer.data() + p->GetOffset_Internal()) = value;
+        }
         void name(const TCHAR* param_name, FName value)
         {
             if (FProperty* p = param(param_name)) *reinterpret_cast<FName*>(buffer.data() + p->GetOffset_Internal()) = value;
@@ -2034,10 +2038,144 @@ namespace
         }
     }
 
+    // ---- The weapon in your hand: a strength-limited spring --------------------------------------
+    // The game holds a weapon with a physics joint between the weapon and the hand bone
+    // ("PhysicsConstraint R/L Hand"), locked once the weapon is seated, and re-shapes it in every
+    // tick (decompile: Willie_BP @454086-455803). With your hand posed from the controller, a locked
+    // joint makes the weapon weightless. Right after his tick the mod turns the seated joint into a
+    // spring toward the hand with a force limit (pose_grip_strength_kg), so a heavy weapon lags and
+    // sags, and the game's own grip slip and stamina (which read this joint's force) keep working.
+    // Its stiffness follows the weapon's mass, so every weapon follows equally well while within
+    // your strength. The controller buzzes with the gap.
+    struct GripLog
+    {
+        double gap = 0.0, mass = 0.0, force = 0.0;
+        bool active = false;
+    };
+    GripLog g_grip_log[2];
+
+    void spring_joint(UObject* joint, double mass, const hsvr::Config& cfg)
+    {
+        const double pi = 3.14159265358979;
+        double w = 2.0 * pi * cfg.pose_grip_hz;
+        double k = mass * w * w;                 // kg/s^2: force per cm of gap (cm units)
+        double c = 2.0 * cfg.pose_grip_damping * mass * w;
+        double max_force = cfg.pose_grip_strength_kg * 980.0; // kg weight in kg*cm/s^2
+        double inertia = mass * cfg.pose_grip_radius_cm * cfg.pose_grip_radius_cm; // rough, kg*cm^2
+        double ka = inertia * w * w, ca = 2.0 * cfg.pose_grip_damping * inertia * w;
+        double max_torque = max_force * cfg.pose_grip_radius_cm;
+        for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
+        {
+            Call c1(joint, fn);
+            c1.byte(STR("ConstraintType"), 0); // free
+            c1.number(STR("LimitSize"), 0.0);
+            c1.run();
+        }
+        for (const TCHAR* fn : {STR("SetAngularSwing1Limit"), STR("SetAngularSwing2Limit"), STR("SetAngularTwistLimit")})
+        {
+            Call c1(joint, fn);
+            c1.byte(STR("MotionType"), 0); // free
+            c1.run();
+        }
+        Call pos(joint, STR("SetLinearPositionDrive"));
+        pos.flag(STR("bEnableDriveX"), true);
+        pos.flag(STR("bEnableDriveY"), true);
+        pos.flag(STR("bEnableDriveZ"), true);
+        pos.run();
+        Call vel(joint, STR("SetLinearVelocityDrive"));
+        vel.flag(STR("bEnableDriveX"), true);
+        vel.flag(STR("bEnableDriveY"), true);
+        vel.flag(STR("bEnableDriveZ"), true);
+        vel.run();
+        Call target(joint, STR("SetLinearPositionTarget"));
+        target.three(STR("InPosTarget"), 0.0, 0.0, 0.0);
+        target.run();
+        Call vtarget(joint, STR("SetLinearVelocityTarget"));
+        vtarget.three(STR("InVelTarget"), 0.0, 0.0, 0.0);
+        vtarget.run();
+        Call lin(joint, STR("SetLinearDriveParams"));
+        lin.number(STR("PositionStrength"), k);
+        lin.number(STR("VelocityStrength"), c);
+        lin.number(STR("InForceLimit"), max_force);
+        lin.run();
+        Call mode(joint, STR("SetAngularDriveMode"));
+        mode.byte(STR("DriveMode"), 0); // SLERP
+        mode.run();
+        Call slerp(joint, STR("SetOrientationDriveSLERP"));
+        slerp.first_flag(true);
+        slerp.run();
+        Call aslerp(joint, STR("SetAngularVelocityDriveSLERP"));
+        aslerp.first_flag(true);
+        aslerp.run();
+        Call atarget(joint, STR("SetAngularOrientationTarget"));
+        atarget.three(STR("InPosTarget"), 0.0, 0.0, 0.0);
+        atarget.run();
+        Call ang(joint, STR("SetAngularDriveParams"));
+        ang.number(STR("PositionStrength"), ka);
+        ang.number(STR("VelocityStrength"), ca);
+        ang.number(STR("InForceLimit"), max_torque);
+        ang.run();
+    }
+
+    void weapon_spring_after_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        for (int side = 0; side < 2; ++side)
+        {
+            GripLog& log = g_grip_log[side];
+            log.active = false;
+            if (!cfg.pose_grip_spring) continue;
+            UObject* joint = object_property(pawn, side == 0 ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand"));
+            UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (!joint || !weapon) continue;
+            // Only a seated weapon (the game first pulls a new weapon into the hand over a short distance).
+            if (side == 1)
+                if (FProperty* p = pawn->GetPropertyByNameInChain(STR("R Hand Soft Attach Distance")))
+                    if (number_property(pawn, p) > 0.0) continue;
+            if (bool_property(weapon, STR("Is Sheathed")) || bool_property(pawn, STR("Sheathing R")) || bool_property(pawn, STR("Unsheathing R"))) continue;
+            UObject* base = object_property(weapon, STR("BaseMesh"));
+            if (!base) continue;
+            Call m(base, STR("GetMass"));
+            m.run();
+            double mass = (std::max)(0.05, m.number());
+            spring_joint(joint, mass, cfg);
+            log.active = true;
+            log.mass = mass;
+            // How far the weapon is from where the hand holds it, from the joint's own force.
+            Call f(joint, STR("GetConstraintForce"));
+            if (f.run())
+            {
+                Vec3 lf = f.vec(STR("OutLinearForce"));
+                log.force = length(lf);
+                log.gap = log.force / (mass * std::pow(2.0 * 3.14159265358979 * cfg.pose_grip_hz, 2.0));
+            }
+            // Buzz with the gap: nothing within 2 cm, full at 15 cm.
+            ControllerState state = controllers_state();
+            if (state.hand[side].grip_valid && log.gap > 2.0) controllers_buzz(side, (float)(std::min)(1.0, (log.gap - 2.0) / 13.0) * (float)cfg.pose_grip_buzz);
+        }
+        static double last = 0.0;
+        double now = now_seconds();
+        if (now - last >= 0.5 && (g_grip_log[0].active || g_grip_log[1].active))
+        {
+            last = now;
+            double rate[2] = {-1, -1};
+            if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Grab L Release Rate"))) rate[0] = number_property(pawn, p);
+            if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Grab R Release Rate"))) rate[1] = number_property(pawn, p);
+            HSVR_LOG("Grip: left %s mass %.2f kg force %.0f gap %.1f cm slip %.2f; right %s mass %.2f kg force %.0f gap %.1f cm slip %.2f",
+                     g_grip_log[0].active ? "spring" : "-", g_grip_log[0].mass, g_grip_log[0].force, g_grip_log[0].gap, rate[0],
+                     g_grip_log[1].active ? "spring" : "-", g_grip_log[1].mass, g_grip_log[1].force, g_grip_log[1].gap, rate[1]);
+        }
+    }
+
     void capsule_after_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
-        if (g_pose_active.load()) crouch_after_tick(context);
+        if (g_pose_active.load())
+        {
+            crouch_after_tick(context);
+            weapon_spring_after_tick(context);
+        }
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
         using namespace hsvr;
