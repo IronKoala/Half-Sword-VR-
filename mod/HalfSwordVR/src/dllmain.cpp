@@ -2054,6 +2054,11 @@ namespace
         double gap = 0.0, mass = 0.0, force = 0.0;
         bool active = false;
         double hand_dist = 0.0; // weapon body to the hand bone, measured directly
+        hsvr::Vec3 weapon_at, hand_at;
+        UObject* weapon_seen = nullptr;
+        hsvr::Vec3 rest; // weapon relative to the hand bone when it was seated (hand frame)
+        int visible = -1;
+        std::wstring joined;
         int simulating = -1;
         double scale = 0.0;
     };
@@ -2156,7 +2161,42 @@ namespace
                 sc.run();
                 log.scale = sc.vec().x;
                 if (g_pose.mesh)
-                    log.hand_dist = length(component_location(base) - socket_location(g_pose.mesh, bone_fname(side == 0 ? "hand_l" : "hand_r")));
+                {
+                    log.weapon_at = component_location(base);
+                    log.hand_at = socket_location(g_pose.mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+                    log.hand_dist = length(log.weapon_at - log.hand_at);
+                    Quat hand_rot = socket_rotation(g_pose.mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+                    if (log.weapon_seen != weapon)
+                    {
+                        log.weapon_seen = weapon;
+                        log.rest = hand_rot.inverse().rotate(log.weapon_at - log.hand_at);
+                    }
+                    // How far the weapon is from where it sat in the hand when it was seated.
+                    log.gap = length(log.weapon_at - (log.hand_at + hand_rot.rotate(log.rest)));
+                }
+                Call vis(base, STR("IsVisible"));
+                vis.run();
+                if (FProperty* vp = vis.param(STR("ReturnValue"))) log.visible = *(vis.buffer.data() + vp->GetOffset_Internal()) ? 1 : 0;
+                Call who(joint, STR("GetConstrainedComponents"));
+                if (who.run())
+                {
+                    log.joined.clear();
+                    for (const TCHAR* pn : {STR("OutComponent1"), STR("OutBoneName1"), STR("OutComponent2"), STR("OutBoneName2")})
+                    {
+                        FProperty* pp = who.param(pn);
+                        if (!pp) continue;
+                        uint8_t* at = who.buffer.data() + pp->GetOffset_Internal();
+                        if (pp->GetClass().GetName() == STR("NameProperty")) log.joined += reinterpret_cast<FName*>(at)->ToString() + STR(" ");
+                        else
+                        {
+                            UObject* o = *reinterpret_cast<UObject**>(at);
+                            log.joined += (o ? o->GetName() : std::wstring(STR("none"))) + STR(":");
+                        }
+                    }
+                }
+                else
+                    log.joined = STR("(no GetConstrainedComponents)");
+            }
             }
             // How far the weapon is from where the hand holds it, from the joint's own force.
             Call f(joint, STR("GetConstraintForce"));
@@ -2164,7 +2204,7 @@ namespace
             {
                 Vec3 lf = f.vec(STR("OutLinearForce"));
                 log.force = length(lf);
-                log.gap = log.force / (mass * std::pow(2.0 * 3.14159265358979 * cfg.pose_grip_hz, 2.0));
+
             }
             // Buzz with the gap: nothing within 2 cm, full at 15 cm.
             ControllerState state = controllers_state();
@@ -2183,6 +2223,11 @@ namespace
                      g_grip_log[0].active ? "spring" : "-", g_grip_log[0].mass, g_grip_log[0].force, g_grip_log[0].gap, rate[0], g_grip_log[0].hand_dist,
                      g_grip_log[0].simulating, g_grip_log[0].scale, g_grip_log[1].active ? "spring" : "-", g_grip_log[1].mass, g_grip_log[1].force,
                      g_grip_log[1].gap, rate[1], g_grip_log[1].hand_dist, g_grip_log[1].simulating, g_grip_log[1].scale);
+            for (int side = 0; side < 2; ++side)
+                if (g_grip_log[side].active)
+                    HSVR_LOG("Grip: %s weapon at (%.0f, %.0f, %.0f), hand at (%.0f, %.0f, %.0f), visible %d, joint between %ls", side == 0 ? "left" : "right",
+                             g_grip_log[side].weapon_at.x, g_grip_log[side].weapon_at.y, g_grip_log[side].weapon_at.z, g_grip_log[side].hand_at.x,
+                             g_grip_log[side].hand_at.y, g_grip_log[side].hand_at.z, g_grip_log[side].visible, g_grip_log[side].joined.c_str());
         }
     }
 
@@ -2914,6 +2959,12 @@ namespace
             if (entry.command == "hsvr.dump")
             {
                 script_dump();
+                continue;
+            }
+            if (entry.command.rfind("hsvr.third_person ", 0) == 0)
+            {
+                // The game's own camera behind him (like the Insert key), so test pictures show his body.
+                hsvr::shared().third_person.store(atoi(entry.command.c_str() + 18) != 0);
                 continue;
             }
             if (entry.command.rfind("hsvr.give_weapon ", 0) == 0)
