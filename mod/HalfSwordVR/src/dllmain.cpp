@@ -2053,6 +2053,13 @@ namespace
     // sags, and the game's own grip slip and stamina (which read this joint's force) keep working.
     // Its stiffness follows the weapon's mass, so every weapon follows equally well while within
     // your strength. The controller buzzes with the gap.
+    // Test overrides from the dev script: -1 = use the ini. g_grip_spring_override 0 leaves the game's
+    // own joint alone (still measured); g_grip_k_scale multiplies the spring's stiffness, damping and
+    // force cap; g_weapon_gravity 0 turns gravity off on the held weapon.
+    std::atomic<int> g_grip_spring_override{-1};
+    std::atomic<double> g_grip_k_scale{1.0};
+    std::atomic<int> g_weapon_gravity{-1};
+
     struct GripLog
     {
         double gap = 0.0, mass = 0.0, force = 0.0;
@@ -2077,9 +2084,10 @@ namespace
     {
         const double pi = 3.14159265358979;
         double w = 2.0 * pi * cfg.pose_grip_hz;
-        double k = mass * w * w;                 // kg/s^2: force per cm of gap (cm units)
-        double c = 2.0 * cfg.pose_grip_damping * mass * w;
-        double max_force = cfg.pose_grip_strength_kg * 980.0; // kg weight in kg*cm/s^2
+        double scale = g_grip_k_scale.load();
+        double k = scale * mass * w * w;                 // kg/s^2: force per cm of gap (cm units)
+        double c = scale * 2.0 * cfg.pose_grip_damping * mass * w;
+        double max_force = scale * cfg.pose_grip_strength_kg * 980.0; // kg weight in kg*cm/s^2
         double inertia = mass * cfg.pose_grip_radius_cm * cfg.pose_grip_radius_cm; // rough, kg*cm^2
         double ka = inertia * w * w, ca = 2.0 * cfg.pose_grip_damping * inertia * w;
         double max_torque = max_force * cfg.pose_grip_radius_cm;
@@ -2190,6 +2198,42 @@ namespace
             }
     }
 
+    // Every physics constraint or physics handle an object points at, and what each one joins, to
+    // find anything else holding the weapon besides the hand joint.
+    void list_holders(UObject* owner)
+    {
+        if (!owner) return;
+        for (UStruct* level = owner->GetClassPrivate(); level; level = level->GetSuperStruct())
+            for (FProperty* p : level->ForEachProperty())
+            {
+                if (p->GetClass().GetName() != STR("ObjectProperty")) continue;
+                UObject* o = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal());
+                if (!o) continue;
+                std::wstring cls = o->GetClassPrivate()->GetName();
+                if (cls.find(STR("PhysicsConstraint")) == std::wstring::npos && cls.find(STR("PhysicsHandle")) == std::wstring::npos) continue;
+                std::wstring joined;
+                Call who(o, STR("GetConstrainedComponents"));
+                if (who.run())
+                    for (const TCHAR* pn : {STR("OutComponent1"), STR("OutBoneName1"), STR("OutComponent2"), STR("OutBoneName2")})
+                    {
+                        FProperty* pp = who.param(pn);
+                        if (!pp) continue;
+                        uint8_t* at = who.buffer.data() + pp->GetOffset_Internal();
+                        if (pp->GetClass().GetName() == STR("NameProperty")) joined += reinterpret_cast<FName*>(at)->ToString() + STR(" ");
+                        else
+                        {
+                            UObject* c = *reinterpret_cast<UObject**>(at);
+                            joined += (c ? c->GetFullName() : std::wstring(STR("none"))) + STR(" : ");
+                        }
+                    }
+                UObject* grabbed = object_property(o, STR("GrabbedComponent"));
+                if (grabbed) joined += STR("grabs ") + grabbed->GetFullName();
+                double xm = nested_number(o, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("XMotion")});
+                HSVR_LOG("Grip: holder %ls.%ls = %ls (%ls) X motion %.0f: %ls", owner->GetName().c_str(), p->GetName().c_str(), o->GetName().c_str(), cls.c_str(), xm,
+                         joined.c_str());
+            }
+    }
+
     void dump_joint(UObject* joint)
     {
         FProperty* p = joint ? joint->GetPropertyByNameInChain(STR("ConstraintInstance")) : nullptr;
@@ -2239,7 +2283,9 @@ namespace
         {
             GripLog& log = g_grip_log[side];
             log.active = false;
-            if (!cfg.pose_grip_spring) continue;
+            int spring_override = g_grip_spring_override.load();
+            bool spring_on = spring_override < 0 ? cfg.pose_grip_spring != 0 : spring_override != 0;
+            if (!cfg.pose_grip_spring && spring_override < 0) continue;
             UObject* joint = object_property(pawn, side == 0 ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand"));
             UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             if (!joint || !weapon) continue;
@@ -2262,13 +2308,22 @@ namespace
                     last_before = t;
                     HSVR_LOG("Grip: right joint after his tick (the game's): %s", joint_settings(joint).c_str());
                 }
-                spring_joint(joint, mass, cfg);
+                if (spring_on) spring_joint(joint, mass, cfg);
+                int gravity = g_weapon_gravity.load();
+                if (gravity >= 0)
+                {
+                    Call g(base, STR("SetEnableGravity"));
+                    g.first_flag(gravity != 0);
+                    g.run();
+                }
                 if (show) HSVR_LOG("Grip: right joint after the mod's change: %s", joint_settings(joint).c_str());
                 static UObject* dumped[2] = {nullptr, nullptr};
                 if (dumped[side] != weapon)
                 {
                     dumped[side] = weapon;
                     dump_joint(joint);
+                    list_holders(pawn);
+                    list_holders(weapon);
                 }
             }
             log.active = true;
@@ -2385,9 +2440,10 @@ namespace
                     HSVR_LOG("Grip: %s weapon at (%.0f, %.0f, %.0f), hand at (%.0f, %.0f, %.0f), visible %d, joint between %ls", side == 0 ? "left" : "right",
                              g_grip_log[side].weapon_at.x, g_grip_log[side].weapon_at.y, g_grip_log[side].weapon_at.z, g_grip_log[side].hand_at.x,
                              g_grip_log[side].hand_at.y, g_grip_log[side].hand_at.z, g_grip_log[side].visible, g_grip_log[side].joined.c_str());
-                    HSVR_LOG("Grip: %s joint stretch %.1f cm (%.1f, %.1f, %.1f) world, hand anchor Pos2 (%.1f, %.1f, %.1f)", side == 0 ? "left" : "right",
-                             g_grip_log[side].stretch, g_grip_log[side].stretch_vec.x, g_grip_log[side].stretch_vec.y, g_grip_log[side].stretch_vec.z,
-                             g_grip_log[side].pos2.x, g_grip_log[side].pos2.y, g_grip_log[side].pos2.z);
+                    HSVR_LOG("Grip: %s joint stretch %.1f cm (%.1f, %.1f, %.1f) world, hand anchor Pos2 (%.1f, %.1f, %.1f) [spring %d, k x%g, gravity %d]",
+                             side == 0 ? "left" : "right", g_grip_log[side].stretch, g_grip_log[side].stretch_vec.x, g_grip_log[side].stretch_vec.y, g_grip_log[side].stretch_vec.z,
+                             g_grip_log[side].pos2.x, g_grip_log[side].pos2.y, g_grip_log[side].pos2.z, g_grip_spring_override.load(),
+                             g_grip_k_scale.load(), g_weapon_gravity.load());
                 }
         }
     }
@@ -3230,6 +3286,21 @@ namespace
             {
                 // The game's own camera behind him (like the Insert key), so test pictures show his body.
                 hsvr::shared().third_person.store(atoi(entry.command.c_str() + 18) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.grip_spring ", 0) == 0)
+            {
+                g_grip_spring_override.store(atoi(entry.command.c_str() + 17));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.grip_k_scale ", 0) == 0)
+            {
+                g_grip_k_scale.store(atof(entry.command.c_str() + 18));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.weapon_gravity ", 0) == 0)
+            {
+                g_weapon_gravity.store(atoi(entry.command.c_str() + 20));
                 continue;
             }
             if (entry.command.rfind("hsvr.give_weapon ", 0) == 0)
