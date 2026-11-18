@@ -208,6 +208,10 @@ namespace hsvr
         // controller to sitting on the weapon as the weapon falls 1 to pose_hold_blocked_from_cm behind.
         bool pose_hold_hand_on_weapon = true;
         double pose_hold_blocked_from_cm = 3.0;
+        // The stuck rule: a stopped weapon whose grip is out of his reach from the shoulder, or more
+        // than an arm's length from your hand, for pose_hold_let_go_s, is let go (the game's own drop).
+        bool pose_hold_let_go = true;
+        double pose_hold_let_go_s = 0.15;
         // Your arm length (shoulder to wrist, cm), measured by holding both arms straight out to the
         // sides and holding B and Y for 2 s. 0 = not measured: your hands go exactly where the
         // controllers are. Measured, your reach is scaled to his so full reach is full reach.

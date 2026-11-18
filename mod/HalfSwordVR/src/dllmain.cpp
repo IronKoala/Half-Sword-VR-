@@ -1475,6 +1475,8 @@ namespace
         if (D < 1e-3) return;
         Vec3 dir = to * (1.0 / D);
         D = (std::min)((std::max)(D, lo), hi);
+        // A held weapon goes where his hand can be: past his reach, as far as his arm goes.
+        g_pose.target[side] = S + dir * D;
         // The hand in the controller's grip (OpenXR grip pose, here X forward through the fist from
         // the little finger to the thumb, Y right, Z up): the fingers run down the handle, tilted
         // pose_knuckle_deg toward the front; the thumb side is the front. The same for both hands
@@ -2905,8 +2907,52 @@ namespace
         // His hand on the weapon this frame: how far the weapon is from where the hold sent it (cm),
         // and how much of that the hand took (0 follows the controller, 1 sits on the weapon).
         double blocked_cm = 0.0, on_weapon = 0.0;
+        double stuck_since = -1.0;
     };
     HoldState g_hold[2];
+
+    // Lets go of the weapon in that hand the game's own way: Set Up Right/Left Hand Weapon with no
+    // weapon and "Dropped With no Damage" (decompile: what the game's tap on grab does; it breaks the
+    // hand joint, detaches the weapon and gives it its dropped damping).
+    void drop_weapon(int side, UObject* pawn)
+    {
+        const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
+        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
+        if (!fn)
+        {
+            HSVR_LOG("Hold: no \"%ls\" on the character, the weapon is not dropped", name);
+            return;
+        }
+        alignas(16) static uint8_t parameters[4096];
+        memset(parameters, 0, sizeof(parameters));
+        std::wstring names;
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            names += n + STR(", ");
+            if (n.find(STR("Dropped")) != std::wstring::npos && p->GetClass().GetName() == STR("BoolProperty"))
+            {
+                auto* flag = static_cast<FBoolProperty*>(p);
+                parameters[p->GetOffset_Internal() + flag->GetByteOffset()] |= flag->GetFieldMask();
+            }
+            // A transform parameter gets a valid (identity) rotation and scale 1, in case it is read.
+            if (p->GetClass().GetName() == STR("StructProperty"))
+                if (UScriptStruct* type = struct_type(p))
+                {
+                    uint8_t* at = parameters + p->GetOffset_Internal();
+                    if (FProperty* r = struct_member(type, STR("Rotation")))
+                        if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                        {
+                            uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                            if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                            else *reinterpret_cast<float*>(wat) = 1.0f;
+                        }
+                    if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+                }
+        }
+        pawn->ProcessEvent(fn, parameters);
+        HSVR_LOG("Hold: dropped with %ls(%ls)", name, names.c_str());
+    }
 
     // Where his hand goes while it holds a weapon. The hold sent the weapon (last tick) to where the
     // controller had the hand; if it is not there now, something stopped it, and the hand goes onto
@@ -2937,6 +2983,38 @@ namespace
         t = t * t * (3.0 - 2.0 * t);
         h.on_weapon = t;
         if (t <= 0.0) return false;
+        // The stuck rule (Matthew's framework, hold_melee): a weapon stopped with its grip out of his
+        // reach from the shoulder, or your hand pulled more than an arm's length from it, is let go
+        // rather than dragged through or snapped back. Held for pose_hold_let_go_s first, so a glancing knock
+        // never drops it.
+        if (cfg.pose_hold_let_go && t >= 0.99 && g_pose.driver)
+        {
+            const ArmCalibration& a = g_pose.arm[side];
+            double reach = a.upper_length + a.lower_length;
+            Vec3 shoulder = socket_location(g_pose.driver, bone_fname(side == 0 ? "upperarm_l" : "upperarm_r"));
+            Vec3 grip_at = pos + rot.rotate(h.pivot);
+            Vec3 hand_point = target + hand_rot.rotate(h.in_hand);
+            double from_shoulder = length(grip_at - shoulder) - length(h.in_hand);
+            double from_hand = length(grip_at - hand_point);
+            bool out = from_shoulder > reach + 2.0 || from_hand > reach;
+            if (!out) h.stuck_since = -1.0;
+            else
+            {
+                double now = now_seconds();
+                if (h.stuck_since < 0.0) h.stuck_since = now;
+                else if (now - h.stuck_since >= cfg.pose_hold_let_go_s)
+                {
+                    HSVR_LOG("Hold: %s hand lets go of %ls: stopped %.0f cm from where you hold it, its grip %.0f cm from the shoulder (reach %.0f), "
+                             "your hand %.0f cm from it",
+                             side == 0 ? "left" : "right", h.weapon->GetName().c_str(), h.blocked_cm, from_shoulder, reach, from_hand);
+                    h.stuck_since = -1.0;
+                    drop_weapon(side, g_pose.pawn);
+                    return false;
+                }
+            }
+        }
+        else
+            h.stuck_since = -1.0;
         // The hand where it holds the weapon, moved and turned as the weapon was kept from following.
         Quat dr = from_scaled_axis(turn * t);
         Vec3 point = target + hand_rot.rotate(h.in_hand) + off * t;
