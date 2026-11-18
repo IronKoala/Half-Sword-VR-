@@ -907,6 +907,7 @@ namespace
         hsvr::Vec3 foot_home_local[2];   // where each foot stands relative to the actor, in the body's frame
         hsvr::Quat foot_rot_local[2];    // body frame -> foot bone, standing
         double ankle_height[2] = {10.0, 10.0}; // foot bone above the floor, standing
+        hsvr::Quat chest_rot_local, pelvis_rot_local; // body frame -> spine_05 / pelvis at calibration, for the twist log
         bool feet_calibrated = false;
         double swivel_time[2] = {0.0, 0.0};
     };
@@ -994,6 +995,8 @@ namespace
         g_pose_anchor_fixed = true;
         g_pose_room_moved_local = {};
 
+        g_pose.chest_rot_local = (body_inv * socket_rotation(g_pose.mesh, bone_fname("spine_05"))).normalized();
+        g_pose.pelvis_rot_local = (body_inv * socket_rotation(g_pose.mesh, bone_fname("pelvis"))).normalized();
         g_pose.feet_calibrated = true;
         for (int side = 0; side < 2; ++side)
         {
@@ -1727,7 +1730,12 @@ namespace
                 if (FProperty* mp = movement->GetPropertyByNameInChain(STR("MovementMode")))
                     mode = *(reinterpret_cast<uint8_t*>(movement) + mp->GetOffset_Internal());
             }
-            HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d, torso twist %.0f deg", v[0], v[1], v[2], mode, g_pose.twist_deg);
+            // What his body really does on screen: chest and hips turned from where they were at calibration.
+            double chest_yaw = quat_yaw_deg((socket_rotation(mesh, bone_fname("spine_05")) * g_pose.chest_rot_local.inverse()).normalized());
+            double hips_yaw = quat_yaw_deg((socket_rotation(mesh, bone_fname("pelvis")) * g_pose.pelvis_rot_local.inverse()).normalized());
+            double look_yaw = have_look ? quat_yaw_deg(look_rot) : 0.0;
+            HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d, torso twist %.0f deg asked; on screen: head %.0f, chest %.0f, hips %.0f (chest %+.0f from hips)",
+                     v[0], v[1], v[2], mode, g_pose.twist_deg, look_yaw, chest_yaw, hips_yaw, wrap_deg(chest_yaw - hips_yaw));
             if (g_feet_active.load())
             {
                 Vec3 fl = socket_location(mesh, bone_fname("foot_l")), fr = socket_location(mesh, bone_fname("foot_r"));
