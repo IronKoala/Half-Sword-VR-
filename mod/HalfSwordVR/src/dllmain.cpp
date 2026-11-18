@@ -1381,6 +1381,7 @@ namespace
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     std::atomic<bool> g_hold_reach_clamp{true};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
+    std::atomic<float> g_fake_squeeze[2] = {-1.0f, -1.0f}; // test: hsvr.squeeze <0|1> <value>, -1 = the controller
 
     // Sets a yes/no property that the engine packs into a single bit (tests only).
     bool set_bool_property(UObject* owner, const TCHAR* name, bool value)
@@ -3211,6 +3212,141 @@ namespace
         HSVR_LOG("Hold: dropped with %ls(%ls)", name, names.c_str());
     }
 
+    // Puts a weapon lying in the world into that hand the game's own way: Set Up Right/Left Hand
+    // Weapon(no class, the weapon, not dropped, don't destroy, empty passport, save) - the call the
+    // game's grab makes once its hand reaches a ModularWeaponBP (grab_pickup.md, UF @523466 / @535604).
+    // It snaps the weapon's "Grip R Hand Default Pos" onto the hand socket and makes the hand joint.
+    bool give_hand_weapon(int side, UObject* pawn, UObject* weapon)
+    {
+        const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
+        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
+        if (!fn || !weapon) return false;
+        alignas(16) static uint8_t parameters[4096];
+        memset(parameters, 0, sizeof(parameters));
+        bool set = false;
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            if (p->GetClass().GetName() == STR("ObjectProperty") && !set)
+            {
+                *reinterpret_cast<UObject**>(parameters + p->GetOffset_Internal()) = weapon;
+                set = true;
+            }
+            if (p->GetClass().GetName() == STR("StructProperty"))
+                if (UScriptStruct* type = struct_type(p))
+                {
+                    uint8_t* at = parameters + p->GetOffset_Internal();
+                    if (FProperty* r = struct_member(type, STR("Rotation")))
+                        if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                        {
+                            uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                            if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                            else *reinterpret_cast<float*>(wat) = 1.0f;
+                        }
+                    if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+                }
+        }
+        if (!set) return false;
+        pawn->ProcessEvent(fn, parameters);
+        return true;
+    }
+
+    // Where a weapon would sit in that hand: the hand socket the game snaps weapons to, else the bone.
+    hsvr::Vec3 hand_grab_point(UObject* mesh, int side)
+    {
+        static const FName sockets[2] = {FName(STR("weapon_lSocket"), FNAME_Add), FName(STR("weapon_rSocket"), FNAME_Add)};
+        Call has(mesh, STR("DoesSocketExist"));
+        has.name(STR("InSocketName"), sockets[side]);
+        has.run();
+        FProperty* rp = has.param(STR("ReturnValue"));
+        bool exists = rp && *(has.buffer.data() + rp->GetOffset_Internal()) != 0;
+        return socket_location(mesh, exists ? sockets[side] : bone_fname(side == 0 ? "hand_l" : "hand_r"));
+    }
+
+    // The grab button (Phase 4): squeezing a controller's grip with that hand empty picks up the
+    // nearest loose weapon whose body is within pose_grab_radius_cm of the hand; letting go of the
+    // grip drops what that hand holds (B&S-style hold-to-hold). A weapon he already holds when the
+    // grip is not squeezed (one he spawned with) stays until the next squeeze-and-release.
+    // Weapons only for now: objects and bodies need the game's latch tick (grab_pickup.md).
+    void grab_button(const hsvr::Config& cfg, const hsvr::ControllerState& state, bool menu_up)
+    {
+        using namespace hsvr;
+        static bool held[2] = {false, false};
+        UObject* pawn = nullptr;
+        UObject* mesh = find_pawn_mesh(&pawn);
+        bool faked = g_fake_squeeze[0].load() >= 0.0f || g_fake_squeeze[1].load() >= 0.0f;
+        if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
+        {
+            held[0] = held[1] = false;
+            return;
+        }
+        for (int side = 0; side < 2; ++side)
+        {
+            float squeeze = g_fake_squeeze[side].load() >= 0.0f ? g_fake_squeeze[side].load() : state.hand[side].squeeze;
+            bool now_held = held[side] ? squeeze > 0.35f : squeeze > 0.6f;
+            if (now_held == held[side]) continue;
+            held[side] = now_held;
+            const char* hand = side == 0 ? "left" : "right";
+            UObject* mine = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (!now_held)
+            {
+                if (mine && cfg.pose_grab_release_drops)
+                {
+                    drop_weapon(side, pawn);
+                    HSVR_LOG("Grab: %s grip let go: dropped %ls", hand, mine->GetName().c_str());
+                }
+                continue;
+            }
+            if (mine || menu_up) continue;
+            Vec3 at = hand_grab_point(mesh, side);
+            std::vector<UObject*> weapons, willies;
+            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+            UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+            UObject* best = nullptr;
+            double best_d = cfg.pose_grab_radius_cm;
+            int looked = 0;
+            for (UObject* w : weapons)
+            {
+                if (!w || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                if (bool_property(w, STR("Is Sheathed"))) continue;
+                bool taken = false;
+                for (UObject* c : willies)
+                    if (c && (object_property(c, STR("Weapon R")) == w || object_property(c, STR("Weapon L")) == w)) taken = true;
+                if (taken) continue;
+                UObject* base = object_property(w, STR("BaseMesh"));
+                if (!base) continue;
+                Call sim(base, STR("IsSimulatingPhysics"));
+                sim.run();
+                FProperty* sp = sim.param(STR("ReturnValue"));
+                if (!sp || !*(sim.buffer.data() + sp->GetOffset_Internal())) continue;
+                ++looked;
+                Call closest(base, STR("GetClosestPointOnCollision"));
+                if (!closest.fn)
+                {
+                    HSVR_LOG_EVERY(5.0, "Grab: no GetClosestPointOnCollision on %ls", base->GetFullName().c_str());
+                    continue;
+                }
+                closest.three(STR("Point"), at.x, at.y, at.z);
+                closest.run();
+                double d = closest.number();
+                if (d >= 0.0 && d <= best_d)
+                {
+                    best_d = d;
+                    best = w;
+                }
+            }
+            if (!best)
+            {
+                HSVR_LOG("Grab: %s grip squeezed, no loose weapon within %.0f cm (%d loose of %d)", hand, cfg.pose_grab_radius_cm, looked, (int)weapons.size());
+                continue;
+            }
+            bool ok = give_hand_weapon(side, pawn, best);
+            UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            controllers_buzz(side, 0.4f);
+            HSVR_LOG("Grab: %s grip took %ls (%.1f cm from the hand): %s, hand now holds %ls", hand, best->GetName().c_str(), best_d,
+                     ok ? "set up" : "set-up call missing", now ? now->GetName().c_str() : STR("nothing"));
+        }
+    }
+
     // Where his hand goes while it holds a weapon. The hold sent the weapon (last tick) to where the
     // controller had the hand; if it is not there now, something stopped it, and the hand goes onto
     // the weapon by the same amount, so a stopped weapon keeps his hand on it while a free one leaves
@@ -4720,6 +4856,15 @@ namespace
                 g_ghost_force.store(atoi(entry.command.c_str() + 16) != 0);
                 continue;
             }
+            if (entry.command.rfind("hsvr.squeeze ", 0) == 0)
+            {
+                int side = atoi(entry.command.c_str() + 13) != 0 ? 1 : 0;
+                size_t sp = entry.command.find(' ', 13);
+                float v = sp == std::string::npos ? -1.0f : (float)atof(entry.command.c_str() + sp + 1);
+                g_fake_squeeze[side].store(v);
+                HSVR_LOG("Script: hsvr.squeeze %d %.2f", side, v);
+                continue;
+            }
             if (entry.command.rfind("hsvr.press_a ", 0) == 0)
             {
                 g_fake_continue.store(atoi(entry.command.c_str() + 13) != 0);
@@ -5265,6 +5410,7 @@ namespace
         pose_probe(cfg);
         pose_body(cfg);
         hide_own_head(cfg);
+        grab_button(cfg, hsvr::controllers_state(), shared.menu_up.load());
         if (g_console_done)
         {
             apply_picture_settings(cfg);

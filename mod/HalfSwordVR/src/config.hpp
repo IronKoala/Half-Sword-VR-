@@ -220,6 +220,11 @@ namespace hsvr
         // than an arm's length from your hand, for pose_hold_let_go_s, is let go (the game's own drop).
         bool pose_hold_let_go = true;
         double pose_hold_let_go_s = 0.15;
+        // The grab button: squeeze a grip near a loose weapon to pick it up; let go of the grip to
+        // drop what that hand holds (pose_grab_release_drops).
+        bool pose_grab_button = true;
+        double pose_grab_radius_cm = 10.0;
+        bool pose_grab_release_drops = true;
         // The ghost hand: while his hand stays on a stopped weapon more than pose_ghost_from_cm from
         // your real hand, a see-through glove shows where your hand is. Mesh and material are object
         // paths in the cooked game; offset (cm) and turn (deg) from the hand bone, and scale, for fitting.
