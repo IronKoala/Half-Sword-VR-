@@ -322,7 +322,7 @@ def main(argv=None):
         cell = max([max(s) for s in sizes if s] or [16])
         n = len(mats)
         grid = int(math.ceil(math.sqrt(n)))
-        cell = min(cell, 2048 // grid)  # the mod loads maps uncompressed: keep the atlas at 2048 or less
+        cell = min(cell, 4096 // grid)
         maps = [material_maps(m, (cell, cell), args.metallic, args.roughness) for m in mats]
         if any(has for _, has in maps):
             W = grid * cell
