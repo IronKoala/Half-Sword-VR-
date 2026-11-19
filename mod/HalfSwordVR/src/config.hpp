@@ -535,10 +535,15 @@ namespace hsvr
         // 1 = the game's grab joint is made soft (a capped spring, B&S-like) 0.25 s after it latches, so
         // the tracked hand no longer pulls on it without limit (the game lets go when the pull beats
         // his grip strength). 0 = the game's own joint.
-        int pose_grab_body_hold = 0;
-        double pose_grab_body_spring = 2000.0; // drive stiffness (acceleration mode)
-        double pose_grab_body_damper = 100.0;
-        double pose_grab_body_max = 2500.0;    // drive cap
+        // Test 4 (2026-11-19): 2000/100 let a standing Willie go in 2.8 s; 20000/400 held like the game's
+        // joint. cap_per_t: the drive cap is this x his grip strength T (the game's slip threshold), so
+        // the force stays just under T (it levels off at about cap/500): his strength sets how hard he
+        // can drag a body, and the stretch rule lets go when it gets away. 0 = the fixed pose_grab_body_max.
+        int pose_grab_body_hold = 1;
+        double pose_grab_body_spring = 20000.0; // drive stiffness (acceleration mode)
+        double pose_grab_body_damper = 400.0;
+        double pose_grab_body_cap_per_t = 450.0;
+        double pose_grab_body_max = 250000.0;    // drive cap when cap_per_t is 0
         double pose_grab_body_let_go_cm = 30.0; // hand this far from the grab point for 0.3 s lets go
         // Eating and drinking: grabbed food within pose_eat_cm of your mouth is bitten (the game's
         // Bite Event); a held bottle at your mouth with its neck below pose_drink_tip (the dot of its

@@ -484,6 +484,7 @@ namespace hsvr
         num("pose_grab_body_spring", c.pose_grab_body_spring);
         num("pose_grab_body_damper", c.pose_grab_body_damper);
         num("pose_grab_body_max", c.pose_grab_body_max);
+        num("pose_grab_body_cap_per_t", c.pose_grab_body_cap_per_t);
         num("pose_grab_body_let_go_cm", c.pose_grab_body_let_go_cm);
         flag("input_hand_tracking", c.input_hand_tracking);
         flag("pose_eat", c.pose_eat);
