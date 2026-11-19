@@ -8463,6 +8463,12 @@ namespace
                     if (d.scabbard && d.socket[0]) off_belt = length(component_location(d.scabbard) - socket_location(mesh, bone_fname(d.socket)));
                 HSVR_LOG("%s: %s hand %s %ls: out %.1f cm (UnSheathing %ls %d, concrete %.0f; scabbard %.1f cm from %s)", d.sheathing ? "Sheathe" : "Draw",
                          side == 0 ? "left" : "right", d.sheathing ? "sheathing" : "drawing", d.weapon->GetName().c_str(), z, S, (int)unsheathing, conc, off_belt, d.socket);
+                // What the game's break reads (Check Scabbard Unsheath State: Z >= L x (Sheathing ? 1 : MRC(Aim Swing Speed 0..75 -> 0.85..0))).
+                HSVR_LOG("Draw: break inputs: R Weapon Sheathing %d, L Weapon Sheathing %d, Block R %d, Block L %d, Aim Swing Speed %.1f, swing proxy %.1f, Cross Unsheath %d, length %.1f",
+                         (int)bool_property(pawn, STR("R Weapon Sheathing")), (int)bool_property(pawn, STR("L Weapon Sheathing")),
+                         (int)bool_property(pawn, STR("Block R Weapon From Sheathing")), (int)bool_property(pawn, STR("Block L Weapon From Sheathing")),
+                         read_number_variable(pawn, STR("Aim Swing Speed")), read_number_variable(pawn, STR("Swing Velocity proxy")),
+                         (int)bool_property(pawn, STR("Cross Unsheath")), d.length);
             }
             if (now - d.t0 > 20.0)
             {
