@@ -231,6 +231,7 @@ namespace
         if (g_pose_anchor_fixed)
             out.head_position = out.actor_position + hsvr::quat_from_yaw_deg(body_yaw).rotate(g_pose_anchor_local) -
                                 hsvr::quat_from_yaw_deg(out.has_heading ? out.heading_yaw : 0.0).rotate(g_pose_room_moved_local);
+        out.head_position.z -= g_button_crouch; // the button crouch takes the view down with him
         return true;
     }
 
@@ -861,6 +862,10 @@ namespace
     bool g_body_turning = false;
     // Crouch: how far your headset is below where you stood at recentering (cm, 0 standing).
     double g_crouch_drop = 0.0;
+    // Button crouch (B&S: the stick crouches as well as bending down): left stick click toggles it; the
+    // view and his body go down together by this much (cm, eased), on top of your own crouch.
+    double g_button_crouch = 0.0;
+    bool g_button_crouch_on = false;
     std::atomic<double> g_fake_head_drop{-1.0}; // test: hsvr.fake_head_drop <cm> (fake tracking only)
     bool g_pose_cfg_turn = true, g_pose_cfg_crouch = true, g_pose_fake = false;
     double g_turn_dead_deg = 60.0, g_turn_speed_dps = 150.0, g_turn_max_deg = 85.0;
@@ -2088,6 +2093,26 @@ namespace
                 g_crouch_drop = (std::min)(55.0 * scale, (std::max)(0.0, drop));
             }
         }
+        if (cfg.pose_crouch && cfg.pose_crouch_button_cm > 0.0)
+        {
+            static bool click_was = false;
+            bool click = state.hand[0].stick_click;
+            if (click && !click_was)
+            {
+                g_button_crouch_on = !g_button_crouch_on;
+                controllers_buzz(0, 0.25f);
+                HSVR_LOG("Crouch: left stick click: button crouch %s (%.0f cm)", g_button_crouch_on ? "on" : "off", cfg.pose_crouch_button_cm);
+            }
+            click_was = click;
+            static double last = now_seconds();
+            double tnow = now_seconds(), step = (std::min)(0.1, tnow - last) * cfg.pose_crouch_button_cms;
+            last = tnow;
+            double want = g_button_crouch_on ? cfg.pose_crouch_button_cm : 0.0;
+            g_button_crouch += (std::max)(-step, (std::min)(step, want - g_button_crouch));
+        }
+        else
+            g_button_crouch = 0.0;
+        g_crouch_drop = (std::min)(55.0 * component_scale_z(mesh), g_crouch_drop + g_button_crouch);
         place.z -= g_crouch_drop;
         // Moved, not teleported: a teleport snaps his kinematic physics bodies (the hand holding a
         // weapon) to the new spot with no velocity in the first physics substep, and the held weapon
@@ -11243,6 +11268,30 @@ namespace
         bool a = (live && state.hand[1].primary) || g_fake_continue.load();
         if (!a)
         {
+            // A short tap of right A kicks (B&S: a kick is a button): the game's own "Kick Event" (the
+            // one its jump-tap and the AI use: leg from leg health and footing, its cooldown, the foot's
+            // physics does the hit; kick_input research 2026-11-19).
+            if (continue_since >= 0.0 && !continue_done && cfg.kick_on_a && now_seconds() - continue_since < cfg.kick_tap_s)
+            {
+                UObject* pawn = nullptr;
+                find_pawn_mesh(&pawn);
+                UFunction* kick = pawn ? pawn->GetFunctionByNameInChain(STR("Kick Event")) : nullptr;
+                if (kick)
+                {
+                    std::vector<uint8_t> block = param_block(kick);
+                    bool busy = bool_property(pawn, STR("Kick Cooldown")) || bool_property(pawn, STR("Kicking L")) || bool_property(pawn, STR("Kicking R"));
+                    if (busy)
+                        HSVR_LOG("Kick: right A tapped, still kicking or cooling down, no kick");
+                    else
+                    {
+                        pawn->ProcessEvent(kick, block.data());
+                        HSVR_LOG("Kick: right A tapped: Kick Event (kicking L %d R %d)", (int)bool_property(pawn, STR("Kicking L")),
+                                 (int)bool_property(pawn, STR("Kicking R")));
+                    }
+                }
+                else
+                    HSVR_LOG("Kick: right A tapped, no Kick Event on %s", pawn ? "the character" : "(no character)");
+            }
             continue_since = -1.0;
             continue_done = false;
             return;

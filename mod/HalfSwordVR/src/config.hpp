@@ -465,6 +465,12 @@ namespace hsvr
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;
         double pose_crouch_dead_zone_cm = 3.0;
+        // Left stick click toggles a button crouch this deep (cm, eased at _cms); 0 = off.
+        double pose_crouch_button_cm = 40.0;
+        double pose_crouch_button_cms = 120.0;
+        // A short tap (under kick_tap_s) of right A kicks: the game's Kick Event.
+        bool kick_on_a = true;
+        double kick_tap_s = 0.35;
         // Crouching keeps his legs on the leg IK: the animation's kneel and falling leg poses are kept
         // off (they sank the whole body 50-100 cm at a deep crouch). And the capsule is never put more
         // than 15 cm below its standing height over the floor (the game drops it ~77 cm when its foot
