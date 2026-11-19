@@ -353,6 +353,7 @@ namespace hsvr
         flag("pose_hold_hand_follows", c.pose_hold_hand_follows);
         integer("pose_hold_hand_follows_predict", c.pose_hold_hand_follows_predict);
         num("pose_hold_follow_predict_max_cm", c.pose_hold_follow_predict_max_cm);
+        num("pose_hold_follow_predict_smooth_s", c.pose_hold_follow_predict_smooth_s);
         flag("pose_hold_hand_follows_draw", c.pose_hold_hand_follows_draw);
         num("pose_draw_force_scale_follows", c.pose_draw_force_scale_follows);
         flag("pose_hold_let_go", c.pose_hold_let_go);

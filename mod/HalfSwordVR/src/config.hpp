@@ -293,6 +293,7 @@ namespace hsvr
         // physics velocity (jumped when the item was blocked), 0 = none (a frame behind the item).
         int pose_hold_hand_follows_predict = 1;
         double pose_hold_follow_predict_max_cm = 12.0;
+        double pose_hold_follow_predict_smooth_s = 0.03; // smoothing of that measured velocity (0 = none)
         // The stuck rule: a stopped weapon whose grip is out of his reach from the shoulder, or more
         // than an arm's length from your hand, for pose_hold_let_go_s, is let go (the game's own drop).
         // A weapon stopped by his own body is never let go by the stuck rule (vanilla weapons collide with him too).

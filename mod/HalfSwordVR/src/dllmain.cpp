@@ -4915,6 +4915,8 @@ namespace
         hsvr::Quat rot, prev_rot;
         double t = 0.0, prev_t = 0.0;
         bool have = false, have_prev = false;
+        hsvr::Vec3 v, w;        // smoothed measured velocity (cm/s) and turn rate (rad/s)
+        bool have_v = false;
     };
     std::unordered_map<UObject*, ItemTrack> g_item_track;
     double world_delta_seconds(UObject* context);
@@ -4959,10 +4961,21 @@ namespace
         }
         double gap = k.t - k.prev_t;
         if (!k.have_prev || !(gap > 0.002 && gap < 0.05)) return;
-        // The same motion again over this frame, about the grip-independent origin of the item.
-        double ahead = DT / gap;
-        Vec3 step = (k.pos - k.prev_pos) * ahead;
-        Vec3 turn = scaled_axis((k.rot * k.prev_rot.inverse()).normalized()) * ahead;
+        // Its velocity from the last two frames, smoothed over pose_hold_follow_predict_smooth_s (once per
+        // new frame): straight frame-to-frame extrapolation tripled the item's own frame-to-frame jerk in
+        // the hand (playtest 10:36: hand target 2nd difference p50 7.9 cm against the grip's 2.7 on the
+        // worst ticks).
+        if (k.t != k.prev_t && now == k.t)
+        {
+            Vec3 v_now = (k.pos - k.prev_pos) * (1.0 / gap);
+            Vec3 w_now = scaled_axis((k.rot * k.prev_rot.inverse()).normalized()) * (1.0 / gap);
+            double a = cfg.pose_hold_follow_predict_smooth_s > 1e-4 ? 1.0 - std::exp(-gap / cfg.pose_hold_follow_predict_smooth_s) : 1.0;
+            if (!k.have_v) k.v = v_now, k.w = w_now, k.have_v = true;
+            else k.v = k.v + (v_now - k.v) * a, k.w = k.w + (w_now - k.w) * a;
+        }
+        if (!k.have_v) return;
+        Vec3 step = k.v * DT;
+        Vec3 turn = k.w * DT;
         step = clamp_length(step, (std::max)(0.0, cfg.pose_hold_follow_predict_max_cm));
         turn = clamp_length(turn, 30.0 / 57.2958);
         Quat dq = from_scaled_axis(turn);
