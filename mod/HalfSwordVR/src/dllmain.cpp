@@ -1657,6 +1657,7 @@ namespace
                     // The slot it is going into, else the first right slot.
                     const char* sock = object_property(g_pose.pawn, STR("Weapon Slot R 1")) && !(wr && object_property(g_pose.pawn, STR("Weapon Slot R 1")) == wr)
                                            ? "Sheath_Slot_R_2" : "Sheath_Slot_R_1";
+                    if (g_draw[1].active && g_draw[1].sheathing && g_draw[1].socket && g_draw[1].socket[0]) sock = g_draw[1].socket; // across too
                     Vec3 m = socket_location(mesh, bone_fname(sock));
                     Vec3 ax = socket_rotation(mesh, bone_fname(sock)).rotate(Vec3{0, 0, 1});
                     double len = wr ? blade_length(wr) : 80.0;
@@ -10230,6 +10231,41 @@ namespace
                 }
                 else
                     HSVR_LOG("Script: hsvr.scabbard_test: no belt scabbard with a pin");
+                continue;
+            }
+            if (entry.command == "hsvr.sheathe_test L1" || entry.command == "hsvr.sheathe_test L2")
+            {
+                // Across: the right hand's weapon at the left belt slot's mouth, into the game's cross path.
+                UObject* player = nullptr;
+                find_pawn_mesh(&player);
+                UObject* wr = player ? object_property(player, STR("Weapon R")) : nullptr;
+                UObject* b = wr ? object_property(wr, STR("BaseMesh")) : nullptr;
+                UObject* scab = wr ? object_property(wr, STR("Scabbard")) : nullptr;
+                UObject* mesh = player ? object_property(player, STR("Mesh")) : nullptr;
+                int slot = entry.command.back() == '2' ? 1 : 0;
+                const char* sock = slot == 0 ? "Sheath_Slot_L_1" : "Sheath_Slot_L_2";
+                if (b && scab && mesh)
+                {
+                    hsvr::Vec3 mouth = socket_location(mesh, bone_fname(sock));
+                    hsvr::Vec3 z = hsvr::normalized(socket_rotation(mesh, bone_fname(sock)).rotate(hsvr::Vec3{0, 0, 1}));
+                    hsvr::Vec3 xh = std::fabs(z.z) < 0.9 ? hsvr::Vec3{0, 0, 1} : hsvr::Vec3{1, 0, 0};
+                    hsvr::Vec3 x = hsvr::normalized(xh - z * hsvr::dot(xh, z));
+                    hsvr::Quat q = hsvr::quat_from_axes(x, hsvr::cross(z, x), z);
+                    double len = blade_length(wr);
+                    set_component_transform(b, mouth - z * (len + 3.0), q, true);
+                    g_hold[1].settle_until = -1.0;
+                    SheathFit fit;
+                    auto known = g_sheath_fit.find(wr);
+                    if (known != g_sheath_fit.end() && known->second.scab == scab) fit = known->second;
+                    fit.scab = scab;
+                    fit.slot_side = 0;
+                    fit.slot = slot;
+                    fit.socket = sock;
+                    bool ok = sheathe_cross_begin(1, player, wr, fit);
+                    HSVR_LOG("Script: hsvr.sheathe_test across: %ls at the mouth of %s: %s", wr->GetName().c_str(), sock, ok ? "sheathing" : "NOT started");
+                }
+                else
+                    HSVR_LOG("Script: hsvr.sheathe_test across: %s", !wr ? "nothing in the right hand" : (!scab ? "its weapon has no scabbard" : "no mesh"));
                 continue;
             }
             if (entry.command == "hsvr.sheathe_test")
