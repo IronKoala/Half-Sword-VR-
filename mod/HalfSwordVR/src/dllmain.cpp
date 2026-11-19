@@ -5412,6 +5412,9 @@ namespace
             }
             else
                 yank_since[side] = -1.0;
+            // A pull that the yank will answer is not a let-go (flip-test3: the past-reach let-go fired
+            // after 0.15 s and dropped the weapon before the 0.25 s yank could pull it out).
+            if (in_body && cfg.stab_yank_cm > 0.0 && from_hand > cfg.stab_yank_cm) out = false;
             // Not right after it came into the hand (a new or long weapon swings into place first),
             // and not while it is still closing in on where the hold sends it.
             double t_now = now_seconds();
