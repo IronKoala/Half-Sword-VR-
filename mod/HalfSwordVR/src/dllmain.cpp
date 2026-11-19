@@ -7028,6 +7028,113 @@ namespace
                 HSVR_LOG("Script: hsvr.stuck_check %d", g_stuck_check.load());
                 continue;
             }
+            if (entry.command.rfind("hsvr.hide ", 0) == 0 || entry.command.rfind("hsvr.camera_probe", 0) == 0)
+            {
+                // hsvr.hide <text> 0|1: every component of his whose name or tags hold <text> (any case)
+                // hidden from your view (1) or shown again (0). hsvr.camera_probe: where your eye is
+                // against his neck and every visible part of him (the view-blocking hunt, playtest
+                // 2026-11-18: flesh and cloth filling the lower view in armour).
+                bool probe = entry.command.rfind("hsvr.camera_probe", 0) == 0;
+                std::string text;
+                int hide_value = 1;
+                if (!probe)
+                {
+                    std::string rest = entry.command.substr(10);
+                    size_t sp = rest.find_last_of(' ');
+                    if (sp != std::string::npos && (rest.substr(sp + 1) == "0" || rest.substr(sp + 1) == "1"))
+                    {
+                        hide_value = rest[sp + 1] - '0';
+                        rest.resize(sp);
+                    }
+                    for (char& ch : rest) ch = (char)tolower((unsigned char)ch);
+                    text = rest;
+                }
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                if (!pawn || !mesh) continue;
+                hsvr::Vec3 eye;
+                hsvr::Quat eye_rot;
+                bool eye_tracked = false;
+                {
+                    hsvr::ControllerState st = hsvr::controllers_state();
+                    if (st.head_valid && hsvr::stereo_tracking_to_world(st.head, eye, eye_rot)) eye_tracked = true;
+                }
+                hsvr::Vec3 head = socket_location(mesh, bone_fname("head"));
+                hsvr::Quat head_rot = socket_rotation(mesh, bone_fname("head"));
+                if (!eye_tracked)
+                {
+                    // As the view's anchor: the eye offset forward along his facing and up.
+                    Call fv(pawn, STR("GetActorForwardVector"));
+                    fv.run();
+                    hsvr::Vec3 f = fv.vec();
+                    eye = head + f * hsvr::config().eye_forward_cm + hsvr::Vec3{0, 0, hsvr::config().eye_up_cm};
+                    eye_rot = head_rot;
+                }
+                if (probe)
+                {
+                    for (const char* b : {"head", "neck_02", "neck_01", "spine_05", "spine_04", "clavicle_l", "clavicle_r"})
+                    {
+                        hsvr::Vec3 p = socket_location(mesh, bone_fname(b));
+                        hsvr::Vec3 d = p - eye;
+                        HSVR_LOG("Probe: %s is %.1f cm from your eye (dx %.1f dy %.1f dz %.1f)", b, hsvr::length(d), d.x, d.y, d.z);
+                    }
+                    hsvr::Vec3 fwd = eye_rot.rotate(hsvr::Vec3{1, 0, 0});
+                    HSVR_LOG("Probe: eye (%.1f, %.1f, %.1f) %s, looking (%.2f, %.2f, %.2f)", eye.x, eye.y, eye.z, eye_tracked ? "from the headset" : "from the head bone + eye offset (no headset)",
+                             fwd.x, fwd.y, fwd.z);
+                }
+                std::vector<UObject*> comps;
+                UObjectGlobals::FindAllOf(STR("SceneComponent"), comps);
+                int matched = 0;
+                for (UObject* c : comps)
+                {
+                    if (!c || c->GetOuterPrivate() != pawn || !is_a(c, STR("PrimitiveComponent"))) continue;
+                    std::wstring tags;
+                    if (RawArray* t = c->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")))
+                        for (int32_t i = 0; i < t->Num && t->Data; ++i) tags += reinterpret_cast<const FName*>(t->Data)[i].ToString() + STR(" ");
+                    std::wstring name = c->GetName();
+                    if (probe)
+                    {
+                        Call vis(c, STR("IsVisible"));
+                        vis.run();
+                        bool visible = false;
+                        if (FProperty* r = vis.param(STR("ReturnValue"))) visible = (vis.buffer[r->GetOffset_Internal()] & static_cast<FBoolProperty*>(r)->GetFieldMask()) != 0;
+                        if (!visible) continue;
+                        // Its collision (physics bodies; armour and cloth pieces may have none: -1).
+                        Call q(c, STR("GetClosestPointOnCollision"));
+                        q.three(STR("Point"), eye.x, eye.y, eye.z);
+                        q.run();
+                        double d = q.number();
+                        Call lb(c, STR("GetLocalBounds"));
+                        hsvr::Vec3 mn, mx;
+                        bool inside = false;
+                        double box_d = -1.0;
+                        if (lb.fn && lb.run())
+                        {
+                            mn = lb.vec(STR("Min"));
+                            mx = lb.vec(STR("Max"));
+                            hsvr::Vec3 local = component_rotation(c).inverse().rotate(eye - component_location(c));
+                            hsvr::Vec3 cl{(std::max)(mn.x, (std::min)(mx.x, local.x)), (std::max)(mn.y, (std::min)(mx.y, local.y)), (std::max)(mn.z, (std::min)(mx.z, local.z))};
+                            box_d = hsvr::length(local - cl);
+                            inside = box_d == 0.0;
+                        }
+                        std::string mesh_name;
+                        if (UObject* m = object_property(c, STR("SkeletalMesh"))) for (wchar_t ch : m->GetName()) mesh_name += (char)ch;
+                        else if (UObject* m2 = object_property(c, STR("StaticMesh"))) for (wchar_t ch : m2->GetName()) mesh_name += (char)ch;
+                        HSVR_LOG("Probe: visible %ls [%ls] mesh %s tags [%ls]: eye %.1f cm from its collision (-1 none), %.1f cm from its bounds%s", name.c_str(),
+                                 c->GetClassPrivate()->GetName().c_str(), mesh_name.c_str(), tags.c_str(), d, box_d, inside ? " (INSIDE its bounds)" : "");
+                        continue;
+                    }
+                    std::wstring hay = name + STR(" ") + tags;
+                    for (auto& ch : hay) ch = (wchar_t)towlower(ch);
+                    std::wstring want(text.begin(), text.end());
+                    if (text != "all" && hay.find(want) == std::wstring::npos) continue;
+                    set_owner_hidden(c, hide_value != 0);
+                    ++matched;
+                    HSVR_LOG("Script: hsvr.hide: %ls [%ls] %s", name.c_str(), tags.c_str(), hide_value ? "hidden from your view" : "shown again");
+                }
+                if (!probe) HSVR_LOG("Script: hsvr.hide %s %d: %d components", text.c_str(), hide_value, matched);
+                continue;
+            }
             if (entry.command.rfind("hsvr.weapon_dump", 0) == 0)
             {
                 UObject* pawn = nullptr;
