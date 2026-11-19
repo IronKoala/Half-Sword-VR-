@@ -8728,6 +8728,29 @@ namespace
                 HSVR_LOG("Script: hsvr.passive_foe: %d foe(s) made passive (%d AI controllers)", stopped, (int)ais.size());
                 continue;
             }
+            if (entry.command.rfind("hsvr.foe_freeze ", 0) == 0)
+            {
+                // Stab tests: 1 = every foe's body stops simulating and holds his animated pose (a
+                // standing target that placement and hits can't knock over); 0 = physics again.
+                bool freeze = atoi(entry.command.c_str() + 16) != 0;
+                UObject* player = nullptr;
+                find_pawn_mesh(&player);
+                std::vector<UObject*> foes;
+                UObjectGlobals::FindAllOf(STR("Willie_BP_C"), foes);
+                static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+                for (UObject* foe : foes)
+                {
+                    if (!foe || foe == player || foe->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                    UObject* fm = object_property(foe, STR("Mesh"));
+                    if (!fm) continue;
+                    Call sim(fm, STR("SetAllBodiesSimulatePhysics"));
+                    sim.first_flag(!freeze);
+                    sim.run();
+                    hsvr::Vec3 p = socket_location(fm, pelvis_bone);
+                    HSVR_LOG("Script: hsvr.foe_freeze %d: %ls, pelvis (%.0f, %.0f, %.0f)", (int)freeze, foe->GetName().c_str(), p.x, p.y, p.z);
+                }
+                continue;
+            }
             if (entry.command == "hsvr.unstick")
             {
                 // Stab tests: the weapon in his right hand lets go of any body it is stuck in (the
