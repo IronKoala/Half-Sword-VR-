@@ -6909,6 +6909,42 @@ namespace
     // sits on the skin, the stuck joint's first trace along the blade misses the body and the game
     // lets go on the next tick (stab-test10: 4 of 5 sticks, "hitting body 0" on their first tick).
     void stab_set_depth(int side, UObject* weapon, const char* when);
+
+    // A young stick: the game's stuck joint keeps a blade only while a 3 cm trace along it finds the
+    // stuck bone first, from its very first tick, and the game sticks a VR blade at the skin
+    // (stab-test13/14: head sticks all let go on that first tick, trace "hit 0"). For the first
+    // stab_wound_settle_s its "Spikes (temp)" is set, the game's own way to keep spiked weapons
+    // (the keep test then takes any bone, with a 15 cm trace); the wound hold carries the blade in
+    // meanwhile, and afterwards the normal test decides (pulling out lets go).
+    UObject* g_young_joint[2] = {nullptr, nullptr};
+    double g_young_since[2] = {-1.0, -1.0};
+    void stab_hold_keep(int side, UObject* weapon, bool on)
+    {
+        hsvr::Config cfg = hsvr::config();
+        if (!cfg.stab_wound_hold || cfg.stab_wound_settle_s <= 0.0) return;
+        if (on)
+        {
+            RawArray* joints = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
+            UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[joints->Num - 1]) : nullptr;
+            if (!cs) return;
+            set_variable(cs, STR("Spikes (temp)"), 1.0);
+            g_young_joint[side] = cs;
+            g_young_since[side] = hsvr::now_seconds();
+            HSVR_LOG("Stab: %s stick %ls held open for %.2f s", side == 0 ? "left" : "right", cs->GetName().c_str(), cfg.stab_wound_settle_s);
+        }
+        else if (UObject* cs = g_young_joint[side])
+        {
+            g_young_joint[side] = nullptr;
+            g_young_since[side] = -1.0;
+            RawArray* joints = weapon ? weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array")) : nullptr;
+            bool alive = false;
+            if (joints && joints->Data)
+                for (int32_t i = 0; i < joints->Num; ++i) alive = alive || joints->Data[i] == cs;
+            if (alive) set_variable(cs, STR("Spikes (temp)"), 0.0);
+            HSVR_LOG("Stab: %s stick %s: normal keep test again", side == 0 ? "left" : "right", alive ? "settled" : "already gone");
+        }
+    }
+
     void stab_hit_post(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
         using namespace hsvr;
@@ -6923,7 +6959,11 @@ namespace
         bool stuck = bool_property(weapon, STR("Stuck In Body"));
         bool fresh = stuck && !w.was_stuck;
         w.was_stuck = stuck;
-        if (fresh) stab_set_depth(side, weapon, "hit");
+        if (fresh)
+        {
+            stab_hold_keep(side, weapon, true);
+            stab_set_depth(side, weapon, "hit");
+        }
     }
 
     void stab_set_depth(int side, UObject* weapon, const char* when)
@@ -7130,7 +7170,12 @@ namespace
             if (UObject* held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
             {
                 bool stuck = bool_property(held, STR("Stuck In Body"));
-                if (stuck && !w.was_stuck) stab_set_depth(side, held, "tick");
+                if (stuck && !w.was_stuck)
+                {
+                    stab_hold_keep(side, held, true);
+                    stab_set_depth(side, held, "tick");
+                }
+                if (g_young_joint[side] && now - g_young_since[side] >= config().stab_wound_settle_s) stab_hold_keep(side, held, false);
                 w.was_stuck = stuck;
             }
             if (!w.weapon || w.hit_at < 0.0) continue;
