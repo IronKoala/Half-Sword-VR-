@@ -569,6 +569,8 @@ namespace hsvr
         bool pose_fist_game_flags = true;
         // Body grabs (a Willie's throat, arm...): what the game's grab joint feels, logged every 0.1 s.
         bool log_body_grab = true;
+        // Every other Willie's body hits (impulse, health, consciousness, what hit him), when they change.
+        bool log_body_hits = true;
         // 1 = the game's grab joint is made soft (a capped spring, B&S-like) 0.25 s after it latches, so
         // the tracked hand no longer pulls on it without limit (the game lets go when the pull beats
         // his grip strength). 0 = the game's own joint.

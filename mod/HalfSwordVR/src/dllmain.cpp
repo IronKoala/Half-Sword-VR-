@@ -1893,6 +1893,20 @@ namespace
                 if (item)
                     if (UObject* b = object_property(item, STR("BaseMesh"))) grip = component_location(b) + Vec3{0, 0, g_arm_floor[2]};
             }
+            if (mode == 18 && side == 1)
+            {
+                // Elbow / forearm test: the right hand swept from out to his right side, raised, across in
+                // front of his chest in 0.12 s (a horizontal elbow strike: the forearm and elbow lead),
+                // back over 0.6 s, every 2.2 s. Put a foe 35-45 cm in front.
+                static double t0 = -1.0;
+                static int seen18 = -1;
+                if (seen18 != g_fake_arm_epoch.load()) t0 = now;
+                seen18 = g_fake_arm_epoch.load();
+                Vec3 a{18.0, out * 38.0, 12.0}, b{18.0, -out * 12.0, 12.0};
+                double t = std::fmod(now - t0, 2.2);
+                double u = t < 1.4 ? 0.0 : (t < 1.52 ? (t - 1.4) / 0.12 : (t < 1.6 ? 1.0 : (std::max)(0.0, 1.0 - (t - 1.6) / 0.6)));
+                grip = shoulder + body.rotate(a + (b - a) * u);
+            }
             if ((mode == 16 || mode == 17) && side == 1 && g_pose.pawn)
             {
                 // Fist and grapple tests, on the nearest other Willie. 16: the right hand rests 25 cm in
@@ -3388,6 +3402,7 @@ namespace
     void body_grab_before_tick(UObject* pawn);
     void fist_flags_after_tick(UObject* pawn);
     void body_grab_after_tick(UObject* pawn);
+    void body_hit_watch(UObject* pawn);
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
@@ -6444,6 +6459,58 @@ namespace
             if (g_body_grab[side].on && g_body_grab[side].softened)
                 if (UObject* joint = object_property(pawn, side == 0 ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand")))
                     body_spring_joint(joint, cfg, body_spring_cap(cfg, g_body_grab[side].grip_t));
+    }
+
+    // Limb strikes (elbows, forearms, open hands): the struck Willie's body-hit block (UG 791446, from
+    // his armour proxies' OnComponentHit -> NewFunction) damages himself when the impulse passes ~300 (a
+    // hand or forearm) or 1000. log_body_hits: every other Willie's 'Last Hit Impulse', Health and
+    // Consciousness, logged when they change, with what hit him ('Other Comp').
+    void body_hit_watch(UObject* pawn)
+    {
+        if (!hsvr::config().log_body_hits) return;
+        static std::vector<UObject*> foes;
+        static double found_at = -10.0;
+        struct Seen { double impulse = -1.0, health = -1.0, conscious = -1.0; };
+        static std::map<UObject*, Seen> seen;
+        double now = hsvr::now_seconds();
+        if (now - found_at > 1.0)
+        {
+            found_at = now;
+            foes.clear();
+            std::vector<UObject*> all;
+            UObjectGlobals::FindAllOf(STR("Willie_BP_C"), all);
+            for (UObject* w : all)
+                if (w && w != pawn && w->GetName().rfind(STR("Default__"), 0) != 0) foes.push_back(w);
+            std::map<UObject*, Seen> keep;
+            for (UObject* w : foes) keep[w] = seen[w];
+            seen.swap(keep);
+        }
+        for (UObject* w : foes)
+        {
+            Seen& was = seen[w];
+            double impulse = read_number_variable(w, STR("Last Hit Impulse"));
+            double health = read_number_variable(w, STR("Health"));
+            double conscious = read_number_variable(w, STR("Consciousness"));
+            bool hit = was.impulse >= 0.0 && impulse != was.impulse && impulse > 0.0;
+            bool hurt = was.health >= 0.0 && health < was.health - 0.01;
+            if (hit || hurt)
+            {
+                UObject* other = object_property(w, STR("Other Comp"));
+                UObject* other_owner = nullptr;
+                if (other)
+                {
+                    Call oc(other, STR("GetOwner"));
+                    oc.run();
+                    other_owner = oc.object_result();
+                }
+                HSVR_LOG("Body hit: %ls last hit impulse %.0f, health %.1f -> %.1f, consciousness %.0f -> %.0f, hit by limbs %d, by %ls.%ls%s", w->GetName().c_str(), impulse,
+                         was.health, health, was.conscious, conscious, (int)bool_property(w, STR("Beig Hit By Limbs")), other_owner ? other_owner->GetName().c_str() : STR("?"),
+                         other ? other->GetName().c_str() : STR("?"), other_owner == pawn ? " (you)" : "");
+            }
+            was.impulse = impulse;
+            was.health = health;
+            was.conscious = conscious;
+        }
     }
 
     // pose_grab_body_no_slip: right before Willie's tick (where the slip rule runs), the held hand's
@@ -11292,6 +11359,7 @@ namespace
             swing_speed_after_tick(context);
             fist_flags_after_tick(context);
             body_grab_after_tick(context);
+            body_hit_watch(context);
             thrown_tick(context);
             frames_tick(context);
         }
