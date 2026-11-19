@@ -5374,14 +5374,17 @@ namespace
             const Quat flips[4] = {Quat{0, 0, 0, 1}, Quat{0, 0, 1, 0}, Quat{1, 0, 0, 0}, Quat{0, 1, 0, 0}};
             const char* flip_name[4] = {"as the game seats it", "edge turned", "blade reversed", "blade reversed, edge turned"};
             int best = 0;
-            double best_a = 1e9;
+            double best_a = 1e9, best_cost = 1e9;
             for (int i = 0; i < 4; ++i)
             {
                 Quat c = (seat * flips[i]).normalized();
                 double d = std::fabs(c.x * natural.x + c.y * natural.y + c.z * natural.z + c.w * natural.w);
                 double ang = 2.0 * std::acos((std::min)(1.0, d));
-                if (ang < best_a)
+                // A reversed blade (pommel up) only when clearly nearer: a sword picked up is held blade up.
+                double cost = ang + (i >= 2 ? hsvr::config().pose_grab_seat_reverse_bias_deg * 3.14159265358979 / 180.0 : 0.0);
+                if (cost < best_cost)
                 {
+                    best_cost = cost;
                     best_a = ang;
                     best = i;
                 }

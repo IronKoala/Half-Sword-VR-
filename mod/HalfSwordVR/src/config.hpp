@@ -315,6 +315,7 @@ namespace hsvr
         // A weapon grabbed by its grip or blade sits at the game's own seat in the hand (the nearest of
         // it, edge turned, blade reversed), its handle through the seat's point (B&S fixed orientations).
         bool pose_grab_seat = true;
+        double pose_grab_seat_reverse_bias_deg = 45.0; // a reversed seat must be this much nearer to win
         double pose_swing_speed_lo = 1.5;
         double pose_swing_speed_hi = 7.0;
         double pose_swing_speed_fall_s = 0.15;
