@@ -123,7 +123,7 @@ namespace
         int fit_hands = 1;
         double two_hand_grip_cm = 14.0; // handle at least this long -> two-handed sword grip (game: 12 cm grips
                                         // are one-handed, type 2; 15 and 20 cm grips two-handed, type 11)
-        std::wstring offhand = L"next";   // next: off hand beside the main hand (game spacing); pommel: at the handle's end
+        std::wstring offhand = L"pommel"; // pommel: off hand at the handle's end (Matthew 2026-11-19); next: beside the main hand (game spacing)
     };
     Settings g_settings;
 
