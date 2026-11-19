@@ -2721,7 +2721,7 @@ namespace
     // His own body against a held weapon: the closest of his physics bodies to the weapon's axis
     // (pommel end to tip, 12 points), if within `within` cm. Vanilla weapons collide with his own
     // body too (self_collision.md), so a weapon stopped by it is not stuck in something else.
-    double own_body_contact(UObject* pawn, UObject* weapon, double within, std::wstring* bone_out = nullptr)
+    double own_body_contact(UObject* pawn, UObject* weapon, double within, std::wstring* bone_out = nullptr, int holding_side = -1)
     {
         using namespace hsvr;
         UObject* mesh = object_property(pawn, STR("Mesh"));
@@ -2732,6 +2732,9 @@ namespace
         double best = -1.0;
         for (FName bone : physics_body_bones(mesh))
         {
+            // The holding arm from the forearm down never collides with its weapon (ignore_arm_collision),
+            // so it is not what stops it (playtest 2: "stopped by his own hand_r").
+            if (holding_side >= 0 && in_forearm(mesh, bone, holding_side)) continue;
             for (int i = 0; i <= 11; ++i)
             {
                 Vec3 pt = a + (b - a) * (i / 11.0);
@@ -4831,7 +4834,7 @@ namespace
                     // anything; it stays in the hand. Looked at once per stop.
                     h.self_checked_at = h.stuck_since;
                     std::wstring bone;
-                    double d = own_body_contact(g_pose.pawn, h.weapon, 3.0, &bone);
+                    double d = own_body_contact(g_pose.pawn, h.weapon, 3.0, &bone, side);
                     h.self_blocked = d >= 0.0;
                     if (h.self_blocked)
                         HSVR_LOG("Hold: %s hand keeps %ls: it is stopped by his own %ls (%.1f cm), not stuck in anything", side == 0 ? "left" : "right",
@@ -4862,7 +4865,7 @@ namespace
 
     // Walks a weapon's axis (BaseMesh +Z through the grip point) both ways from the grip, in 2 cm
     // steps, asking its real parts (closest_on_weapon): a step is on the weapon while the axis point
-    // is inside (or within 1.5 cm of) a part, and wide when, seen from 12 cm out on any of four sides,
+    // is inside (or within 3 cm of) a part (grip points sit 1-3 cm off some hafts' surface), and wide when, seen from 12 cm out on any of four sides,
     // a part level with the step reaches out further than wide_cm from the axis. lo/hi = the last step on the weapon and not wide, each
     // way; wide_lo/hi say whether it stopped at a wide part (else at the weapon's end). False when
     // the grip itself is not inside the parts. Cached per weapon.
@@ -4884,7 +4887,7 @@ namespace
             auto probe = [&](double z) {
                 Vec3 a = bp + br.rotate({pivot.x, pivot.y, pivot.z + z});
                 double d = closest_on_weapon(weapon, a);
-                if (d < 0.0 || d > 1.5) return 2;
+                if (d < 0.0 || d > 3.0) return 2;
                 // The nearest point of the parts seen from 12 cm out: wide only when that point is level
                 // with this step (a guard a few cm further along would otherwise read as wide here).
                 for (const Vec3& dir : side)
@@ -6161,7 +6164,9 @@ namespace
         if (hsvr::config().pose_capsule_floor_clamp && g_pose.mesh)
         {
             double floor_z = 0.0;
-            if (ground_below(context, keep.x, keep.y, keep.z + 40.0, floor_z))
+            // Only when the game dropped it this tick (its miss drop is ~77 cm): the trace can land on a
+            // loose shield or weapon, which once lifted him 57 cm (playtest 2, 147.8 s).
+            if (rise < -20.0 && ground_below(context, keep.x, keep.y, keep.z + 40.0, floor_z))
             {
                 double lowest = floor_z + 90.0 * component_scale_z(g_pose.mesh) - 15.0;
                 if (keep.z < lowest)
