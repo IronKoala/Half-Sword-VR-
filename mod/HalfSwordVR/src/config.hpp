@@ -239,7 +239,7 @@ namespace hsvr
         // The grab button: squeeze a grip near a loose weapon to pick it up; let go of the grip to
         // drop what that hand holds (pose_grab_release_drops).
         bool pose_grab_button = true;
-        double pose_grab_radius_cm = 10.0;
+        double pose_grab_radius_cm = 18.0;
         // Shields: every measured strap and handle is a grab point; anywhere else (the rim, an edge)
         // the hand holds it where it touched (pose_shield_free_grip; 0 = always the game's grip).
         bool pose_shield_free_grip = true;
