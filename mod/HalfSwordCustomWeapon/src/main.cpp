@@ -119,6 +119,9 @@ namespace
         std::wstring own_material = L"/Game/Assets/Props/Cooking_Utencils/Materials/MI_Prop_Cooking_Utencil_Pot_002.MI_Prop_Cooking_Utencil_Pot_002";
         std::wstring tex_base = L"D", tex_normal = L"N", tex_orm = L"ORM";
         int own_textures = 1;     // 0: keep the game's material untouched
+        // Automatic swap: every weapon (anyone's) whose Head mesh name contains this text becomes the
+        // model, without pressing the key. Empty = off.
+        std::wstring auto_head_mesh;
     };
     Settings g_settings;
 
@@ -153,6 +156,7 @@ namespace
             else if (k == "tex_base") g_settings.tex_base = std::wstring(v.begin(), v.end());
             else if (k == "tex_normal") g_settings.tex_normal = std::wstring(v.begin(), v.end());
             else if (k == "tex_orm") g_settings.tex_orm = std::wstring(v.begin(), v.end());
+            else if (k == "auto_head_mesh") g_settings.auto_head_mesh = std::wstring(v.begin(), v.end());
             else if (k == "own_material") g_settings.own_material = std::wstring(v.begin(), v.end());
             else if (k == "own_textures") g_settings.own_textures = atoi(v.c_str());
         }
@@ -917,11 +921,8 @@ namespace
     void apply_test_blade(UObject* weapon);
     void apply_full_weapon(UObject* weapon, const std::wstring& base_name);
 
-    void apply()
+    bool vector_sizes_ok()
     {
-        log("---- F9: make the held weapon the custom model ----");
-        load_settings();
-
         // Our arrays are handed to the engine as FVector / FVector2D arrays: check they are doubles.
         int32_t vec = struct_size(STR("/Script/CoreUObject.Vector"));
         int32_t vec2 = struct_size(STR("/Script/CoreUObject.Vector2D"));
@@ -929,8 +930,34 @@ namespace
         if (vec != 24 || vec2 != 16)
         {
             log("  ! unexpected vector sizes, stopping");
-            return;
+            return false;
         }
+        return true;
+    }
+
+    std::wstring model_base_name()
+    {
+        std::wstring base_name = g_settings.model;
+        if (base_name.size() > 4 && _wcsicmp(base_name.c_str() + base_name.size() - 4, L".obj") == 0)
+            base_name = base_name.substr(0, base_name.size() - 4);
+        return base_name;
+    }
+
+    bool has_collision_file(const std::wstring& base_name)
+    {
+        if (FILE* probe = _wfopen((g_dir + base_name + L"_collision.obj").c_str(), L"r"))
+        {
+            fclose(probe);
+            return true;
+        }
+        return false;
+    }
+
+    void apply()
+    {
+        log("---- F9: make the held weapon the custom model ----");
+        load_settings();
+        if (!vector_sizes_ok()) return;
 
         UObject* pawn = player_pawn();
         UObject* weapon = object_property(pawn, STR("Weapon R"));
@@ -942,14 +969,9 @@ namespace
         }
         // A model with a collision file next to it (from tools/bs_weapon_export.py) replaces the
         // whole weapon; a bare OBJ only replaces the head (the first test).
-        std::wstring base_name = g_settings.model;
-        if (base_name.size() > 4 && _wcsicmp(base_name.c_str() + base_name.size() - 4, L".obj") == 0)
-            base_name = base_name.substr(0, base_name.size() - 4);
-        if (FILE* probe = _wfopen((g_dir + base_name + L"_collision.obj").c_str(), L"r"))
-        {
-            fclose(probe);
+        std::wstring base_name = model_base_name();
+        if (has_collision_file(base_name))
             apply_full_weapon(weapon, base_name);
-        }
         else
         {
             apply_test_blade(weapon);
@@ -1243,17 +1265,24 @@ namespace
         const TCHAR* slot_names[] = {STR("Head"), STR("Guard"), STR("Grip"), STR("Pommel")};
         UObject* slots[4];
         UObject* base = object_property(weapon, STR("BaseMesh"));
+        double parts_before = 0;
         for (int i = 0; i < 4; ++i)
         {
             slots[i] = object_property(weapon, slot_names[i]);
             float kg = 0;
             body_mass(slots[i], false, kg);
+            parts_before += kg;
             V3 lo{}, hi{};
             mesh_box(object_property(slots[i], STR("StaticMesh")), lo, hi);
             log("  slot %s: mesh %s, own mass setting %.3f kg, mesh z %.1f to %.1f", narrow(slot_names[i]).c_str(),
                 name_of(object_property(slots[i], STR("StaticMesh"))).c_str(), kg, lo.z, hi.z);
         }
-        log("  whole weapon %.3f kg", mass_of(base));
+        // BaseMesh (the grip dummy) has a mass of its own, which stays; the parts get the rest.
+        double whole_before = mass_of(base);
+        double base_share = whole_before - parts_before;
+        double parts_target = mass_total - base_share;
+        if (base_share < 0 || parts_target < 0.25 * mass_total) parts_target = mass_total;
+        log("  whole weapon %.3f kg (BaseMesh's own %.3f kg; parts get %.3f kg)", whole_before, base_share, parts_target);
         for (const TCHAR* extra : {STR("Sub Module 1 Mesh"), STR("SubModule 2 Mesh")})
             if (UObject* c = object_property(weapon, extra))
                 if (UObject* m = object_property(c, STR("StaticMesh")))
@@ -1341,7 +1370,7 @@ namespace
             }
             UObject* mesh = build_part_mesh(weapon, slots[i], pieces);
             if (!mesh) continue;
-            float kg = volume_all > 0 ? (float)(mass_total * volume[i] / volume_all) : 0.0f;
+            float kg = volume_all > 0 ? (float)(parts_target * volume[i] / volume_all) : 0.0f;
             body_mass(slots[i], true, kg);
             Call set(slots[i], STR("SetStaticMesh"));
             set.object(STR("NewMesh"), mesh);
@@ -1350,7 +1379,7 @@ namespace
             log("  %s: new collision in place (%s), mass setting %.3f kg", narrow(slot_names[i]).c_str(),
                 set.ret_bool() ? "changed" : "NOT changed", kg);
         }
-        log("Whole weapon mass now %.3f kg (target %.3f kg; BaseMesh's own share is not changed)", mass_of(base), mass_total);
+        log("Whole weapon mass now %.3f kg (target %.3f kg)", mass_of(base), mass_total);
 
         // Damage points on the head move with the blade: same layout, stretched to the new length.
         double old_len = ohi.z, new_len = (tip + shift) / hs.z; // both in the head's unscaled local units
@@ -1384,12 +1413,47 @@ namespace
 
     bool g_key_was_down = false;
 
+    // Automatic swap, checked once a second. A weapon is swapped once its Head has shown the
+    // wanted mesh on two checks in a row (so the forge has finished setting it up); after the
+    // swap its Head holds our runtime mesh, so it is not matched again.
+    std::map<UObject*, int> g_auto_seen;
+    ULONGLONG g_auto_next = 0;
+
+    void auto_swap()
+    {
+        if (g_settings.auto_head_mesh.empty()) return;
+        ULONGLONG now = GetTickCount64();
+        if (now < g_auto_next) return;
+        g_auto_next = now + 1000;
+        std::wstring base_name = model_base_name();
+        if (!has_collision_file(base_name)) return;
+        std::vector<UObject*> weapons;
+        UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+        std::map<UObject*, int> seen;
+        for (UObject* w : weapons)
+        {
+            if (w->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            UObject* mesh = object_property(object_property(w, STR("Head")), STR("StaticMesh"));
+            if (!mesh || mesh->GetName().find(g_settings.auto_head_mesh) == std::wstring::npos) continue;
+            int count = g_auto_seen.count(w) ? g_auto_seen[w] + 1 : 1;
+            if (count < 2)
+            {
+                seen[w] = count;
+                continue;
+            }
+            log("---- automatic swap: %s (head mesh %s) ----", name_of(w).c_str(), name_of(mesh).c_str());
+            if (vector_sizes_ok()) apply_full_weapon(w, base_name);
+        }
+        g_auto_seen.swap(seen);
+    }
+
     void tick(UObject* engine)
     {
         g_engine = engine;
         bool down = (GetAsyncKeyState(g_settings.key) & 0x8000) != 0;
         if (down && !g_key_was_down) apply();
         g_key_was_down = down;
+        auto_swap();
     }
 } // namespace
 
