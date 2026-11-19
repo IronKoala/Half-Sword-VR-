@@ -375,6 +375,9 @@ namespace hsvr
         flag("pose_throw", c.pose_throw);
         num("pose_throw_speed", c.pose_throw_speed);
         num("pose_throw_multiplier", c.pose_throw_multiplier);
+        flag("pose_draw", c.pose_draw);
+        num("pose_draw_touch_cm", c.pose_draw_touch_cm);
+        num("pose_draw_settle_s", c.pose_draw_settle_s);
         num("pose_grab_seat_reverse_bias_deg", c.pose_grab_seat_reverse_bias_deg);
         num("pose_swing_speed_lo", c.pose_swing_speed_lo);
         num("pose_swing_speed_hi", c.pose_swing_speed_hi);

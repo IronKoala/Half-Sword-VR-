@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <cwctype>
 #include <map>
 #include <unordered_map>
@@ -1640,6 +1641,36 @@ namespace
                 local = Vec3{35.0 + 10.0 * std::sin(t), out * 15.0, -15.0 + 20.0 * std::cos(t)};
             }
             grip = shoulder + body.rotate(local);
+            if (mode == 11 && side == 1 && g_pose.pawn)
+            {
+                // Draw test: the right hand goes to the first sheathed weapon's grip, holds 1.5 s, then
+                // pulls along its blade's -Z (out of the scabbard) to 1.3 x its length over 2 s.
+                static double t0 = -1.0, len = 80.0;
+                static Vec3 p0, ax;
+                static int seen = -1;
+                if (seen != 11 || t0 < 0.0)
+                {
+                    t0 = -1.0;
+                    for (const TCHAR* v : {STR("Weapon Slot R 1"), STR("Weapon Slot R 2"), STR("Weapon Slot L 1"), STR("Weapon Slot L 2"), STR("Weapon Slot Back")})
+                    {
+                        UObject* w = object_property(g_pose.pawn, v);
+                        UObject* b = w ? object_property(w, STR("BaseMesh")) : nullptr;
+                        if (!b) continue;
+                        p0 = component_location(b);
+                        ax = component_rotation(b).rotate(Vec3{0, 0, 1});
+                        if (FProperty* lp = w->GetPropertyByNameInChain(STR("Length to Top R Default"))) len = (std::max)(20.0, number_property(w, lp));
+                        t0 = now;
+                        break;
+                    }
+                }
+                seen = mode;
+                if (t0 >= 0.0)
+                {
+                    double t = now - t0;
+                    double s = t < 1.5 ? 0.0 : (std::min)(1.3 * len, (t - 1.5) / 2.0 * 1.3 * len);
+                    grip = p0 - ax * s;
+                }
+            }
             grip_rot = (body * rot_to_quat(60.0, 0.0, 0.0)).normalized(); // controller handle tilted forward, as held
             // Mode 9: at the mouth, the hand turning over (a full turn about his right in 6 s), so a
             // held bottle tips its neck down at some point (drinking tests).
@@ -2374,6 +2405,19 @@ namespace
     // pose_swing_speed_lo..hi m/s -> 0..75, exactly 0 at rest (some game rules need == 0).
     double read_number_variable(UObject* owner, const TCHAR* name);
     double g_hand_world_v[2] = {0.0, 0.0}; // m/s
+    // A draw from a scabbard in progress, per hand (see try_draw).
+    struct DrawState
+    {
+        bool active = false;
+        int slot_side = 1;           // whose flags the game uses (the slot's side: 0 L, 1 R)
+        UObject* weapon = nullptr;
+        UObject* scabbard = nullptr;
+        double t0 = 0.0;
+        double last_log = -1e9;
+    };
+    DrawState g_draw[2];
+    bool any_draw() { return g_draw[0].active || g_draw[1].active; }
+    bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg);
     double g_swing_want = 0.0, g_swing_written = 0.0, g_swing_keep = 0.89, g_swing_last_t = -1.0;
     hsvr::Vec3 g_swing_rel[2];
     double g_swing_v[2] = {0.0, 0.0};
@@ -2434,6 +2478,13 @@ namespace
         if (want >= g_swing_want || dt <= 0.0) g_swing_want = want;
         else g_swing_want += (want - g_swing_want) * (1.0 - std::exp(-dt / (std::max)(0.01, cfg.pose_swing_speed_fall_s)));
         if (g_swing_want < 0.5) g_swing_want = 0.0;
+        if (any_draw())
+        {
+            // A draw breaks free at Length x MRC(Aim Swing Speed 0..75 -> 0.85..0): kept at the
+            // game's 85% (Matthew 2026-11-19) by holding the swing speed at 0 while drawing.
+            if (number_property(pawn, g_swing_proxy) > 0.0) set_variable(pawn, STR("Swing Velocity proxy"), 0.0, nullptr, nullptr);
+            return;
+        }
         if (g_swing_want <= 0.0) return; // the game's own (0 at rest, or the mouse's)
         double proxy_now = number_property(pawn, g_swing_proxy);
         double p = (25.0 + g_swing_want / 1.5) / (std::max)(0.1, g_swing_keep);
@@ -2469,6 +2520,8 @@ namespace
             turn_body_before_tick();
             stick_walk_before_tick(context);
             swing_speed_before_tick(context);
+            for (int side = 0; side < 2; ++side)
+                if (g_draw[side].active) set_bool_property(context, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
         }
     }
 
@@ -5128,6 +5181,7 @@ namespace
             if (mine || menu_up) continue;
             if (cfg.pose_grab_handles ? try_second_hand(side, pawn, mesh, cfg) : try_two_hand(side, pawn, mesh, cfg)) continue;
             Vec3 at = hand_grab_point(mesh, side);
+            if (cfg.pose_draw && try_draw(side, pawn, mesh, at, cfg)) continue;
             std::vector<UObject*> weapons, willies;
             UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
@@ -5286,7 +5340,7 @@ namespace
         // never drops it.
         // Not while the blade is stuck in someone: the game's wound holds it, and pulling out is
         // yours to do (stab assist).
-        if (cfg.pose_hold_let_go && t >= 0.99 && g_pose.driver && !bool_property(h.weapon, STR("Stuck In Body")))
+        if (cfg.pose_hold_let_go && t >= 0.99 && g_pose.driver && !bool_property(h.weapon, STR("Stuck In Body")) && !g_draw[side].active)
         {
             const ArmCalibration& a = g_pose.arm[side];
             double reach = a.upper_length + a.lower_length;
@@ -6112,6 +6166,19 @@ namespace
             }
         }
 
+        if (g_draw[side].active && g_draw[side].weapon == weapon)
+        {
+            // Drawing: the scabbard's slide joint holds the blade on its line; the hand moves it only
+            // along that line (its grip point follows your hand's along the blade), turned as it is.
+            Vec3 bp = component_location(base);
+            Quat bq = component_rotation(base);
+            Vec3 ax = bq.rotate(Vec3{0, 0, 1});
+            Vec3 want = target_pos + target_rot.rotate(pivot), have = bp + bq.rotate(pivot);
+            double d = dot(want - have, ax);
+            target_rot = bq;
+            target_pos = bp + ax * d;
+            h.settle_until = -1.0;
+        }
         double dt = h.have_last ? now - h.last_time : 1.0 / 72.0;
         dt = (std::min)(1.0 / 30.0, (std::max)(1.0 / 240.0, dt));
         h.dt = dt;
@@ -6808,6 +6875,186 @@ namespace
     // takes several frames to make the hand joint; playtest 3: a sword taken by the blade showed in
     // the hand by its grip for 0.15 s, then jumped 30 cm), the item is kept exactly where the mod's
     // grip has it in the hand, every tick after the game's.
+    // ---- Drawing from a scabbard (Matthew 2026-11-19: grab the handle, pull it all the way out
+    // along the scabbard; the game's own 85% release kept) -------------------------------------------
+    // The game's draw (hs_draw_sheathe_calls.md): Draw Weapon(Hand, Side, Slot) sets the slot bytes and
+    // flags; its attach (Set Up Hand Weapon, Weapon UnSheathing, Set Scabbard Constraint Free) is done
+    // here at once instead of by the game's arm reaching for the grip. The slot's slide joint keeps the
+    // blade on the scabbard's line; the mod moves it only along that line (hold_weapon); the game breaks
+    // it free at 0.85 L (swing speed held at 0) and does its bookkeeping; the hold then eases the
+    // weapon into the hand. Let go mid-draw and the game seats it again.
+    struct SlotDef
+    {
+        const TCHAR* var;
+        int side, slot;
+    };
+    const SlotDef k_slots[5] = {{STR("Weapon Slot R 1"), 1, 0}, {STR("Weapon Slot R 2"), 1, 1}, {STR("Weapon Slot L 1"), 0, 0},
+                                {STR("Weapon Slot L 2"), 0, 1}, {STR("Weapon Slot Back"), 1, 2}};
+
+    bool call_one_object(UObject* owner, const TCHAR* name, UObject* arg)
+    {
+        Call c(owner, name);
+        if (!c.fn) return false;
+        for (FProperty* p : c.fn->ForEachProperty())
+            if (p->GetClass().GetName() == STR("ObjectProperty"))
+            {
+                *reinterpret_cast<UObject**>(c.buffer.data() + p->GetOffset_Internal()) = arg;
+                break;
+            }
+        return c.run();
+    }
+
+    bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        int best = -1;
+        double best_d = 1e9, best_t = 0.0;
+        const Handle* best_h = nullptr;
+        for (int i = 0; i < 5; ++i)
+        {
+            UObject* w = object_property(pawn, k_slots[i].var);
+            UObject* base = w ? object_property(w, STR("BaseMesh")) : nullptr;
+            if (!base) continue;
+            Vec3 bp = component_location(base);
+            Quat bq = component_rotation(base);
+            Vec3 local = bq.inverse().rotate(at - bp);
+            for (const Handle& hd : item_handles(w, base))
+            {
+                if (hd.name != "grip") continue;
+                Vec3 ab = hd.b - hd.a;
+                double len2 = dot(ab, ab);
+                double u = len2 > 1e-6 ? (std::min)(1.0, (std::max)(0.0, dot(local - hd.a, ab) / len2)) : 0.0;
+                double d = length(local - (hd.a + ab * u));
+                if (d < best_d)
+                {
+                    best_d = d;
+                    best = i;
+                    best_t = u;
+                    best_h = &hd;
+                }
+            }
+        }
+        if (best < 0) return false;
+        const SlotDef& sd = k_slots[best];
+        UObject* w = object_property(pawn, sd.var);
+        if (best_d > cfg.pose_draw_touch_cm)
+        {
+            if (best_d < 30.0) HSVR_LOG("Draw: %s hand squeezed %.1f cm from the grip of %ls (needs %.0f)", side == 0 ? "left" : "right", best_d, w->GetName().c_str(), cfg.pose_draw_touch_cm);
+            return false;
+        }
+        const TCHAR* S = sd.side == 0 ? STR("L") : STR("R");
+        auto name = [&](const wchar_t* fmt) {
+            wchar_t buf[96];
+            std::swprintf(buf, 96, fmt, S);
+            return std::wstring(buf);
+        };
+        double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
+        bool busy = conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
+                    bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing"));
+        if (busy)
+        {
+            HSVR_LOG("Draw: %s hand on %ls, but the game is already drawing or sheathing (concrete R %.0f L %.0f)", side == 0 ? "left" : "right", w->GetName().c_str(), conc_r, conc_l);
+            return true; // the squeeze is spent on it either way
+        }
+        Call draw(pawn, STR("Draw Weapon"));
+        if (!draw.fn)
+        {
+            HSVR_LOG("Draw: no \"Draw Weapon\" on the character");
+            return false;
+        }
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            std::wstring ps;
+            for (FProperty* p : draw.fn->ForEachProperty()) ps += p->GetName() + STR(" (") + p->GetClass().GetName() + STR("), ");
+            HSVR_LOG("Draw: Draw Weapon takes %ls", ps.c_str());
+        }
+        draw.byte(STR("Hand"), (uint8_t)side);
+        draw.byte(STR("Side"), (uint8_t)sd.side);
+        draw.byte(STR("Slot"), (uint8_t)sd.slot);
+        draw.run();
+        UObject* base = object_property(w, STR("BaseMesh"));
+        Vec3 w0_pos = component_location(base);
+        Quat w0_rot = component_rotation(base);
+        Call(pawn, STR("Event Temporary Block Sheathing After Grab")).run();
+        bool ok = give_hand_weapon(side, pawn, w);
+        UObject* now_held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+        if (!ok || now_held != w)
+        {
+            HSVR_LOG("Draw: %s hand could not take %ls from %ls", side == 0 ? "left" : "right", w->GetName().c_str(), sd.var);
+            return true;
+        }
+        set_component_transform(base, w0_pos, w0_rot, true); // where it sits in the scabbard
+        UObject* scab = object_property(w, STR("Scabbard"));
+        set_bool_property(pawn, name(L"Weapon UnSheathing %ls").c_str(), true);
+        set_bool_property(pawn, (std::wstring(sd.side == 0 ? STR("Block L") : STR("Block R")) + STR(" Weapon From Sheathing")).c_str(), true);
+        if (scab)
+        {
+            set_variable(pawn, name(L"Current Scabbard %ls").c_str(), 0.0, scab, nullptr);
+            call_one_object(pawn, STR("Set Scabbard Constraint Free"), scab);
+        }
+        set_bool_property(pawn, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
+        FreeGrip g = handle_grip(side, mesh, w0_pos, w0_rot, at, *best_h, best_t);
+        g.place = false;
+        g.hold_at = false;
+        g_pending_free[side] = g;
+        g_draw[side] = DrawState{true, sd.side, w, scab, now_seconds()};
+        controllers_buzz(side, 0.3f);
+        HSVR_LOG("Draw: %s hand draws %ls from %ls (grip at %.0f%%, %.1f cm from the hand; scabbard %s; sheath slot %s %.0f)", side == 0 ? "left" : "right",
+                 w->GetName().c_str(), sd.var, best_t * 100.0, best_d, scab ? "yes" : "none", sd.side == 0 ? "L" : "R",
+                 read_number_variable(pawn, sd.side == 0 ? STR("Sheath Slot L") : STR("Sheath Slot R")));
+        return true;
+    }
+
+    void draw_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        const Config& cfg = hsvr::config();
+        double now = now_seconds();
+        for (int side = 0; side < 2; ++side)
+        {
+            DrawState& d = g_draw[side];
+            if (!d.active) continue;
+            const TCHAR* hand = side == 0 ? STR("Weapon L") : STR("Weapon R");
+            UObject* base = d.weapon ? object_property(d.weapon, STR("BaseMesh")) : nullptr;
+            if (object_property(pawn, hand) != d.weapon || !base)
+            {
+                HSVR_LOG("Draw: %s hand let go mid-draw after %.2f s (the game seats it again)", side == 0 ? "left" : "right", now - d.t0);
+                d = DrawState{};
+                continue;
+            }
+            const TCHAR* S = d.slot_side == 0 ? STR("L") : STR("R");
+            bool unsheathing = bool_property(pawn, d.slot_side == 0 ? STR("Weapon UnSheathing L") : STR("Weapon UnSheathing R"));
+            double conc = read_number_variable(pawn, d.slot_side == 0 ? STR("L Sheath Slot Concrete") : STR("R Sheath Slot Concrete"));
+            Vec3 bp = component_location(base);
+            Quat bq = component_rotation(base);
+            double z = d.scabbard ? bq.inverse().rotate(component_location(d.scabbard) - bp).z : 0.0;
+            if (!unsheathing && conc == 11.0)
+            {
+                HSVR_LOG("Draw: %s hand drew %ls free after %.2f s (out %.1f cm)", side == 0 ? "left" : "right", d.weapon->GetName().c_str(), now - d.t0, z);
+                HoldState& h = g_hold[side];
+                h.settle_from_pos = bp;
+                h.settle_from_rot = bq;
+                h.settle_s = (std::max)(0.02, cfg.pose_draw_settle_s);
+                h.settle_until = now + h.settle_s;
+                d = DrawState{};
+                continue;
+            }
+            if (now - d.last_log > 0.5)
+            {
+                d.last_log = now;
+                HSVR_LOG("Draw: %s hand drawing %ls: out %.1f cm (UnSheathing %ls %d, concrete %.0f)", side == 0 ? "left" : "right", d.weapon->GetName().c_str(), z, S,
+                         (int)unsheathing, conc);
+            }
+            if (now - d.t0 > 20.0)
+            {
+                HSVR_LOG("Draw: gave up waiting for the game after 20 s");
+                d = DrawState{};
+            }
+        }
+    }
+
     void keep_pending_in_hand(UObject* pawn)
     {
         using namespace hsvr;
@@ -6841,6 +7088,7 @@ namespace
         using namespace hsvr;
         Config cfg = config();
         keep_pending_in_hand(pawn);
+        draw_tick(pawn);
         for (int side = 0; side < 2; ++side)
         {
             GripLog& log = g_grip_log[side];

@@ -320,6 +320,11 @@ namespace hsvr
         bool pose_throw = true;
         double pose_throw_speed = 2.0;
         double pose_throw_multiplier = 2.0;
+        // Drawing from a scabbard: a squeeze within this distance of a sheathed weapon's grip draws it
+        // (pulled out along the scabbard; the game releases it at 85%), eased into the hand over settle_s.
+        bool pose_draw = true;
+        double pose_draw_touch_cm = 8.0;
+        double pose_draw_settle_s = 0.15;
         double pose_grab_seat_reverse_bias_deg = 45.0; // a reversed seat must be this much nearer to win
         double pose_swing_speed_lo = 1.5;
         double pose_swing_speed_hi = 7.0;
