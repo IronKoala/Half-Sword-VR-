@@ -3403,6 +3403,7 @@ namespace
         bool handle_sliding_logged = false;
         double handle_damp = 0.0;      // the slide's damper along the handle (N s/m), from the trigger
         double settle_until = -1.0;    // pulled from settle_from into the hand until then
+        bool flipped = false;          // turned end for end by the grip flip (for the log)
         double settle_s = 0.0;
         hsvr::Vec3 settle_from_pos;
         hsvr::Quat settle_from_rot;
@@ -7229,6 +7230,68 @@ namespace
         }
     }
 
+    // ---- Reverse grip flip (Saints & Sinners' knife, stabbing_and_ss_reference.md section 6) ----
+    // A tap of the holding hand's B (right) / Y (left) turns a one-handed weapon end for end in the
+    // hand at the same spot on its handle: forward grip <-> ice-pick grip, the edge kept as it was
+    // (the seat's "blade reversed" flip, a half turn about the seat's X). The weapon is not snapped:
+    // the hold glides it to the new grip over grip_flip_s (S&S: 200 cm/s and 500 deg/s, ~0.36 s for
+    // the half turn), with a short buzz. Not while it is stuck in someone or held in two hands, and
+    // not while the other hand's B/Y is held too (both together is the recenter/calibration chord).
+    std::atomic<int> g_flip_request{-1}; // hsvr.flip <0|1>: a pretend tap (unattended tests)
+    void grip_flip_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        if (!cfg.grip_flip || !pawn) return;
+        ControllerState state = controllers_state();
+        static bool was[2] = {false, false};
+        static double down_at[2] = {-1.0, -1.0};
+        static bool other_seen[2] = {false, false};
+        double now = now_seconds();
+        for (int side = 0; side < 2; ++side)
+        {
+            bool b = state.active && state.hand[side].secondary;
+            bool other = state.active && state.hand[1 - side].secondary;
+            if (b && !was[side])
+            {
+                down_at[side] = now;
+                other_seen[side] = other;
+            }
+            if (b && other) other_seen[side] = true;
+            bool tap = !b && was[side] && down_at[side] > 0.0 && now - down_at[side] <= cfg.grip_flip_tap_s && !other_seen[side];
+            was[side] = b;
+            if (g_flip_request.load() == side)
+            {
+                g_flip_request.store(-1);
+                tap = true;
+            }
+            if (!tap) continue;
+            HoldState& h = g_hold[side];
+            UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            const char* why = nullptr;
+            if (!weapon || h.weapon != weapon) why = "nothing held";
+            else if (!h.free.set || h.free.forearm) why = "not held by a handle";
+            else if (bool_property(weapon, STR("Stuck In Body"))) why = "it is stuck in a body";
+            else if (g_two.active && g_two.weapon == weapon) why = "held in two hands";
+            if (why)
+            {
+                HSVR_LOG("Flip: %s hand: no flip (%s)", side == 0 ? "left" : "right", why);
+                continue;
+            }
+            UObject* base = object_property(weapon, STR("BaseMesh"));
+            if (!base) continue;
+            h.free.rel = (h.free.rel * Quat{1.0, 0.0, 0.0, 0.0}).normalized();
+            h.settle_from_pos = component_location(base);
+            h.settle_from_rot = component_rotation(base);
+            h.settle_s = (std::max)(0.05, cfg.grip_flip_s);
+            h.settle_until = now + h.settle_s;
+            h.flipped = !h.flipped;
+            controllers_buzz(side, 0.35f);
+            HSVR_LOG("Flip: %s hand turns %ls end for end (%s grip), over %.2f s", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                     h.flipped ? "reversed" : "forward", h.settle_s);
+        }
+    }
+
     // Between a grab and the start of its hold (the game's set-up snaps the item to its own grip and
     // takes several frames to make the hand joint; playtest 3: a sword taken by the blade showed in
     // the hand by its grip for 0.15 s, then jumped 30 cm), the item is kept exactly where the mod's
@@ -8346,6 +8409,7 @@ namespace
             thrown_tick(context);
         }
         stab_log_tick(context);
+        grip_flip_tick(context);
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
         using namespace hsvr;
@@ -9647,6 +9711,12 @@ namespace
                 }
                 else
                     HSVR_LOG("Script: hsvr.sheathe_test: %s", wr ? "no empty right belt slot" : "nothing in the right hand");
+                continue;
+            }
+            if (entry.command.rfind("hsvr.flip ", 0) == 0)
+            {
+                g_flip_request.store(atoi(entry.command.c_str() + 10));
+                HSVR_LOG("Script: hsvr.flip %d", g_flip_request.load());
                 continue;
             }
             if (entry.command == "hsvr.unstick")

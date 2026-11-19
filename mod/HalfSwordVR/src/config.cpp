@@ -383,6 +383,9 @@ namespace hsvr
         flag("pose_draw_scabbard_free", c.pose_draw_scabbard_free);
         num("pose_hold_stuck_force_scale", c.pose_hold_stuck_force_scale);
         flag("stab_wound_hold", c.stab_wound_hold);
+        flag("grip_flip", c.grip_flip);
+        num("grip_flip_s", c.grip_flip_s);
+        num("grip_flip_tap_s", c.grip_flip_tap_s);
         num("stab_wound_settle_s", c.stab_wound_settle_s);
         num("stab_wound_settle_max_s", c.stab_wound_settle_max_s);
         num("stab_wound_entry_cms", c.stab_wound_entry_cms);
