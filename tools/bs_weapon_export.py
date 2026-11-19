@@ -21,14 +21,16 @@ Triangles are written counter-clockwise from outside (the mod reverses them for 
 Needs: pip install UnityPy numpy scipy
 """
 import json
-import math
+import os
 import sys
 import warnings
 
 import numpy as np
 import UnityPy
-from scipy.spatial import ConvexHull
 from UnityPy.helpers.MeshHelper import MeshHandler
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # python -I leaves the script folder out
+import weapon_parts as wp  # noqa: E402
 
 warnings.filterwarnings("ignore")
 # B&S bundles have their Unity version stripped; the type trees inside are what matter.
@@ -205,97 +207,18 @@ def dir_to_frame(v):
 frame_pos = np.array([to_frame(p) for p in positions])
 frame_nrm = np.array([dir_to_frame(n) for n in normals])
 
-with open(f"{out_dir}/{prefab_name}.obj", "w", newline="\n") as f:
-    f.write(f"# {prefab_name} exported by tools/bs_weapon_export.py; Unreal axes, cm, weapon frame\n")
-    for p in frame_pos:
-        f.write("v %.4f %.4f %.4f\n" % tuple(p))
-    for n in frame_nrm:
-        f.write("vn %.5f %.5f %.5f\n" % tuple(n))
-    for uv in uvs:
-        f.write("vt %.5f %.5f\n" % (uv[0], uv[1]))
-    for a, b, c in tris:
-        # Unity's front face is clockwise as seen in its left-handed space, which is numerically
-        # outward = cross(b - a, c - a): the same as an OBJ counter-clockwise face. Keep the order.
-        f.write(f"f {a+1}/{a+1}/{a+1} {b+1}/{b+1}/{b+1} {c+1}/{c+1}/{c+1}\n")
+# Unity's front face is clockwise as seen in its left-handed space, which is numerically
+# outward = cross(b - a, c - a): the same as an OBJ counter-clockwise face, so the order is kept.
+wp.write_visual_obj(f"{out_dir}/{prefab_name}.obj", f"{prefab_name} exported by tools/bs_weapon_export.py",
+                    frame_pos, frame_nrm, uvs, tris)
 
 # ---- zones and collision pieces --------------------------------------------------------------
 z = frame_pos[:, 2]
 handle_bottom = -main["axisLength"] * 100.0
-# The guard: near the handle's top end, the run of slices much wider than the grip.
-def width_at(lo, hi):
-    sel = frame_pos[(z >= lo) & (z < hi)]
-    return float(np.ptp(sel[:, 0])) if len(sel) else 0.0
-
-
-grip_width = float(np.median([w for w in (width_at(s, s + 1) for s in np.arange(handle_bottom, -2, 1)) if w > 0]))
-bins = [(s, width_at(s, s + 0.25)) for s in np.arange(-5.0, 20.0, 0.25)]
-wide = [s for s, w in bins if w > 2.0 * grip_width]
-if wide:
-    guard_bottom, guard_top = wide[0], wide[0] + 0.25
-    for s in wide:
-        if s <= guard_top + 0.5:
-            guard_top = s + 0.25
-else:
-    guard_bottom = guard_top = 0.0
-# Pieces: pommel below the handle, the grip, the guard, then the blade in slices so curves are kept.
-pieces = []
-
-
-edges = set()
-for a, b, c in tris:
-    for u, w in ((a, b), (b, c), (c, a)):
-        edges.add((min(u, w), max(u, w)))
-edges = np.array(sorted(edges))
-
-
-def plane_points(c):
-    """Where the mesh's edges cross the plane z = c (so a slice keeps its full outline even when the
-    model has no vertices near its ends)."""
-    za, zb = z[edges[:, 0]], z[edges[:, 1]]
-    cross = (za - c) * (zb - c) < 0
-    pa, pb = frame_pos[edges[cross, 0]], frame_pos[edges[cross, 1]]
-    t = ((c - za[cross]) / (zb[cross] - za[cross]))[:, None]
-    return pa + (pb - pa) * t
-
-
-def add_piece(slot, lo, hi):
-    sel = np.vstack([frame_pos[(z >= lo) & (z <= hi)], plane_points(lo), plane_points(hi)])
-    if len(sel) < 4:
-        return
-    try:
-        hull = ConvexHull(sel)
-    except Exception:
-        return
-    pieces.append((slot, sel[hull.vertices], hull))
-
-
-add_piece("Pommel", z.min(), handle_bottom)
-add_piece("Grip", handle_bottom, guard_bottom)
-add_piece("Guard", guard_bottom, guard_top)
+guard_bottom, guard_top, grip_width = wp.find_guard(frame_pos, handle_bottom)
+pieces = wp.build_pieces(frame_pos, tris, handle_bottom, guard_bottom, guard_top)
 top = z.max()
-n_slices = max(1, int(math.ceil((top - guard_top) / 15.0)))
-step = (top - guard_top) / n_slices
-for i in range(n_slices):
-    add_piece("Head", guard_top + i * step, guard_top + (i + 1) * step)
-
-with open(f"{out_dir}/{prefab_name}_collision.obj", "w", newline="\n") as f:
-    f.write(f"# {prefab_name} convex collision pieces (UCX_<slot>_<n>)\n")
-    count = {}
-    vbase = 0
-    for slot, pts, hull in pieces:
-        count[slot] = count.get(slot, 0) + 1
-        f.write(f"g UCX_{slot}_{count[slot]}\n")
-        index = {}
-        for k, vi in enumerate(hull.vertices):
-            index[vi] = vbase + k + 1
-            f.write("v %.4f %.4f %.4f\n" % tuple(hull.points[vi]))
-        centre = hull.points[hull.vertices].mean(axis=0)
-        for s in hull.simplices:
-            a, b, c = hull.points[s[0]], hull.points[s[1]], hull.points[s[2]]
-            if np.dot(np.cross(b - a, c - a), a - centre) < 0:
-                s = (s[0], s[2], s[1])
-            f.write(f"f {index[s[0]]} {index[s[1]]} {index[s[2]]}\n")
-        vbase += len(hull.vertices)
+wp.write_collision(f"{out_dir}/{prefab_name}_collision.obj", prefab_name, pieces)
 
 # ---- data -----------------------------------------------------------------------------------------
 damager_ids = {d["transformName"]: d["damagerID"] for d in item_json.get("damagers") or []}
@@ -333,15 +256,12 @@ print(json.dumps(out, indent=2))
 print(f"{len(frame_pos)} vertices, {len(tris)} triangles, {len(pieces)} collision pieces")
 
 # The same numbers as flat key=value lines for the mod (it has no JSON reader).
-with open(f"{out_dir}/{prefab_name}.txt", "w", newline="\n") as f:
-    f.write(f"; {prefab_name}: written by tools/bs_weapon_export.py, centimetres in the weapon frame\n")
-    f.write(f"mass_kg={out['mass_kg']}\n")
-    for k, v in out["zones_cm"].items():
-        f.write(f"{k}={v}\n")
-    if out["centre_of_mass_cm"]:
-        f.write(f"centre_of_mass_z={out['centre_of_mass_cm'][2]}\n")
-    for d in out["damagers"]:
-        f.write(f"damager_{d['name'].lower()}_z={d['position_cm'][2]}\n")
+numbers = {"mass_kg": out["mass_kg"], **out["zones_cm"]}
+if out["centre_of_mass_cm"]:
+    numbers["centre_of_mass_z"] = out["centre_of_mass_cm"][2]
+for d in out["damagers"]:
+    numbers[f"damager_{d['name'].lower()}_z"] = d["position_cm"][2]
+wp.write_numbers(f"{out_dir}/{prefab_name}.txt", f"{prefab_name}: written by tools/bs_weapon_export.py", numbers)
 
 # ---- textures --------------------------------------------------------------------------------
 # The model's own maps, converted to what Unreal expects:
@@ -352,17 +272,8 @@ with open(f"{out_dir}/{prefab_name}.txt", "w", newline="\n") as f:
 #                           B&S's MOES map (R metallic, G occlusion, B emission mask, A smoothness).
 # The normal and ORM maps are written gamma-encoded (linear -> sRGB) because the mod loads every file as
 # an sRGB texture; the GPU's sRGB decode then gives back the linear values.
-def lin_to_srgb(x):
-    return np.where(x <= 0.0031308, x * 12.92, 1.055 * np.power(np.clip(x, 0, 1), 1 / 2.4) - 0.055)
-
-
 def save(a, name, encode):
-    from PIL import Image
-    a = np.clip(a, 0, 1)
-    if encode:
-        a = lin_to_srgb(a)
-    Image.fromarray((a * 255 + 0.5).astype(np.uint8), "RGB").save(f"{out_dir}/{prefab_name}_{name}.png")
-    print(f"wrote {prefab_name}_{name}.png {a.shape[1]}x{a.shape[0]}")
+    wp.save_rgb(f"{out_dir}/{prefab_name}_{name}.png", a, encode)
 
 
 if len(material_ids) > 1:
@@ -389,8 +300,7 @@ if material_ids:
             x, y = nm[:, :, 3] * 2 - 1, nm[:, :, 1] * 2 - 1
         else:
             x, y = nm[:, :, 0] * 2 - 1, nm[:, :, 1] * 2 - 1
-        zz = np.sqrt(np.clip(1 - x * x - y * y, 0, 1))
-        save(np.dstack([x * 0.5 + 0.5, -y * 0.5 + 0.5, zz * 0.5 + 0.5]), "Normal", True)
+        wp.save_normal_from_opengl_xy(f"{out_dir}/{prefab_name}_Normal.png", x, y)
     moes = image("_MetallicGlossMap")
     if moes is not None:
-        save(np.dstack([moes[:, :, 1], 1 - moes[:, :, 3], moes[:, :, 0]]), "ORM", True)
+        wp.save_orm(f"{out_dir}/{prefab_name}_ORM.png", moes[:, :, 1], 1 - moes[:, :, 3], moes[:, :, 0])
