@@ -315,6 +315,11 @@ namespace hsvr
         // A weapon grabbed by its grip or blade sits at the game's own seat in the hand (the nearest of
         // it, edge turned, blade reversed), its handle through the seat's point (B&S fixed orientations).
         bool pose_grab_seat = true;
+        // Throwing (B&S): a weapon let go while the hand moves at least pose_throw_speed m/s is thrown the
+        // game's way (its hits count) and its velocity multiplied by pose_throw_multiplier (B&S 2.0).
+        bool pose_throw = true;
+        double pose_throw_speed = 2.0;
+        double pose_throw_multiplier = 2.0;
         double pose_grab_seat_reverse_bias_deg = 45.0; // a reversed seat must be this much nearer to win
         double pose_swing_speed_lo = 1.5;
         double pose_swing_speed_hi = 7.0;

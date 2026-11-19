@@ -2349,6 +2349,7 @@ namespace
     // (a weapon, item or fist; an empty hand waving does not swing), relative to the body, mapped
     // pose_swing_speed_lo..hi m/s -> 0..75, exactly 0 at rest (some game rules need == 0).
     double read_number_variable(UObject* owner, const TCHAR* name);
+    double g_hand_world_v[2] = {0.0, 0.0}; // m/s
     double g_swing_want = 0.0, g_swing_written = 0.0, g_swing_keep = 0.89, g_swing_last_t = -1.0;
     hsvr::Vec3 g_swing_rel[2];
     double g_swing_v[2] = {0.0, 0.0};
@@ -2359,6 +2360,24 @@ namespace
         using namespace hsvr;
         const Config& cfg = hsvr::config();
         g_swing_written = 0.0;
+        {
+            // Each hand's speed in the world (for throws), ~30 ms smoothing.
+            static hsvr::Vec3 last[2];
+            static double last_t = -1.0;
+            double t = now_seconds(), d = last_t > 0.0 ? t - last_t : 0.0;
+            last_t = t;
+            for (int side = 0; side < 2; ++side)
+            {
+                Vec3 at = g_pose.target[side];
+                if (g_pose.hand_valid[side] && d > 1e-4 && d < 0.1)
+                {
+                    double v = length(at - last[side]) / d / 100.0;
+                    g_hand_world_v[side] += (v - g_hand_world_v[side]) * (1.0 - std::exp(-d / 0.03));
+                }
+                else g_hand_world_v[side] = 0.0;
+                last[side] = at;
+            }
+        }
         if (!cfg.pose_feed_swing_speed) return;
         if (!g_swing_looked)
         {
@@ -3504,8 +3523,23 @@ namespace
     // hand joint, detaches the weapon and gives it its dropped damping).
     bool is_fist(UObject* weapon);
     void remove_fist(int side, UObject* pawn, const char* why);
-    void drop_weapon(int side, UObject* pawn)
+    // A throw (B&S: released faster than 2 m/s): the game counts an unheld weapon's hits only while its
+    // "Just Thrown" is set and "Last Parent" is the thrower (ModularWeaponBP @67055; hs_throwing.md),
+    // which Set Up Hand Weapon sets from "Dropped With no Damage" == false. Its flight is its own (the
+    // game adds nothing); B&S doubles the release velocity. The game clears Just Thrown only after a
+    // hit, so the mod clears it when the throw lands or misses, and keeps Last Parent while it flies
+    // (the game drops it beyond 3 m).
+    struct Thrown
     {
+        UObject* weapon = nullptr;
+        UObject* base = nullptr;
+        double t0 = 0.0;
+    };
+    std::vector<Thrown> g_thrown;
+
+    void drop_weapon(int side, UObject* pawn, bool thrown = false)
+    {
+        UObject* held = pawn ? object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) : nullptr;
         // A fist is not a weapon to drop: it goes.
         if (is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))))
         {
@@ -3528,7 +3562,7 @@ namespace
         {
             std::wstring n = p->GetName();
             names += n + STR(", ");
-            if (n.find(STR("Dropped")) != std::wstring::npos && p->GetClass().GetName() == STR("BoolProperty"))
+            if (n.find(STR("Dropped")) != std::wstring::npos && p->GetClass().GetName() == STR("BoolProperty") && !thrown)
             {
                 auto* flag = static_cast<FBoolProperty*>(p);
                 parameters[p->GetOffset_Internal() + flag->GetByteOffset()] |= flag->GetFieldMask();
@@ -3551,7 +3585,65 @@ namespace
         pawn->ProcessEvent(fn, parameters);
         g_hold[side] = HoldState{}; // a new hold (and slide) when anything is next held
         g_grip_log[side] = GripLog{}; // its 0.5 s "Grip:" line stops with the hold
-        HSVR_LOG("Hold: dropped with %ls(%ls)", name, names.c_str());
+        HSVR_LOG("Hold: dropped with %ls(%ls)%s", name, names.c_str(), thrown ? " as a throw" : "");
+        if (thrown && held)
+        {
+            using namespace hsvr;
+            const Config& cfg = hsvr::config();
+            UObject* base = object_property(held, STR("BaseMesh"));
+            if (!object_property(held, STR("Last Parent"))) set_variable(held, STR("Last Parent"), 0.0, pawn, nullptr);
+            Vec3 v{};
+            if (base)
+            {
+                Call lv(base, STR("GetPhysicsLinearVelocity"));
+                lv.run();
+                v = lv.vec();
+                if (cfg.pose_throw_multiplier != 1.0)
+                {
+                    Vec3 nv = v * cfg.pose_throw_multiplier;
+                    Call slv(base, STR("SetPhysicsLinearVelocity"));
+                    slv.three(STR("NewVel"), nv.x, nv.y, nv.z);
+                    slv.flag(STR("bAddToCurrent"), false);
+                    slv.run();
+                }
+            }
+            g_thrown.push_back(Thrown{held, base, now_seconds()});
+            HSVR_LOG("Throw: %s hand throws %ls at %.1f m/s (hand %.1f m/s, x%.1f); Just Thrown %d, Last Parent %s", side == 0 ? "left" : "right",
+                     held->GetName().c_str(), length(v) * cfg.pose_throw_multiplier / 100.0, g_hand_world_v[side], cfg.pose_throw_multiplier,
+                     (int)bool_property(held, STR("Just Thrown")), object_property(held, STR("Last Parent")) == pawn ? "you" : "NOT you");
+        }
+    }
+
+    void thrown_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        double now = now_seconds();
+        for (size_t i = 0; i < g_thrown.size();)
+        {
+            Thrown& t = g_thrown[i];
+            bool done = !t.weapon || !t.base || now - t.t0 > 4.0;
+            bool held = false;
+            if (!done)
+                for (const TCHAR* slot : {STR("Weapon L"), STR("Weapon R")}) held = held || object_property(pawn, slot) == t.weapon;
+            double speed = 0.0;
+            if (!done && !held)
+            {
+                Call lv(t.base, STR("GetPhysicsLinearVelocity"));
+                lv.run();
+                speed = length(lv.vec());
+                if (now - t.t0 > 0.3 && speed < 150.0) done = true; // landed or stopped
+                else if (bool_property(t.weapon, STR("Just Thrown")) && object_property(t.weapon, STR("Last Parent")) != pawn)
+                    set_variable(t.weapon, STR("Last Parent"), 0.0, pawn, nullptr);
+            }
+            if (done || held)
+            {
+                if (t.weapon && !held && bool_property(t.weapon, STR("Just Thrown"))) set_bool_property(t.weapon, STR("Just Thrown"), false);
+                if (t.weapon) HSVR_LOG("Throw: %ls %s after %.2f s", t.weapon->GetName().c_str(), held ? "caught" : "landed", now - t.t0);
+                g_thrown.erase(g_thrown.begin() + i);
+                continue;
+            }
+            ++i;
+        }
     }
 
     // Puts a weapon lying in the world into that hand the game's own way: Set Up Right/Left Hand
@@ -5000,8 +5092,9 @@ namespace
                 }
                 if (mine && cfg.pose_grab_release_drops)
                 {
-                    drop_weapon(side, pawn);
-                    HSVR_LOG("Grab: %s grip let go: dropped %ls", hand, mine->GetName().c_str());
+                    bool throw_it = cfg.pose_throw && g_hand_world_v[side] >= cfg.pose_throw_speed && !is_fist(mine);
+                    drop_weapon(side, pawn, throw_it);
+                    HSVR_LOG("Grab: %s grip let go: %s %ls (hand %.1f m/s)", hand, throw_it ? "threw" : "dropped", mine->GetName().c_str(), g_hand_world_v[side]);
                 }
                 else if (!mine)
                     release_object(side, pawn);
@@ -7130,6 +7223,7 @@ namespace
             crouch_after_tick(context);
             weapon_spring_after_tick(context);
             swing_speed_after_tick(context);
+            thrown_tick(context);
         }
         stab_log_tick(context);
         if (!g_hold_have || !g_hold_capsule.load()) return;
