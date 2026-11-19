@@ -5357,6 +5357,39 @@ namespace
         g.t = t;
         g.handle = hd.name;
         g.grip_type = clamp_grip_type(side, side == 1 ? hd.grip_r : hd.grip_l);
+        if (hsvr::config().pose_grab_seat && (hd.name == "grip" || hd.name == "blade"))
+        {
+            // B&S: an item sits in the hand in one of a few fixed orientations, the one nearest to how
+            // it was. Here: the game's own seat (weapon_rSocket / weapon_lSocket in the hand bone, the same
+            // for every ordinary weapon; seated_orientation.md), its blade either way along the grip line
+            // and its edge either way (the game's reverse and Mordhau seats are these turned 180). The
+            // handle's line goes through the seat's point, where the fingers close.
+            double mx = side == 0 ? -1.0 : 1.0;
+            Vec3 sz = normalized(Vec3{-0.495 * mx, 0.861, 0.113});
+            Vec3 sx = Vec3{0.866 * mx, 0.500, -0.013};
+            sx = normalized(sx - sz * dot(sx, sz));
+            Quat seat = quat_from_axes(sx, cross(sz, sx), sz);
+            Quat a_rot = socket_rotation(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+            Quat natural = (a_rot.inverse() * w0_rot).normalized();
+            const Quat flips[4] = {Quat{0, 0, 0, 1}, Quat{0, 0, 1, 0}, Quat{1, 0, 0, 0}, Quat{0, 1, 0, 0}};
+            const char* flip_name[4] = {"as the game seats it", "edge turned", "blade reversed", "blade reversed, edge turned"};
+            int best = 0;
+            double best_a = 1e9;
+            for (int i = 0; i < 4; ++i)
+            {
+                Quat c = (seat * flips[i]).normalized();
+                double d = std::fabs(c.x * natural.x + c.y * natural.y + c.z * natural.z + c.w * natural.w);
+                double ang = 2.0 * std::acos((std::min)(1.0, d));
+                if (ang < best_a)
+                {
+                    best_a = ang;
+                    best = i;
+                }
+            }
+            g.rel = (seat * flips[best]).normalized();
+            g.in_anchor = Vec3{-7.25 * mx, 1.34, -2.87};
+            HSVR_LOG("Grab: %s hand seats it %s (%.0f deg from how it was)", side == 0 ? "left" : "right", flip_name[best], best_a * 180.0 / 3.14159265358979);
+        }
         return g;
     }
 

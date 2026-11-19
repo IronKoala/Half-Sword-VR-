@@ -371,6 +371,7 @@ namespace hsvr
         flag("pose_two_hand_curl", c.pose_two_hand_curl);
         flag("pose_fingers_anim_only", c.pose_fingers_anim_only);
         flag("pose_feed_swing_speed", c.pose_feed_swing_speed);
+        flag("pose_grab_seat", c.pose_grab_seat);
         num("pose_swing_speed_lo", c.pose_swing_speed_lo);
         num("pose_swing_speed_hi", c.pose_swing_speed_hi);
         num("pose_swing_speed_fall_s", c.pose_swing_speed_fall_s);

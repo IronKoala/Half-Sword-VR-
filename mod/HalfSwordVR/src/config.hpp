@@ -312,6 +312,9 @@ namespace hsvr
         // The game's swing speed (Aim Swing Speed) fed from the controllers: the faster hand that holds
         // something, lo..hi m/s relative to the body -> 0..75; falls with this time constant.
         bool pose_feed_swing_speed = true;
+        // A weapon grabbed by its grip or blade sits at the game's own seat in the hand (the nearest of
+        // it, edge turned, blade reversed), its handle through the seat's point (B&S fixed orientations).
+        bool pose_grab_seat = true;
         double pose_swing_speed_lo = 1.5;
         double pose_swing_speed_hi = 7.0;
         double pose_swing_speed_fall_s = 0.15;
