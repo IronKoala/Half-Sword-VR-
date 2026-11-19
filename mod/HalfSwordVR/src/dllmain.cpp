@@ -874,6 +874,7 @@ namespace
         hsvr::Vec3 target[2]; // last hand targets (where the hand bone goes, from the controller)
         hsvr::Quat hand_rot[2]; // and the hand bone's world rotation there
         hsvr::Vec3 raw_target[2]; // the same before scaling your reach to his (for measuring your arm)
+        hsvr::Vec3 reach_target[2]; // scaled to his reach but not yet clamped to it (where you mean his hand to be)
         bool hand_valid[2] = {false, false};
         hsvr::Vec3 swivel_local[2]; // smoothed elbow direction, in the body's frame
         bool swivel_valid[2] = {false, false};
@@ -1532,6 +1533,7 @@ namespace
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     std::atomic<bool> g_fake_stick_click{false}; // test: hsvr.stick_click 1 holds the left stick click
     std::string g_park_socket;                  // test: hsvr.arm_park <socket> (arm mode 13): right hand there
+    double g_arm_floor[3] = {45.0, 15.0, 5.0};  // test: hsvr.arm_floor <fwd> <side> <height> (arm mode 14): right hand near the floor
     std::atomic<float> g_fake_trigger[2] = {-1.0f, -1.0f}; // test: hsvr.trigger <0|1> <value>, -1 = the controller
     std::atomic<float> g_fake_squeeze[2] = {-1.0f, -1.0f}; // test: hsvr.squeeze <0|1> <value>, -1 = the controller
 
@@ -1753,6 +1755,15 @@ namespace
                 local = Vec3{35.0 + 10.0 * std::sin(t), out * 15.0, -15.0 + 20.0 * std::cos(t)};
             }
             grip = shoulder + body.rotate(local);
+            if (mode == 14 && side == 1 && g_pose.pawn)
+            {
+                // Floor test: the right controller this far ahead of and beside his capsule, this high above
+                // the floor under it (the capsule's bottom).
+                Vec3 ap = actor_location(g_pose.pawn);
+                double floor_z = ap.z - 90.0 * component_scale_z(object_property(g_pose.pawn, STR("Mesh")));
+                Vec3 flat = body.rotate(Vec3{g_arm_floor[0], g_arm_floor[1], 0.0});
+                grip = Vec3{ap.x + flat.x, ap.y + flat.y, floor_z + g_arm_floor[2]};
+            }
             if (mode == 13 && side == 1 && g_pose.pawn && !g_park_socket.empty())
             {
                 // Holster test: the right hand's grip point parked on a named socket of his mesh.
@@ -1847,6 +1858,7 @@ namespace
         // as far out along his arm as it is along yours.
         if (cfg.pose_user_arm_cm > 1.0 && tracked) target = S + (target - S) * ((a.upper_length + a.lower_length) / cfg.pose_user_arm_cm);
         g_pose.target[side] = target;
+        g_pose.reach_target[side] = target;
         S = shoulder_reach(side, cfg, S, target, component_inv);
 
         Vec3 to = target - S;
@@ -5854,6 +5866,22 @@ namespace
             Vec3 at = hand_grab_point(mesh, side);
             if (cfg.pose_draw && try_draw(side, pawn, mesh, at, cfg)) continue;
             if (try_scabbard_grab(side, pawn, mesh, at, cfg)) continue;
+            // His arm can be too short for where your hand is (reaching to the floor: his crouch stops at
+            // 55 cm and he does not bend forward, so his hand stayed 20 cm above your controller on the
+            // floor, playtest 14:31). Then items are looked for at your controller, and what you touch there
+            // is pulled up into his hand (the grab's settle) instead of never being touched.
+            Vec3 palm_drawn = at;
+            if (cfg.pose_grab_from_controller && g_pose.hand_valid[side])
+            {
+                Vec3 hand_bone = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+                double held_back = length(g_pose.reach_target[side] - hand_bone);
+                if (held_back > cfg.pose_grab_controller_gap_cm)
+                {
+                    at = at + (g_pose.raw_target[side] - hand_bone);
+                    HSVR_LOG("Grab: %s hand is held %.1f cm short of your hand by his reach: looking at your controller (%.0f %.0f %.0f)", hand, held_back, at.x,
+                             at.y, at.z);
+                }
+            }
             std::vector<UObject*> weapons, willies;
             UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
@@ -5926,7 +5954,7 @@ namespace
                     {
                         if (hi >= 0 && hd <= cfg.pose_grab_handle_cm)
                         {
-                            g_pending_free[side] = handle_grip(side, mesh, w0_pos, w0_rot, at, hs[hi], t);
+                            g_pending_free[side] = handle_grip(side, mesh, w0_pos, w0_rot, palm_drawn, hs[hi], t);
                             g_pending_item[side] = best;
                             g_pending_free[side].hold_at = cfg.pose_grab_settle_s > 0.0;
                             g_pending_free[side].at_pos = w0_pos;
@@ -5938,7 +5966,7 @@ namespace
                         }
                         else
                         {
-                            hold_where_touched(side, mesh, best, hb, w0_pos, w0_rot, at, touch, "spot where the hand touched it", nullptr, true);
+                            hold_where_touched(side, mesh, best, hb, w0_pos, w0_rot, palm_drawn, touch, "spot where the hand touched it", nullptr, true);
                             g_pending_free[side].grip_type = 5;
                         }
                     }
@@ -12094,6 +12122,13 @@ namespace
             {
                 g_fake_stick_click.store(atoi(entry.command.c_str() + 17) != 0);
                 HSVR_LOG("Script: hsvr.stick_click %d", (int)g_fake_stick_click.load());
+                continue;
+            }
+            if (entry.command.rfind("hsvr.arm_floor ", 0) == 0)
+            {
+                std::sscanf(entry.command.c_str() + 15, "%lf %lf %lf", &g_arm_floor[0], &g_arm_floor[1], &g_arm_floor[2]);
+                g_fake_arm_mode.store(14);
+                HSVR_LOG("Script: hsvr.arm_floor %.0f ahead, %.0f to the side, %.0f cm above the floor (right hand)", g_arm_floor[0], g_arm_floor[1], g_arm_floor[2]);
                 continue;
             }
             if (entry.command.rfind("hsvr.arm_park ", 0) == 0)

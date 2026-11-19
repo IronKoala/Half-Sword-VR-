@@ -371,6 +371,8 @@ namespace hsvr
         num("pose_slide_hand_half_cm", c.pose_slide_hand_half_cm);
         flag("pose_slide_zone_measured", c.pose_slide_zone_measured);
         num("pose_slide_wide_cm", c.pose_slide_wide_cm);
+        flag("pose_grab_from_controller", c.pose_grab_from_controller);
+        num("pose_grab_controller_gap_cm", c.pose_grab_controller_gap_cm);
         flag("pose_scabbard_handle", c.pose_scabbard_handle);
         flag("pose_grab_weapon_handles_only", c.pose_grab_weapon_handles_only);
         num("pose_hold_damping_ratio", c.pose_hold_damping_ratio);

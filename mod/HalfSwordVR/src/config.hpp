@@ -339,6 +339,10 @@ namespace hsvr
         // polearm's hook or head, a wide pommel). 0 = the game's lengths and its Head module only.
         bool pose_slide_zone_measured = true;
         double pose_slide_wide_cm = 4.0;
+        // When his arm can't reach where your hand is (more than grab_controller_gap_cm short: reaching to the
+        // floor), a squeeze looks for items at your controller, and what it touches is pulled into his hand.
+        bool pose_grab_from_controller = true;
+        double pose_grab_controller_gap_cm = 4.0;
         // A belt scabbard is a handle (B&S): taken only within pose_grab_handle_cm of its length, lined up
         // with the hand's grip line, the trigger slides the hand along it. 0 = held where touched, as before.
         bool pose_scabbard_handle = true;
