@@ -346,6 +346,12 @@ namespace hsvr
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;
         double pose_crouch_dead_zone_cm = 3.0;
+        // Crouching keeps his legs on the leg IK: the animation's kneel and falling leg poses are kept
+        // off (they sank the whole body 50-100 cm at a deep crouch). And the capsule is never put more
+        // than 15 cm below its standing height over the floor (the game drops it ~77 cm when its foot
+        // traces miss).
+        bool pose_crouch_keep_leg_ik = true;
+        bool pose_capsule_floor_clamp = true;
         // Where the wrist sits relative to the controller's grip, in the controller's frame
         // (forward, right, up, cm), and how the hand is turned relative to the controller (degrees).
         // Defaults: the wrist 8 cm from the palm centre back along the fingers and 2 cm toward the

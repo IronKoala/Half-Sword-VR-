@@ -166,3 +166,12 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `hsvr.weapon_collision <n>` | Switches the weapon's collision mode. This rebuilds the body and breaks the hand joint; don't use it to test the grip |
 | `hsvr.contact_log 0/1` | Logs which of his bodies, and which other components, touch the weapon (on by default) |
 | `hsvr.arm_move <mode>` | Fake-tracking arms: 0 circles, 1 still, 2 slow swing, 3 fast swing, 4 overhead, 5 pushed down through the floor (the weapon is stopped by the ground), 6 reaching 54-70 cm out in front (past his arm: the shoulder reaches) |
+
+## Crouch (2026-11-19, playtest: body sank through the floor at a deep crouch)
+
+| Setting | Default | What it does |
+|---|---|---|
+| `pose_crouch_keep_leg_ik` | 1 | The animation's kneel and falling leg branches (every Kneel flag and Free Fall Rate in ABP_Willie's own copy) are kept off each frame, so the legs stay on the leg IK. The log line "Crouch: kept off in the animation" lists what was found; "the animation wanted canned legs" shows when the game tried. The pawn's own values are not touched. |
+| `pose_capsule_floor_clamp` | 1 | The capsule is never more than 15 cm below its standing height over the floor under it (the game drops it ~77 cm when its foot traces miss). Logged as "Capsule: the game put it ... into the floor". |
+
+Test: crouch slowly to the deepest you can and hold 10 s, a few times. Pass: feet on the floor, head where your headset is, no "into the floor" lines after the first second.

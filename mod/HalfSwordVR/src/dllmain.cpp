@@ -874,6 +874,7 @@ namespace
 
     void feet_reset();
     bool ground_below(UObject* pawn, double x, double y, double from_z, double& ground_z);
+    double number_property(UObject* owner, FProperty* p);
 
     void pose_release()
     {
@@ -1241,6 +1242,61 @@ namespace
                 }
             HSVR_LOG("Feet: animation foot targets %s/%s; foot properties in the animation: %s", g_effector[0] ? "found" : "MISSING",
                      g_effector[1] ? "found" : "MISSING", seen.c_str());
+        }
+        // His legs stay on the leg IK: the animation's kneel and falling branches (ABP_Willie BLB_131
+        // R/L Kneel, BLB_29/TWB_22 Kneel Fall, TWB_80 Free Fall Rate) replace the IK'd legs with canned
+        // poses that carry their own lower pelvis (crouch_ik.md). At a deep crouch the game's kneel
+        // trigger fired and the whole body sank 50-100 cm (playtest 2026-11-18). Cleared in the
+        // animation's copy only, after its update reads the pawn; the pawn's own values are untouched.
+        if (hsvr::config().pose_crouch_keep_leg_ik)
+        {
+            static std::vector<FProperty*> clear_bools, clear_numbers;
+            static bool looked = false;
+            if (!looked)
+            {
+                looked = true;
+                std::string names;
+                for (UStruct* level = static_cast<UStruct*>(context->GetClassPrivate()); level; level = level->GetSuperStruct())
+                    for (FProperty* p : level->ForEachProperty())
+                    {
+                        std::wstring n = p->GetName();
+                        auto kind = p->GetClass().GetName();
+                        bool kneel_flag = kind == STR("BoolProperty") && n.find(STR("Kneel")) != std::wstring::npos;
+                        bool fall_rate = (kind == STR("DoubleProperty") || kind == STR("FloatProperty")) && n == STR("Free Fall Rate");
+                        if (!kneel_flag && !fall_rate) continue;
+                        (kneel_flag ? clear_bools : clear_numbers).push_back(p);
+                        if (!names.empty()) names += ", ";
+                        for (wchar_t ch : n) names += (char)(ch < 128 ? ch : '?');
+                    }
+                HSVR_LOG("Crouch: kept off in the animation every frame (legs stay on the IK): %s", names.empty() ? "NONE FOUND" : names.c_str());
+            }
+            std::string was;
+            for (FProperty* p : clear_bools)
+            {
+                auto* flag = static_cast<FBoolProperty*>(p);
+                uint8_t* byte = reinterpret_cast<uint8_t*>(context) + p->GetOffset_Internal() + flag->GetByteOffset();
+                if (*byte & flag->GetFieldMask())
+                {
+                    std::wstring n = p->GetName();
+                    was += " ";
+                    for (wchar_t ch : n) was += (char)(ch < 128 ? ch : '?');
+                }
+                *byte &= (uint8_t)~flag->GetFieldMask();
+            }
+            for (FProperty* p : clear_numbers)
+            {
+                double v = number_property(context, p);
+                if (v > 0.01)
+                {
+                    char part[48];
+                    std::snprintf(part, sizeof(part), " Free Fall Rate %.2f", v);
+                    was += part;
+                }
+                uint8_t* at = reinterpret_cast<uint8_t*>(context) + p->GetOffset_Internal();
+                if (p->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(at) = 0.0;
+                else *reinterpret_cast<float*>(at) = 0.0f;
+            }
+            if (!was.empty()) HSVR_LOG_EVERY(0.5, "Crouch: the animation wanted canned legs (crouch %.0f cm):%s; kept on the leg IK", g_crouch_drop, was.c_str());
         }
         UObject* mesh = g_pose.mesh;
         UObject* pawn = g_pose.pawn;
@@ -6052,6 +6108,24 @@ namespace
         Vec3 moved{now_at.x - g_hold_location.x, now_at.y - g_hold_location.y, 0.0};
         double rise = now_at.z - g_hold_location.z;
         Vec3 keep{g_hold_location.x, g_hold_location.y, rise > 30.0 ? g_hold_location.z : now_at.z};
+        // Never sunk into the floor: when its foot traces miss (a foot posed under the floor) the
+        // game drops the capsule ~77 cm (Willie @594860, crouch_ik.md). The capsule's centre is kept
+        // at least its standing height above the floor under it, less 15 cm (the game's own step
+        // offset is within +-10).
+        if (hsvr::config().pose_capsule_floor_clamp && g_pose.mesh)
+        {
+            double floor_z = 0.0;
+            if (ground_below(context, keep.x, keep.y, keep.z + 40.0, floor_z))
+            {
+                double lowest = floor_z + 90.0 * component_scale_z(g_pose.mesh) - 15.0;
+                if (keep.z < lowest)
+                {
+                    HSVR_LOG_EVERY(0.5, "Capsule: the game put it %.1f cm into the floor (centre %.1f, floor %.1f, crouch %.0f cm): kept at %.1f", lowest - keep.z, keep.z,
+                                   floor_z, g_crouch_drop, lowest);
+                    keep.z = lowest;
+                }
+            }
+        }
         static double last_line = 0.0;
         static double moved_max = 0.0;
         static int climbs = 0;

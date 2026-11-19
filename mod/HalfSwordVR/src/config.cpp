@@ -401,6 +401,8 @@ namespace hsvr
         num("pose_teleport_above_cm", c.pose_teleport_above_cm);
         flag("pose_crouch", c.pose_crouch);
         num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
+        flag("pose_crouch_keep_leg_ik", c.pose_crouch_keep_leg_ik);
+        flag("pose_capsule_floor_clamp", c.pose_capsule_floor_clamp);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);
         num("pose_wrist_right_cm", c.pose_wrist_right_cm);
         num("pose_wrist_up_cm", c.pose_wrist_up_cm);
