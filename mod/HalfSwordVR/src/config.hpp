@@ -216,6 +216,13 @@ namespace hsvr
         double pose_hold_max_force = 3000.0;
         // While the held weapon is stuck in a body, the hold's force and torque caps are scaled by this.
         double pose_hold_stuck_force_scale = 0.15;
+        // In a wound (the weapon Stuck In Body): the blade slides along it at most this fast in and
+        // out (cm/s; B&S's held dampers with the hand's strength), x stab_wound_head_factor in the
+        // head and neck; sideways and in turn it goes with the body.
+        bool stab_wound_hold = true;
+        double stab_wound_in_cms = 50.0;
+        double stab_wound_out_cms = 40.0;
+        double stab_wound_head_factor = 0.35;
         double pose_hold_turn_spring = 1100.0;
         double pose_hold_turn_damper = 45.0;
         double pose_hold_max_torque = 250.0;

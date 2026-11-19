@@ -382,6 +382,10 @@ namespace hsvr
         num("pose_draw_force_scale", c.pose_draw_force_scale);
         flag("pose_draw_scabbard_free", c.pose_draw_scabbard_free);
         num("pose_hold_stuck_force_scale", c.pose_hold_stuck_force_scale);
+        flag("stab_wound_hold", c.stab_wound_hold);
+        num("stab_wound_in_cms", c.stab_wound_in_cms);
+        num("stab_wound_out_cms", c.stab_wound_out_cms);
+        num("stab_wound_head_factor", c.stab_wound_head_factor);
         flag("pose_sheathe", c.pose_sheathe);
         num("pose_sheathe_mouth_cm", c.pose_sheathe_mouth_cm);
         num("pose_sheathe_angle_deg", c.pose_sheathe_angle_deg);

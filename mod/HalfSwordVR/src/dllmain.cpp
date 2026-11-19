@@ -5881,6 +5881,8 @@ namespace
 
     // One tick of the hold for one hand. `joint` is the game's hand joint (its frames say where on the
     // weapon the hand holds it and how the weapon sits in the hand); `base` the weapon's BaseMesh.
+    std::wstring stab_name_var(UObject* owner, const TCHAR* name);
+
     void hold_weapon(int side, UObject* pawn, UObject* joint, UObject* base, UObject* weapon, double mass, const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -6391,11 +6393,38 @@ namespace
                 double now_ax = dot(v_com_now, u), need_ax = dot(v_need, u);
                 v_need = v_need + u * ((now_ax * h.handle_keep + need_ax * (1.0 - h.handle_keep)) - need_ax);
             }
+            // In a wound (Stuck In Body): the blade only slides along the wound, slowed by it as in
+            // B&S (held penetration dampers 800 in / 1000 N s/m out: with the hand's ~400 N that is
+            // ~0.5 m/s in, ~0.4 m/s out), harder in the head (S&S: pull-out needs about 3x more);
+            // sideways and in turn it goes with him (the game's stuck joint holds it in a 15 deg
+            // cone). Pulling back far enough draws it out; the game lets go once the tip box leaves
+            // the body (stab-test9).
+            bool in_wound = cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body"));
+            if (in_wound)
+            {
+                Vec3 u = rot.rotate({0.0, 0.0, 1.0});
+                if (UObject* jt = object_property(weapon, STR("Jammed Tip")))
+                {
+                    Call f(jt, STR("GetForwardVector"));
+                    f.run();
+                    Vec3 fw = f.vec();
+                    if (length(fw) > 0.5) u = fw * (1.0 / length(fw));
+                }
+                std::wstring bone = stab_name_var(weapon, STR("Hit Bone Name"));
+                bool head = bone == STR("Head") || bone == STR("head") || bone.rfind(STR("neck"), 0) == 0;
+                double k = head ? cfg.stab_wound_head_factor : 1.0;
+                double need_ax = dot(v_need, u), now_ax = dot(v_com_now, u);
+                double ax = (std::min)(cfg.stab_wound_in_cms * k, (std::max)(-cfg.stab_wound_out_cms * k, need_ax));
+                v_need = (v_com_now - u * now_ax) + u * ax;
+                HSVR_LOG_EVERY(0.25, "Hold: %s hand's %ls in a wound (%ls): wanted %.0f cm/s along it, slides %.0f", side == 0 ? "left" : "right",
+                               weapon->GetName().c_str(), bone.c_str(), need_ax, ax);
+            }
             Vec3 dv = v_need - v_com_now;
             double dv_most = (max_force / (std::max)(0.05, mass)) * DT + std::fabs(gz) * DT;
             bool f_capped = length(dv) > dv_most;
             dv = clamp_length(dv, dv_most);
             Vec3 w_need = scaled_axis((rot_t * rot.inverse()).normalized()) * (1.0 / DT);
+            if (in_wound) w_need = w_now;
             Vec3 dL = about_com * (w_need - w_now);
             bool t_capped = length(dL) > max_torque * DT;
             dL = clamp_length(dL, max_torque * DT);
