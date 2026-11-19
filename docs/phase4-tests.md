@@ -94,8 +94,8 @@ Next: your strength from the game's stats instead of a fixed number, the hand st
 |---|---|---|
 | `pose_grab_button` | 1 | The grab button. |
 | `pose_grab_radius_cm` | 10 | How near the weapon's body your hand must be. |
-| `pose_shield_free_grip` | 1 | A shield grabbed more than `pose_shield_snap_cm` from its own grip is held where the hand touched it (the rim or any edge), turned as it was; near its own grip the game's grip is used. |
-| `pose_shield_snap_cm` | 10 | How near the shield's own grip counts as taking it by that grip. |
+| `pose_shield_free_grip` | 1 | Shields: every strap and handle measured on the shield's mesh is a grab point. The hand closing within `pose_shield_point_cm` of one the game itself uses for that hand takes the game's grip (strap shields on the forearm); any other fitting is held in the hand where it closed, and anywhere else (the rim, an edge) the hand holds it where it touched. 0 = always the game's grip. |
+| `pose_shield_point_cm` | 8 | How near a strap or handle the hand must close to take the shield by it. |
 | `pose_grab_release_drops` | 1 | Letting go of the grip drops the weapon. |
 | `pose_grab_objects` | 1 | Objects and bodies can be grabbed too. |
 
@@ -133,7 +133,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `hsvr.spawn <class path> [left]` | Spawns an actor of that class just above that hand (e.g. food: /Game/Assets/Food/Blueprints/BP_Food_Apple_Red.BP_Food_Apple_Red_C). `hsvr.give_weapon` now refuses anything that is not a ModularWeaponBP (an apple through Set Up Hand Weapon is a fatal engine error). |
 | `hsvr.arm_move 8` | Fake arms: both hands at his mouth (eating and drinking tests); `9` the same with the hands turning over (a full turn in 6 s) so a bottle tips |
 | `hsvr.bring_object [left] food` | As bring_object, food items only |
-| `hsvr.bring_object [left] shield [rim]` | The nearest loose shield kept at that hand (up to 8 s, until the hand holds it): its middle, or with `rim` a point on its edge |
+| `hsvr.bring_object [left] shield|weapon [rim] [at x y z]` | The nearest loose shield (or non-shield weapon) kept at that hand (up to 8 s, until the hand holds it): its middle, with `rim` a point on its edge, or with `at x y z` that point of it (BaseMesh frame, cm) |
 | `hsvr.watch_vars grip,offhand,stuck` | Every tick, logs each change ("Watch: <time> pawn.<name> old -> new") of the number, yes/no and enum variables on his pawn and on the weapon in each hand whose names contain one of the words (case ignored). No words = stop. For matching a game routine to a kick by its timing |
 | `hsvr.passive_foe` | Makes every foe a training dummy: its AI controller stopped (DED, tick off, movement stopped) and its attack inputs cleared; its physics, balance and get-up keep working. Spawn one with Free Mode Foes Amount=1, Brawling off, and run this right after it spawns |
 | `hsvr.force_watch 0/1` | Logs ("Force:") every physics write from game script (impulses, forces, velocities, teleports, collision and physics switches) on a part of a weapon in his hands or his own body, with the calling Blueprint function and bytecode offset |

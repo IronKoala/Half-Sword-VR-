@@ -240,10 +240,11 @@ namespace hsvr
         // drop what that hand holds (pose_grab_release_drops).
         bool pose_grab_button = true;
         double pose_grab_radius_cm = 10.0;
-        // Shields: a grab within pose_shield_snap_cm of the shield's own grip takes it the game's way;
-        // anywhere else (the rim, an edge) the hand holds it where it touched (pose_shield_free_grip).
+        // Shields: every measured strap and handle is a grab point; anywhere else (the rim, an edge)
+        // the hand holds it where it touched (pose_shield_free_grip; 0 = always the game's grip).
         bool pose_shield_free_grip = true;
-        double pose_shield_snap_cm = 10.0;
+        // How near a strap or handle the hand must close to take the shield by it (cm).
+        double pose_shield_point_cm = 8.0;
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;

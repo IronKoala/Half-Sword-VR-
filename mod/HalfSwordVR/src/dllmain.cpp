@@ -3000,6 +3000,7 @@ namespace
         bool forearm = false;
         std::string bone;
         std::string what; // for the log: "rim", a strap's name...
+        bool place = false; // put the weapon there on the hold's first tick
     };
     FreeGrip g_pending_free[2]; // applied when that hand's next hold starts
 
@@ -4316,37 +4317,101 @@ namespace
         return best;
     }
 
-    // A shield taken where the hand touched it. The game's set-up has just snapped it onto its one
-    // grip (shield_grips.md); where that grip was on the shield before the snap is where his hand
-    // would have had to be. Near there (pose_shield_snap_cm), the game's grip stays. Anywhere else
-    // the shield goes back where it was and the hand holds it there, as it touched it: the rim, or
-    // any edge (the shield's turn in the hand kept as it was).
+    // Every strap and handle you can see on a shield is a grab point (Matthew 2026-11-18: "if i can
+    // see more then one grab point then i want to be able to grab it"). Measured from the shields'
+    // own meshes (HalfSwordDecomp defaults/shield_grab_points_measured.csv: the cooked StaticMesh
+    // LOD0, each fitting a separate piece of the mesh): its centre line in the BaseMesh frame (cm),
+    // and which hands the game itself puts on it (its own grip: "Grip R/L Hand Default" and the arm
+    // pose it snaps to). Flush fittings with no room for a hand are left out.
+    struct ShieldFitting
+    {
+        const wchar_t* shield; // class name without _C
+        const char* name;
+        double cx, cy, cz, ax, ay, az, length;
+        bool game_r, game_l; // part of the game's own grip for that hand
+    };
+    const ShieldFitting k_shield_fittings[] = {
+        {L"Shield_Buckler", "handle", 0.00, 0.00, -0.04, -0.000, -0.006, -1.000, 33.4, true, true},
+        {L"Shield_Buckler_2", "handle", 0.01, 0.01, 0.05, 0.000, -0.002, -1.000, 23.6, true, true},
+        {L"Shield_Buckler_3", "handle", -0.01, 0.00, 0.07, -0.000, -0.000, -1.000, 26.6, true, true},
+        {L"Shield_Tagre", "big strap", 6.91, -6.56, -7.52, 0.643, 0.000, 0.766, 19.3, true, true},
+        {L"Shield_Tagre", "narrow strap", -6.00, -4.54, 0.54, 0.735, 0.000, 0.678, 19.6, true, false},
+        {L"Shield_Tagre", "upright strap", -6.12, -4.06, 0.61, 0.164, 0.000, 0.987, 19.4, true, true},
+        {L"Shield_Pavise_Light", "upright handle", 0.18, 1.43, -0.16, -0.014, 0.000, 1.000, 21.1, false, false},
+        {L"Shield_Pavise_Light", "top handle", 0.12, -3.03, 15.94, -1.000, 0.000, 0.022, 27.5, true, false},
+        {L"Shield_Pavise_Light", "lower strap", 0.38, -7.42, -8.74, 1.000, 0.000, 0.004, 26.0, false, false},
+        {L"Shield_Pavise_Heavy", "centre handle", -0.09, 0.60, -3.33, 0.008, 0.000, 1.000, 18.9, true, false},
+        {L"Shield_Pavise_Heavy", "centre handle's right arm", 5.47, 1.52, 9.55, 0.922, 0.000, 0.386, 14.0, false, false},
+        {L"Shield_Pavise_Heavy", "centre handle's left arm", -5.53, 1.53, 9.57, -0.929, 0.000, 0.370, 13.9, false, false},
+        {L"Shield_Pavise_Heavy", "side bar", -16.42, -2.18, 14.36, 0.018, 0.000, 1.000, 25.9, false, true},
+        {L"Shield_Pavise_Heavy", "long strap", 13.80, -6.77, 12.38, -0.007, 0.000, 1.000, 39.6, false, true},
+        {L"Shield_Pavise_Tower", "crossed strap's middle", -0.21, -0.60, -0.31, 0.008, 0.000, 1.000, 20.9, true, true},
+        {L"Shield_Pavise_Tower", "crossed strap, upper right", 5.66, 1.34, 12.63, 0.808, 0.000, 0.589, 15.2, false, false},
+        {L"Shield_Pavise_Tower", "crossed strap, upper left", -5.54, 1.64, 12.43, -0.797, 0.000, 0.604, 13.1, false, false},
+        {L"Shield_Pavise_Tower", "crossed strap, lower right", 5.82, 1.26, -11.79, -0.833, 0.000, 0.553, 14.6, false, false},
+        {L"Shield_Pavise_Tower", "crossed strap, lower left", -5.71, 1.47, -11.77, 0.880, 0.000, 0.474, 14.2, false, false},
+        {L"Shield_Pavise_Tower", "top rod", 0.31, 2.67, 51.44, 1.000, 0.000, 0.000, 13.2, false, false},
+        {L"Shield_Pavise_Tower", "bottom bar", 0.18, 0.69, -48.85, 1.000, 0.000, -0.000, 25.5, false, false},
+        {L"Shield_BossGrip", "handle", -0.00, -0.39, 0.70, -0.001, 0.000, 1.000, 50.1, true, true},
+    };
+
+    // A shield taken with the grip button. The hand point, in the shield's frame from before the
+    // game's set-up moves it, is matched against its fittings: the nearest within
+    // pose_shield_point_cm wins. One of the game's own for that hand keeps the game's grip (a strap
+    // shield then sits on the forearm as the game has it). Any other fitting is held in the hand where
+    // the hand closed on it, and anywhere else on the shield (the rim, an edge, the face) the hand
+    // holds it where it touched; both keep the shield turned as it was in the hand. The hold places
+    // it there on its first tick (the game's set-up snaps it to its own grip a tick later).
     void shield_grip(int side, UObject* mesh, UObject* shield, UObject* base, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm,
                      const hsvr::Vec3& touch, const hsvr::Config& cfg)
     {
         using namespace hsvr;
-        Vec3 w1_pos = component_location(base);
-        Quat w1_rot = component_rotation(base);
-        Vec3 snapped = hand_grab_point(mesh, side);                                         // the hand point, now on the game's grip
-        Vec3 game_grip = w0_pos + w0_rot.rotate(w1_rot.inverse().rotate(snapped - w1_pos)); // that grip before the snap
-        double off = length(game_grip - palm);
-        if (off <= cfg.pose_shield_snap_cm)
+        const char* hand = side == 0 ? "left" : "right";
+        std::wstring cls = shield->GetClassPrivate() ? shield->GetClassPrivate()->GetName() : std::wstring();
+        if (cls.size() > 2 && cls.substr(cls.size() - 2) == STR("_C")) cls.resize(cls.size() - 2);
+        Vec3 local = w0_rot.inverse().rotate(palm - w0_pos);
+        const ShieldFitting* best = nullptr;
+        double best_d = cfg.pose_shield_point_cm;
+        Vec3 best_on;
+        int known = 0;
+        for (const ShieldFitting& f : k_shield_fittings)
         {
-            HSVR_LOG("Shield: %s hand took %ls by its own grip (%.1f cm from it)", side == 0 ? "left" : "right", shield->GetName().c_str(), off);
+            if (cls != f.shield) continue;
+            ++known;
+            Vec3 c{f.cx, f.cy, f.cz}, a = normalize(Vec3{f.ax, f.ay, f.az});
+            double t = (std::max)(-f.length * 0.5, (std::min)(f.length * 0.5, dot(local - c, a)));
+            Vec3 on = c + a * t;
+            double d = length(local - on);
+            if (d <= best_d)
+            {
+                best_d = d;
+                best = &f;
+                best_on = on;
+            }
+        }
+        if (best && (side == 1 ? best->game_r : best->game_l))
+        {
+            HSVR_LOG("Shield: %s hand took %ls by its %s (%.1f cm), the game's own grip", hand, shield->GetName().c_str(), best->name, best_d);
             return;
         }
-        set_component_transform(base, w0_pos, w0_rot, true);
+        if (!known && length(touch - palm) <= cfg.pose_shield_point_cm)
+        {
+            HSVR_LOG("Shield: %s hand took %ls, a shield with no measured grab points: the game's own grip", hand, cls.c_str());
+            return;
+        }
         Vec3 a_pos = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
         Quat a_rot = socket_rotation(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
         FreeGrip g;
         g.set = true;
-        g.pivot = w0_rot.inverse().rotate(touch - w0_pos);
+        g.place = true;
+        g.pivot = best ? best_on : w0_rot.inverse().rotate(touch - w0_pos);
         g.in_anchor = a_rot.inverse().rotate(palm - a_pos);
         g.rel = (a_rot.inverse() * w0_rot).normalized();
-        g.what = "edge where the hand touched it";
+        g.what = best ? best->name : "edge where the hand touched it";
         g_pending_free[side] = g;
-        HSVR_LOG("Shield: %s hand took %ls where it touched it (%.1f cm from its own grip; touch %.1f cm from the hand): free grip", side == 0 ? "left" : "right",
-                 shield->GetName().c_str(), off, length(touch - palm));
+        set_component_transform(base, w0_pos, w0_rot, true);
+        HSVR_LOG("Shield: %s hand took %ls by the %s (%.1f cm from the hand)", hand, shield->GetName().c_str(), g.what.c_str(),
+                 best ? best_d : length(touch - palm));
     }
 
     void grab_button(const hsvr::Config& cfg, const hsvr::ControllerState& state, bool menu_up)
@@ -4882,6 +4947,12 @@ namespace
         // The weapon as the game's locked joint would sit it in that hand.
         Quat target_rot = (hand_rot * f2 * f1.inverse()).normalized();
         Vec3 target_pos = hand_pos + hand_rot.rotate(in_hand) - target_rot.rotate(pivot); // weapon origin
+        if (h.free.place)
+        {
+            // Once, where the hand took it: the game's set-up has just snapped it to its own grip.
+            h.free.place = false;
+            set_component_transform(base, target_pos, target_rot, true);
+        }
         double two_hand_gain = 1.0;
         if (g_two.active && g_two.main == side)
         {
@@ -7013,6 +7084,18 @@ namespace
                 // hand, or with "rim" the edge of it (found from its collision) at the hand.
                 bool want_shield = entry.command.find("shield", 17) != std::string::npos;
                 bool want_rim = entry.command.find("rim", 17) != std::string::npos;
+                // "hsvr.bring_object [left] weapon ...": the nearest loose weapon that is not a shield.
+                // "... at x y z" (either): that point of it (BaseMesh frame, cm) kept at the hand.
+                bool want_weapon = entry.command.find("weapon", 17) != std::string::npos;
+                bool have_at = false;
+                hsvr::Vec3 at_point;
+                {
+                    size_t ap = entry.command.find(" at ", 17);
+                    if (ap != std::string::npos &&
+                        sscanf(entry.command.c_str() + ap + 4, "%lf %lf %lf", &at_point.x, &at_point.y, &at_point.z) == 3)
+                        have_at = true;
+                }
+                bool want_held_kind = want_shield || want_weapon;
                 hsvr::Vec3 hand = hand_grab_point(mesh, bring_side);
                 std::vector<UObject*> comps;
                 UObjectGlobals::FindAllOf(STR("StaticMeshComponent"), comps);
@@ -7026,9 +7109,11 @@ namespace
                     owner_call.run();
                     UObject* owner = owner_call.object_result();
                     if (!owner || owner == pawn || is_a(owner, STR("Willie_BP_C"))) continue;
-                    if (want_shield)
+                    if (want_held_kind)
                     {
-                        if (!class_name_starts(owner, STR("Shield")) || object_property(owner, STR("BaseMesh")) != c) continue;
+                        if (!is_a(owner, STR("ModularWeaponBP_C")) || object_property(owner, STR("BaseMesh")) != c) continue;
+                        if (want_shield != class_name_starts(owner, STR("Shield"))) continue;
+                        if (is_fist(owner) || bool_property(owner, STR("Is Sheathed"))) continue;
                         if (object_property(pawn, STR("Weapon L")) == owner || object_property(pawn, STR("Weapon R")) == owner) continue;
                     }
                     else if (is_a(owner, STR("ModularWeaponBP_C")))
@@ -7037,7 +7122,7 @@ namespace
                     Call sim(c, STR("IsSimulatingPhysics"));
                     sim.run();
                     FProperty* sp = sim.param(STR("ReturnValue"));
-                    if (!want_shield && (!sp || !*(sim.buffer.data() + sp->GetOffset_Internal()))) continue; // a shield just spawned may not simulate yet
+                    if (!want_held_kind && (!sp || !*(sim.buffer.data() + sp->GetOffset_Internal()))) continue; // a weapon just spawned may not simulate yet
                     ++loose;
                     double d = hsvr::length(component_location(c) - hand);
                     if (d < best_d)
@@ -7059,10 +7144,11 @@ namespace
                     stop.run();
                     g_bring = best;
                     g_bring_side = bring_side;
-                    g_bring_until = hsvr::now_seconds() + (want_shield ? 8.0 : 4.0);
-                    g_bring_weapon = want_shield;
-                    g_bring_at_point = false;
-                    if (want_shield && want_rim)
+                    g_bring_until = hsvr::now_seconds() + (want_held_kind ? 8.0 : 4.0);
+                    g_bring_weapon = want_held_kind;
+                    g_bring_at_point = have_at;
+                    g_bring_point = at_point;
+                    if (want_shield && want_rim && !have_at)
                     {
                         // Its thin axis: the local axis with the least collision across it (asked
                         // from 200 cm out each way). The rim point is the farthest edge along the
