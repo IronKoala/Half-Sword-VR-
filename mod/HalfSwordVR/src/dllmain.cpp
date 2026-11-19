@@ -7396,6 +7396,8 @@ namespace
         hsvr::Vec3 rest_pos;   // and its place there (how far it moves off the belt is logged)
         bool test = false;     // hsvr.scabbard_test: a fixed angle on the belt (not a hand's), no let-go
         hsvr::Quat test_rel;   // that angle, in the pelvis's frame
+        hsvr::Vec3 last_pelvis; // the pelvis's place last tick (its velocity is carried)
+        double last_pelvis_t = -1.0;
         double t0 = 0.0;
         double far_since = -1.0;
         double last_log = -1e9;
@@ -7612,6 +7614,10 @@ namespace
             Quat pelvis_q = socket_rotation(mesh, bone_fname("pelvis"));
             Vec3 pelvis_p = socket_location(mesh, bone_fname("pelvis"));
             double off_belt = length(pelvis_q.inverse().rotate(component_location(s.scab) - pelvis_p) - s.rest_pos);
+            Vec3 pelvis_v;
+            if (s.last_pelvis_t > 0.0 && now - s.last_pelvis_t > 1e-4 && now - s.last_pelvis_t < 0.1) pelvis_v = (pelvis_p - s.last_pelvis) * (1.0 / (now - s.last_pelvis_t));
+            s.last_pelvis = pelvis_p;
+            s.last_pelvis_t = now;
             if (s.active)
             {
                 Quat hand_rot = g_pose.hand_rot[side];
@@ -7659,7 +7665,7 @@ namespace
             {
                 want = (pelvis_q * s.rest).normalized();
                 double left = length(scaled_axis((want * cur.inverse()).normalized())) * 57.2958;
-                if (left < 2.0 || now - s.t0 > 1.0)
+                if ((left < 2.0 && off_belt < 1.5) || now - s.t0 > 1.0)
                 {
                     UObject* scab = s.scab;
                     s = ScabHold{};
@@ -7680,6 +7686,16 @@ namespace
             sav.three(STR("NewAngVel"), w.x, w.y, w.z);
             sav.flag(STR("bAddToCurrent"), false);
             sav.run();
+            // And kept on its spot on the belt (scabbard-test3: a draw dragged it 5.7 cm off, and it
+            // re-locked 4.1 cm off).
+            Vec3 spot_err = (pelvis_p + pelvis_q.rotate(s.rest_pos)) - component_location(s.scab);
+            Vec3 v = spot_err * (1.0 / (std::max)(0.01, cfg.pose_scabbard_follow_s)) + pelvis_v;
+            double vl = length(v);
+            if (vl > 400.0) v = v * (400.0 / vl);
+            Call slv(s.scab, STR("SetPhysicsLinearVelocity"));
+            slv.three(STR("NewVel"), v.x, v.y, v.z);
+            slv.flag(STR("bAddToCurrent"), false);
+            slv.run();
         }
     }
 
