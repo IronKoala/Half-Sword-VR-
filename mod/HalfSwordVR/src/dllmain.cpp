@@ -2361,7 +2361,7 @@ namespace
     std::vector<MovedPiece> g_late_moved;
     struct LateStats
     {
-        double worst_cm = 0, worst_deg = 0, sum_cm = 0, after_worst = 0;
+        double worst_cm = 0, worst_deg = 0, sum_cm = 0, after_worst = 0, view_worst = 0, view_worst_deg = 0;
         int n = 0;
         double last_log = 0;
     } g_late_stats;
@@ -2390,42 +2390,52 @@ namespace
         Vec3 w;
         Quat r;
         if (!head_pose_world(cfg, controllers_state(), w, r)) return;
+        // Where the head bone belongs on the view's headset pose (as the head lock puts it).
+        Vec3 want = w - r.rotate(Vec3{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm});
+        Quat want_rot = (r * g_pose.head_offset).normalized();
         Quat dr = (r * g_head_used.rot.inverse()).normalized();
-        Vec3 dp = w - g_head_used.at;
-        double cm = length(dp), deg = 2.0 * std::acos((std::min)(1.0, std::fabs(dr.w))) * kRadToDeg;
+        double view_cm = length(w - g_head_used.at), view_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(dr.w))) * kRadToDeg;
         late_restore();
-        double after = 0.0;
+        double off_cm = 0.0, off_deg = 0.0, after = 0.0;
         for (UObject* c : g_head_pieces)
         {
             if (!c) continue;
             FProperty* lp = c->GetPropertyByNameInChain(STR("RelativeLocation"));
             FProperty* rp = c->GetPropertyByNameInChain(STR("RelativeRotation"));
             if (!lp || !rp) continue;
+            // Each piece is moved so ITS head bone lands on the view's head spot: this takes out both the
+            // view's newer headset pose and anything his body drew late.
+            Vec3 bone = socket_location(c, bone_fname("head"));
+            Quat bone_rot = socket_rotation(c, bone_fname("head"));
+            Quat d = (want_rot * bone_rot.inverse()).normalized();
+            double cm = length(want - bone), deg = 2.0 * std::acos((std::min)(1.0, std::fabs(d.w))) * kRadToDeg;
+            off_cm = (std::max)(off_cm, cm);
+            off_deg = (std::max)(off_deg, deg);
+            if (cm > 20.0 || deg > 45.0) continue; // not a frame's drift: leave it on the body
             MovedPiece m{c, {0, 0, 0}, {0, 0, 0}};
             read_three(reinterpret_cast<uint8_t*>(c) + lp->GetOffset_Internal(), lp, m.loc);
             read_three(reinterpret_cast<uint8_t*>(c) + rp->GetOffset_Internal(), rp, m.rot);
-            // Where its head bone should be: the old spot carried rigidly by the headset's change.
-            Vec3 bone_before = socket_location(c, bone_fname("head"));
             Vec3 at = component_location(c);
             Quat rot = component_rotation(c);
-            set_component_transform(c, w + dr.rotate(at - g_head_used.at), (dr * rot).normalized(), true);
+            set_component_transform(c, want + d.rotate(at - bone), (d * rot).normalized(), true);
             g_late_moved.push_back(m);
-            Vec3 want_bone = w + dr.rotate(bone_before - g_head_used.at);
-            after = (std::max)(after, length(socket_location(c, bone_fname("head")) - want_bone));
+            after = (std::max)(after, length(socket_location(c, bone_fname("head")) - want));
         }
         auto& st = g_late_stats;
-        st.worst_cm = (std::max)(st.worst_cm, cm);
-        st.worst_deg = (std::max)(st.worst_deg, deg);
+        st.worst_cm = (std::max)(st.worst_cm, off_cm);
+        st.worst_deg = (std::max)(st.worst_deg, off_deg);
         st.after_worst = (std::max)(st.after_worst, after);
-        st.sum_cm += cm;
+        st.sum_cm += off_cm;
+        st.view_worst = (std::max)(st.view_worst, view_cm);
+        st.view_worst_deg = (std::max)(st.view_worst_deg, view_deg);
         ++st.n;
         double now = now_seconds();
         if (now - st.last_log >= 0.25)
         {
             st.last_log = now;
-            HSVR_LOG("Helmet: late move to the view's headset pose: worst %.2f cm / %.2f deg, mean %.2f cm over %d frames, %d head pieces; "
-                     "head bone off its carried spot after the move, worst %.3f cm",
-                     st.worst_cm, st.worst_deg, st.n ? st.sum_cm / st.n : 0.0, st.n, (int)g_head_pieces.size(), st.after_worst);
+            HSVR_LOG("Helmet: as drawn before the late move, off the view's head spot by worst %.2f cm / %.2f deg (mean %.2f cm) over %d frames, %d head pieces; "
+                     "after the move worst %.3f cm; the view's headset moved %.2f cm / %.2f deg since the pose",
+                     st.worst_cm, st.worst_deg, st.n ? st.sum_cm / st.n : 0.0, st.n, (int)g_head_pieces.size(), st.after_worst, st.view_worst, st.view_worst_deg);
             st = LateStats{};
             st.last_log = now;
         }
