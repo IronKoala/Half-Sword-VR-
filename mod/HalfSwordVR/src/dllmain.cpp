@@ -6859,12 +6859,86 @@ namespace
         HSVR_LOG("Stab: watching the weapons' Collision Hit (parameters %ls)", params.c_str());
     }
 
+    // Who lets a stuck blade go (stab-test7: the game stuck thrusts, then let them go within 0.15 s).
+    // Logs every call of the stuck joint's Release Constraint and the weapon's release functions for
+    // a weapon in his hands, with the calling Blueprint function and bytecode offset (the "@" of the
+    // decompile), the stuck joint's own state and the hold's.
+    void stab_release_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        UObject* self = context.Context;
+        UObject* pawn = g_pose.pawn;
+        if (!self || !pawn) return;
+        UFunction* hooked = static_cast<UFunction*>(custom_data);
+        UObject* wr = object_property(pawn, STR("Weapon R"));
+        UObject* wl = object_property(pawn, STR("Weapon L"));
+        bool is_joint = self->GetName().find(STR("Constraint_Weapon_Stuck_BP")) != std::wstring::npos;
+        UObject* weapon = is_joint ? object_property(self, STR("My Weapon")) : self;
+        if (!weapon || (weapon != wr && weapon != wl)) return;
+        int side = weapon == wr ? 1 : 0;
+        UFunction* caller = context.TheStack.Node();
+        // At most one line per function and caller offset each 0.25 s (some are called every tick).
+        {
+            static std::map<std::wstring, double> last;
+            std::wstring key = hooked->GetName() + (caller ? caller->GetName() : STR("")) +
+                               std::to_wstring(caller && context.TheStack.Code() ? (long long)(context.TheStack.Code() - caller->GetScript().GetData()) : -1);
+            double now = hsvr::now_seconds();
+            auto it = last.find(key);
+            if (it != last.end() && now - it->second < 0.25) return;
+            last[key] = now;
+        }
+        long long offset = -1;
+        if (caller && caller != hooked && context.TheStack.Code())
+        {
+            const auto& script = caller->GetScript();
+            if (script.GetData()) offset = (long long)(context.TheStack.Code() - script.GetData());
+        }
+        const HoldState& h = g_hold[side];
+        if (is_joint)
+            HSVR_LOG("Stab: release: %ls.%ls from %ls @%lld; joint: hitting body %.0f, activate %.0f, through %.0f, is meat %.0f, distance %.1f, "
+                     "bone mass %.1f, var14 %.0f; hold lag %.1f cm, force %.0f N, controller along %.0f cm/s",
+                     self->GetName().c_str(), hooked->GetName().c_str(), caller && caller != hooked ? caller->GetName().c_str() : STR("(ProcessEvent)"), offset,
+                     stab_var(self, STR("Hitting Body")), stab_var(self, STR("Activate Constraint")), stab_var(self, STR("Through")), stab_var(self, STR("Is Meat")),
+                     stab_var(self, STR("Distance")), stab_var(self, STR("Bone Mass")), stab_var(self, STR("NewVar_14")), h.lag, h.force_n,
+                     hsvr::length(g_stab_ctrl_vel[side]));
+        else
+            HSVR_LOG("Stab: release: %ls.%ls from %ls @%lld; stuck in body %.0f, stuck joints %d; hold lag %.1f cm, force %.0f N", weapon->GetName().c_str(),
+                     hooked->GetName().c_str(), caller && caller != hooked ? caller->GetName().c_str() : STR("(ProcessEvent)"), offset,
+                     stab_var(weapon, STR("Stuck In Body")), stab_array_num(weapon, STR("Stuck Constraints Array")), h.lag, h.force_n);
+    }
+
+    void install_stab_release_watch()
+    {
+        static bool installed = false;
+        static double last_try = -10.0;
+        if (installed) return;
+        double now = hsvr::now_seconds();
+        if (now - last_try < 2.0) return;
+        last_try = now;
+        UFunction* rc = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Blueprints/Utility/Constraint_Weapon_Stuck_BP.Constraint_Weapon_Stuck_BP_C:Release Constraint"));
+        if (!rc) return; // its class loads with the weapons
+        installed = true;
+        int n = 0;
+        for (const TCHAR* path : {STR("/Game/Blueprints/Utility/Constraint_Weapon_Stuck_BP.Constraint_Weapon_Stuck_BP_C:Release Constraint"),
+                                  STR("/Game/Blueprints/Utility/Constraint_Weapon_Stuck_BP.Constraint_Weapon_Stuck_BP_C:Event Destroy Self"),
+                                  STR("/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C:Release All Jammed Bones"),
+                                  STR("/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C:GGAGA"),
+                                  STR("/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C:Clear Stuck Bone"),
+                                  STR("/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C:Temporary Disable Damage")})
+            if (UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, path))
+            {
+                UObjectGlobals::RegisterHook(fn, &stab_release_hook, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+                ++n;
+            }
+        HSVR_LOG("Stab: watching %d release functions of the stuck joint and the weapon", n);
+    }
+
     // Every tick after his: the controllers' velocity, and the deferred lines after a hit.
     void stab_log_tick(UObject* pawn)
     {
         using namespace hsvr;
         if (!config().stab_log || !pawn) return;
         install_stab_log();
+        install_stab_release_watch();
         double now = now_seconds();
         for (int side = 0; side < 2; ++side)
         {
