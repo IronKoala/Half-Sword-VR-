@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cwctype>
 #include <map>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -4276,6 +4277,45 @@ namespace
         }
     }
 
+    // A weapon's real shape. Its BaseMesh is a 2 cm grip dummy (SM_Grip_Dummy); the blade, grip, guard,
+    // pommel or shield plate are child static meshes welded into its body, and a closest-point query
+    // on the root skips welded shapes (PhysInterface_Chaos GetSquaredDistanceToBody, IsShapeBoundToBody)
+    // while one on a welded child answers with that child's own shapes (collision dump, 2026-11-18).
+    // So every static mesh part of the weapon is asked, and the nearest answer wins. The parts list
+    // (by outer) is rebuilt at most every 0.25 s.
+    std::unordered_map<UObject*, std::vector<UObject*>> g_weapon_parts;
+    double g_weapon_parts_time = -10.0;
+
+    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out = nullptr)
+    {
+        if (!weapon) return -1.0;
+        double now = hsvr::now_seconds();
+        if (now - g_weapon_parts_time > 0.25)
+        {
+            g_weapon_parts_time = now;
+            g_weapon_parts.clear();
+            std::vector<UObject*> comps;
+            UObjectGlobals::FindAllOf(STR("StaticMeshComponent"), comps);
+            for (UObject* c : comps)
+                if (c && c->GetOuterPrivate()) g_weapon_parts[c->GetOuterPrivate()].push_back(c);
+        }
+        double best = -1.0;
+        auto it = g_weapon_parts.find(weapon);
+        if (it == g_weapon_parts.end()) return -1.0;
+        for (UObject* c : it->second)
+        {
+            Call q(c, STR("GetClosestPointOnCollision"));
+            if (!q.fn) continue;
+            q.three(STR("Point"), point.x, point.y, point.z);
+            q.run();
+            double d = q.number();
+            if (d < 0.0 || (best >= 0.0 && d >= best)) continue;
+            best = d;
+            if (out) *out = q.vec(STR("OutPointOnBody"));
+        }
+        return best;
+    }
+
     // A shield taken where the hand touched it. The game's set-up has just snapped it onto its one
     // grip (shield_grips.md); where that grip was on the shield before the snap is where his hand
     // would have had to be. Near there (pose_shield_snap_cm), the game's grip stays. Anywhere else
@@ -4421,15 +4461,7 @@ namespace
                 FProperty* sp = sim.param(STR("ReturnValue"));
                 if (!sp || !*(sim.buffer.data() + sp->GetOffset_Internal())) continue;
                 ++looked;
-                Call closest(base, STR("GetClosestPointOnCollision"));
-                if (!closest.fn)
-                {
-                    HSVR_LOG_EVERY(5.0, "Grab: no GetClosestPointOnCollision on %ls", base->GetFullName().c_str());
-                    continue;
-                }
-                closest.three(STR("Point"), at.x, at.y, at.z);
-                closest.run();
-                double d = closest.number();
+                double d = closest_on_weapon(w, at);
                 if (d >= 0.0 && d < nearest_d)
                 {
                     nearest_d = d;
@@ -4460,10 +4492,7 @@ namespace
             {
                 w0_pos = component_location(best_base);
                 w0_rot = component_rotation(best_base);
-                Call closest(best_base, STR("GetClosestPointOnCollision"));
-                closest.three(STR("Point"), at.x, at.y, at.z);
-                closest.run();
-                touch = closest.number() > 0.0 ? closest.vec(STR("OutPointOnBody")) : at;
+                if (closest_on_weapon(best, at, &touch) < 0.0) touch = at;
             }
             bool ok = give_hand_weapon(side, pawn, best);
             UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
@@ -7050,10 +7079,8 @@ namespace
                             {
                                 hsvr::Vec3 dir = rot.rotate(axes[a] * sgn);
                                 hsvr::Vec3 from = centre + dir * 200.0;
-                                Call cl(best, STR("GetClosestPointOnCollision"));
-                                cl.three(STR("Point"), from.x, from.y, from.z);
-                                cl.run();
-                                hsvr::Vec3 p = cl.number() > 0.0 ? cl.vec(STR("OutPointOnBody")) : centre;
+                                hsvr::Vec3 p = centre;
+                                if (closest_on_weapon(best->GetOuterPrivate(), from, &p) < 0.0) p = centre;
                                 double e = hsvr::dot(p - centre, dir);
                                 across[a] += e;
                                 if (sgn > 0) edge[a] = p;
