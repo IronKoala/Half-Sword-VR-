@@ -7368,14 +7368,32 @@ namespace
                 Vec3 vb = v_com_now + g * DT, wb = w_now; // gravity this frame, taken off again below (the physics adds it)
                 Vec3 ang;
                 Vec3 err_rot = scaled_axis((rot * target_rot.inverse()).normalized());
-                bs_solve(mass, invI, vb, wb, pts, n, err_rot, target_ang, rk * st * 1e4, rc * dst * 1e4, rf * st * body.total * 1e4 * draw_scale, DT,
+                // The wrist's end stop (Matthew 2026-11-19: with the turning limit at a real wrist's 30 N m,
+                // a short sword kept going past the hand when he stopped a swing, "the wrist hyperextends").
+                // Within pose_hold_wrist_free_deg of the hand the turn is limited to the wrist's strength (a
+                // long weapon held at its end droops); past it the limit rises to pose_hold_wrist_stop_torque
+                // by pose_hold_wrist_stop_deg, as a real wrist bottoms out and the forearm takes the load.
+                double tcap = rf * st * body.total * 1e4 * draw_scale;
+                {
+                    double bend = length(err_rot) * 57.2958;
+                    double f0 = cfg.pose_hold_wrist_free_deg, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_wrist_stop_deg);
+                    double hard = cfg.pose_hold_wrist_stop_torque * st * body.total * 1e4 * draw_scale;
+                    if (cfg.pose_hold_wrist_stop_torque > 0.0 && bend > f0 && hard > tcap)
+                    {
+                        double u = (std::min)(1.0, (bend - f0) / (f1 - f0));
+                        tcap = tcap + (hard - tcap) * u;
+                        HSVR_LOG_EVERY(0.5, "Hold: %s wrist bent %.0f deg from the hand: turning limit %.0f N m (wrist stop)", side == 0 ? "left" : "right", bend,
+                                       tcap / 1e4);
+                    }
+                }
+                bs_solve(mass, invI, vb, wb, pts, n, err_rot, target_ang, rk * st * 1e4, rc * dst * 1e4, tcap, DT,
                          (std::max)(1, cfg.pose_bs_iterations), ang);
                 exact_v = clamp_length(vb - g * DT, 2000.0);
                 w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
                 h.force_n = length(pts[0].acc) / DT / 100.0;
                 h.force_capped = length(pts[0].acc) >= pts[0].fmax * DT * 0.999;
                 h.torque_nm = length(ang) / DT / 1e4;
-                h.torque_capped = length(ang) >= rf * st * body.total * 1e4 * draw_scale * DT * 0.999;
+                h.torque_capped = length(ang) >= tcap * DT * 0.999;
                 HSVR_LOG_EVERY(0.5, "Hold: %s B&S hold%s: grip %.1f cm / %.0f deg off, %.0f N%s, turn %.1f N m%s%s", side == 0 ? "left" : "right",
                                two ? " (two hands)" : "", length(pts[0].err), length(err_rot) * 57.2958, h.force_n, h.force_capped ? " (cap)" : "", h.torque_nm,
                                h.torque_capped ? " (cap)" : "",

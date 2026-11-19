@@ -334,6 +334,9 @@ namespace hsvr
         num("pose_hold_turn_spring", c.pose_hold_turn_spring);
         num("pose_hold_turn_damper", c.pose_hold_turn_damper);
         num("pose_hold_max_torque", c.pose_hold_max_torque);
+        num("pose_hold_wrist_free_deg", c.pose_hold_wrist_free_deg);
+        num("pose_hold_wrist_stop_deg", c.pose_hold_wrist_stop_deg);
+        num("pose_hold_wrist_stop_torque", c.pose_hold_wrist_stop_torque);
         flag("pose_hold_weight", c.pose_hold_weight);
         num("pose_hold_weight_torque_scale", c.pose_hold_weight_torque_scale);
         flag("pose_hold_weight_two_hand_couple", c.pose_hold_weight_two_hand_couple);

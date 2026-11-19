@@ -262,6 +262,13 @@ namespace hsvr
         // One hand's most turning force at the grip (N m, x his strength): a real wrist, not B&S's 250. A war
         // staff held by its end (29 N m of weight) droops; one-handed swords (2-4 N m, hard swings ~20) stay free.
         double pose_hold_max_torque = 30.0;
+        // The wrist's end stop: once the held item is bent more than pose_hold_wrist_free_deg from where
+        // the hand points it, the turning limit rises to pose_hold_wrist_stop_torque (N m, times his
+        // strength) by pose_hold_wrist_stop_deg, so a stopped swing does not carry the item on past the
+        // hand while a long weapon held at its end still droops. 0 = no stop.
+        double pose_hold_wrist_free_deg = 25.0;
+        double pose_hold_wrist_stop_deg = 50.0;
+        double pose_hold_wrist_stop_torque = 250.0;
         // Weight: the hold's turn is limited by torque about the grip, not the centre of mass (heavy and
         // long weapons trail fast turns, B&S-style). torque_scale multiplies pose_hold_max_torque for it.
         bool pose_hold_weight = true;
