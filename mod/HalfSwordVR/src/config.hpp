@@ -539,7 +539,10 @@ namespace hsvr
         // joint. cap_per_t: the drive cap is this x his grip strength T (the game's slip threshold), so
         // the force stays just under T (it levels off at about cap/500): his strength sets how hard he
         // can drag a body, and the stretch rule lets go when it gets away. 0 = the fixed pose_grab_body_max.
-        int pose_grab_body_hold = 1;
+        // Test 5: the game's own joint (0) held an active Willie 15 s and choked him out; the capped spring
+        // let a standing one drift off (its force levels at ~cap/400 whatever the stretch). Every grab the
+        // game broke had HIS arm at tonus 0 / health 0 after hits (T = 0: the game's broken-arm rule).
+        int pose_grab_body_hold = 0;
         double pose_grab_body_spring = 20000.0; // drive stiffness (acceleration mode)
         double pose_grab_body_damper = 400.0;
         double pose_grab_body_cap_per_t = 450.0;
