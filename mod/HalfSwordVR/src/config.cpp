@@ -575,6 +575,11 @@ namespace hsvr
         flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
         flag("dev_grip_trace", c.dev_grip_trace);
         flag("stab_log", c.stab_log);
+        num("hit_buzz", c.hit_buzz);
+        num("hit_buzz_scrape", c.hit_buzz_scrape);
+        flag("hit_buzz_blade_on_plate", c.hit_buzz_blade_on_plate);
+        num("hit_buzz_impulse_full", c.hit_buzz_impulse_full);
+        flag("hit_buzz_log", c.hit_buzz_log);
         flag("stab_assist", c.stab_assist);
         num("stab_min_speed_cms", c.stab_min_speed_cms);
         num("stab_min_into_cos", c.stab_min_into_cos);

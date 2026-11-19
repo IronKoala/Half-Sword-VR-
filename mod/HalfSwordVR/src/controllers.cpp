@@ -48,6 +48,50 @@ namespace hsvr
         ControllerState g_state;
         bool g_trigger_was_down[2] = {false, false};
         std::atomic<float> g_buzz[2] = {0.0f, 0.0f};
+        // Hit envelopes playing on each hand (controllers_hit).
+        struct HitEnvelope
+        {
+            std::vector<float> t, v;
+            double start = 0.0, seconds = 0.1;
+            float volume = 0.0f;
+        };
+        std::mutex g_hit_mutex;
+        std::vector<HitEnvelope> g_hits[2];
+
+        float envelope_at(const HitEnvelope& e, double u)
+        {
+            if (e.t.empty()) return 0.0f;
+            if (u <= e.t.front()) return e.v.front();
+            for (size_t i = 1; i < e.t.size(); ++i)
+                if (u <= e.t[i])
+                {
+                    double span = e.t[i] - e.t[i - 1];
+                    double f = span > 1e-6 ? (u - e.t[i - 1]) / span : 1.0;
+                    return (float)(e.v[i - 1] + (e.v[i] - e.v[i - 1]) * f);
+                }
+            return e.v.back();
+        }
+
+        // The sum of the hand's envelopes now (B&S Hand.UpdateHaptic), dropping finished ones.
+        float hit_amplitude(int h)
+        {
+            double now = now_seconds();
+            std::lock_guard<std::mutex> lock(g_hit_mutex);
+            auto& list = g_hits[h];
+            float sum = 0.0f;
+            for (size_t i = 0; i < list.size();)
+            {
+                double u = (now - list[i].start) / list[i].seconds;
+                if (u >= 1.0)
+                {
+                    list.erase(list.begin() + i);
+                    continue;
+                }
+                sum += envelope_at(list[i], (std::max)(0.0, u)) * list[i].volume;
+                ++i;
+            }
+            return (std::min)(1.0f, sum);
+        }
 
         const char* kHandName[2] = {"left", "right"};
 
@@ -424,7 +468,10 @@ namespace hsvr
             }
             g_trigger_was_down[h] = down;
             float buzz = g_buzz[h].exchange(0.0f);
-            if (buzz > 0.01f) pulse(xr, session, h, (std::min)(1.0f, buzz), 0.02);
+            float hit = hit_amplitude(h);
+            // A hit plays as B&S sends it: the summed envelope, 1/30 s at a time, every frame.
+            if (hit > 0.01f && hit >= buzz) pulse(xr, session, h, hit, 1.0 / 30.0);
+            else if (buzz > 0.01f) pulse(xr, session, h, (std::min)(1.0f, buzz), 0.02);
         }
         std::lock_guard<std::mutex> lock(g_state_mutex);
         g_state = s;
@@ -481,6 +528,20 @@ namespace hsvr
     {
         std::lock_guard<std::mutex> lock(g_state_mutex);
         return g_state;
+    }
+
+    void controllers_hit(int hand, const float* key_t, const float* key_v, int keys, double seconds, float volume)
+    {
+        if (hand < 0 || hand > 1 || keys <= 0 || seconds <= 0.0 || volume <= 0.0f) return;
+        HitEnvelope e;
+        e.t.assign(key_t, key_t + keys);
+        e.v.assign(key_v, key_v + keys);
+        e.start = now_seconds();
+        e.seconds = seconds;
+        e.volume = volume;
+        std::lock_guard<std::mutex> lock(g_hit_mutex);
+        if (g_hits[hand].size() >= 16) g_hits[hand].erase(g_hits[hand].begin());
+        g_hits[hand].push_back(std::move(e));
     }
 
     void controllers_buzz(int hand, float amplitude)
