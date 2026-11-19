@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -652,8 +653,8 @@ namespace
         return mesh;
     }
 
-    // The visible model: a ProceduralMeshComponent on the weapon, snapped onto the Head, no collision.
-    UObject* build_visual(UObject* weapon, UObject* head, const Model& m, UObject* material)
+    // A new ProceduralMeshComponent on the weapon, not attached, identity transform, no collision.
+    UObject* add_proc(UObject* weapon)
     {
         UObject* proc_class = find(STR("/Script/ProceduralMeshComponent.ProceduralMeshComponent"));
         if (!proc_class) return nullptr;
@@ -680,12 +681,22 @@ namespace
         }
         if (!add.run()) return nullptr;
         UObject* proc = add.ret_object();
-        log("  new procedural mesh component: %s", name_of(proc).c_str());
         if (!proc) return nullptr;
 
+        // No collision means no physics body (PrimitiveComponent ShouldCreatePhysicsState), so nothing
+        // of this component ever welds into the weapon.
         Call nocol(proc, STR("SetCollisionEnabled"));
         nocol.byte(STR("NewType"), 0); // ECollisionEnabled::NoCollision
         nocol.run();
+        return proc;
+    }
+
+    // The visible model: a ProceduralMeshComponent on the weapon, snapped onto the Head, no collision.
+    UObject* build_visual(UObject* weapon, UObject* head, const Model& m, UObject* material)
+    {
+        UObject* proc = add_proc(weapon);
+        log("  new procedural mesh component (visual): %s", name_of(proc).c_str());
+        if (!proc) return nullptr;
 
         Call attach(proc, STR("K2_AttachToComponent"));
         attach.object(STR("Parent"), head)
@@ -715,9 +726,12 @@ namespace
         return proc;
     }
 
+    void apply_test_blade(UObject* weapon);
+    void apply_full_weapon(UObject* weapon, const std::wstring& base_name);
+
     void apply()
     {
-        log("---- F9: make the held weapon's head the custom model ----");
+        log("---- F9: make the held weapon the custom model ----");
         load_settings();
 
         // Our arrays are handed to the engine as FVector / FVector2D arrays: check they are doubles.
@@ -738,6 +752,24 @@ namespace
             log("  ! hold a weapon in the right hand first");
             return;
         }
+        // A model with a collision file next to it (from tools/bs_weapon_export.py) replaces the
+        // whole weapon; a bare OBJ only replaces the head (the first test).
+        std::wstring base_name = g_settings.model;
+        if (base_name.size() > 4 && _wcsicmp(base_name.c_str() + base_name.size() - 4, L".obj") == 0)
+            base_name = base_name.substr(0, base_name.size() - 4);
+        if (FILE* probe = _wfopen((g_dir + base_name + L"_collision.obj").c_str(), L"r"))
+        {
+            fclose(probe);
+            apply_full_weapon(weapon, base_name);
+        }
+        else
+        {
+            apply_test_blade(weapon);
+        }
+    }
+
+    void apply_test_blade(UObject* weapon)
+    {
         UObject* head = object_property(weapon, STR("Head"));
         UObject* base = object_property(weapon, STR("BaseMesh"));
         UObject* old_mesh = object_property(head, STR("StaticMesh"));
@@ -792,6 +824,364 @@ namespace
             mass.run();
         }
         log("After: Head mass %.3f kg, BaseMesh (whole welded weapon) mass %.3f kg", mass_of(head), mass_of(base));
+
+        UObject* proc = build_visual(weapon, head, model, material);
+        log(proc ? "Done. Swing it at something and check the hits." : "  ! visual model failed (collision swap above still applies)");
+    }
+
+    // ---- whole-weapon replacement (models from tools/bs_weapon_export.py) -----------------------
+    std::map<std::string, double> read_numbers(const std::wstring& path)
+    {
+        std::map<std::string, double> out;
+        FILE* f = _wfopen(path.c_str(), L"r");
+        if (!f) return out;
+        char line[256];
+        while (fgets(line, sizeof line, f))
+        {
+            if (line[0] == ';' || line[0] == '#') continue;
+            char* eq = strchr(line, '=');
+            if (!eq) continue;
+            *eq = 0;
+            out[line] = atof(eq + 1);
+        }
+        fclose(f);
+        return out;
+    }
+
+    struct Hull
+    {
+        std::string slot;
+        std::vector<V3> points;
+        std::vector<int> faces; // triangles, indices into points
+        double volume = 0;      // cm^3
+    };
+
+    std::vector<Hull> load_hulls(const std::wstring& path)
+    {
+        std::vector<Hull> hulls;
+        FILE* f = _wfopen(path.c_str(), L"r");
+        if (!f) return hulls;
+        char line[512];
+        int base = 1; // OBJ index of the current hull's first vertex
+        int total = 0;
+        while (fgets(line, sizeof line, f))
+        {
+            if (line[0] == 'g' && line[1] == ' ')
+            {
+                // UCX_<slot>_<n>
+                std::string g(line + 2);
+                while (!g.empty() && (g.back() == '\n' || g.back() == '\r' || g.back() == ' ')) g.pop_back();
+                Hull h;
+                size_t a = g.find('_'), b = g.rfind('_');
+                h.slot = (a != std::string::npos && b > a) ? g.substr(a + 1, b - a - 1) : g;
+                hulls.push_back(h);
+                base = total + 1;
+            }
+            else if (line[0] == 'v' && line[1] == ' ' && !hulls.empty())
+            {
+                V3 p{};
+                sscanf(line + 2, "%lf %lf %lf", &p.x, &p.y, &p.z);
+                hulls.back().points.push_back(p);
+                ++total;
+            }
+            else if (line[0] == 'f' && line[1] == ' ' && !hulls.empty())
+            {
+                int i, j, k;
+                if (sscanf(line + 2, "%d %d %d", &i, &j, &k) == 3)
+                {
+                    hulls.back().faces.push_back(i - base);
+                    hulls.back().faces.push_back(j - base);
+                    hulls.back().faces.push_back(k - base);
+                }
+            }
+        }
+        fclose(f);
+        // Volume of each closed hull (faces wound outward): sum of signed tetrahedra.
+        for (Hull& h : hulls)
+        {
+            double v = 0;
+            for (size_t t = 0; t + 2 < h.faces.size(); t += 3)
+            {
+                const V3 &a = h.points[h.faces[t]], &b = h.points[h.faces[t + 1]], &c = h.points[h.faces[t + 2]];
+                v += (a.x * (b.y * c.z - b.z * c.y) - a.y * (b.x * c.z - b.z * c.x) + a.z * (b.x * c.y - b.y * c.x)) / 6.0;
+            }
+            h.volume = std::fabs(v);
+        }
+        return hulls;
+    }
+
+    // A component's world transform, kept as the engine's own bytes so it can be handed back to
+    // KismetMathLibrary's TransformLocation / InverseTransformLocation.
+    struct Xf
+    {
+        std::vector<uint8_t> bytes;
+    };
+
+    Xf world_transform(UObject* component)
+    {
+        Xf x;
+        Call c(component, STR("K2_GetComponentToWorld"));
+        if (!c.run()) return x;
+        if (FProperty* p = c.param(STR("ReturnValue")))
+        {
+            uint8_t* at = c.buffer.data() + p->GetOffset_Internal();
+            x.bytes.assign(at, at + p->GetSize());
+        }
+        return x;
+    }
+
+    V3 transform_point(const Xf& x, V3 p, bool inverse)
+    {
+        static UObject* math = find(STR("/Script/Engine.Default__KismetMathLibrary"));
+        Call c(math, inverse ? STR("InverseTransformLocation") : STR("TransformLocation"));
+        FProperty* t = c.param(STR("T"));
+        if (!t || x.bytes.size() != (size_t)t->GetSize()) return p;
+        memcpy(c.buffer.data() + t->GetOffset_Internal(), x.bytes.data(), x.bytes.size());
+        c.three(STR("Location"), p.x, p.y, p.z);
+        if (!c.run()) return p;
+        FProperty* r = c.param(STR("ReturnValue"));
+        return r ? read_three(c.buffer.data() + r->GetOffset_Internal(), r) : p;
+    }
+
+    bool set_object_property(UObject* owner, const TCHAR* name, UObject* value)
+    {
+        if (!owner) return false;
+        UObject** slot = owner->GetValuePtrByPropertyNameInChain<UObject*>(name);
+        if (!slot) return false;
+        *slot = value;
+        return true;
+    }
+
+    bool set_bool_property(UObject* owner, const TCHAR* name, bool value)
+    {
+        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        if (!p) return false;
+        auto* b = static_cast<FBoolProperty*>(p);
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal() + b->GetByteOffset();
+        if (value) *at |= b->GetFieldMask();
+        else *at &= ~b->GetFieldMask();
+        return true;
+    }
+
+    // The component's own mass setting (BodyInstance.bOverrideMass / MassInKgOverride). Written
+    // straight into the component: SetMassOverrideInKg on a welded part would change the weapon's
+    // root body instead (PrimitiveComponentPhysics.cpp: GetBodyInstance returns the weld parent).
+    bool body_mass(UObject* component, bool write, float& kg, bool& on)
+    {
+        FProperty* bi = component ? component->GetPropertyByNameInChain(STR("BodyInstance")) : nullptr;
+        UScriptStruct* type = struct_type(bi);
+        FProperty* mass = member(type, STR("MassInKgOverride"));
+        FProperty* flag = member(type, STR("bOverrideMass"));
+        if (!mass || !flag) return false;
+        uint8_t* base = reinterpret_cast<uint8_t*>(component) + bi->GetOffset_Internal();
+        auto* b = static_cast<FBoolProperty*>(flag);
+        uint8_t* fa = base + flag->GetOffset_Internal() + b->GetByteOffset();
+        float* ma = reinterpret_cast<float*>(base + mass->GetOffset_Internal());
+        if (write)
+        {
+            *ma = kg;
+            if (on) *fa |= b->GetFieldMask();
+            else *fa &= ~b->GetFieldMask();
+        }
+        else
+        {
+            kg = *ma;
+            on = (*fa & b->GetFieldMask()) != 0;
+        }
+        return true;
+    }
+
+    // Convex collision for one weapon part: a hidden ProceduralMeshComponent cooks the convex pieces
+    // at runtime (ProceduralMeshComponent.cpp UpdateCollision -> BodySetup CreatePhysicsMeshes ->
+    // RuntimeCookPhysics_Chaos), then that BodySetup is given to a runtime UStaticMesh, which goes
+    // into the part's slot. The slot keeps the game's hit binding and damage points.
+    UObject* build_part_mesh(UObject* weapon, UObject* slot, const std::vector<std::vector<V3>>& pieces)
+    {
+        V3 lo{1e30, 1e30, 1e30}, hi{-1e30, -1e30, -1e30};
+        for (auto& piece : pieces)
+            for (const V3& p : piece)
+            {
+                lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+                hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+            }
+        UObject* mesh = build_box_mesh(weapon, lo, hi);
+        if (!mesh) return nullptr;
+
+        UObject* cooker = add_proc(weapon);
+        if (!cooker) return nullptr;
+        // Complex-as-simple would make the body a triangle mesh, which cannot simulate.
+        if (!set_bool_property(cooker, STR("bUseComplexAsSimpleCollision"), false))
+            log("  ! could not turn off bUseComplexAsSimpleCollision");
+        set_bool_property(cooker, STR("bUseAsyncCooking"), false);
+        for (auto& piece : pieces)
+        {
+            Call add(cooker, STR("AddCollisionConvexMesh"));
+            add.array(STR("ConvexVerts"), piece.data(), (int32_t)piece.size());
+            add.run();
+        }
+        UObject* body = object_property(cooker, STR("ProcMeshBodySetup"));
+        log("  %s: %zu convex pieces cooked into %s", narrow(slot->GetName()).c_str(), pieces.size(), name_of(body).c_str());
+        if (!body) return nullptr;
+
+        // Keep the old part's physical material (surface type for hit sounds and effects).
+        UObject* old_mesh = object_property(slot, STR("StaticMesh"));
+        UObject* old_body = object_property(old_mesh, STR("BodySetup"));
+        UObject* phys = object_property(old_body, STR("PhysMaterial"));
+        if (phys) set_object_property(body, STR("PhysMaterial"), phys);
+        log("  %s: physical material %s", narrow(slot->GetName()).c_str(), name_of(phys).c_str());
+
+        if (!set_object_property(mesh, STR("BodySetup"), body))
+        {
+            log("  ! could not set the new mesh's BodySetup");
+            return nullptr;
+        }
+        return mesh;
+    }
+
+    void hide(UObject* component)
+    {
+        if (!component) return;
+        Call c(component, STR("SetVisibility"));
+        c.flag(STR("bNewVisibility"), false).flag(STR("bPropagateToChildren"), false);
+        c.run();
+    }
+
+    void apply_full_weapon(UObject* weapon, const std::wstring& base_name)
+    {
+        auto numbers = read_numbers(g_dir + base_name + L".txt");
+        auto hulls = load_hulls(g_dir + base_name + L"_collision.obj");
+        Model model;
+        if (!load_obj(g_dir + base_name + L".obj", model) || hulls.empty() || numbers.empty())
+        {
+            log("  ! %s: need %s.obj, %s_collision.obj and %s.txt", narrow(base_name).c_str(), narrow(base_name).c_str(),
+                narrow(base_name).c_str(), narrow(base_name).c_str());
+            return;
+        }
+        double guard_top = numbers["guard_top"];
+        double tip = numbers["tip"];
+        double mass_total = g_settings.mass_kg > 0 ? g_settings.mass_kg : numbers["mass_kg"];
+        log("Model %s: %zu collision pieces, guard top %.1f cm, tip %.1f cm, mass %.2f kg", narrow(base_name).c_str(),
+            hulls.size(), guard_top, tip, mass_total);
+
+        // The parts, as the forge builds them (ModularWeaponBP slots).
+        const TCHAR* slot_names[] = {STR("Head"), STR("Guard"), STR("Grip"), STR("Pommel")};
+        UObject* slots[4];
+        UObject* base = object_property(weapon, STR("BaseMesh"));
+        for (int i = 0; i < 4; ++i)
+        {
+            slots[i] = object_property(weapon, slot_names[i]);
+            float kg = 0;
+            bool on = false;
+            body_mass(slots[i], false, kg, on);
+            V3 w = slots[i] ? world_location(slots[i]) : V3{0, 0, 0};
+            log("  slot %s: %s, mesh %s, own mass %s %.3f kg, world (%.1f %.1f %.1f)", narrow(slot_names[i]).c_str(),
+                name_of(slots[i]).c_str(), name_of(object_property(slots[i], STR("StaticMesh"))).c_str(), on ? "override" : "computed",
+                kg, w.x, w.y, w.z);
+        }
+        {
+            float kg = 0;
+            bool on = false;
+            body_mass(base, false, kg, on);
+            log("  BaseMesh: %s, mesh %s, own mass %s %.3f kg; whole weapon %.3f kg", name_of(base).c_str(),
+                name_of(object_property(base, STR("StaticMesh"))).c_str(), on ? "override" : "computed", kg, mass_of(base));
+        }
+        for (const TCHAR* extra : {STR("Head SubModule 1"), STR("Sub Module 1 Mesh"), STR("SubModule 2 Mesh")})
+            if (UObject* c = object_property(weapon, extra))
+                log("  also on this weapon: %s = %s, mesh %s (left as it is)", narrow(extra).c_str(), name_of(c).c_str(),
+                    name_of(object_property(c, STR("StaticMesh"))).c_str());
+        UObject* head = slots[0];
+        UObject* old_head_mesh = object_property(head, STR("StaticMesh"));
+        if (!head || !old_head_mesh)
+        {
+            log("  ! this weapon has no head part (or it was already replaced)");
+            return;
+        }
+        V3 olo{}, ohi{};
+        mesh_box(old_head_mesh, olo, ohi);
+        log_tips(weapon);
+
+        // Head frame: the model's guard top sits on the head's origin (where the game puts the head
+        // part on the guard), the blade along the head's +Z.
+        for (V3& p : model.positions) p.z -= guard_top;
+        {
+            Call sc(head, STR("K2_GetComponentScale"));
+            FProperty* r = sc.run() ? sc.param(STR("ReturnValue")) : nullptr;
+            V3 s = r ? read_three(sc.buffer.data() + r->GetOffset_Internal(), r) : V3{1, 1, 1};
+            log("  head scale (%.3f %.3f %.3f)%s", s.x, s.y, s.z,
+                (std::fabs(s.x - 1) > 0.01 || std::fabs(s.y - 1) > 0.01 || std::fabs(s.z - 1) > 0.01) ? " - not 1, the model will be stretched by it" : "");
+        }
+        Xf head_xf = world_transform(head);
+        if (head_xf.bytes.empty())
+        {
+            log("  ! could not read the head's transform");
+            return;
+        }
+
+        Call get_mat(head, STR("GetMaterial"));
+        get_mat.i32(STR("ElementIndex"), 0);
+        UObject* material = get_mat.run() ? get_mat.ret_object() : nullptr;
+
+        // Mass: shared between the parts by the volume of their pieces (one material throughout).
+        double volume_all = 0, volume[4] = {0, 0, 0, 0};
+        for (Hull& h : hulls)
+        {
+            volume_all += h.volume;
+            for (int i = 0; i < 4; ++i)
+                if (narrow(slot_names[i]) == h.slot) volume[i] += h.volume;
+        }
+
+        for (int i = 0; i < 4; ++i)
+        {
+            if (!slots[i]) continue;
+            std::vector<std::vector<V3>> pieces;
+            for (Hull& h : hulls)
+            {
+                if (narrow(slot_names[i]) != h.slot) continue;
+                std::vector<V3> local;
+                Xf slot_xf = i == 0 ? head_xf : world_transform(slots[i]);
+                for (V3 p : h.points)
+                {
+                    p.z -= guard_top;
+                    local.push_back(i == 0 ? p : transform_point(slot_xf, transform_point(head_xf, p, false), true));
+                }
+                pieces.push_back(local);
+            }
+            if (pieces.empty())
+            {
+                log("  %s: no pieces in the model; left as it is but hidden", narrow(slot_names[i]).c_str());
+                hide(slots[i]);
+                continue;
+            }
+            UObject* mesh = build_part_mesh(weapon, slots[i], pieces);
+            if (!mesh) continue;
+            float kg = volume_all > 0 ? (float)(mass_total * volume[i] / volume_all) : 0.0f;
+            bool on = true;
+            body_mass(slots[i], true, kg, on);
+            Call set(slots[i], STR("SetStaticMesh"));
+            set.object(STR("NewMesh"), mesh);
+            set.run();
+            hide(slots[i]);
+            log("  %s: new collision in place (%s), mass %.3f kg", narrow(slot_names[i]).c_str(),
+                set.ret_bool() ? "changed" : "NOT changed", kg);
+        }
+        log("Whole weapon mass now %.3f kg (target %.3f kg)", mass_of(base), mass_total);
+
+        // Damage points on the head move with the blade: same layout, stretched to the new length.
+        double old_len = ohi.z, new_len = tip - guard_top;
+        std::vector<UObject*> comps;
+        UObjectGlobals::FindAllOf(STR("SceneComponent"), comps);
+        for (UObject* c : comps)
+        {
+            if (object_property(c, STR("AttachParent")) != head) continue;
+            if (c->GetName().find(STR("NODE_AddSceneComponent")) == std::wstring::npos) continue;
+            FProperty* rp = c->GetPropertyByNameInChain(STR("RelativeLocation"));
+            if (!rp || old_len < 1.0) continue;
+            V3 r = read_three(reinterpret_cast<uint8_t*>(c) + rp->GetOffset_Internal(), rp);
+            Call move(c, STR("K2_SetRelativeLocation"));
+            move.three(STR("NewLocation"), r.x, r.y, r.z * new_len / old_len).flag(STR("bTeleport"), true);
+            move.run();
+            log("  head damage point %s: z %.1f -> %.1f cm", narrow(c->GetName()).c_str(), r.z, r.z * new_len / old_len);
+        }
 
         UObject* proc = build_visual(weapon, head, model, material);
         log(proc ? "Done. Swing it at something and check the hits." : "  ! visual model failed (collision swap above still applies)");
