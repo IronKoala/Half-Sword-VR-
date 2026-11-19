@@ -348,6 +348,7 @@ namespace hsvr
         // floor), a squeeze looks for items at your controller, and what it touches is pulled into his hand.
         bool pose_grab_from_controller = true;
         double pose_grab_controller_gap_cm = 4.0;
+        double pose_grab_controller_max_cm = 60.0; // not from farther than this (a jump, a teleport)
         // A belt scabbard is a handle (B&S): taken only within pose_grab_handle_cm of its length, lined up
         // with the hand's grip line, the trigger slides the hand along it. 0 = held where touched, as before.
         bool pose_scabbard_handle = true;

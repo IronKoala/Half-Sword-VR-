@@ -5920,7 +5920,7 @@ namespace
             {
                 Vec3 hand_bone = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
                 double held_back = length(g_pose.reach_target[side] - hand_bone);
-                if (held_back > cfg.pose_grab_controller_gap_cm)
+                if (held_back > cfg.pose_grab_controller_gap_cm && length(g_pose.raw_target[side] - hand_bone) <= cfg.pose_grab_controller_max_cm)
                 {
                     at = at + (g_pose.raw_target[side] - hand_bone);
                     HSVR_LOG("Grab: %s hand is held %.1f cm short of your hand by his reach: looking at your controller (%.0f %.0f %.0f)", hand, held_back, at.x,
@@ -7128,7 +7128,14 @@ namespace
                 // first keeps its own target (bs_hold_measured.md §3).
                 {
                     double dtp = (std::min)(1.0 / 30.0, (std::max)(1.0 / 240.0, now - h.last_time));
-                    g_two.bs_vel = g_two.bs_valid && h.have_last ? (p2 - g_two.bs_p2) * (1.0 / dtp) : Vec3{};
+                    Vec3 raw_v = g_two.bs_valid && h.have_last ? (p2 - g_two.bs_p2) * (1.0 / dtp) : Vec3{};
+                    // Smoothed like the first hand's (pose_hold_target_vel_smooth_s): two noisy hands pulling one
+                    // weapon shook it most (playtest 14:37: halberd and sword in two hands 1.0-1.4 cm at ~10 Hz).
+                    double tau2 = hsvr::config().pose_hold_target_vel_smooth_s;
+                    if (tau2 > 1e-4 && g_two.bs_valid && h.have_last)
+                        g_two.bs_vel = g_two.bs_vel + (raw_v - g_two.bs_vel) * (1.0 - std::exp(-dtp / tau2));
+                    else
+                        g_two.bs_vel = raw_v;
                     if (length(g_two.bs_vel) > 3000.0) g_two.bs_vel = Vec3{};
                     g_two.bs_p2 = p2;
                     g_two.bs_local = local2;
