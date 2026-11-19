@@ -3806,6 +3806,7 @@ namespace
     // hand joint, detaches the weapon and gives it its dropped damping).
     bool is_fist(UObject* weapon);
     bool holster_snap(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg);
+    UObject* scabbard_pin(UObject* scab);
     void remove_fist(int side, UObject* pawn, const char* why);
     // A throw (B&S: released faster than 2 m/s): the game counts an unheld weapon's hits only while its
     // "Just Thrown" is set and "Last Parent" is the thrower (ModularWeaponBP @67055; hs_throwing.md),
@@ -3897,7 +3898,27 @@ namespace
                     if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
                 }
         }
+        // B&S: a holster stays on the body when its item is dropped. The game's release takes a drawn
+        // weapon's scabbard off the belt (Set Up <S> Hand Weapon @11946-@13481: it destroys the scabbard's
+        // pelvis pin when the slot's scabbard is the released weapon's), also on the mod's hand-overs. Its
+        // Scabbard reference is hidden from that check for the call and put back after.
+        UObject* kept_scab = nullptr;
+        FProperty* scab_prop = held ? held->GetPropertyByNameInChain(STR("Scabbard")) : nullptr;
+        if (hsvr::config().pose_keep_scabbard_on_drop && scab_prop && scab_prop->GetClass().GetName() == STR("ObjectProperty"))
+        {
+            UObject** slot = reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(held) + scab_prop->GetOffset_Internal());
+            if (*slot && scabbard_pin(*slot))
+            {
+                kept_scab = *slot;
+                *slot = nullptr;
+            }
+        }
         pawn->ProcessEvent(fn, parameters);
+        if (kept_scab)
+        {
+            *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(held) + scab_prop->GetOffset_Internal()) = kept_scab;
+            HSVR_LOG("Hold: %ls's scabbard kept on the belt (%s)", held->GetName().c_str(), scabbard_pin(kept_scab) ? "still pinned" : "its pin is GONE anyway");
+        }
         g_hold[side] = HoldState{}; // a new hold (and slide) when anything is next held
         g_grip_log[side] = GripLog{}; // its 0.5 s "Grip:" line stops with the hold
         HSVR_LOG("Hold: dropped with %ls(%ls)%s", name, names.c_str(), thrown ? " as a throw" : "");
@@ -8354,7 +8375,11 @@ namespace
         Vec3 mouth = sock_mouth, ax = sock_ax;
         bool real = false, other_side = false;
         auto fit = g_sheath_fit.find(w);
-        if (fit != g_sheath_fit.end() && fit->second.scab == object_property(w, STR("Scabbard")))
+        bool pinned = fit != g_sheath_fit.end() && fit->second.scab && scabbard_pin(fit->second.scab) != nullptr;
+        if (fit != g_sheath_fit.end() && fit->second.scab == object_property(w, STR("Scabbard")) && !pinned)
+            HSVR_LOG_EVERY(2.0, "Sheathe: %ls's scabbard is no longer on the belt (the game takes it off when its weapon is dropped); not sheathed",
+                           w->GetName().c_str());
+        if (fit != g_sheath_fit.end() && fit->second.scab == object_property(w, STR("Scabbard")) && pinned)
         {
             Vec3 sp = component_location(fit->second.scab);
             Quat sq = component_rotation(fit->second.scab);

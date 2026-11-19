@@ -385,6 +385,9 @@ namespace hsvr
         // pose_holster_zone_cm of the free belt slot it goes in (the one the game's Assign picks) and moving
         // slower than pose_holster_max_speed m/s (faster is a throw), and the game hangs it there.
         bool pose_holster_snap = true;
+        // A drawn weapon dropped, thrown or passed to the other hand leaves its scabbard on the belt (B&S);
+        // the game's own release takes it off (Matthew 2026-11-19: "the scabbard despawns").
+        bool pose_keep_scabbard_on_drop = true;
         double pose_holster_zone_cm = 15.0;
         double pose_holster_max_speed = 3.0;
         double pose_throw_speed = 2.0;
