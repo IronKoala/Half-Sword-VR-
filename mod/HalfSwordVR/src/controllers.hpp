@@ -65,4 +65,8 @@ namespace hsvr
     // Asks for a buzz on a hand (0 left, 1 right), strength 0..1, sent with the next input update.
     // The strongest request since the last update wins.
     void controllers_buzz(int hand, float amplitude);
+    // A hit felt the way Blade & Sorcery does it: an amplitude envelope (keys of normalised time
+    // 0..1 -> amplitude 0..1) played over `seconds` at `volume`. Every frame each hand gets the sum
+    // of its envelopes playing (clamped to 1), sent as a 1/30 s pulse.
+    void controllers_hit(int hand, const float* key_t, const float* key_v, int keys, double seconds, float volume);
 } // namespace hsvr

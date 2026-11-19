@@ -700,6 +700,19 @@ namespace hsvr
         // alignment, cutting rate, rubber-band and stick state, and the controller's speed along the
         // blade. Read only; changes nothing in the game.
         bool stab_log = true;
+        // Hit vibration, Blade & Sorcery's way (defaults\bs_haptics.md): every weapon, shield or fist
+        // hit plays B&S's hit-sound envelopes on the controllers, sized by the contact speed (and,
+        // for a blow taken on a held item, the game's own impulse). This is the overall strength
+        // (0 off, 1 as B&S).
+        double hit_buzz = 1.0;
+        // B&S's scrape ticks while a contact slides (0.8 per 2 cm), x this (0 off).
+        double hit_buzz_scrape = 1.0;
+        // B&S makes no buzz for a blade on plate armour; 1 = give it the metal-on-metal layer.
+        bool hit_buzz_blade_on_plate = true;
+        // The game's impulse (kg cm/s) that counts as a full-strength blow on a held item.
+        double hit_buzz_impulse_full = 3000.0;
+        // Log every hit buzz ("Hit buzz:" lines).
+        bool hit_buzz_log = true;
         // Stab assist: the VR hold moves the weapon on its own (the game's hand joint is free), so a
         // tip meets flesh with only the weapon's mass behind it and the game's stick rule
         // (cutting rate x impulse >= 10000) rarely passes. On a hit of a piercing tip on a person's

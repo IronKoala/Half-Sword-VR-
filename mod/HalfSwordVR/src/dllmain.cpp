@@ -8788,6 +8788,393 @@ namespace
         HSVR_LOG("Force: watching %d engine physics functions for calls on his weapons and his body", hooked);
     }
 
+    // ---- Hit vibration (Blade & Sorcery's way) -------------------------------------------------
+    // B&S has no haptic effect for hits: the buzz is the hit sound (defaults\bs_haptics.md). Each
+    // hit sound layer has a volume from the hit's intensity (InverseLerp of the relative contact
+    // speed: 0.25-15 m/s, maces 6-16, punches 2-9) through its volumeIntensityCurve, layers under
+    // 0.05 are not played, and every frame a hand gets the sum of its sounds' amplitude envelopes x
+    // volume, clamped to 1, as a 1/30 s pulse (controllers_hit). Weapon and shield hits buzz every
+    // hand holding either item; a punch only the punching hand; a hit taken on the body, nothing.
+    // Contact that stays on (sliding) gives B&S's scrape ticks: 0.8 per 2 cm of slide.
+    // Here: our weapon's speed at the contact is the velocity the hold gave it last tick (the hit
+    // event comes after the physics step, when the speeds have already changed), the other body's
+    // is read at the point. A blow taken on a parked weapon or shield (its own speed ~0, the
+    // attacker's already slowed) also gets an intensity from the game's own impulse, so a block
+    // is felt by how hard it was hit.
+    struct HitCurveKey { float x, y; };
+    // Unity curve with flat tangents between keys (a smoothstep per segment).
+    double hit_curve(const HitCurveKey* k, int n, double x)
+    {
+        if (x <= k[0].x) return k[0].y;
+        for (int i = 1; i < n; ++i)
+            if (x <= k[i].x)
+            {
+                double u = (x - k[i - 1].x) / (std::max)(1e-6, (double)(k[i].x - k[i - 1].x));
+                u = u * u * (3.0 - 2.0 * u);
+                return k[i - 1].y + (k[i].y - k[i - 1].y) * u;
+            }
+        return k[n - 1].y;
+    }
+    // B&S envelopes (mean over each container's clips), sampled every 50 ms over 0.4 s.
+    struct HitEnvelopeDef { const char* name; float v[9]; };
+    const HitEnvelopeDef kEnvSword = {"HitSword1", {.66f, .71f, .63f, .37f, .16f, .09f, .09f, .09f, .02f}};
+    const HitEnvelopeDef kEnvSwordSoft = {"HitSwordSoft", {.85f, .47f, .29f, .08f, .03f, .03f, .02f, .00f, .00f}};
+    const HitEnvelopeDef kEnvSlashFlesh = {"HitSwordSlashOnFlesh", {.00f, .50f, .82f, .71f, .30f, .11f, .06f, .03f, .01f}};
+    const HitEnvelopeDef kEnvPierceFlesh = {"HitSwordPierceOnFlesh", {.06f, .60f, .96f, .64f, .27f, .15f, .08f, .04f, .03f}};
+    const HitEnvelopeDef kEnvMaceFlesh = {"HitMaceOnFlesh", {.19f, .89f, .61f, .26f, .08f, .08f, .01f, .00f, .00f}};
+    const HitEnvelopeDef kEnvPunch = {"Punch", {.02f, .90f, .39f, .10f, .03f, .01f, .00f, .00f, .00f}};
+    const HitEnvelopeDef kEnvPunchHeavy = {"PunchHeavy", {.15f, .91f, .81f, .39f, .20f, .10f, .02f, .02f, .01f}};
+    const HitEnvelopeDef kEnvMace = {"HitMace", {.09f, .86f, .65f, .24f, .05f, .02f, .01f, .01f, .00f}};
+    const HitEnvelopeDef kEnvTick = {"Scrape", {1.0f, .10f, .00f, .00f, .00f, .00f, .00f, .00f, .00f}};
+    const HitCurveKey kCurveSoft[] = {{0.0f, 0.0f}, {0.2f, 1.0f}, {1.0f, 0.0f}};
+    const HitCurveKey kCurveHard[] = {{0.0f, 0.0f}, {0.1f, 0.0f}, {1.0f, 1.0f}};
+    const HitCurveKey kCurveOnFlesh[] = {{0.0f, 0.2f}, {1.0f, 1.0f}};
+    const HitCurveKey kCurveOnPlate[] = {{0.0f, 0.5f}, {1.0f, 1.0f}};
+    const HitCurveKey kCurvePunch[] = {{0.0f, 0.0f}, {0.5f, 0.6f}, {1.0f, 0.0f}};
+    const HitCurveKey kCurvePunchHeavy[] = {{0.0f, 0.2f}, {1.0f, 0.6f}};
+
+    // One sound layer on a hand; returns the volume played (0 = culled).
+    double hit_layer(int hand, const HitEnvelopeDef& env, const HitCurveKey* curve, int keys, double intensity, double db_gain, double seconds = 0.4)
+    {
+        static const float t[9] = {0.0f, 0.125f, 0.25f, 0.375f, 0.5f, 0.625f, 0.75f, 0.875f, 1.0f};
+        double vol = hit_curve(curve, keys, intensity) * db_gain * hsvr::config().hit_buzz;
+        if (vol < 0.05) return 0.0;
+        hsvr::controllers_hit(hand, t, env.v, 9, seconds, (float)vol);
+        return vol;
+    }
+
+    // A weapon is blunt when none of its damage points (the game's Tips, tags sEdge### / sTip###)
+    // is sharp (both under 10): maces, hammers, flails, staffs. Cached per weapon.
+    bool weapon_is_blunt(UObject* weapon)
+    {
+        static std::map<UObject*, bool> cache;
+        if (!weapon) return false;
+        auto it = cache.find(weapon);
+        if (it != cache.end()) return it->second;
+        int sharp = 0;
+        bool any = false;
+        if (RawArray* tips = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")); tips && tips->Data)
+            for (int32_t i = 0; i < tips->Num; ++i)
+                if (UObject* tp = static_cast<UObject*>(tips->Data[i]))
+                    if (RawArray* tags = tp->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")); tags && tags->Data)
+                        for (int32_t j = 0; j < tags->Num; ++j)
+                        {
+                            std::wstring s = reinterpret_cast<const FName*>(tags->Data)[j].ToString();
+                            if (s.size() > 5 && (s.rfind(STR("sEdge"), 0) == 0)) any = true, sharp = (std::max)(sharp, _wtoi(s.c_str() + 5));
+                            else if (s.size() > 4 && s.rfind(STR("sTip"), 0) == 0) any = true, sharp = (std::max)(sharp, _wtoi(s.c_str() + 4));
+                        }
+        bool blunt = any && sharp < 10;
+        if (cache.size() > 256) cache.clear();
+        cache[weapon] = blunt;
+        return blunt;
+    }
+
+    // The player's hands holding this item (bit 0 left, bit 1 right).
+    int hit_holders(UObject* pawn, UObject* item)
+    {
+        if (!item) return 0;
+        int m = 0;
+        if (g_hold[0].weapon == item || object_property(pawn, STR("Weapon L")) == item) m |= 1;
+        if (g_hold[1].weapon == item || object_property(pawn, STR("Weapon R")) == item) m |= 2;
+        if (g_two.active && g_two.weapon == item) m |= 3;
+        return m;
+    }
+
+    // The pre-hit speed of a held item at a point (cm/s): the velocity the hold set last tick.
+    bool hit_held_velocity(UObject* pawn, UObject* item, const hsvr::Vec3& at, hsvr::Vec3& out)
+    {
+        using namespace hsvr;
+        for (int side = 0; side < 2; ++side)
+        {
+            const HoldState& h = g_hold[side];
+            if (h.weapon != item || !h.have_last) continue;
+            UObject* base = object_property(item, STR("BaseMesh"));
+            if (!base) return false;
+            Call cm(base, STR("GetCenterOfMass"));
+            cm.run();
+            Vec3 r = at - cm.vec();
+            const Vec3& w = h.last_set_w;
+            out = h.last_set_v + Vec3{w.y * r.z - w.z * r.y, w.z * r.x - w.x * r.z, w.x * r.y - w.y * r.x};
+            return true;
+        }
+        return false;
+    }
+
+    hsvr::Vec3 hit_body_velocity(UObject* comp, FName bone, const hsvr::Vec3& at)
+    {
+        if (!comp) return {};
+        Call v(comp, STR("GetPhysicsLinearVelocityAtPoint"));
+        v.three(STR("Point"), at.x, at.y, at.z);
+        v.name(STR("BoneName"), bone);
+        v.run();
+        return v.vec();
+    }
+
+    // Recent contacts per hand: the same thing touched again within 0.2 s is the same contact
+    // (UE reports a touching pair every physics step) unless it is clearly harder.
+    struct HitContact
+    {
+        UObject* other = nullptr;
+        double last = -10.0, intensity = 0.0;
+        hsvr::Vec3 point;
+        double slid = 0.0;
+    };
+    HitContact g_hit_contact[2][4];
+
+    // Returns true when this is a new hit on that hand (and remembers it); scrape ticks for a
+    // contact that stays on and slides.
+    bool hit_is_new(int hand, UObject* other, double intensity, const hsvr::Vec3& point, double now)
+    {
+        hsvr::Config cfg = hsvr::config();
+        HitContact* slot = nullptr;
+        HitContact* oldest = &g_hit_contact[hand][0];
+        for (HitContact& c : g_hit_contact[hand])
+        {
+            if (c.other == other && now - c.last < 0.2) slot = &c;
+            if (c.last < oldest->last) oldest = &c;
+        }
+        if (slot)
+        {
+            double moved = hsvr::length(point - slot->point);
+            if (moved < 30.0) slot->slid += moved; // a jump this big is a new spot, not a slide
+            slot->point = point;
+            slot->last = now;
+            if (intensity > slot->intensity * 1.5 + 0.1)
+            {
+                slot->intensity = intensity;
+                slot->slid = 0.0;
+                return true;
+            }
+            slot->intensity = (std::max)(slot->intensity * 0.9, intensity);
+            if (cfg.hit_buzz_scrape > 0.0 && slot->slid >= 2.0)
+            {
+                slot->slid = std::fmod(slot->slid, 2.0);
+                hit_layer(hand, kEnvTick, kCurveOnPlate, 2, 1.0, 0.8 * cfg.hit_buzz_scrape, 0.06);
+            }
+            return false;
+        }
+        *oldest = HitContact{other, now, intensity, point, 0.0};
+        return true;
+    }
+
+    enum class HitSource { Blade, Blunt, Fist };
+    enum class HitTarget { Item, Flesh, Plate, World };
+
+    // Plays B&S's sound layers for one hit on the hands in `mask`; returns the summed peak volume.
+    double hit_play(int mask, HitSource src, HitTarget tgt, double intensity)
+    {
+        hsvr::Config cfg = hsvr::config();
+        double total = 0.0;
+        for (int hand = 0; hand < 2; ++hand)
+        {
+            if (!(mask & (1 << hand))) continue;
+            double v = 0.0;
+            if (src == HitSource::Fist)
+            {
+                v += hit_layer(hand, kEnvPunch, kCurvePunch, 3, intensity, 1.0);
+                v += hit_layer(hand, kEnvPunchHeavy, kCurvePunchHeavy, 2, intensity, 1.0);
+            }
+            else if (tgt == HitTarget::Item)
+            {
+                const HitEnvelopeDef& hard = src == HitSource::Blunt ? kEnvMace : kEnvSword;
+                v += hit_layer(hand, kEnvSwordSoft, kCurveSoft, 3, intensity, 1.0);
+                v += hit_layer(hand, hard, kCurveHard, 3, intensity, 1.0);
+            }
+            else if (tgt == HitTarget::Flesh)
+            {
+                if (src == HitSource::Blunt) v += hit_layer(hand, kEnvMaceFlesh, kCurveOnFlesh, 2, intensity, 1.26);
+                else v += hit_layer(hand, kEnvSlashFlesh, kCurveOnFlesh, 2, intensity, 1.0);
+            }
+            else if (tgt == HitTarget::Plate)
+            {
+                // B&S plays a blade on plate silently (only blunt damage passes its filter);
+                // hit_buzz_blade_on_plate gives it the metal-on-metal hard layer instead.
+                if (src == HitSource::Blunt) v += hit_layer(hand, kEnvMace, kCurveOnPlate, 2, intensity, 1.0);
+                else if (cfg.hit_buzz_blade_on_plate) v += hit_layer(hand, kEnvSword, kCurveHard, 3, intensity, 1.0);
+            }
+            total = (std::max)(total, v);
+        }
+        return total;
+    }
+
+    double inverse_lerp(double a, double b, double x) { return (std::max)(0.0, (std::min)(1.0, (x - a) / (b - a))); }
+
+    // The hit event's FHitResult, broken out (BreakHitResult): what was hit, its bone, our own bone
+    // (BoneName = Hit.MyBoneName) and the point.
+    struct HitInfo
+    {
+        UObject* comp = nullptr;
+        FName bone, my_bone;
+        hsvr::Vec3 point;
+        bool ok = false;
+    };
+    HitInfo break_hit(Unreal::UnrealScriptFunctionCallableContext& context, FProperty* hit_prop)
+    {
+        HitInfo r;
+        if (!hit_prop) return r;
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        Call b(gs, STR("BreakHitResult"));
+        FProperty* hp = b.param(STR("Hit"));
+        if (!hp) return r;
+        const uint8_t* src = context.TheStack.Locals() + hit_prop->GetOffset_Internal();
+        for (FOutParmRec* o = context.TheStack.OutParms(); o; o = o->NextOutParm)
+            if (o->Property == hit_prop && o->PropAddr)
+            {
+                src = o->PropAddr;
+                break;
+            }
+        std::memcpy(b.buffer.data() + hp->GetOffset_Internal(), src, (std::min)(hp->GetSize(), hit_prop->GetSize()));
+        b.run();
+        if (FProperty* c = b.param(STR("HitComponent"))) r.comp = *reinterpret_cast<UObject**>(b.buffer.data() + c->GetOffset_Internal());
+        if (FProperty* c = b.param(STR("HitBoneName"))) r.bone = *reinterpret_cast<FName*>(b.buffer.data() + c->GetOffset_Internal());
+        if (FProperty* c = b.param(STR("BoneName"))) r.my_bone = *reinterpret_cast<FName*>(b.buffer.data() + c->GetOffset_Internal());
+        r.point = b.vec(STR("ImpactPoint"));
+        r.ok = true;
+        return r;
+    }
+
+    bool hit_rate_ok(double now)
+    {
+        static double window = 0.0;
+        static int n = 0;
+        if (now - window >= 1.0) window = now, n = 0;
+        return ++n <= 120;
+    }
+
+    // A person's part: his skeletal mesh is flesh, anything else on him (armour pieces) plate.
+    HitTarget hit_target_kind(UObject* other_actor, UObject* comp)
+    {
+        if (!other_actor) return HitTarget::World;
+        if (is_a(other_actor, STR("ModularWeaponBP_C"))) return HitTarget::Item;
+        if (is_a(other_actor, STR("Willie_BP_C")))
+            return comp && is_a(comp, STR("SkeletalMeshComponent")) ? HitTarget::Flesh : HitTarget::Plate;
+        return HitTarget::World;
+    }
+
+    // ModularWeaponBP "Collision Hit" (before it runs): a weapon hits something. Ours hitting
+    // anything, or anyone's hitting an item we hold.
+    void hit_haptics_weapon(Unreal::UnrealScriptFunctionCallableContext& context, UFunction* fn)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        if (cfg.hit_buzz <= 0.0 || !fn) return;
+        UObject* weapon = context.Context;
+        UObject* pawn = live_posed_pawn();
+        uint8_t* locals = context.TheStack.Locals();
+        if (!weapon || !pawn || !locals) return;
+        UObject* other = nullptr;
+        UObject* other_comp = nullptr;
+        FProperty* hit_prop = nullptr;
+        double ni[3] = {0, 0, 0};
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            uint8_t* at = locals + p->GetOffset_Internal();
+            if (n == STR("OtherActor") || n == STR("Other Actor")) other = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("OtherComp") || n == STR("Other Comp")) other_comp = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("NormalImpulse") || n == STR("Normal Impulse")) read_three(at, p, ni);
+            else if (n == STR("Hit")) hit_prop = p;
+        }
+        if (other == pawn) return; // his own body (the game ignores it too)
+        int mine = hit_holders(pawn, weapon);
+        int theirs = other ? hit_holders(pawn, other) : 0;
+        int mask = mine | theirs;
+        if (!mask) return;
+        double now = now_seconds();
+        if (!hit_rate_ok(now)) return;
+        HitInfo hit = break_hit(context, hit_prop);
+        UObject* target_comp = hit.comp ? hit.comp : other_comp;
+        double impulse = length(Vec3{ni[0], ni[1], ni[2]});
+
+        // Relative contact speed (m/s): each side's velocity at the point, ours from the hold.
+        Vec3 va, vb;
+        if (!hit_held_velocity(pawn, weapon, hit.point, va))
+            if (UObject* base = object_property(weapon, STR("BaseMesh"))) va = hit_body_velocity(base, FName(), hit.point);
+        if (!other || !hit_held_velocity(pawn, other, hit.point, vb)) vb = hit_body_velocity(target_comp, hit.bone, hit.point);
+        double speed = length(va - vb) / 100.0;
+
+        // Who strikes: our weapon (its kind), or theirs on our item (its kind decides the sound).
+        bool fist = is_fist(weapon);
+        HitSource src = fist ? HitSource::Fist : weapon_is_blunt(weapon) ? HitSource::Blunt : HitSource::Blade;
+        HitTarget tgt = hit_target_kind(other, target_comp);
+        if (!mine) tgt = HitTarget::Item; // their weapon on the item we hold
+        double lo = 0.25, hi = 15.0;
+        if (src == HitSource::Fist) lo = 2.0, hi = 9.0;
+        else if (src == HitSource::Blunt) lo = 6.0, hi = 16.0;
+        double i_speed = inverse_lerp(lo, hi, speed);
+        double i_imp = src == HitSource::Fist ? 0.0 : inverse_lerp(15.0, (std::max)(16.0, cfg.hit_buzz_impulse_full), impulse);
+        double intensity = (std::max)(i_speed, i_imp);
+
+        UObject* key = mine ? other : weapon;
+        if (tgt == HitTarget::World)
+        {
+            // B&S: blades on stone and dirt make no hit buzz, only scrape ticks while sliding.
+            for (int hand = 0; hand < 2; ++hand)
+                if (mask & (1 << hand)) hit_is_new(hand, target_comp ? target_comp : other, 0.0, hit.point, now);
+            return;
+        }
+        int play = 0;
+        for (int hand = 0; hand < 2; ++hand)
+            if ((mask & (1 << hand)) && hit_is_new(hand, key, intensity, hit.point, now)) play |= 1 << hand;
+        // A punch: only the punching hand.
+        if (src == HitSource::Fist) play &= mine;
+        if (!play) return;
+        double vol = hit_play(play, src, tgt, intensity);
+        if (cfg.hit_buzz_log)
+            HSVR_LOG("Hit buzz: %ls %s %ls (%ls bone %ls) %s, %.1f m/s, impulse %.0f, intensity %.2f (speed %.2f, impulse %.2f), hands %s, volume %.2f",
+                     weapon->GetName().c_str(), mine ? "hit" : "hit our", other ? other->GetName().c_str() : STR("?"), target_comp ? target_comp->GetName().c_str() : STR("?"),
+                     hit.bone.ToString().c_str(),
+                     tgt == HitTarget::Item ? "item" : tgt == HitTarget::Flesh ? "flesh" : "plate", speed, impulse, intensity, i_speed, i_imp,
+                     play == 3 ? "both" : play == 1 ? "left" : "right", vol);
+    }
+
+    // Willie's mesh OnComponentHit, on the player's pawn: an open hand, forearm or arm (no fist
+    // weapon in it) landing on another person is a punch on that side (B&S Punch, 2-9 m/s).
+    void hit_haptics_body(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        if (cfg.hit_buzz <= 0.0) return;
+        UFunction* fn = static_cast<UFunction*>(custom_data);
+        UObject* pawn = live_posed_pawn();
+        uint8_t* locals = context.TheStack.Locals();
+        if (!fn || !pawn || context.Context != pawn || !locals) return;
+        UObject* other = nullptr;
+        UObject* other_comp = nullptr;
+        FProperty* hit_prop = nullptr;
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            uint8_t* at = locals + p->GetOffset_Internal();
+            if (n == STR("OtherActor")) other = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("OtherComp")) other_comp = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("Hit")) hit_prop = p;
+        }
+        if (!other || other == pawn || !is_a(other, STR("Willie_BP_C"))) return;
+        double now = now_seconds();
+        if (!hit_rate_ok(now)) return;
+        HitInfo hit = break_hit(context, hit_prop);
+        std::wstring bone = hit.my_bone.ToString();
+        bool arm = bone.find(STR("hand")) != std::wstring::npos || bone.find(STR("arm")) != std::wstring::npos || bone.find(STR("finger")) != std::wstring::npos ||
+                   bone.find(STR("thumb")) != std::wstring::npos || bone.find(STR("index")) != std::wstring::npos || bone.find(STR("middle")) != std::wstring::npos ||
+                   bone.find(STR("ring")) != std::wstring::npos || bone.find(STR("pinky")) != std::wstring::npos;
+        if (!arm || bone.size() < 2) return;
+        int side = bone.size() >= 2 && bone.substr(bone.size() - 2) == STR("_l") ? 0 : bone.substr(bone.size() - 2) == STR("_r") ? 1 : -1;
+        if (side < 0) return;
+        // A fist weapon in that hand reports its own hit (above).
+        if (is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))) return;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        Vec3 va = hit_body_velocity(mesh, hit.my_bone, hit.point);
+        Vec3 vb = hit_body_velocity(hit.comp ? hit.comp : other_comp, hit.bone, hit.point);
+        double speed = (std::max)(length(va - vb) / 100.0, g_hand_world_v[side]);
+        double intensity = inverse_lerp(2.0, 9.0, speed);
+        if (!hit_is_new(side, other, intensity, hit.point, now)) return;
+        double vol = hit_play(1 << side, HitSource::Fist, HitTarget::Flesh, intensity);
+        if (cfg.hit_buzz_log)
+            HSVR_LOG("Hit buzz: %s %ls hit %ls (%ls bone %ls), %.1f m/s, intensity %.2f, volume %.2f", side == 0 ? "left" : "right", bone.c_str(), other->GetName().c_str(),
+                     hit.comp ? hit.comp->GetName().c_str() : STR("?"), hit.bone.ToString().c_str(), speed, intensity, vol);
+    }
+
     // ---- Stab log (read only) ------------------------------------------------------------------
     // Why VR stabs bounce (defaults\stabbing_and_ss_reference.md in the decompile folder): the game
     // sticks a blade only when CuttingRate * |NormalImpulse| >= 10000 (ModularWeaponBP @44253-@44512)
@@ -8883,6 +9270,8 @@ namespace
 
     void stab_hit_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
+        // Hit vibration first: it reads the game's own impulse before the stab assist may raise it.
+        hit_haptics_weapon(context, static_cast<UFunction*>(custom_data));
         {
             hsvr::Config c = hsvr::config();
             if (!c.stab_log && !c.stab_assist) return;
@@ -9138,6 +9527,25 @@ namespace
         std::wstring params;
         for (FProperty* p : fn->ForEachProperty()) params += p->GetName() + STR(", ");
         HSVR_LOG("Stab: watching the weapons' Collision Hit (parameters %ls)", params.c_str());
+    }
+
+    // Hit vibration needs the weapons' Collision Hit (shared with the stab log) and Willie's mesh hit.
+    void install_hit_haptics()
+    {
+        if (hsvr::config().hit_buzz <= 0.0) return;
+        install_stab_log();
+        static bool installed = false;
+        static double last_try = -10.0;
+        if (installed) return;
+        double now = hsvr::now_seconds();
+        if (now - last_try < 2.0) return;
+        last_try = now;
+        UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
+            nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:BndEvt__BP_ThirdPersonCharacter_Mesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"));
+        if (!fn) return;
+        installed = true;
+        UObjectGlobals::RegisterHook(fn, &hit_haptics_body, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+        HSVR_LOG("Hit buzz: watching the weapons' Collision Hit and Willie's mesh hits (B&S-style hit vibration)");
     }
 
     // Who lets a stuck blade go (stab-test7: the game stuck thrusts, then let them go within 0.15 s).
@@ -11396,6 +11804,7 @@ namespace
         }
         stab_no_rubber_band(context);
         stab_log_tick(context);
+        install_hit_haptics();
         grip_flip_tick(context);
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
