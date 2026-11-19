@@ -111,6 +111,10 @@ namespace
         int flip_winding = 0;     // flip if the model shows inside out
         double mass_kg = 0.0;     // > 0: set the Head's mass to this; 0: keep the game's mass
         int hide_original = 1;    // hide the box (the old head is replaced either way)
+        // Material texture parameters that get the model's own maps (<model>_BaseColor.png,
+        // _Normal.png, _ORM.png next to it). Empty = leave that parameter alone.
+        std::wstring tex_base, tex_normal, tex_orm;
+        int own_textures = 1;     // 0: keep the game's material untouched
     };
     Settings g_settings;
 
@@ -142,6 +146,10 @@ namespace
             else if (k == "flip_winding") g_settings.flip_winding = atoi(v.c_str());
             else if (k == "mass_kg") g_settings.mass_kg = atof(v.c_str());
             else if (k == "hide_original") g_settings.hide_original = atoi(v.c_str());
+            else if (k == "tex_base") g_settings.tex_base = std::wstring(v.begin(), v.end());
+            else if (k == "tex_normal") g_settings.tex_normal = std::wstring(v.begin(), v.end());
+            else if (k == "tex_orm") g_settings.tex_orm = std::wstring(v.begin(), v.end());
+            else if (k == "own_textures") g_settings.own_textures = atoi(v.c_str());
         }
         fclose(f);
         log("Settings: model=%s key=0x%X fit_to_original=%d flip_winding=%d mass_kg=%.3f hide_original=%d",
@@ -171,7 +179,6 @@ namespace
         std::vector<double> uvs;             // u, v pairs
         std::vector<int32_t> triangles;      // Unreal winding
         V3 min{1e30, 1e30, 1e30}, max{-1e30, -1e30, -1e30};
-        V3 tangent_scale{1, 1, 1};           // scale of the component the model is shown on
     };
 
     bool load_obj(const std::wstring& path, Model& m)
@@ -715,32 +722,23 @@ namespace
                 .array(STR("UV0"), m.uvs.data(), (int32_t)(m.uvs.size() / 2))
                 .flag(STR("bCreateCollision"), false);
 
-        // Tangents (FProcMeshTangent: TangentX + bFlipTangentY), laid out from the reflected struct.
-        // Without them the engine gets zero tangents and normal-mapped materials shade wrongly.
-        // Tangent = the blade axis (Z) made perpendicular to the normal, worked out in world terms
-        // (normals scale by 1/s, directions by s) and handed over in the component's local units.
-        std::vector<uint8_t> tangents;
-        auto* tstruct = UObjectGlobals::StaticFindObject<UScriptStruct*>(nullptr, nullptr, STR("/Script/ProceduralMeshComponent.ProcMeshTangent"));
-        FProperty* tx = member(tstruct, STR("TangentX"));
-        FProperty* tflip = member(tstruct, STR("bFlipTangentY"));
-        if (tx && tflip)
+        // Tangents from the UVs, by the engine's own routine (KismetProceduralMeshLibrary
+        // CalculateTangentsForMesh), so they follow the convention its normal maps expect. Its
+        // normals output is not used (the file's normals are kept). The two output arrays are
+        // allocated by the engine and left alone afterwards (a one-off leak per F9 press).
+        static UObject* pml = find(STR("/Script/ProceduralMeshComponent.Default__KismetProceduralMeshLibrary"));
+        Call calc(pml, STR("CalculateTangentsForMesh"));
+        calc.array(STR("Vertices"), m.positions.data(), (int32_t)m.positions.size())
+                .array(STR("Triangles"), m.triangles.data(), (int32_t)m.triangles.size())
+                .array(STR("UVs"), m.uvs.data(), (int32_t)(m.uvs.size() / 2));
+        RawArray tangents{};
+        if (calc.run())
         {
-            int32_t stride = (tstruct->GetPropertiesSize() + 7) & ~7;
-            const V3 s = m.tangent_scale;
-            tangents.assign((size_t)stride * m.normals.size(), 0);
-            for (size_t i = 0; i < m.normals.size(); ++i)
-            {
-                V3 n = unit(V3{m.normals[i].x / s.x, m.normals[i].y / s.y, m.normals[i].z / s.z});
-                V3 a{0, 0, 1};
-                if (std::fabs(n.z) > 0.95) a = {1, 0, 0};
-                double d = n.x * a.x + n.y * a.y + n.z * a.z;
-                V3 t = unit(V3{a.x - n.x * d, a.y - n.y * d, a.z - n.z * d});
-                t = unit(V3{t.x / s.x, t.y / s.y, t.z / s.z});
-                write_three(tangents.data() + i * stride + tx->GetOffset_Internal(), tx, t.x, t.y, t.z);
-            }
-            section.array(STR("Tangents"), tangents.data(), (int32_t)m.normals.size());
-            log("  tangents: %zu (stride %d)", m.normals.size(), stride);
+            if (uint8_t* t = calc.at(STR("Tangents"))) tangents = *reinterpret_cast<RawArray*>(t);
+            log("  tangents from UVs: %d (vertices %zu)", tangents.Num, m.positions.size());
         }
+        if (tangents.Num == (int32_t)m.positions.size())
+            section.array(STR("Tangents"), tangents.Data, tangents.Num);
         if (!section.run()) return nullptr;
         Call sections(proc, STR("GetNumSections"));
         if (sections.run()) log("  procedural mesh sections: %d", sections.ret_i32());
@@ -752,6 +750,103 @@ namespace
             mat.run();
         }
         return proc;
+    }
+
+    // ---- materials and textures ----------------------------------------------------------------
+    // Logs the texture, scalar and vector parameters a material instance (and its parents) sets,
+    // read from the reflected arrays TextureParameterValues etc., so parameter names come from the
+    // game, not from a guess.
+    void log_material_params(UObject* material)
+    {
+        struct Kind
+        {
+            const TCHAR* array;
+            const TCHAR* type;
+            const TCHAR* value;
+        };
+        const Kind kinds[] = {{STR("TextureParameterValues"), STR("/Script/Engine.TextureParameterValue"), STR("ParameterValue")},
+                              {STR("ScalarParameterValues"), STR("/Script/Engine.ScalarParameterValue"), STR("ParameterValue")},
+                              {STR("VectorParameterValues"), STR("/Script/Engine.VectorParameterValue"), STR("ParameterValue")}};
+        for (int depth = 0; material && depth < 8; ++depth)
+        {
+            log("  material %s (%s)", name_of(material).c_str(), narrow(material->GetClassPrivate()->GetName()).c_str());
+            for (const Kind& k : kinds)
+            {
+                auto* arr = material->GetValuePtrByPropertyNameInChain<RawArray>(k.array);
+                auto* type = UObjectGlobals::StaticFindObject<UScriptStruct*>(nullptr, nullptr, k.type);
+                if (!arr || !type || !arr->Data) continue;
+                FProperty* info = member(type, STR("ParameterInfo"));
+                FProperty* name = member(struct_type(info), STR("Name"));
+                FProperty* value = member(type, k.value);
+                if (!info || !name || !value) continue;
+                int32_t stride = (type->GetPropertiesSize() + 7) & ~7;
+                for (int32_t i = 0; i < arr->Num; ++i)
+                {
+                    const uint8_t* e = static_cast<const uint8_t*>(arr->Data) + (size_t)i * stride;
+                    const FName* n = reinterpret_cast<const FName*>(e + info->GetOffset_Internal() + name->GetOffset_Internal());
+                    const uint8_t* v = e + value->GetOffset_Internal();
+                    std::string text;
+                    if (k.array[0] == 'T') text = name_of(*reinterpret_cast<UObject* const*>(v));
+                    else if (k.array[0] == 'S') text = std::to_string(*reinterpret_cast<const float*>(v));
+                    else
+                    {
+                        const float* c = reinterpret_cast<const float*>(v);
+                        char b[96];
+                        snprintf(b, sizeof b, "(%.3f %.3f %.3f %.3f)", c[0], c[1], c[2], c[3]);
+                        text = b;
+                    }
+                    log("    %s %s = %s", narrow(k.array).substr(0, 6).c_str(), narrow(n->ToString()).c_str(), text.c_str());
+                }
+            }
+            material = object_property(material, STR("Parent"));
+        }
+    }
+
+    // A PNG/JPG file loaded as a runtime texture (KismetRenderingLibrary ImportFileAsTexture2D).
+    UObject* load_texture(UObject* world_context, const std::wstring& path)
+    {
+        if (FILE* f = _wfopen(path.c_str(), L"rb")) fclose(f);
+        else return nullptr;
+        static UObject* rl = find(STR("/Script/Engine.Default__KismetRenderingLibrary"));
+        Call c(rl, STR("ImportFileAsTexture2D"));
+        c.object(STR("WorldContextObject"), world_context);
+        if (uint8_t* a = c.at(STR("Filename")))
+            *reinterpret_cast<RawArray*>(a) = RawArray{path.c_str(), (int32_t)path.size() + 1, (int32_t)path.size() + 1};
+        UObject* t = c.run() ? c.ret_object() : nullptr;
+        log("  texture %s -> %s", narrow(path).c_str(), name_of(t).c_str());
+        return t;
+    }
+
+    // Puts the model's own maps into a dynamic copy of the material on the visual.
+    void apply_own_textures(UObject* weapon, UObject* proc, UObject* material, const std::wstring& base_path)
+    {
+        log_material_params(material);
+        if (!g_settings.own_textures) return;
+        struct Map
+        {
+            const std::wstring& param;
+            const wchar_t* file;
+        };
+        const Map maps[] = {{g_settings.tex_base, L"_BaseColor.png"}, {g_settings.tex_normal, L"_Normal.png"}, {g_settings.tex_orm, L"_ORM.png"}};
+        Call mid_call(proc, STR("CreateDynamicMaterialInstance"));
+        mid_call.i32(STR("ElementIndex"), 0).object(STR("SourceMaterial"), material);
+        UObject* mid = mid_call.run() ? mid_call.ret_object() : nullptr;
+        log("  dynamic material %s", name_of(mid).c_str());
+        if (!mid) return;
+        for (const Map& m : maps)
+        {
+            if (m.param.empty()) continue;
+            UObject* tex = load_texture(weapon, base_path + m.file);
+            if (!tex) continue;
+            FName name(m.param.c_str(), FNAME_Add);
+            Call set(mid, STR("SetTextureParameterValue"));
+            if (FProperty* p = set.param(STR("ParameterName"))) *reinterpret_cast<FName*>(set.buffer.data() + p->GetOffset_Internal()) = name;
+            set.object(STR("Value"), tex);
+            set.run();
+            Call get(mid, STR("K2_GetTextureParameterValue"));
+            if (FProperty* p = get.param(STR("ParameterName"))) *reinterpret_cast<FName*>(get.buffer.data() + p->GetOffset_Internal()) = name;
+            log("  %s <- %s (reads back %s)", narrow(m.param).c_str(), name_of(tex).c_str(), get.run() ? name_of(get.ret_object()).c_str() : "?");
+        }
     }
 
     void apply_test_blade(UObject* weapon);
@@ -1217,8 +1312,8 @@ namespace
             p = to_head_local(p);
         }
         for (V3& n : model.normals) n = unit(V3{n.x * hs.x, n.y * hs.y, n.z * hs.z});
-        model.tangent_scale = hs;
         UObject* proc = build_visual(weapon, head, model, material);
+        if (proc) apply_own_textures(weapon, proc, material, g_dir + base_name);
         log(proc ? "Done. Swing it at something and check the hits." : "  ! visual model failed (collision swap above still applies)");
     }
 

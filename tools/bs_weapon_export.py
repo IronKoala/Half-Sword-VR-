@@ -141,6 +141,7 @@ half = main["axisLength"] / 2.0
 # ---- the visible mesh ----------------------------------------------------------------------------
 positions, normals, uvs, tris = [], [], [], []
 mesh_names = []
+material_ids = []  # the first material of each drawn mesh
 for tpid, go in nodes:
     if not active[tpid]:
         continue
@@ -157,6 +158,11 @@ for tpid, go in nodes:
     if mesh_pid not in objs:
         continue
     mesh = objs[mesh_pid].read()
+    mats = tree[mr].get("m_Materials", [])
+    if len(mats) > 1:
+        print(f"warning: {mesh.m_Name} has {len(mats)} materials; only the first one's textures are exported")
+    if mats and mats[0]["m_PathID"] in objs and mats[0]["m_PathID"] not in material_ids:
+        material_ids.append(mats[0]["m_PathID"])
     h = MeshHandler(mesh)
     h.process()
     m = world[tpid]
@@ -336,3 +342,55 @@ with open(f"{out_dir}/{prefab_name}.txt", "w", newline="\n") as f:
         f.write(f"centre_of_mass_z={out['centre_of_mass_cm'][2]}\n")
     for d in out["damagers"]:
         f.write(f"damager_{d['name'].lower()}_z={d['position_cm'][2]}\n")
+
+# ---- textures --------------------------------------------------------------------------------
+# The model's own maps, converted to what Unreal expects:
+#   <prefab>_BaseColor.png  colour (sRGB)
+#   <prefab>_Normal.png     tangent-space normal, DirectX style (green = -Y): Unity stores normal maps
+#                           as "DXT5nm" (x in alpha, y in green) with OpenGL-style +Y, checked below.
+#   <prefab>_ORM.png        R = ambient occlusion, G = roughness (1 - smoothness), B = metallic, from
+#                           B&S's MOES map (R metallic, G occlusion, B emission mask, A smoothness).
+# The normal and ORM maps are written gamma-encoded (linear -> sRGB) because the mod loads every file as
+# an sRGB texture; the GPU's sRGB decode then gives back the linear values.
+def lin_to_srgb(x):
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * np.power(np.clip(x, 0, 1), 1 / 2.4) - 0.055)
+
+
+def save(a, name, encode):
+    from PIL import Image
+    a = np.clip(a, 0, 1)
+    if encode:
+        a = lin_to_srgb(a)
+    Image.fromarray((a * 255 + 0.5).astype(np.uint8), "RGB").save(f"{out_dir}/{prefab_name}_{name}.png")
+    print(f"wrote {prefab_name}_{name}.png {a.shape[1]}x{a.shape[0]}")
+
+
+if len(material_ids) > 1:
+    print(f"warning: {len(material_ids)} different materials; textures come from the first only")
+if material_ids:
+    mat = objs[material_ids[0]].read_typetree()
+    tex = {k: v["m_Texture"]["m_PathID"] for k, v in mat["m_SavedProperties"]["m_TexEnvs"]}
+
+    def image(key):
+        pid = tex.get(key, 0)
+        if not pid or pid not in objs:
+            return None
+        return np.asarray(objs[pid].read().image.convert("RGBA")).astype(np.float64) / 255.0
+
+    print(f"material {mat['m_Name']}")
+    base = image("_BaseMap")
+    if base is None:
+        base = image("_MainTex")
+    if base is not None:
+        save(base[:, :, :3], "BaseColor", False)
+    nm = image("_BumpMap")
+    if nm is not None:
+        if nm[:, :, 0].std() < 0.01 and nm[:, :, 0].mean() > 0.95:  # DXT5nm: red unused (all 1)
+            x, y = nm[:, :, 3] * 2 - 1, nm[:, :, 1] * 2 - 1
+        else:
+            x, y = nm[:, :, 0] * 2 - 1, nm[:, :, 1] * 2 - 1
+        zz = np.sqrt(np.clip(1 - x * x - y * y, 0, 1))
+        save(np.dstack([x * 0.5 + 0.5, -y * 0.5 + 0.5, zz * 0.5 + 0.5]), "Normal", True)
+    moes = image("_MetallicGlossMap")
+    if moes is not None:
+        save(np.dstack([moes[:, :, 1], 1 - moes[:, :, 3], moes[:, :, 0]]), "ORM", True)
