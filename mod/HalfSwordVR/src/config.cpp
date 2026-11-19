@@ -324,6 +324,7 @@ namespace hsvr
         num("pose_stamina_speed_smooth_s", c.pose_stamina_speed_smooth_s);
         num("pose_stamina_force_cap_n", c.pose_stamina_force_cap_n);
         num("pose_stamina_torque_cap_nm", c.pose_stamina_torque_cap_nm);
+        flag("pose_hold_exact", c.pose_hold_exact);
         num("pose_hold_spring", c.pose_hold_spring);
         num("pose_hold_damper", c.pose_hold_damper);
         num("pose_hold_max_force", c.pose_hold_max_force);

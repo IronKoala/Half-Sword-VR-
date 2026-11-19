@@ -207,6 +207,10 @@ namespace hsvr
         double pose_stamina_speed_smooth_s = 0.7;
         double pose_stamina_force_cap_n = 150.0;
         double pose_stamina_torque_cap_nm = 15.0;
+        // Exact hold (B&S-style): each frame the weapon gets the velocity that puts it exactly where
+        // the hand is drawn at the end of this frame's physics, limited only by the hand's strength
+        // (pose_hold_max_force / max_torque). 0 = the spring below.
+        bool pose_hold_exact = true;
         double pose_hold_spring = 5000.0;
         double pose_hold_damper = 100.0;
         double pose_hold_max_force = 3000.0;

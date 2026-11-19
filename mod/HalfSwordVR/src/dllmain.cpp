@@ -5182,6 +5182,18 @@ namespace
         }
     }
 
+    // This frame's delta time, the one the physics will step by after the ticks (GetWorldDeltaSeconds).
+    double world_delta_seconds(UObject* context)
+    {
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        if (!gs || !context) return -1.0;
+        Call c(gs, STR("GetWorldDeltaSeconds"));
+        if (!c.fn) return -1.0;
+        c.object(STR("WorldContextObject"), context);
+        if (!c.run()) return -1.0;
+        return c.number();
+    }
+
     // One tick of the hold for one hand. `joint` is the game's hand joint (its frames say where on the
     // weapon the hand holds it and how the weapon sits in the hand); `base` the weapon's BaseMesh.
     void hold_weapon(int side, UObject* pawn, UObject* joint, UObject* base, UObject* weapon, double mass, const hsvr::Config& cfg)
@@ -5519,21 +5531,58 @@ namespace
         h.torque_capped = length(torque) > max_torque;
         torque = clamp_length(torque, max_torque);
         h.torque_nm = length(torque) / 1e4;
-        drain_stamina(side, pawn, h.force_n, h.torque_nm, target_pivot, dt, cfg);
         Vec3 w_next = clamp_length(w + inertia.inverse() * ((torque + weight) * dt), 60.0);
         // 20 m/s is beyond any real hand; it only guards against tracking glitches.
         v_next = clamp_length(v_next, 2000.0);
         Quat rot_next = (from_scaled_axis(w_next * dt) * rot).normalized();
         Vec3 local_com = rot.inverse().rotate(com - pos);
         Vec3 com_next = pivot_now + v_next * dt + rot_next.rotate(local_com - pivot);
+        bool exact_set = false;
+        Vec3 exact_v;
+        if (cfg.pose_hold_exact)
+        {
+            // B&S-style: the weapon is in the hand. Its velocity this frame is exactly what puts it
+            // where the hand is drawn at the end of this frame's physics (the frame's own delta time,
+            // not the last frame's: the physics steps by it after the ticks), so nothing trails the
+            // hand and it hits with its real speed. Only the hand's strength limits the change (a
+            // blocked or too heavy weapon falls behind, and the hand goes onto it). Gravity during
+            // the frame is taken off ahead.
+            double DT = world_delta_seconds(pawn);
+            if (!(DT > 1e-4 && DT < 0.1)) DT = dt;
+            DT = (std::min)(0.08, DT);
+            Vec3 com_t = target_pos + target_rot.rotate(local_com);
+            Vec3 g{0.0, 0.0, gz};
+            Vec3 v_com_now = lv.vec();
+            Vec3 v_need = (com_t - com) * (1.0 / DT) - g * (DT * 0.5);
+            Vec3 dv = v_need - v_com_now;
+            double dv_most = (max_force / (std::max)(0.05, mass)) * DT + std::fabs(gz) * DT;
+            bool f_capped = length(dv) > dv_most;
+            dv = clamp_length(dv, dv_most);
+            Vec3 w_need = scaled_axis((target_rot * rot.inverse()).normalized()) * (1.0 / DT);
+            Vec3 dL = about_com * (w_need - w_now);
+            bool t_capped = length(dL) > max_torque * DT;
+            dL = clamp_length(dL, max_torque * DT);
+            exact_v = clamp_length(v_com_now + dv, 2000.0);
+            w_next = clamp_length(w_now + about_com.inverse() * dL, 60.0);
+            h.force_capped = f_capped;
+            h.torque_capped = t_capped;
+            h.force_n = length(dv) * mass / DT / 100.0;
+            h.torque_nm = length(dL) / DT / 1e4;
+            com_next = com + exact_v * DT + g * (DT * DT * 0.5);
+            exact_set = true;
+            HSVR_LOG_EVERY(1.0, "Hold: %s exact hold, frame %.1f ms (measured %.1f), %.1f cm and %.1f deg to go, force %.0f N%s, torque %.1f N m%s",
+                           side == 0 ? "left" : "right", DT * 1000.0, dt * 1000.0, length(com_t - com), length(scaled_axis((target_rot * rot.inverse()).normalized())) * 57.2958,
+                           h.force_n, f_capped ? " (cap)" : "", h.torque_nm, t_capped ? " (cap)" : "");
+        }
         h.expected_com = com_next;
         h.have_expected = true;
+        drain_stamina(side, pawn, h.force_n, h.torque_nm, target_pivot, dt, cfg);
         // Wake it first: a body the solver has put to sleep (a weapon lying still on the ground) may
         // keep the velocity it is given without moving (run 29: the knife stayed frozen on the floor).
         Call wake(base, STR("WakeRigidBody"));
         wake.run();
         Call slv(base, STR("SetPhysicsLinearVelocity"));
-        Vec3 set_v = (com_next - com) * (1.0 / dt);
+        Vec3 set_v = exact_set ? exact_v : (com_next - com) * (1.0 / dt);
         slv.three(STR("NewVel"), set_v.x, set_v.y, set_v.z);
         slv.flag(STR("bAddToCurrent"), false);
         slv.run();

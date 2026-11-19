@@ -175,3 +175,9 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `pose_capsule_floor_clamp` | 1 | When the game drops the capsule more than 20 cm in a tick (its foot-trace miss drop is ~77 cm), it is kept no more than 15 cm below its standing height over the floor under it. Only on such a drop, since the floor trace can land on a loose shield. Logged as "Capsule: the game put it ... into the floor". |
 
 Unattended: with `dev_pose_fake_tracking`, `hsvr.fake_head_drop <cm>` holds a crouch depth (-1 = the made-up path). In the headset: crouch slowly to the deepest you can and hold 10 s, a few times. Pass: feet on the floor, head where your headset is, no "into the floor" lines after the first second.
+
+## Exact hold (2026-11-19, grab rebuild step 1)
+
+| Setting | Default | What it does |
+|---|---|---|
+| `pose_hold_exact` | 1 | Each frame the held weapon gets the velocity that puts it exactly where the hand is drawn at the end of this frame's physics (this frame's own delta time, GetWorldDeltaSeconds; gravity during the frame taken off ahead). Only the hand's strength (`pose_hold_max_force`, `pose_hold_max_torque` x his strength) limits the change, so a blocked or too-heavy weapon falls behind. 0 = the old spring. Why: the spring trailed the hand by its lag and used the last frame's time; Willie's kinematic hand also moves in one jump per frame inside the physics substeps (grab_rebuild_research.md section 3), so nothing is driven through the hand body. Logged as "Hold: right exact hold, frame ... ms (measured ...), ... cm and ... deg to go". |
