@@ -1258,7 +1258,7 @@ namespace
         for (int side = 0; side < 2; ++side)
         {
             if (!prop[side]) continue;
-            int g = side == g_anim_grip_two_side ? g_anim_grip_two : (now - g_anim_grip_time[side] < 0.25 ? g_anim_grip[side] : -1);
+            int g = side == g_anim_grip_two_side ? g_anim_grip_two : (now - g_anim_grip_time[side] < 0.1 ? g_anim_grip[side] : -1);
             if (g != last[side])
             {
                 HSVR_LOG("Fingers: %s hand shows %d%s", side == 0 ? "left" : "right", g, g < 0 ? " (the game's own)" : "");
@@ -2318,6 +2318,81 @@ namespace
     std::vector<std::pair<std::wstring, double>> g_pawn_pins;
     bool set_variable(UObject* owner, const TCHAR* name, double number, UObject* object, const FName* fname);
 
+    // ---- Swing speed from the controllers -------------------------------------------------------
+    // The game's "Aim Swing Speed" (ASS, 0..75) comes only from the mouse (Willie UG @667580) and is
+    // 0 in VR, yet weapon skill growth, combat stance, fists, wrist locks, the AI's threat timing,
+    // weapons staying live when fallen, the unsheath length and more read it (aim_swing_speed_flow.md).
+    // It is written in his tick before nearly every reader, so the mod sets its only input, "Swing
+    // Velocity proxy" (ASS = (proxy - 25) * 1.5), before his tick, divided by how much the tick's own
+    // decay takes off (measured after each tick). The value: the faster hand that holds something
+    // (a weapon, item or fist; an empty hand waving does not swing), relative to the body, mapped
+    // pose_swing_speed_lo..hi m/s -> 0..75, exactly 0 at rest (some game rules need == 0).
+    double read_number_variable(UObject* owner, const TCHAR* name);
+    double g_swing_want = 0.0, g_swing_written = 0.0, g_swing_keep = 0.89, g_swing_last_t = -1.0;
+    hsvr::Vec3 g_swing_rel[2];
+    double g_swing_v[2] = {0.0, 0.0};
+    FProperty* g_swing_proxy = nullptr;
+    bool g_swing_looked = false;
+    void swing_speed_before_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        const Config& cfg = hsvr::config();
+        g_swing_written = 0.0;
+        if (!cfg.pose_feed_swing_speed) return;
+        if (!g_swing_looked)
+        {
+            g_swing_looked = true;
+            g_swing_proxy = pawn->GetPropertyByNameInChain(STR("Swing Velocity proxy"));
+            HSVR_LOG("Swing: the game's swing speed input %s (%ls)", g_swing_proxy ? "found" : "MISSING", g_swing_proxy ? g_swing_proxy->GetClass().GetName().c_str() : STR("-"));
+        }
+        if (!g_swing_proxy) return;
+        double now = now_seconds(), dt = g_swing_last_t > 0.0 ? now - g_swing_last_t : 0.0;
+        g_swing_last_t = now;
+        Vec3 body = actor_location(pawn);
+        double fastest = 0.0;
+        for (int side = 0; side < 2; ++side)
+        {
+            Vec3 rel = g_pose.target[side] - body;
+            if (g_pose.hand_valid[side] && dt > 1e-4 && dt < 0.1)
+            {
+                double v = length(rel - g_swing_rel[side]) / dt / 100.0; // m/s
+                double a = 1.0 - std::exp(-dt / 0.03);                   // ~30 ms smoothing (tracking jitter)
+                g_swing_v[side] += (v - g_swing_v[side]) * a;
+            }
+            else g_swing_v[side] = 0.0;
+            g_swing_rel[side] = rel;
+            bool holds = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != nullptr;
+            if (holds) fastest = (std::max)(fastest, g_swing_v[side]);
+        }
+        double lo = cfg.pose_swing_speed_lo, hi = (std::max)(lo + 0.1, cfg.pose_swing_speed_hi);
+        double want = fastest <= lo ? 0.0 : (std::min)(75.0, (fastest - lo) / (hi - lo) * 75.0);
+        // Rises at once, falls like the game's own (a swing's speed lingers ~0.1-0.2 s).
+        if (want >= g_swing_want || dt <= 0.0) g_swing_want = want;
+        else g_swing_want += (want - g_swing_want) * (1.0 - std::exp(-dt / (std::max)(0.01, cfg.pose_swing_speed_fall_s)));
+        if (g_swing_want < 0.5) g_swing_want = 0.0;
+        if (g_swing_want <= 0.0) return; // the game's own (0 at rest, or the mouse's)
+        double proxy_now = number_property(pawn, g_swing_proxy);
+        double p = (25.0 + g_swing_want / 1.5) / (std::max)(0.1, g_swing_keep);
+        if (p <= proxy_now) return; // the mouse already swings harder
+        set_variable(pawn, STR("Swing Velocity proxy"), p, nullptr, nullptr);
+        g_swing_written = p;
+    }
+    void swing_speed_after_tick(UObject* pawn)
+    {
+        if (g_swing_written <= 0.0 || !g_swing_proxy) return;
+        double after = number_property(pawn, g_swing_proxy);
+        double k = after / g_swing_written;
+        if (k > 0.05 && k <= 1.0) g_swing_keep += (k - g_swing_keep) * 0.5; // the tick's decay, measured
+        static double last_log = -1e9;
+        double now = hsvr::now_seconds();
+        if (now - last_log > 1.0)
+        {
+            last_log = now;
+            HSVR_LOG("Swing: hands %.1f / %.1f m/s, swing speed wanted %.0f, game's now %.1f (input kept %.2f per tick)", g_swing_v[0], g_swing_v[1], g_swing_want,
+                     read_number_variable(pawn, STR("Aim Swing Speed")), g_swing_keep);
+        }
+    }
+
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
@@ -2329,6 +2404,7 @@ namespace
             block_offhand_search_before_tick(context);
             turn_body_before_tick();
             stick_walk_before_tick(context);
+            swing_speed_before_tick(context);
         }
     }
 
@@ -6699,6 +6775,7 @@ namespace
         {
             crouch_after_tick(context);
             weapon_spring_after_tick(context);
+            swing_speed_after_tick(context);
         }
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;

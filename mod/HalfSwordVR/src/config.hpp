@@ -309,6 +309,12 @@ namespace hsvr
         // Finger shapes go only to the animation's copy of each hand's grip type (written right after
         // ABP_Willie's update), never to the pawn's, so the game's two-handed rules and Set Up never see them.
         bool pose_fingers_anim_only = true;
+        // The game's swing speed (Aim Swing Speed) fed from the controllers: the faster hand that holds
+        // something, lo..hi m/s relative to the body -> 0..75; falls with this time constant.
+        bool pose_feed_swing_speed = true;
+        double pose_swing_speed_lo = 1.5;
+        double pose_swing_speed_hi = 7.0;
+        double pose_swing_speed_fall_s = 0.15;
         // The second hand turns with the weapon (locked onto it as the first hand holds it, mirrored)
         // instead of with your controller.
         bool pose_two_hand_lock_rotation = true;

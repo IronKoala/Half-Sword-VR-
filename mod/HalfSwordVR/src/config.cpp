@@ -370,6 +370,10 @@ namespace hsvr
         num("pose_two_hand_let_go_cm", c.pose_two_hand_let_go_cm);
         flag("pose_two_hand_curl", c.pose_two_hand_curl);
         flag("pose_fingers_anim_only", c.pose_fingers_anim_only);
+        flag("pose_feed_swing_speed", c.pose_feed_swing_speed);
+        num("pose_swing_speed_lo", c.pose_swing_speed_lo);
+        num("pose_swing_speed_hi", c.pose_swing_speed_hi);
+        num("pose_swing_speed_fall_s", c.pose_swing_speed_fall_s);
         flag("pose_two_hand_lock_rotation", c.pose_two_hand_lock_rotation);
         {
             double m = c.pose_two_hand_mirror;
