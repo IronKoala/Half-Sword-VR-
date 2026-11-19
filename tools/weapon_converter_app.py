@@ -112,16 +112,31 @@ def main():
     work = tempfile.mkdtemp(prefix="hs_weapon_")
     argv = [model, work]
     ext = os.path.splitext(model)[1].lower()
-    if ext not in (".glb", ".gltf"):
-        # The file's numbers carry no unit: show the length each unit would give and let the user pick.
-        import trimesh
-        import numpy as np
-        b = trimesh.load(model, force="scene", process=False).bounds
-        length = float(np.max(b[1] - b[0]))
-        print("This file does not say what unit it uses. The model would be this long:")
+    # Downloaded models often carry an arbitrary scale, so the real length is always asked.
+    raw = model_to_weapon.model_length(model)
+    if ext in (".glb", ".gltf"):
+        print(f"The file makes this weapon {raw * 100:,.1f} cm long.")
+        keep = raw * 100
+    else:
+        print("This file does not say what unit it uses. Its length would be:")
         for key, word, cm in UNITS:
-            print(f"  {key:>2} ({word}): {length * cm:,.1f} cm")
-        argv += ["--units", ask("Which looks right for this weapon? Type m, cm, mm or in: ", [u[0] for u in UNITS])]
+            print(f"  in {word}: {raw * cm:,.1f} cm")
+        keep = None
+    print("Real swords: arming sword ~90 cm, longsword ~110-125 cm, two-handed/greatsword ~140-180 cm.")
+    while True:
+        prompt = "How long should it be, in cm" + (f" (Enter = keep {keep:,.1f})" if keep else "") + ": "
+        a = input(prompt).strip().replace(",", ".")
+        if not a and keep:
+            length = keep
+            break
+        try:
+            length = float(a)
+            if 10 <= length <= 400:
+                break
+        except ValueError:
+            pass
+        print("  please type a length in centimetres, for example 120")
+    argv += ["--length-cm", f"{length:g}"]
     mass = input("Weight in kg (press Enter to estimate it from the model): ").strip().replace(",", ".")
     if mass:
         argv += ["--mass-kg", mass]

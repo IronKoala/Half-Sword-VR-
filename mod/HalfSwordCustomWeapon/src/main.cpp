@@ -727,20 +727,62 @@ namespace
                 .array(STR("UV0"), m.uvs.data(), (int32_t)(m.uvs.size() / 2))
                 .flag(STR("bCreateCollision"), false);
 
-        // Tangents from the UVs, by the engine's own routine (KismetProceduralMeshLibrary
-        // CalculateTangentsForMesh), so they follow the convention its normal maps expect. Its
-        // normals output is not used (the file's normals are kept). The two output arrays are
-        // allocated by the engine and left alone afterwards (a one-off leak per F9 press).
-        static UObject* pml = find(STR("/Script/ProceduralMeshComponent.Default__KismetProceduralMeshLibrary"));
-        Call calc(pml, STR("CalculateTangentsForMesh"));
-        calc.array(STR("Vertices"), m.positions.data(), (int32_t)m.positions.size())
-                .array(STR("Triangles"), m.triangles.data(), (int32_t)m.triangles.size())
-                .array(STR("UVs"), m.uvs.data(), (int32_t)(m.uvs.size() / 2));
+        // Tangents from the UVs. Small models: the engine's own routine (KismetProceduralMeshLibrary
+        // CalculateTangentsForMesh), whose output arrays are engine-allocated and left alone (a one-off
+        // leak per F9 press). It compares every vertex with every other one (it took 15 s on a model
+        // of 177k vertices), so big models get the same per-triangle construction done here instead:
+        // TangentX = direction of increasing U, made perpendicular to the normal; bFlipTangentY set
+        // when the direction of increasing V points against cross(normal, TangentX), the basis the
+        // engine's vertex shader rebuilds (TangentY = cross(Z, X) * sign).
         RawArray tangents{};
-        if (calc.run())
+        std::vector<uint8_t> own_tangents;
+        if (m.positions.size() <= 30000)
         {
-            if (uint8_t* t = calc.at(STR("Tangents"))) tangents = *reinterpret_cast<RawArray*>(t);
-            log("  tangents from UVs: %d (vertices %zu)", tangents.Num, m.positions.size());
+            static UObject* pml = find(STR("/Script/ProceduralMeshComponent.Default__KismetProceduralMeshLibrary"));
+            Call calc(pml, STR("CalculateTangentsForMesh"));
+            calc.array(STR("Vertices"), m.positions.data(), (int32_t)m.positions.size())
+                    .array(STR("Triangles"), m.triangles.data(), (int32_t)m.triangles.size())
+                    .array(STR("UVs"), m.uvs.data(), (int32_t)(m.uvs.size() / 2));
+            if (calc.run())
+                if (uint8_t* t = calc.at(STR("Tangents"))) tangents = *reinterpret_cast<RawArray*>(t);
+            log("  tangents from UVs (engine): %d (vertices %zu)", tangents.Num, m.positions.size());
+        }
+        else
+        {
+            auto* type = UObjectGlobals::StaticFindObject<UScriptStruct*>(nullptr, nullptr, STR("/Script/ProceduralMeshComponent.ProcMeshTangent"));
+            FProperty* tx = member(type, STR("TangentX"));
+            FProperty* flip = member(type, STR("bFlipTangentY"));
+            if (tx && flip)
+            {
+                size_t stride = ((size_t)type->GetPropertiesSize() + 7) & ~(size_t)7;
+                own_tangents.assign(stride * m.positions.size(), 0);
+                auto* fb = static_cast<FBoolProperty*>(flip);
+                auto sub = [](V3 a, V3 b) { return V3{a.x - b.x, a.y - b.y, a.z - b.z}; };
+                auto dot = [](V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
+                auto cross = [](V3 a, V3 b) { return V3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; };
+                for (size_t k = 0; k + 2 < m.triangles.size(); k += 3)
+                {
+                    int i0 = m.triangles[k], i1 = m.triangles[k + 1], i2 = m.triangles[k + 2];
+                    V3 e1 = sub(m.positions[i1], m.positions[i0]), e2 = sub(m.positions[i2], m.positions[i0]);
+                    double du1 = m.uvs[2 * i1] - m.uvs[2 * i0], dv1 = m.uvs[2 * i1 + 1] - m.uvs[2 * i0 + 1];
+                    double du2 = m.uvs[2 * i2] - m.uvs[2 * i0], dv2 = m.uvs[2 * i2 + 1] - m.uvs[2 * i0 + 1];
+                    double r = du1 * dv2 - du2 * dv1;
+                    if (std::fabs(r) < 1e-12) r = 1e-12;
+                    V3 tu{(e1.x * dv2 - e2.x * dv1) / r, (e1.y * dv2 - e2.y * dv1) / r, (e1.z * dv2 - e2.z * dv1) / r};
+                    V3 tv{(e2.x * du1 - e1.x * du2) / r, (e2.y * du1 - e1.y * du2) / r, (e2.z * du1 - e1.z * du2) / r};
+                    for (int c : {i0, i1, i2})
+                    {
+                        V3 n = m.normals[c];
+                        double d = dot(n, tu);
+                        V3 t = unit(V3{tu.x - n.x * d, tu.y - n.y * d, tu.z - n.z * d});
+                        uint8_t* at = own_tangents.data() + (size_t)c * stride;
+                        write_three(at + tx->GetOffset_Internal(), tx, t.x, t.y, t.z);
+                        if (dot(cross(n, t), tv) < 0) at[flip->GetOffset_Internal() + fb->GetByteOffset()] |= fb->GetFieldMask();
+                    }
+                }
+                tangents = RawArray{own_tangents.data(), (int32_t)m.positions.size(), (int32_t)m.positions.size()};
+                log("  tangents from UVs (own, per triangle): %zu", m.positions.size());
+            }
         }
         if (tangents.Num == (int32_t)m.positions.size())
             section.array(STR("Tangents"), tangents.Data, tangents.Num);

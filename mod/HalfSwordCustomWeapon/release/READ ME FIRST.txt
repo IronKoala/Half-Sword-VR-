@@ -17,7 +17,8 @@ Install the mod
 Add a sword
 1. Get a sword model as GLB/glTF (best: it keeps its textures) or OBJ.
 2. Drag the model file onto WeaponConverter.exe (or double-click it and pick the file).
-3. Answer its questions (unit, if the file doesn't say; weight, or Enter to estimate) and check what it
+3. Answer its questions (the real length in cm, since downloaded models often have odd scales; weight,
+   or Enter to estimate) and check what it
    found: guard, which end is the blade, grip and pommel. Type y to use it.
    It writes the converted sword into the mod folder and selects it.
 

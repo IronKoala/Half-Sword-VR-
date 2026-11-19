@@ -119,6 +119,61 @@ def build_pieces(pos, tris, handle_bottom, guard_bottom, guard_top, slice_cm=15.
     return pieces
 
 
+def _slices(pos, tris, coord, cuts):
+    """Convex hulls of a mesh cut into slabs along one coordinate (0 x, 1 y, 2 z) at the given cut
+    values; each slab keeps its outline where the mesh's edges cross the cut planes."""
+    if len(tris) == 0:
+        return []
+    edges = _edges(tris)
+    c = pos[:, coord]
+    ca, cb = c[edges[:, 0]], c[edges[:, 1]]
+
+    def plane_points(v):
+        cross = (ca - v) * (cb - v) < 0
+        pa, pb = pos[edges[cross, 0]], pos[edges[cross, 1]]
+        t = ((v - ca[cross]) / (cb[cross] - ca[cross]))[:, None]
+        return pa + (pb - pa) * t
+
+    used = np.unique(tris)
+    out = []
+    for lo, hi in zip(cuts[:-1], cuts[1:]):
+        inside = used[(c[used] >= lo) & (c[used] <= hi)]
+        sel = np.vstack([pos[inside], plane_points(lo), plane_points(hi)])
+        if len(sel) < 4:
+            continue
+        try:
+            hull = ConvexHull(sel)
+        except Exception:
+            continue
+        out.append((sel[hull.vertices], hull))
+    return out
+
+
+def build_pieces_from_parts(pos, tris, part_of_vertex, slice_cm=15.0):
+    """Collision pieces when the model's meshes are its parts: Pommel and Grip one hull each, the
+    Guard cut in three across the edge direction (so swept quillons don't fill the grip), the blade
+    ("Head") cut every slice_cm along its length."""
+    pieces = []
+    tri_part = part_of_vertex[tris[:, 0]]
+    for slot in ("Pommel", "Grip", "Guard", "Head"):
+        sub = tris[tri_part == slot]
+        if len(sub) == 0:
+            continue
+        used = np.unique(sub)
+        if slot == "Head":
+            lo, hi = pos[used, 2].min(), pos[used, 2].max()
+            n = max(1, int(math.ceil((hi - lo) / slice_cm)))
+            hulls = _slices(pos, sub, 2, np.linspace(lo, hi, n + 1))
+        elif slot == "Guard":
+            lo, hi = pos[used, 0].min(), pos[used, 0].max()
+            hulls = _slices(pos, sub, 0, np.linspace(lo, hi, 4))
+        else:
+            lo, hi = pos[used, 2].min(), pos[used, 2].max()
+            hulls = _slices(pos, sub, 2, np.array([lo, hi]))
+        pieces += [(slot, pts, hull) for pts, hull in hulls]
+    return pieces
+
+
 def write_collision(path, title, pieces):
     with open(path, "w", newline="\n") as f:
         f.write(f"# {title} convex collision pieces (UCX_<slot>_<n>)\n")
