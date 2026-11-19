@@ -315,11 +315,27 @@ namespace
         return static_cast<FStructProperty*>(property)->GetStruct();
     }
 
+    // FName text keeps the letter case of whichever spelling the engine registered first (a
+    // parameter "Position" can read back as "position"), so names are compared ignoring case.
+    bool same_name(FProperty* p, const TCHAR* name)
+    {
+        return _wcsicmp(p->GetName().c_str(), name) == 0;
+    }
+
+    std::string list_names(UStruct* type)
+    {
+        std::string all;
+        if (!type) return all;
+        for (FProperty* p : type->ForEachProperty()) all += (all.empty() ? "" : ", ") + narrow(p->GetName());
+        return all;
+    }
+
     FProperty* member(UScriptStruct* type, const TCHAR* name)
     {
         if (!type) return nullptr;
         for (FProperty* p : type->ForEachProperty())
-            if (p->GetName() == name) return p;
+            if (same_name(p, name)) return p;
+        log("  ! struct %s has no member %s (members: %s)", narrow(type->GetName()).c_str(), narrow(name).c_str(), list_names(type).c_str());
         return nullptr;
     }
 
@@ -389,8 +405,8 @@ namespace
         {
             if (!fn) return nullptr;
             for (FProperty* p : fn->ForEachProperty())
-                if (p->GetName() == name) return p;
-            log("  ! %s has no parameter %s", label.c_str(), narrow(name).c_str());
+                if (same_name(p, name)) return p;
+            log("  ! %s has no parameter %s (parameters: %s)", label.c_str(), narrow(name).c_str(), list_names(fn).c_str());
             ok = false;
             return nullptr;
         }
@@ -532,7 +548,11 @@ namespace
         UScriptStruct* box = struct_type(ret);
         FProperty* mn = member(box, STR("Min"));
         FProperty* mx = member(box, STR("Max"));
-        if (!ret || !mn || !mx) return false;
+        if (!ret || !mn || !mx)
+        {
+            log("  ! could not read the mesh bounds");
+            return false;
+        }
         uint8_t* base = c.buffer.data() + ret->GetOffset_Internal();
         lo = read_three(base + mn->GetOffset_Internal(), mn);
         hi = read_three(base + mx->GetOffset_Internal(), mx);
