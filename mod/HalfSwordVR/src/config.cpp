@@ -313,6 +313,8 @@ namespace hsvr
         num("pose_lean_slack_cm", c.pose_lean_slack_cm);
         flag("pose_lean_cancel_game_bend", c.pose_lean_cancel_game_bend);
         flag("pose_no_uro", c.pose_no_uro);
+        flag("pose_helmet_late", c.pose_helmet_late);
+        flag("pose_mesh_after_driver", c.pose_mesh_after_driver);
         flag("pose_arms", c.pose_arms);
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);

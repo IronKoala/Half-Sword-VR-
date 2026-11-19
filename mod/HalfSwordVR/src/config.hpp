@@ -192,6 +192,13 @@ namespace hsvr
         bool pose_lean_cancel_game_bend = true;
         // 1 = his body, head and worn armour animate every frame (no update-rate skipping).
         bool pose_no_uro = true;
+        // 1 = your helmet (and his head) are moved to this frame's headset pose right when the view takes
+        // it, just before drawing. The body is posed from the headset pose of the frame before (the pose
+        // is read when the views are set up), so a helmet following his head trailed your view by one
+        // frame of head motion and slid around in front of your eyes.
+        bool pose_helmet_late = true;
+        // 1 = his visible body updates after his posed skeleton every frame (it copies its pose), never before.
+        bool pose_mesh_after_driver = true;
         bool pose_arms = true;
         bool pose_follow_room = true;
         // 1 = while posed, your character's capsule only moves when you walk: the game's own pull
