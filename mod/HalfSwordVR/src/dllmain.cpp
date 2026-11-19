@@ -1615,6 +1615,10 @@ namespace
         return moved;
     }
 
+    // What the arm solve used and made this frame (deep log): shoulder, elbow, hand (world), and what moved
+    // the hand off the controller (1 on the held item, 2 two hands, 4 on a scabbard).
+    hsvr::Vec3 g_solved_S[2], g_solved_E[2], g_solved_H[2];
+    int g_solved_on[2] = {0, 0};
     void pose_arm(int side, const hsvr::Config& cfg, const hsvr::ControllerState& state, const hsvr::Quat& body, const hsvr::Quat& component_inv)
     {
         using namespace hsvr;
@@ -1820,8 +1824,9 @@ namespace
         Vec3 controller_wrist = target;
         Quat controller_rot = Wh;
         bool on_weapon = hand_on_weapon(side, cfg, target, Wh);
-        if (two_hand_pose(side, target, Wh)) on_weapon = true;
-        if (!on_weapon && hand_on_scabbard(side, target, Wh)) on_weapon = true;
+        g_solved_on[side] = on_weapon ? 1 : 0;
+        if (two_hand_pose(side, target, Wh)) on_weapon = true, g_solved_on[side] |= 2;
+        if (!on_weapon && hand_on_scabbard(side, target, Wh)) on_weapon = true, g_solved_on[side] |= 4;
         // Where your real hand is, while his stays on a stopped weapon.
         ghost_hand(side, cfg, on_weapon && hand_on_weapon_amount(side) > 0.5 && length(controller_wrist - target) > cfg.pose_ghost_from_cm, controller_wrist,
                    controller_rot);
@@ -2007,6 +2012,7 @@ namespace
         a.twist_deg = twist * 180.0 / 3.14159265358979323846;
         double c = dot(normalized(Wh.rotate(a.fingers_local)), axis);
         a.bend_deg = std::acos((std::max)(-1.0, (std::min)(1.0, c))) * 180.0 / 3.14159265358979323846;
+        g_solved_S[side] = S, g_solved_E[side] = E, g_solved_H[side] = H;
         node_set_rotation(*chain_node("upperarm" + sx), component_inv * Wu);
         node_set_rotation(*chain_node("lowerarm" + sx), component_inv * Wl);
         node_set_rotation(*chain_node("hand" + sx), component_inv * Wh);
@@ -9637,7 +9643,11 @@ namespace
                  "crouch_cm,button_crouch_cm,two_hands,stamina,aim_swing_speed,kicking_l,kicking_r,fallen,conc_r,conc_l,"
                  "drv_comp_x,drv_comp_y,drv_comp_z,drv_comp_qx,drv_comp_qy,drv_comp_qz,drv_comp_qw,vis_comp_x,vis_comp_y,vis_comp_z,vis_comp_qx,vis_comp_qy,"
                  "vis_comp_qz,vis_comp_qw,drv_lowerarm_l_x,drv_lowerarm_l_y,drv_lowerarm_l_z,drv_lowerarm_r_x,drv_lowerarm_r_y,drv_lowerarm_r_z,"
-                 "vis_hand_l_x,vis_hand_l_y,vis_hand_l_z,vis_hand_r_x,vis_hand_r_y,vis_hand_r_z";
+                 "vis_hand_l_x,vis_hand_l_y,vis_hand_l_z,vis_hand_r_x,vis_hand_r_y,vis_hand_r_z,"
+                 "solve_l_on,solve_l_S_x,solve_l_S_y,solve_l_S_z,solve_l_E_x,solve_l_E_y,solve_l_E_z,solve_l_H_x,solve_l_H_y,solve_l_H_z,"
+                 "drv_upperarm_l_x,drv_upperarm_l_y,drv_upperarm_l_z,"
+                 "solve_r_on,solve_r_S_x,solve_r_S_y,solve_r_S_z,solve_r_E_x,solve_r_E_y,solve_r_E_z,solve_r_H_x,solve_r_H_y,solve_r_H_z,"
+                 "drv_upperarm_r_x,drv_upperarm_r_y,drv_upperarm_r_z";
             for (FName bn : g_frame_bones)
             {
                 std::string n = narrow(bn.ToString());
@@ -9733,6 +9743,15 @@ namespace
         else row += ",,,,,,,";
         v3(socket_location(g_pose.driver, bone_fname("lowerarm_l"))), v3(socket_location(g_pose.driver, bone_fname("lowerarm_r")));
         v3(socket_location(mesh, bone_fname("hand_l"))), v3(socket_location(mesh, bone_fname("hand_r")));
+        // The arm solve's own shoulder, elbow and hand this frame, and the driver's shoulder as evaluated
+        // (the solve reads last frame's shoulder: if the animation moves it, the hand lands off).
+        for (int side = 0; side < 2; ++side)
+        {
+            snprintf(b, sizeof b, ",%d", g_solved_on[side]);
+            row += b;
+            v3(g_solved_S[side]), v3(g_solved_E[side]), v3(g_solved_H[side]);
+            v3(socket_location(g_pose.driver, bone_fname(side == 0 ? "upperarm_l" : "upperarm_r")));
+        }
         for (FName bn : g_frame_bones) v3(socket_location(mesh, bn));
         row += "\n";
         fputs(row.c_str(), g_frames);
