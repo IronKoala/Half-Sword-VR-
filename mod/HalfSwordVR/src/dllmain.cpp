@@ -860,6 +860,7 @@ namespace
     bool g_body_turning = false;
     // Crouch: how far your headset is below where you stood at recentering (cm, 0 standing).
     double g_crouch_drop = 0.0;
+    std::atomic<double> g_fake_head_drop{-1.0}; // test: hsvr.fake_head_drop <cm> (fake tracking only)
     bool g_pose_cfg_turn = true, g_pose_cfg_crouch = true, g_pose_fake = false;
     double g_turn_dead_deg = 60.0, g_turn_speed_dps = 150.0, g_turn_max_deg = 85.0;
 
@@ -1911,8 +1912,9 @@ namespace
         g_crouch_drop = 0.0;
         if (cfg.pose_crouch && cfg.dev_pose_fake_tracking)
         {
-            // Made-up path: slowly down to 40 cm and back up.
-            g_crouch_drop = 20.0 - 20.0 * std::cos(now_seconds() * 0.4);
+            // Made-up path: slowly down to 40 cm and back up; hsvr.fake_head_drop <cm> holds a depth.
+            double held = g_fake_head_drop.load();
+            g_crouch_drop = held >= 0.0 ? (std::min)(55.0 * component_scale_z(mesh), held) : 20.0 - 20.0 * std::cos(now_seconds() * 0.4);
         }
         else if (cfg.pose_crouch && state.head_valid)
         {
@@ -7712,6 +7714,12 @@ namespace
                 HSVR_LOG("Script: hsvr.match_won %d: game mode %ls (written %d, Match Won now %d), character (written %d, Match Won (Player) now %d)", (int)won,
                          game_mode ? game_mode->GetFullName().c_str() : STR("missing"), (int)a, (int)bool_property(game_mode, STR("Match Won")), (int)b,
                          (int)bool_property(pawn, STR("Match Won (Player)")));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.fake_head_drop ", 0) == 0)
+            {
+                g_fake_head_drop.store(atof(entry.command.c_str() + 20));
+                HSVR_LOG("Script: hsvr.fake_head_drop %.1f cm (-1 = the made-up path)", g_fake_head_drop.load());
                 continue;
             }
             if (entry.command.rfind("hsvr.hold_reach ", 0) == 0)
