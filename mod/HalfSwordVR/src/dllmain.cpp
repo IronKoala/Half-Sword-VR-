@@ -7187,8 +7187,13 @@ namespace
                 if (g_young_joint[side])
                 {
                     double age = now - g_young_since[side];
-                    if ((age >= config().stab_wound_settle_s && g_young_trace_ok[side] >= 3) || age >= config().stab_wound_settle_max_s)
+                    bool earned = age >= config().stab_wound_settle_s && g_young_trace_ok[side] >= 3;
+                    if (earned || age >= config().stab_wound_settle_max_s)
+                    {
+                        HSVR_LOG("Stab: %s stick young window ends after %.2f s: %s", side == 0 ? "left" : "right", age,
+                                 earned ? "earned (the normal keep trace found the stuck bone 3 ticks running)" : "capped (stab_wound_settle_max_s)");
                         stab_hold_keep(side, held, false);
+                    }
                 }
                 w.was_stuck = stuck;
             }
