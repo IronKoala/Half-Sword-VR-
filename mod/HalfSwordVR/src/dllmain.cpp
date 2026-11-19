@@ -6582,13 +6582,18 @@ namespace
         // The arm's tonus already falls with exhaustion (the game caps it 1 -> 0.25 as Exhaustion rises,
         // which happens only once stamina is nearly gone), so stamina and tonus are not multiplied
         // (strength test 1: that counted it twice, 0.33 at stamina 0): the weaker of the two counts.
+        // With the arm-mass factor on, Muscle Rate does not scale the hold: in flat Half Sword the arm motors
+        // are the same for every body and muscle acts through the arm's mass (already in size) and through
+        // the hand joint's slip threshold (x1..1.5). The mod has no force-based slip of its own (the game's
+        // reads its hand joint, which the hold leaves free), so that part is only logged. Off: as before.
         if (cfg.pose_body_size_strength) b.size = body_size_factor(pawn);
-        b.total = (std::max)(cfg.pose_body_strength_min, b.strength * b.size * (std::min)(b.injury, b.stamina));
+        double on_hold = cfg.pose_body_size_strength ? b.size : b.strength;
+        b.total = (std::max)(cfg.pose_body_strength_min, on_hold * (std::min)(b.injury, b.stamina));
         static bool reported = false;
         if (!reported)
         {
             reported = true;
-            HSVR_LOG("Strength: Muscle Rate %.2f, Arm %s Tonus %.3f, Consciousness %.0f, Stamina %.1f (tonus, consciousness, stamina -1 = not found; Muscle Rate %s) -> strength %.2f x size %.2f x injury %.2f x stamina %.2f = %.2f",
+            HSVR_LOG("Strength: Muscle Rate %.2f, Arm %s Tonus %.3f, Consciousness %.0f, Stamina %.1f (tonus, consciousness, stamina -1 = not found; Muscle Rate %s) -> grip (slip, logged only with size on) %.2f, size %.2f x injury %.2f x stamina %.2f = %.2f",
                      b.muscle_rate, side == 0 ? "L" : "R", b.tonus, b.consciousness, b.stamina_value, muscle_found ? "found" : "not found", b.strength, b.size,
                      b.injury, b.stamina, b.total);
         }
