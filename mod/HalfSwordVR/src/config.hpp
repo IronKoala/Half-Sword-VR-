@@ -567,6 +567,14 @@ namespace hsvr
         // punch rules read it on hits), and 'R/L Fisting Rate' (the punch stamina) is fed by the
         // game's own formula from the swing speed.
         bool pose_fist_game_flags = true;
+        // Each finger of a free hand (empty, or making a fist) follows yours: SteamVR's hand skeleton when it
+        // gives one, else the trigger, grip and touch sensors (the VR framework's empty-hand curls), with
+        // the framework's per-joint bends and spread, smoothed over tau_s. Written into the visible
+        // body's copy of the animated pose (ABP_CopyPose1), so gauntlets follow. 0 = the game's grip shapes.
+        bool pose_fingers_tracked = true;
+        double pose_fingers_tau_s = 0.05;
+        // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
+        bool log_fingers = true;
         // Body grabs (a Willie's throat, arm...): what the game's grab joint feels, logged every 0.1 s.
         bool log_body_grab = true;
         // Every other Willie's body hits (impulse, health, consciousness, what hit him), when they change.

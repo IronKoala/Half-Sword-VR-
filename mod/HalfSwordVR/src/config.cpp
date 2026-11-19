@@ -495,6 +495,9 @@ namespace hsvr
         num("pose_fist_slap_keep_s", c.pose_fist_slap_keep_s);
         integer("pose_fist_shape", c.pose_fist_shape);
         flag("pose_fist_game_flags", c.pose_fist_game_flags);
+        flag("pose_fingers_tracked", c.pose_fingers_tracked);
+        num("pose_fingers_tau_s", c.pose_fingers_tau_s);
+        flag("log_fingers", c.log_fingers);
         flag("log_body_grab", c.log_body_grab);
         flag("log_body_hits", c.log_body_hits);
         integer("pose_grab_body_hold", c.pose_grab_body_hold);
