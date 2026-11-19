@@ -7440,6 +7440,31 @@ namespace
         c.run();
     }
 
+    // The pin's limits as they are now (scabbard tests).
+    void log_scabbard_pin(UObject* scab, const char* when)
+    {
+        UObject* pin = scabbard_pin(scab);
+        if (!pin) return;
+        auto n = [&](std::initializer_list<const TCHAR*> path) { return nested_number(pin, path); };
+        HSVR_LOG("Scabbard pin (%s): swing1 %.0f deg motion %.0f, swing2 %.0f motion %.0f, twist %.0f motion %.0f, cone soft %.0f stiff %.0f damp %.0f; "
+                 "linear %.1f cm motions %.0f %.0f %.0f soft %.0f; bone2 %s",
+                 when, n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("ConeLimit"), STR("Swing1LimitDegrees")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("ConeLimit"), STR("Swing1Motion")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("ConeLimit"), STR("Swing2LimitDegrees")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("ConeLimit"), STR("Swing2Motion")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("TwistLimit"), STR("TwistLimitDegrees")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("TwistLimit"), STR("TwistMotion")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("ConeLimit"), STR("bSoftConstraint")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("ConeLimit"), STR("Stiffness")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("ConeLimit"), STR("Damping")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("Limit")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("XMotion")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("YMotion")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("ZMotion")}),
+                 n({STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("bSoftConstraint")}),
+                 nested_name(pin, {STR("ConstraintInstance"), STR("ConstraintBone2")}).c_str());
+    }
+
     void widen_scabbard_pin(UObject* scab, double degrees)
     {
         UObject* pin = scabbard_pin(scab);
@@ -7487,7 +7512,9 @@ namespace
         Quat pelvis = socket_rotation(mesh, bone_fname("pelvis"));
         s.rest = (pelvis.inverse() * sq).normalized();
         s.rest_pos = pelvis.inverse().rotate(component_location(scab) - socket_location(mesh, bone_fname("pelvis")));
+        log_scabbard_pin(scab, "before");
         widen_scabbard_pin(scab, cfg.pose_scabbard_angle_deg);
+        log_scabbard_pin(scab, "widened");
     }
 
     bool try_scabbard_grab(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg)
@@ -7613,9 +7640,10 @@ namespace
                 if (now - s.last_log > 0.5)
                 {
                     s.last_log = now;
-                    double ang = length(scaled_axis((s.rest.inverse() * pelvis_q.inverse() * cur).normalized())) * 57.2958;
-                    HSVR_LOG("Scabbard: %s hand holds it %.1f deg off its belt angle, %.1f cm off its belt spot (hand %.1f cm from where it took it; %.1f deg to the hand's angle)",
-                             hand, ang, off_belt, off, length(scaled_axis((want * cur.inverse()).normalized())) * 57.2958);
+                    // The turn from its belt angle in its own frame (X, Y, Z parts, deg).
+                    Vec3 turn = scaled_axis((s.rest.inverse() * pelvis_q.inverse() * cur).normalized()) * 57.2958;
+                    HSVR_LOG("Scabbard: %s hand holds it %.1f deg off its belt angle (own X %.1f Y %.1f Z %.1f), %.1f cm off its belt spot (hand %.1f cm from where it took it; %.1f deg to the hand's angle)",
+                             hand, length(turn), turn.x, turn.y, turn.z, off_belt, off, length(scaled_axis((want * cur.inverse()).normalized())) * 57.2958);
                 }
             }
             else
@@ -9357,6 +9385,7 @@ namespace
                     continue;
                 }
                 double deg = std::atof(arg.c_str());
+                int axis_i = arg.find('y') != std::string::npos ? 1 : (arg.find('z') != std::string::npos ? 2 : 0);
                 UObject* sc = nullptr;
                 if (player)
                     for (UObject* c : belt_scabbards(player))
@@ -9367,10 +9396,11 @@ namespace
                         }
                 if (sc && pm)
                 {
-                    hsvr::Vec3 ax = hsvr::normalized(component_rotation(sc).rotate(hsvr::Vec3{1, 0, 0}));
+                    hsvr::Vec3 ax = hsvr::normalized(component_rotation(sc).rotate(axis_i == 0 ? hsvr::Vec3{1, 0, 0} : (axis_i == 1 ? hsvr::Vec3{0, 1, 0} : hsvr::Vec3{0, 0, 1})));
                     take_scabbard(0, pm, sc, hsvr::Vec3{0, 0, 20}, socket_rotation(pm, bone_fname("hand_l")), hsvr::quat_axis_angle(ax, deg * 3.14159265358979 / 180.0), true,
                                   hsvr::config());
-                    HSVR_LOG("Script: hsvr.scabbard_test: left hand took %ls, wanted %.0f deg turned (limit %.0f)", sc->GetName().c_str(), deg, hsvr::config().pose_scabbard_angle_deg);
+                    HSVR_LOG("Script: hsvr.scabbard_test: left hand took %ls, wanted %.0f deg turned about its %c (limit %.0f)", sc->GetName().c_str(), deg, "XYZ"[axis_i],
+                             hsvr::config().pose_scabbard_angle_deg);
                 }
                 else
                     HSVR_LOG("Script: hsvr.scabbard_test: no belt scabbard with a pin");
