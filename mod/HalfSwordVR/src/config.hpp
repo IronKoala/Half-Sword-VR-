@@ -223,6 +223,10 @@ namespace hsvr
         // Reverse grip flip (S&S): a tap (shorter than grip_flip_tap_s) of the holding hand's B / Y
         // turns a one-handed weapon end for end at the same spot on its handle, gliding over grip_flip_s.
         bool grip_flip = true;
+        // A blade stuck in someone is torn out when your hand is more than stab_yank_cm from its grip
+        // for stab_yank_s (0 = never).
+        double stab_yank_cm = 35.0;
+        double stab_yank_s = 0.25;
         double grip_flip_s = 0.3;
         double grip_flip_tap_s = 0.4;
         double stab_wound_settle_s = 0.2; // no pulling out for this long after it goes in

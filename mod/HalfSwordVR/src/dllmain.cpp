@@ -5380,9 +5380,11 @@ namespace
         // reach from the shoulder, or your hand pulled more than an arm's length from it, is let go
         // rather than dragged through or snapped back. Held for pose_hold_let_go_s first, so a glancing knock
         // never drops it.
-        // Not while the blade is stuck in someone: the game's wound holds it, and pulling out is
-        // yours to do (stab assist).
-        if (cfg.pose_hold_let_go && t >= 0.99 && g_pose.driver && !bool_property(h.weapon, STR("Stuck In Body")) && !g_draw[side].active)
+        // Stuck in someone, B&S's own rule (PlayerHand, StuckBehaviour.Drop, also while penetrating):
+        // the hand lets go only once the grip is past arm's length from the shoulder; how far your
+        // real hand is does not count (the wound holds the blade, and pulling it out is yours to do).
+        bool in_body = bool_property(h.weapon, STR("Stuck In Body"));
+        if (cfg.pose_hold_let_go && t >= 0.99 && g_pose.driver && !g_draw[side].active)
         {
             const ArmCalibration& a = g_pose.arm[side];
             double reach = a.upper_length + a.lower_length;
@@ -5391,12 +5393,30 @@ namespace
             Vec3 hand_point = target + hand_rot.rotate(h.in_hand);
             double from_shoulder = length(grip_at - shoulder) - length(h.in_hand);
             double from_hand = length(grip_at - hand_point);
-            bool out = from_shoulder > reach + 2.0 || from_hand > reach;
+            bool out = from_shoulder > reach + 2.0 || (!in_body && from_hand > reach);
+            // Pulled hard out of a wound: your hand more than stab_yank_cm from the grip for
+            // stab_yank_s tears the blade out (the game's own Release All Jammed Bones) and the hand
+            // keeps it (flip-test1: the hand was 74 cm away while the blade stayed in him).
+            static double yank_since[2] = {-1.0, -1.0};
+            if (in_body && cfg.stab_yank_cm > 0.0 && from_hand > cfg.stab_yank_cm)
+            {
+                double tn = now_seconds();
+                if (yank_since[side] < 0.0) yank_since[side] = tn;
+                else if (tn - yank_since[side] >= cfg.stab_yank_s)
+                {
+                    yank_since[side] = -1.0;
+                    Call r(h.weapon, STR("Release All Jammed Bones"));
+                    r.run();
+                    HSVR_LOG("Hold: %s hand pulls %ls out of the wound (hand %.0f cm from the grip)", side == 0 ? "left" : "right", h.weapon->GetName().c_str(), from_hand);
+                }
+            }
+            else
+                yank_since[side] = -1.0;
             // Not right after it came into the hand (a new or long weapon swings into place first),
             // and not while it is still closing in on where the hold sends it.
             double t_now = now_seconds();
             bool touching = t_now - h.last_contact < 0.15;
-            bool settling = h.started < 0.0 || t_now - h.started < cfg.pose_hold_let_go_grace_s || coming > 0.3 || !touching;
+            bool settling = h.started < 0.0 || t_now - h.started < cfg.pose_hold_let_go_grace_s || (!in_body && (coming > 0.3 || !touching));
             if (!out || settling) h.stuck_since = -1.0;
             else
             {
@@ -7248,8 +7268,25 @@ namespace
         static double down_at[2] = {-1.0, -1.0};
         static bool other_seen[2] = {false, false};
         double now = now_seconds();
+        static double flip_at[2] = {-1.0, -1.0};
+        static Quat flip_from[2];
         for (int side = 0; side < 2; ++side)
         {
+            // For 0.6 s after a flip: how far it has turned, every tick (flip-test1 asked whether the
+            // glide really takes grip_flip_s).
+            if (flip_at[side] > 0.0)
+            {
+                UObject* w = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+                UObject* bm = w ? object_property(w, STR("BaseMesh")) : nullptr;
+                if (!bm || now - flip_at[side] > 0.6) flip_at[side] = -1.0;
+                else
+                {
+                    Quat q = component_rotation(bm);
+                    double turned = length(scaled_axis((q * flip_from[side].inverse()).normalized())) * 57.29578;
+                    HSVR_LOG("Flip: %s +%.3f s: turned %.0f of 180 deg, hold %.1f cm / %.0f deg behind", side == 0 ? "left" : "right", now - flip_at[side], turned,
+                             g_hold[side].lag, g_hold[side].turn_deg);
+                }
+            }
             bool b = state.active && state.hand[side].secondary;
             bool other = state.active && state.hand[1 - side].secondary;
             if (b && !was[side])
@@ -7286,6 +7323,8 @@ namespace
             h.settle_s = (std::max)(0.05, cfg.grip_flip_s);
             h.settle_until = now + h.settle_s;
             h.flipped = !h.flipped;
+            flip_at[side] = now;
+            flip_from[side] = h.settle_from_rot;
             controllers_buzz(side, 0.35f);
             HSVR_LOG("Flip: %s hand turns %ls end for end (%s grip), over %.2f s", side == 0 ? "left" : "right", weapon->GetName().c_str(),
                      h.flipped ? "reversed" : "forward", h.settle_s);
