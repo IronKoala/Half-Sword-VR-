@@ -6972,6 +6972,38 @@ namespace
                 g_stab_ctrl_last[side] = at;
                 g_stab_ctrl_time[side] = now;
             }
+            // While a stuck joint holds the weapon: its state every tick, against the game's keep rule
+            // (kept while linear + angular constraint force < 100000 x bone mass and the box still
+            // overlaps the body, Constraint_Weapon_Stuck_BP @25565-@26093).
+            if (UObject* held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
+            {
+                RawArray* joints = held->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
+                UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[0]) : nullptr;
+                if (cs)
+                {
+                    static UObject* pcc = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+                    double lin = -1.0, ang = -1.0;
+                    Call gc(cs, STR("GetComponentByClass"));
+                    if (FProperty* p = gc.param(STR("ComponentClass")); p && pcc)
+                    {
+                        *reinterpret_cast<UObject**>(gc.buffer.data() + p->GetOffset_Internal()) = pcc;
+                        gc.run();
+                        if (UObject* joint = gc.object_result())
+                        {
+                            Call f(joint, STR("GetConstraintForce"));
+                            f.run();
+                            lin = length(f.vec(STR("OutLinearForce")));
+                            ang = length(f.vec(STR("OutAngularForce")));
+                        }
+                    }
+                    double bm = stab_var(cs, STR("Bone Mass"));
+                    const HoldState& h = g_hold[side];
+                    HSVR_LOG("Stab: stuck tick: joint %ls hitting body %.0f, activate %.0f, distance %.1f, force lin %.0f + ang %.0f vs keep limit %.0f "
+                             "(bone mass %.2f); hold lag %.1f cm, force %.0f N, torque %.1f N m",
+                             cs->GetName().c_str(), stab_var(cs, STR("Hitting Body")), stab_var(cs, STR("Activate Constraint")), stab_var(cs, STR("Distance")), lin,
+                             ang, 100000.0 * bm, bm, h.lag, h.force_n, h.torque_nm);
+                }
+            }
             StabWatch& w = g_stab_watch[side];
             if (!w.weapon || w.hit_at < 0.0) continue;
             if (w.weapon != object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
