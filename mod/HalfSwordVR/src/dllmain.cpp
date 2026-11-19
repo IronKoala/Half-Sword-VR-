@@ -1058,7 +1058,7 @@ namespace
     // bends the knees. The height is the floor under the foot (a trace straight down) plus his ankle
     // height when standing; the game's own foot height drifts 20-45 cm off in a deep crouch.
     // The floor's height under a point: a straight-down trace on the Visibility channel that ignores
-    // your own character. Weapons (held, belted or loose, scabbards included: a scabbard is a part of
+    // your own character (and looks through him too, should a part of him be hit). Weapons (held, belted or loose, scabbards included: a scabbard is a part of
     // its weapon) and creatures are looked through: the trace starts at his hips, and a weapon on the
     // left hip or in a hand over a foot used to count as the floor (the left foot popped up 85 cm,
     // about 40 times a minute). False if nothing else is hit within 2 m below `from_z`.
@@ -1100,7 +1100,7 @@ namespace
                     actor = b.object_result(STR("HitActor"));
                 }
             }
-            bool look_through = actor && actor != pawn && (is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")));
+            bool look_through = actor && (actor == pawn || is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")));
             if (!look_through)
             {
                 ground_z = hit_z;
