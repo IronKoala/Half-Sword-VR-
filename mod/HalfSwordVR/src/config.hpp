@@ -249,6 +249,8 @@ namespace hsvr
         // out (cm/s; B&S's held dampers with the hand's strength), x stab_wound_head_factor in the
         // head and neck; sideways and in turn it goes with the body.
         bool stab_wound_hold = true;
+        // A weapon the mod holds is never left "Being Rubber Banded" by the game (it then can't stick and hits at x0.1).
+        bool stab_no_rubber_band = true;
         // Reverse grip flip (S&S): a tap (shorter than grip_flip_tap_s) of the holding hand's B / Y
         // turns a one-handed weapon end for end at the same spot on its handle, gliding over grip_flip_s.
         bool grip_flip = true;
@@ -286,6 +288,9 @@ namespace hsvr
         // bouncing, the least lag that does): from its mass and its inertia about the grip. 0 = the fixed
         // pose_hold_damper / turn_damper / pose_bs_two_*_c values.
         double pose_hold_damping_ratio = 1.0;
+        // The hand's velocity the hold's dampers follow, smoothed over this time (s): tracking noise
+        // differentiated frame to frame shook a held weapon ~1 cm at ~10 Hz. 0 = raw.
+        double pose_hold_target_vel_smooth_s = 0.05;
         // Weight: the hold's turn is limited by torque about the grip, not the centre of mass (heavy and
         // long weapons trail fast turns, B&S-style). torque_scale multiplies pose_hold_max_torque for it.
         bool pose_hold_weight = true;
@@ -356,6 +361,7 @@ namespace hsvr
         // floor), a squeeze looks for items at your controller, and what it touches is pulled into his hand.
         bool pose_grab_from_controller = true;
         double pose_grab_controller_gap_cm = 4.0;
+        double pose_grab_controller_max_cm = 60.0; // not from farther than this (a jump, a teleport)
         // A belt scabbard is a handle (B&S): taken only within pose_grab_handle_cm of its length, lined up
         // with the hand's grip line, the trigger slides the hand along it. 0 = held where touched, as before.
         bool pose_scabbard_handle = true;

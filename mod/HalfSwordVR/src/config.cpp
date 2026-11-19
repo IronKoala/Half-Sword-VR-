@@ -378,9 +378,11 @@ namespace hsvr
         num("pose_slide_wide_cm", c.pose_slide_wide_cm);
         flag("pose_grab_from_controller", c.pose_grab_from_controller);
         num("pose_grab_controller_gap_cm", c.pose_grab_controller_gap_cm);
+        num("pose_grab_controller_max_cm", c.pose_grab_controller_max_cm);
         flag("pose_scabbard_handle", c.pose_scabbard_handle);
         flag("pose_grab_weapon_handles_only", c.pose_grab_weapon_handles_only);
         num("pose_hold_damping_ratio", c.pose_hold_damping_ratio);
+        num("pose_hold_target_vel_smooth_s", c.pose_hold_target_vel_smooth_s);
         flag("pose_body_size_strength", c.pose_body_size_strength);
         num("pose_slide_ring_max_len_cm", c.pose_slide_ring_max_len_cm);
         num("pose_slide_ring_max_width_cm", c.pose_slide_ring_max_width_cm);
@@ -434,6 +436,7 @@ namespace hsvr
         flag("pose_draw_scabbard_free", c.pose_draw_scabbard_free);
         num("pose_hold_stuck_force_scale", c.pose_hold_stuck_force_scale);
         flag("stab_wound_hold", c.stab_wound_hold);
+        flag("stab_no_rubber_band", c.stab_no_rubber_band);
         flag("grip_flip", c.grip_flip);
         num("stab_yank_cm", c.stab_yank_cm);
         num("stab_yank_s", c.stab_yank_s);

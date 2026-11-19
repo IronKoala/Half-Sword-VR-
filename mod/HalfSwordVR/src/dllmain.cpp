@@ -1533,7 +1533,9 @@ namespace
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     std::atomic<bool> g_fake_stick_click{false}; // test: hsvr.stick_click 1 holds the left stick click
     std::string g_park_socket;                  // test: hsvr.arm_park <socket> (arm mode 13): right hand there
-    double g_arm_floor[3] = {45.0, 15.0, 5.0};  // test: hsvr.arm_floor <fwd> <side> <height> (arm mode 14): right hand near the floor
+    double g_arm_floor[3] = {45.0, 15.0, 5.0};
+    std::atomic<double> g_fake_jitter_cm{0.0};
+    bool is_fist(UObject* weapon);  // test: hsvr.fake_jitter <cm>: tracking-like noise on the fake hands (rms per axis)  // test: hsvr.arm_floor <fwd> <side> <height> (arm mode 14): right hand near the floor
     std::atomic<float> g_fake_trigger[2] = {-1.0f, -1.0f}; // test: hsvr.trigger <0|1> <value>, -1 = the controller
     std::atomic<float> g_fake_squeeze[2] = {-1.0f, -1.0f}; // test: hsvr.squeeze <0|1> <value>, -1 = the controller
 
@@ -1755,6 +1757,33 @@ namespace
                 local = Vec3{35.0 + 10.0 * std::sin(t), out * 15.0, -15.0 + 20.0 * std::cos(t)};
             }
             grip = shoulder + body.rotate(local);
+            if (mode == 15 && side == 1 && g_pose.pawn)
+            {
+                // Pickup test: the right controller this high above the grip point of the nearest loose
+                // weapon (one no one holds, not sheathed), as a hand reaching for it on the floor.
+                static UObject* item = nullptr;
+                static double found_at = -1.0;
+                if (!item || now - found_at > 1.0)
+                {
+                    found_at = now;
+                    item = nullptr;
+                    std::vector<UObject*> ws;
+                    UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), ws);
+                    Vec3 ap = actor_location(g_pose.pawn);
+                    double best = 1e9;
+                    for (UObject* w : ws)
+                    {
+                        if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || bool_property(w, STR("Is Sheathed")) || is_fist(w)) continue;
+                        if (object_property(g_pose.pawn, STR("Weapon R")) == w || object_property(g_pose.pawn, STR("Weapon L")) == w) continue;
+                        UObject* b = object_property(w, STR("BaseMesh"));
+                        if (!b) continue;
+                        double d = length(component_location(b) - ap);
+                        if (d < best) { best = d; item = w; }
+                    }
+                }
+                if (item)
+                    if (UObject* b = object_property(item, STR("BaseMesh"))) grip = component_location(b) + Vec3{0, 0, g_arm_floor[2]};
+            }
             if (mode == 14 && side == 1 && g_pose.pawn)
             {
                 // Floor test: the right controller this far ahead of and beside his capsule, this high above
@@ -1850,6 +1879,20 @@ namespace
                 grip_rot = (aim * body * rot_to_quat(60.0, 0.0, 0.0)).normalized();
             }
             if (mode == 9) grip_rot = (body * quat_axis_angle(Vec3{0, 1, 0}, std::fmod(now, 6.0) / 6.0 * 2.0 * 3.14159265358979) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
+        }
+        if (cfg.dev_pose_fake_tracking && g_fake_jitter_cm.load() > 0.0)
+        {
+            // Like a tracked controller: noise of this size at ~10-20 Hz (a fresh offset every 3 frames, eased).
+            static Vec3 cur[2], next[2];
+            static int n[2] = {0, 0};
+            auto gauss = []() {
+                double u1 = (std::rand() + 1.0) / (RAND_MAX + 2.0), u2 = (std::rand() + 1.0) / (RAND_MAX + 2.0);
+                return std::sqrt(-2.0 * std::log(u1)) * std::cos(6.283185307 * u2);
+            };
+            double j = g_fake_jitter_cm.load();
+            if (++n[side] % 3 == 0) next[side] = Vec3{gauss() * j, gauss() * j, gauss() * j};
+            cur[side] = cur[side] + (next[side] - cur[side]) * 0.5;
+            grip = grip + cur[side];
         }
         Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
         g_pose.raw_target[side] = target;
@@ -3722,6 +3765,8 @@ namespace
         UObject* weapon = nullptr;
         FreeGrip free;
         bool handle_slide = false;     // sliding along its handle this tick (axial momentum kept)
+        hsvr::Vec3 vel_f, ang_f;       // the hand's velocity and spin at the point held, smoothed
+        bool vel_f_set = false;
         hsvr::Vec3 handle_axis;        // that handle's line, world
         double handle_keep = 0.0;      // how much of its own motion along the line it keeps (0..1)
         bool handle_sliding_logged = false;
@@ -5875,7 +5920,7 @@ namespace
             {
                 Vec3 hand_bone = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
                 double held_back = length(g_pose.reach_target[side] - hand_bone);
-                if (held_back > cfg.pose_grab_controller_gap_cm)
+                if (held_back > cfg.pose_grab_controller_gap_cm && length(g_pose.raw_target[side] - hand_bone) <= cfg.pose_grab_controller_max_cm)
                 {
                     at = at + (g_pose.raw_target[side] - hand_bone);
                     HSVR_LOG("Grab: %s hand is held %.1f cm short of your hand by his reach: looking at your controller (%.0f %.0f %.0f)", hand, held_back, at.x,
@@ -7083,7 +7128,14 @@ namespace
                 // first keeps its own target (bs_hold_measured.md §3).
                 {
                     double dtp = (std::min)(1.0 / 30.0, (std::max)(1.0 / 240.0, now - h.last_time));
-                    g_two.bs_vel = g_two.bs_valid && h.have_last ? (p2 - g_two.bs_p2) * (1.0 / dtp) : Vec3{};
+                    Vec3 raw_v = g_two.bs_valid && h.have_last ? (p2 - g_two.bs_p2) * (1.0 / dtp) : Vec3{};
+                    // Smoothed like the first hand's (pose_hold_target_vel_smooth_s): two noisy hands pulling one
+                    // weapon shook it most (playtest 14:37: halberd and sword in two hands 1.0-1.4 cm at ~10 Hz).
+                    double tau2 = hsvr::config().pose_hold_target_vel_smooth_s;
+                    if (tau2 > 1e-4 && g_two.bs_valid && h.have_last)
+                        g_two.bs_vel = g_two.bs_vel + (raw_v - g_two.bs_vel) * (1.0 - std::exp(-dtp / tau2));
+                    else
+                        g_two.bs_vel = raw_v;
                     if (length(g_two.bs_vel) > 3000.0) g_two.bs_vel = Vec3{};
                     g_two.bs_p2 = p2;
                     g_two.bs_local = local2;
@@ -7168,7 +7220,28 @@ namespace
             {
                 target_vel = (target_pivot - last_pivot) * (1.0 / dt);
                 target_ang = scaled_axis((target_rot * h.last_target_rot.inverse()).normalized()) * (1.0 / dt);
+                // Smoothed (pose_hold_target_vel_smooth_s): a frame-to-frame difference of a tracked hand
+                // turns its ~0.4 cm of tracking noise into ~35 cm/s of noise, and the dampers drove the weapon
+                // with it: held still, the weapon and the hand drawn on it shook 1.0-1.4 cm at ~10 Hz while
+                // the controller moved 0.3-0.6 cm (playtest 14:37, halberd / sword / axe).
+                double tau = cfg.pose_hold_target_vel_smooth_s;
+                if (tau > 1e-4 && h.vel_f_set)
+                {
+                    double a = 1.0 - std::exp(-dt / tau);
+                    h.vel_f = h.vel_f + (target_vel - h.vel_f) * a;
+                    h.ang_f = h.ang_f + (target_ang - h.ang_f) * a;
+                    target_vel = h.vel_f;
+                    target_ang = h.ang_f;
+                }
+                else
+                {
+                    h.vel_f = target_vel;
+                    h.ang_f = target_ang;
+                    h.vel_f_set = true;
+                }
             }
+            else
+                h.vel_f_set = false;
         }
         h.last_target_pos = target_pos;
         h.last_target_rot = target_rot;
@@ -8161,6 +8234,35 @@ namespace
                 ++n;
             }
         HSVR_LOG("Stab: watching %d release functions of the stuck joint and the weapon", n);
+    }
+
+    // After his tick, before the physics (where the weapons' hits happen): a weapon the mod holds is
+    // never "Being Rubber Banded". Willie sets that every tick unless BOTH hands' "Soft Not Attached"
+    // are true (UG @459904-@460309); the mod handles the left hand itself, so the game's left flag
+    // stays false and the right weapon was rubber-banded on 40% of his hits (playtest 2026-11-19:
+    // 475 of 1116, 644 of 1768). A rubber-banded weapon never sticks, deals x0.1 damage clamped to
+    // 1000 and needs a 100-1000 impulse to register a hit at all (ModularWeaponBP @38582-@42321):
+    // "poking him with a stick".
+    void stab_no_rubber_band(UObject* pawn)
+    {
+        if (!hsvr::config().stab_no_rubber_band || !pawn) return;
+        static int cleared[2] = {0, 0};
+        static double last_log = 0.0;
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (!weapon || g_hold[side].weapon != weapon) continue;
+            if (!bool_property(weapon, STR("Being Rubber Banded"))) continue;
+            set_variable(weapon, STR("Being Rubber Banded"), 0.0);
+            ++cleared[side];
+            double now = hsvr::now_seconds();
+            if (now - last_log >= 5.0)
+            {
+                last_log = now;
+                HSVR_LOG("Stab: rubber band taken off the held weapons (right %d, left %d ticks so far; his soft-not-attached R %d L %d)", cleared[1], cleared[0],
+                         (int)bool_property(pawn, STR("R Hand Soft Not Attached")), (int)bool_property(pawn, STR("L Hand Soft Not Attached")));
+            }
+        }
     }
 
     // Every tick after his: the controllers' velocity, and the deferred lines after a hit.
@@ -10308,6 +10410,7 @@ namespace
             thrown_tick(context);
             frames_tick(context);
         }
+        stab_no_rubber_band(context);
         stab_log_tick(context);
         grip_flip_tick(context);
         if (!g_hold_have || !g_hold_capsule.load()) return;
@@ -12560,6 +12663,19 @@ namespace
             {
                 g_fake_stick_click.store(atoi(entry.command.c_str() + 17) != 0);
                 HSVR_LOG("Script: hsvr.stick_click %d", (int)g_fake_stick_click.load());
+                continue;
+            }
+            if (entry.command.rfind("hsvr.arm_to_item ", 0) == 0)
+            {
+                g_arm_floor[2] = atof(entry.command.c_str() + 17);
+                g_fake_arm_mode.store(15);
+                HSVR_LOG("Script: hsvr.arm_to_item %.0f cm above the nearest loose weapon's grip (right hand)", g_arm_floor[2]);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.fake_jitter ", 0) == 0)
+            {
+                g_fake_jitter_cm.store(atof(entry.command.c_str() + 17));
+                HSVR_LOG("Script: hsvr.fake_jitter %.2f cm", g_fake_jitter_cm.load());
                 continue;
             }
             if (entry.command.rfind("hsvr.arm_floor ", 0) == 0)
