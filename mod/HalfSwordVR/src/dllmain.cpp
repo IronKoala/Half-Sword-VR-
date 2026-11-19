@@ -6139,6 +6139,7 @@ namespace
         bool wide_lo, wide_hi;
         double at_z;
         std::vector<std::pair<double, double>> extra; // further haft stretches above the first stop (hafted weapons)
+        bool guard_hi = false; // the first stop above the grip is a Guard part (a sword: its blade is a handle)
     };
     std::unordered_map<UObject*, AxisMeasure> g_axis_measures;
     bool measure_weapon_axis(UObject* weapon, UObject* base, const hsvr::Vec3& pivot, double wide_cm, double tip, double& lo, double& hi, bool& wide_lo,
@@ -6232,6 +6233,7 @@ namespace
                                  weapon->GetName().c_str(), dirn * z, r.state == 1 ? "wide" : "off the parts", run_w, part_name(run_part).c_str(), run_len,
                                  resumed ? ", narrow again past it" : "", rondel ? ", a rondel" : "", r.off);
                         wide = r.state == 1;
+                        if (dirn > 0) m.guard_hi = wide && run_part && part_name(run_part).find(STR("Guard")) != std::wstring::npos;
                         break;
                     }
                     // A wide part stops the hand at the part itself (its near edge, a step past the last narrow one).
@@ -6254,8 +6256,11 @@ namespace
                             last = z;
                             z += step;
                         }
-                        // 15 cm: a pollaxe's top spike (14) and a halberd's (12) are not haft.
-                        if (last - s0 >= 15.0)
+                        // 15 cm: a pollaxe's top spike (14) and a halberd's (12) are not haft; nor is a stretch that
+                        // runs up to the weapon's tip (a spearhead, a top spike: heads are not handles).
+                        bool at_tip = tip > 0.0 && last + step * 0.5 >= tip - 10.0;
+                        if (at_tip) HSVR_LOG("Haft: %ls %.0f .. %.0f cm runs to its tip (%.0f): its head, not haft", weapon->GetName().c_str(), s0, last, tip);
+                        if (last - s0 >= 15.0 && !at_tip)
                         {
                             m.extra.push_back({s0 - step * 0.5, last + step * 0.5});
                             HSVR_LOG("Haft: %ls more haft at %.0f .. %.0f cm", weapon->GetName().c_str(), s0 - step * 0.5, last + step * 0.5);
@@ -6286,6 +6291,12 @@ namespace
             for (const auto& e : m.extra) extra->push_back({e.first + m.at_z - pivot.z, e.second + m.at_z - pivot.z});
         }
         return m.ok;
+    }
+
+    bool weapon_has_guard(UObject* weapon)
+    {
+        auto f = g_axis_measures.find(weapon);
+        return f != g_axis_measures.end() && f->second.guard_hi;
     }
 
     std::unordered_map<UObject*, std::vector<Handle>> g_item_handles;
@@ -6331,8 +6342,9 @@ namespace
                 }
                 else
                 {
+                    // Only a sword's blade (past a Guard) is a handle (half-swording); an axe's or a tool's head is not.
                     double b0 = hi + half + cfg.pose_two_hand_blade_gap_cm, b1 = top - half;
-                    if (wide_hi && top > 0.0 && b1 > b0 + 2.0) hs.push_back(Handle{Vec3{0, 0, b0}, Vec3{0, 0, b1}, "blade", 5, 5});
+                    if (wide_hi && weapon_has_guard(item) && top > 0.0 && b1 > b0 + 2.0) hs.push_back(Handle{Vec3{0, 0, b0}, Vec3{0, 0, b1}, "blade", 5, 5});
                 }
             }
             else
