@@ -249,6 +249,7 @@ namespace hsvr
         // controller to sitting on the weapon as the weapon falls 1 to pose_hold_blocked_from_cm behind.
         bool pose_hold_hand_on_weapon = true;
         double pose_hold_blocked_from_cm = 3.0;
+        double pose_hold_hand_on_weapon_after_glide_s = 0.25; // no hand-on-weapon until this long after a grab settle / flip glide ends
         // The stuck rule: a stopped weapon whose grip is out of his reach from the shoulder, or more
         // than an arm's length from your hand, for pose_hold_let_go_s, is let go (the game's own drop).
         // A weapon stopped by his own body is never let go by the stuck rule (vanilla weapons collide with him too).

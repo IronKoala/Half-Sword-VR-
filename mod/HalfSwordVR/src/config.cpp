@@ -333,6 +333,7 @@ namespace hsvr
         num("pose_hold_max_torque", c.pose_hold_max_torque);
         flag("pose_hold_hand_on_weapon", c.pose_hold_hand_on_weapon);
         num("pose_hold_blocked_from_cm", c.pose_hold_blocked_from_cm);
+        num("pose_hold_hand_on_weapon_after_glide_s", c.pose_hold_hand_on_weapon_after_glide_s);
         flag("pose_hold_let_go", c.pose_hold_let_go);
         num("pose_hold_let_go_s", c.pose_hold_let_go_s);
         flag("pose_hold_let_go_ignore_self", c.pose_hold_let_go_ignore_self);
