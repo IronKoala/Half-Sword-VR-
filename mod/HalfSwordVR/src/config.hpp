@@ -137,6 +137,19 @@ namespace hsvr
         // moment the mod is ready. A command is an engine console command. Read once at the start.
         // Example: 20:open /Game/Maps/Arenas/Map_Arena_Slums;50:r.Fog 0;56:r.Fog 1
         std::string dev_script;
+        // Test room: 1 = from the first menu straight into a Free Mode arena (test_room_map) with
+        // test_room_foes foes (1-10) whose AI is off - they never fight back, keep full physics,
+        // fall and get up - stood behind you, and two weapon tables in front of you with one weapon
+        // of every kind. Your save is copied first (save_backups\ in the mod folder) and every
+        // write the game makes to it in the room is undone; leaving the room puts it all back.
+        // Read at launch. 0 = normal game.
+        bool test_room = false;
+        std::string test_room_map = "/Game/Maps/Arenas/Map_Arena_Yard";
+        int test_room_foes = 4;
+        // The foes' tier (armour and weapons): -1 = a random tier each, 0 Beggar .. 8 Lord.
+        int test_room_tier = -1;
+        // The table weapons' tier: -1 = random 0-7 each, 0 Beggar .. 8 Lord.
+        int test_room_weapon_tier = -1;
         int stereo_slot_offset = 0; // 0 = find automatically
 
         // ---- Phase 2: controllers (read only) and the player physics test ----

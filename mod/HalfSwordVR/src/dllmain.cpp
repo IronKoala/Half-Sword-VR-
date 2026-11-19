@@ -12676,7 +12676,8 @@ namespace
     // in Half Sword), the way the menus do before a fight is opened. <Name> is the variable's name as
     // the Blueprint shows it, any case; a name the engine stores with a suffix ("<Name>_12_ABC...") also matches.
     // Yes/no, byte, enum and whole-number variables only.
-    void script_set_game_instance(const std::string& step)
+    // before_out (optional): the value it had, as text "<number>" the step can take back.
+    void script_set_game_instance(const std::string& step, std::string* before_out = nullptr)
     {
         size_t equals = step.find('=');
         if (equals == std::string::npos)
@@ -12730,6 +12731,7 @@ namespace
             bool value = value_text.find("true") != std::string::npos || atoi(value_text.c_str()) != 0;
             if (value) *byte |= flag->GetFieldMask();
             else *byte &= ~flag->GetFieldMask();
+            if (before_out) *before_out = before ? "1" : "0";
             HSVR_LOG("Script: game instance %ls (yes/no) was %d, now %d", found->GetName().c_str(), (int)before, (int)value);
             return;
         }
@@ -12745,6 +12747,7 @@ namespace
             int64_t before = size == 1 ? (int64_t)*address : (int64_t)*reinterpret_cast<int32_t*>(address);
             if (size == 1) *address = (uint8_t)value;
             else *reinterpret_cast<int32_t*>(address) = (int32_t)value;
+            if (before_out) *before_out = std::to_string((long long)before);
             HSVR_LOG("Script: game instance %ls (%ls) was %lld, now %lld", found->GetName().c_str(), type.c_str(), (long long)before, (long long)value);
             return;
         }
@@ -13232,6 +13235,645 @@ namespace
         }
     }
 
+    // ---- Passive foes (hsvr.passive_foe and the test room) ---------------------------------------
+    // A training dummy (passive_foe.md in the decompile folder): the foe's AI controller (AI_BP_C) is
+    // stopped - DED set, its tick off, its movement stopped - and the inputs it writes on its pawn
+    // cleared. The foe keeps its own physics, balance and get-up (those run in Willie_BP's tick), so
+    // it can be hit, grabbed and stuck into. It can still die. Only a zombie revive turns AI_BP on again.
+    bool make_foe_passive(UObject* ai, UObject* foe)
+    {
+        if (!ai || !foe) return false;
+        set_variable(ai, STR("DED"), 1.0);
+        Call tick(ai, STR("SetActorTickEnabled"));
+        tick.first_flag(false);
+        tick.run();
+        Call stop(ai, STR("StopMovement"));
+        stop.run();
+        std::wstring missing;
+        for (const TCHAR* v : {STR("R Hand Active"), STR("L Hand Active"), STR("R Down"), STR("L Down"), STR("Chain Attack"), STR("BobnWeave"), STR("Dodging"),
+                               STR("Alt Thrusting"), STR("AI In Combat"), STR("Is Crouched??")})
+            if (!set_variable(foe, v, 0.0)) missing += std::wstring(v) + STR(", ");
+        if (FProperty* p = foe->GetPropertyByNameInChain(STR("Aim Vector_0")))
+            write_three(reinterpret_cast<uint8_t*>(foe) + p->GetOffset_Internal(), p, 0.0, 0.0, 0.0);
+        HSVR_LOG("Passive: %ls (controller %ls) made passive%ls%ls", foe->GetName().c_str(), ai->GetName().c_str(), missing.empty() ? STR("") : STR("; not found: "),
+                 missing.c_str());
+        return true;
+    }
+
+    // ---- Test room (ini test_room=1) -------------------------------------------------------------
+    // Launching the game goes from the main menu straight into a Free Mode arena (test_room_map) with
+    // test_room_foes foes whose AI is stopped (make_foe_passive) and stood in an arc behind him, and
+    // two of the game's weapon tables in front of him stocked with one weapon of every kind through
+    // the game's own loot point (BP_Loot_Weapon: Generate Weapon from Weapon Type and Tier). Facts
+    // from the decompile: defaults\test_room.md.
+    //
+    // His save: the Free Mode settings are written to the game instance only, never saved by the mod.
+    // The arena's BP_GameManager calls GI_Settings "Load Game" on start, which would put the save's
+    // play/game/combat mode back, so a hook puts the test values back right after it. The game still
+    // saves during a fight (start, ~1 s, death, pause menu); every such write is undone at once by
+    // copying back the copy of GameProgress.sav made at boot (save_backups\ in the mod folder, one
+    // per launch, never deleted). Leaving the room map restores the save, loads it into the game
+    // instance and puts back every game-instance value the room changed. No room without that copy.
+    struct TestRoom
+    {
+        bool booted = false;    // the boot step ran and made the save copy
+        bool failed = false;    // no save copy: no room
+        bool armed = false;     // Load Game hook re-applies the test values
+        bool done = false;      // left the room; nothing more this launch
+        std::wstring map_path;  // /Game/Maps/Arenas/Map_Arena_Yard
+        std::wstring map_key;   // "/Map_Arena_Yard." as it appears in an object's full name
+        std::wstring save_path, backup_path;
+        FILETIME save_time{};   // the save file's write time after the mod's last copy back
+        bool save_time_known = false;
+        std::vector<std::string> values;                              // "Name=value" set at boot
+        std::vector<std::pair<std::string, std::string>> before;      // name, value before
+        bool entered = false;
+        UObject* pawn = nullptr; // the pawn the room was furnished for
+        double pawn_at = -1.0;
+        int stage = 0;           // per pawn: 0 waiting, 1 foes and tables placed, 2 weapons spawned
+        hsvr::Vec3 origin, forward;
+        std::vector<hsvr::Vec3> table_at;
+        double table_yaw = 0.0;
+        double next_sweep = 0.0, next_save_check = 0.0;
+        std::vector<UObject*> settling; // foe meshes moved with physics off (room_settle_foes)
+        double settle_at = 0.0;
+        bool settled = false;
+        double watch_from = 0.0, next_watch = 0.0;     // diagnostics after the weapons are put down
+        std::map<UObject*, hsvr::Vec3> watch_last;
+    };
+    TestRoom g_room;
+
+    std::wstring local_app_data()
+    {
+        wchar_t buf[MAX_PATH];
+        DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+        return (n > 0 && n < MAX_PATH) ? std::wstring(buf, n) : std::wstring();
+    }
+
+    bool file_time(const std::wstring& path, FILETIME& out)
+    {
+        WIN32_FILE_ATTRIBUTE_DATA info{};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) return false;
+        out = info.ftLastWriteTime;
+        return true;
+    }
+
+    // Puts the boot copy back over GameProgress.sav (only ever the copy made this launch).
+    void room_restore_save(const char* why)
+    {
+        if (g_room.backup_path.empty()) return;
+        if (!CopyFileW(g_room.backup_path.c_str(), g_room.save_path.c_str(), FALSE))
+        {
+            HSVR_LOG("TestRoom: could NOT put the save back (%s): error %lu", why, GetLastError());
+            return;
+        }
+        g_room.save_time_known = file_time(g_room.save_path, g_room.save_time);
+        HSVR_LOG("TestRoom: save put back from %ls (%s)", g_room.backup_path.c_str(), why);
+    }
+
+    UObject* game_instance_object()
+    {
+        UObject* viewport = object_property(g_engine, STR("GameViewport"));
+        return object_property(viewport, STR("GameInstance"));
+    }
+
+    void room_apply_values()
+    {
+        for (const std::string& v : g_room.values) script_set_game_instance(v);
+    }
+
+    void room_load_game_post(Unreal::UnrealScriptFunctionCallableContext&, void*)
+    {
+        if (!g_room.armed) return;
+        HSVR_LOG("TestRoom: the game loaded the save; test values put back");
+        room_apply_values();
+    }
+
+    void room_install_hook()
+    {
+        static bool installed = false;
+        if (installed) return;
+        UObject* gi = game_instance_object();
+        UFunction* fn = gi ? gi->GetFunctionByNameInChain(STR("Load Game")) : nullptr;
+        if (!fn)
+        {
+            HSVR_LOG("TestRoom: the game instance has no \"Load Game\"");
+            return;
+        }
+        installed = true;
+        UObjectGlobals::RegisterHook(fn, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, &room_load_game_post, nullptr);
+        HSVR_LOG("TestRoom: watching %ls", fn->GetFullName().c_str());
+    }
+
+    // Boot step (M+2 after the first menu): copy the save, set Free Mode in the game instance.
+    void room_boot(const hsvr::Config& cfg)
+    {
+        g_room.booted = true;
+        std::wstring lad = local_app_data();
+        g_room.save_path = lad + L"\\HalfswordUE5\\Saved\\SaveGames\\GameProgress.sav";
+        std::wstring dir = hsvr::mod_dir() + L"save_backups";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        SYSTEMTIME utc{};
+        GetSystemTime(&utc);
+        wchar_t name[96];
+        swprintf(name, 96, L"\\GameProgress.sav.%04d%02d%02d-%02d%02d%02dZ.bak", (int)utc.wYear, (int)utc.wMonth, (int)utc.wDay, (int)utc.wHour, (int)utc.wMinute,
+                 (int)utc.wSecond);
+        g_room.backup_path = dir + name;
+        if (lad.empty() || !CopyFileW(g_room.save_path.c_str(), g_room.backup_path.c_str(), TRUE))
+        {
+            HSVR_LOG("TestRoom: could not copy %ls to %ls (error %lu); no test room this launch", g_room.save_path.c_str(), g_room.backup_path.c_str(), GetLastError());
+            g_room.backup_path.clear();
+            g_room.failed = true;
+            return;
+        }
+        g_room.save_time_known = file_time(g_room.save_path, g_room.save_time);
+        HSVR_LOG("TestRoom: save copied to %ls", g_room.backup_path.c_str());
+
+        g_room.map_path.assign(cfg.test_room_map.begin(), cfg.test_room_map.end());
+        size_t slash = g_room.map_path.find_last_of(L'/');
+        g_room.map_key = L"/" + (slash == std::wstring::npos ? g_room.map_path : g_room.map_path.substr(slash + 1)) + L".";
+        int foes = (std::max)(1, (std::min)(10, cfg.test_room_foes));
+        int tier = cfg.test_room_tier;
+        g_room.values = {"Current Play Mode=1",        "Free Mode Activated=1",         "Current Game Mode Enum=1",       "Current Combat Mode=1",
+                         "Current Lose Condition=0",   "Free Mode Foes Amount=" + std::to_string(foes), "FreeMode Foes Amount Random=0",
+                         "Free Mode Tier=" + std::to_string(tier < 0 ? 0 : (std::min)(tier, 8)), std::string("FreeMode Tier Random=") + (tier < 0 ? "1" : "0"),
+                         "Free Mode Carnage=0",        "Free Mode Brawling=0",          "Free Mode Blossfechten=0",       "FreeMode Multiplayer=0"};
+        for (const std::string& v : g_room.values)
+        {
+            std::string before;
+            script_set_game_instance(v, &before);
+            if (!before.empty()) g_room.before.emplace_back(v.substr(0, v.find('=')), before);
+        }
+        room_install_hook();
+        g_room.armed = true;
+    }
+
+    // Leaving the room: the save back, loaded into the game instance, and the values before the room.
+    void room_leave()
+    {
+        g_room.armed = false;
+        g_room.done = true;
+        room_restore_save("left the room");
+        script_call_game_instance("Load Game");
+        for (const auto& b : g_room.before) script_set_game_instance(b.first + "=" + b.second);
+        HSVR_LOG("TestRoom: left the room; save and game settings as before it");
+    }
+
+    // Spawns an actor of a class (loaded if needed) with a transform; `before` runs before its
+    // BeginPlay (FinishSpawning), for ExposeOnSpawn variables.
+    template <typename F> UObject* room_spawn(const TCHAR* class_path, UObject* world_object, const hsvr::Vec3& at, const hsvr::Quat& q, F before)
+    {
+        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, class_path);
+        if (!cls)
+        {
+            std::wstring asset = class_path;
+            if (asset.size() > 2 && asset.substr(asset.size() - 2) == STR("_C")) asset.resize(asset.size() - 2);
+            load_asset_object(asset);
+            cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, class_path);
+        }
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        if (!cls || !gs)
+        {
+            HSVR_LOG("TestRoom: class %ls not found", class_path);
+            return nullptr;
+        }
+        auto fill = [&](Call& c) {
+            FProperty* p = c.param(STR("SpawnTransform"));
+            UScriptStruct* type = p ? struct_type(p) : nullptr;
+            if (!type) return;
+            uint8_t* tat = c.buffer.data() + p->GetOffset_Internal();
+            if (FProperty* r = struct_member(type, STR("Rotation")))
+            {
+                const double parts[4] = {q.x, q.y, q.z, q.w};
+                const TCHAR* names[4] = {STR("X"), STR("Y"), STR("Z"), STR("W")};
+                for (int i = 0; i < 4; ++i)
+                    if (FProperty* m = struct_member(struct_type(r), names[i]))
+                    {
+                        uint8_t* mat = tat + r->GetOffset_Internal() + m->GetOffset_Internal();
+                        if (m->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(mat) = parts[i];
+                        else *reinterpret_cast<float*>(mat) = (float)parts[i];
+                    }
+            }
+            if (FProperty* t = struct_member(type, STR("Translation"))) write_three(tat + t->GetOffset_Internal(), t, at.x, at.y, at.z);
+            if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(tat + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+        };
+        Call begin(gs, STR("BeginDeferredActorSpawnFromClass"));
+        begin.object(STR("WorldContextObject"), world_object);
+        begin.object(STR("ActorClass"), cls);
+        fill(begin);
+        begin.byte(STR("CollisionHandlingOverride"), 1); // always spawn
+        begin.run();
+        UObject* actor = begin.object_result();
+        if (!actor) return nullptr;
+        before(actor);
+        Call finish(gs, STR("FinishSpawningActor"));
+        finish.object(STR("Actor"), actor);
+        fill(finish);
+        finish.run();
+        return actor;
+    }
+
+    hsvr::Quat yaw_quat(double yaw_deg)
+    {
+        double h = yaw_deg * 3.14159265358979 / 360.0;
+        hsvr::Quat q;
+        q.z = std::sin(h);
+        q.w = std::cos(h);
+        return q;
+    }
+
+    // Foes: AI stopped, then stood in an arc behind him (2.2 m away), facing him.
+    void room_place_foes(UObject* player)
+    {
+        using hsvr::Vec3;
+        std::vector<UObject*> ais;
+        UObjectGlobals::FindAllOf(STR("AI_BP_C"), ais);
+        std::vector<UObject*> foes;
+        for (UObject* ai : ais)
+        {
+            if (!ai || ai->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            Call gp(ai, STR("K2_GetPawn"));
+            gp.run();
+            UObject* foe = gp.object_result();
+            if (!foe || foe == player) continue;
+            make_foe_passive(ai, foe);
+            foes.push_back(foe);
+        }
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        g_room.settling.clear();
+        g_room.settled = false;
+        int n = (int)foes.size();
+        for (int i = 0; i < n; ++i)
+        {
+            double a = (180.0 + (i - (n - 1) * 0.5) * 32.0) * 3.14159265358979 / 180.0;
+            Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+            Vec3 dir = g_room.forward * std::cos(a) + right * std::sin(a);
+            Vec3 at = g_room.origin + dir * 220.0;
+            double yaw = std::atan2(-dir.y, -dir.x) * 57.29577951308232;
+            UObject* foe = foes[i];
+            UObject* fm = object_property(foe, STR("Mesh"));
+            // A teleport of a simulating body throws him ~5 m (test 2026-11-19 16:31: the pose drives
+            // see a 10 m jump in one frame). His body stops simulating while he is moved, and comes
+            // back to physics 0.4 s later at rest (room_settle_foes).
+            if (fm)
+            {
+                Call sim(fm, STR("SetAllBodiesSimulatePhysics"));
+                sim.first_flag(false);
+                sim.run();
+            }
+            Call mv(foe, STR("K2_SetActorLocationAndRotation"));
+            mv.three(STR("NewLocation"), at.x, at.y, at.z);
+            mv.three(STR("NewRotation"), 0.0, yaw, 0.0);
+            mv.flag(STR("bTeleport"), true);
+            mv.run();
+            // His body moves with him (a teleport of the actor alone leaves the body where it lay).
+            if (fm)
+            {
+                Vec3 before = socket_location(fm, pelvis_bone);
+                Call off(fm, STR("K2_AddWorldOffset"));
+                off.three(STR("DeltaLocation"), at.x - before.x, at.y - before.y, 0.0);
+                off.flag(STR("bTeleport"), true);
+                off.run();
+                g_room.settling.push_back(fm);
+            }
+            HSVR_LOG("TestRoom: %ls stood at (%.0f, %.0f, %.0f), facing him", foe->GetName().c_str(), at.x, at.y, at.z);
+        }
+        g_room.settle_at = hsvr::now_seconds();
+        HSVR_LOG("TestRoom: %d passive foe(s)", n);
+    }
+
+    // Foes placed by room_place_foes: physics back on 0.4 s after the move, then held at rest
+    // (no velocity) for 1 s, so that they stand where they were put.
+    void room_settle_foes()
+    {
+        if (g_room.settling.empty()) return;
+        double since = hsvr::now_seconds() - g_room.settle_at;
+        if (since < 0.4) return;
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        for (UObject* fm : g_room.settling)
+        {
+            if (!g_room.settled)
+            {
+                Call sim(fm, STR("SetAllBodiesSimulatePhysics"));
+                sim.first_flag(true);
+                sim.run();
+            }
+            Call lin(fm, STR("SetAllPhysicsLinearVelocity"));
+            lin.three(STR("NewVel"), 0.0, 0.0, 0.0);
+            lin.run();
+            Call ang(fm, STR("SetAllPhysicsAngularVelocityInDegrees"));
+            ang.three(STR("NewAngVel"), 0.0, 0.0, 0.0);
+            ang.run();
+            if (since >= 1.4)
+            {
+                hsvr::Vec3 p = socket_location(fm, pelvis_bone);
+                HSVR_LOG("TestRoom: %ls settled, pelvis at (%.0f, %.0f, %.0f)", fm->GetFullName().c_str(), p.x, p.y, p.z);
+            }
+        }
+        if (!g_room.settled) HSVR_LOG("TestRoom: %d foe(s) back to physics", (int)g_room.settling.size());
+        g_room.settled = true;
+        if (since >= 1.4) g_room.settling.clear();
+    }
+
+    // Two weapon tables side by side, 1.1 m in front of him, long side across his view.
+    void room_place_tables(UObject* player)
+    {
+        using hsvr::Vec3;
+        double floor_z = g_room.origin.z;
+        if (UObject* capsule = object_property(player, STR("CapsuleComponent")))
+        {
+            Call hh(capsule, STR("GetScaledCapsuleHalfHeight"));
+            hh.run();
+            if (FProperty* p = hh.param(STR("ReturnValue")))
+            {
+                uint8_t* at = hh.buffer.data() + p->GetOffset_Internal();
+                double half = p->GetClass().GetName() == STR("DoubleProperty") ? *reinterpret_cast<double*>(at) : *reinterpret_cast<float*>(at);
+                floor_z -= half;
+            }
+        }
+        Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+        g_room.table_yaw = std::atan2(g_room.forward.y, g_room.forward.x) * 57.29577951308232;
+        g_room.table_at.clear();
+        int tier = hsvr::config().test_room_weapon_tier;
+        for (int t = 0; t < 2; ++t)
+        {
+            Vec3 at = g_room.origin + g_room.forward * 110.0 + right * (t == 0 ? -89.0 : 89.0);
+            at.z = floor_z + 1.0;
+            UObject* table = room_spawn(STR("/Game/Assets/Props/Blueprints/BP_Container_Weapon_Table_1.BP_Container_Weapon_Table_1_C"), player, at, yaw_quat(g_room.table_yaw),
+                                        [&](UObject* a) {
+                                            set_variable(a, STR("Tier"), tier < 0 ? 4.0 : (double)tier);
+                                            // None of the table's own loot: it lands on the same spots as
+                                            // the room's weapons and the overlap threw them (test 16:38).
+                                            set_variable(a, STR("Weapon Spawn Chance"), 0.0);
+                                            set_variable(a, STR("Armor Spawn Chance"), 0.0);
+                                            set_variable(a, STR("Treasure Spawn Chance"), 0.0);
+                                            set_variable(a, STR("Bolts Spawn Chance Modifier"), 0.0);
+                                        });
+            HSVR_LOG("TestRoom: weapon table %ls at (%.0f, %.0f, %.0f)", table ? table->GetName().c_str() : STR("NOT spawned"), at.x, at.y, at.z);
+            if (table) g_room.table_at.push_back(at);
+        }
+    }
+
+    // One weapon of every kind, lying along the tables (BaseMesh +Z, the blade, across his view),
+    // through BP_Loot_Weapon (Spawn Chance 1): 1H/2H swords, maces, hafted, polearm, a shield, a
+    // secondary. Each table also stocks one random piece of its own.
+    void room_spawn_weapons(UObject* player)
+    {
+        using hsvr::Vec3;
+        if (g_room.table_at.empty()) return;
+        struct Kind { int specific; int premade; const char* label; };
+        // Enum_WeaponType_Specific: 1 Swords 1H, 2 Swords 2H, 3 Maces 1H, 4 Maces 2H, 5 Hafted 1H,
+        // 6 Hafted 2H, 7 Polearms. Premade kinds (Enum_WeaponType): 2 Shield, 3 Secondary.
+        static const Kind kinds[] = {{1, -1, "sword 1H"}, {2, -1, "sword 2H"}, {3, -1, "mace 1H"}, {4, -1, "mace 2H"}, {2, 2, "shield"},
+                                     {5, -1, "hafted 1H"}, {6, -1, "hafted 2H"}, {7, -1, "polearm"}, {3, 3, "secondary"}};
+        int tier_cfg = hsvr::config().test_room_weapon_tier;
+        static unsigned seed = (unsigned)GetTickCount64();
+        Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+        // Lying: weapon +Z along `right`, its +X up.
+        hsvr::Quat lying = hsvr::quat_from_axes(Vec3{0, 0, 1}, hsvr::cross(right, Vec3{0, 0, 1}), right);
+        const int count = (int)(sizeof(kinds) / sizeof(kinds[0]));
+        for (int i = 0; i < count; ++i)
+        {
+            int t = (i < 5 || g_room.table_at.size() < 2) ? 0 : 1;
+            int row = t == 0 ? i : i - 5;
+            int rows = t == 0 ? 5 : count - 5;
+            // Along his forward, 16 cm apart (the top is 101 cm deep, +-50; at 20 cm the outer ones
+            // rolled off). Every other one lies 30 cm further along, so neighbouring heads and guards
+            // are never side by side and don't start inside each other.
+            double depth = (row - (rows - 1) * 0.5) * 16.0;
+            Vec3 base = g_room.table_at[t];
+            Vec3 at = base + g_room.forward * depth - right * (row % 2 ? 25.0 : 55.0);
+            if (kinds[i].premade == 2) at = base + g_room.forward * depth; // a shield lies in the middle
+            // The game's own weapon points are at 112 (top at 89-95 cm). Lower, a guard starts inside
+            // the top and the push-out threw the weapons and tipped the table (test 2026-11-19 16:36).
+            at.z = base.z + 112.0;
+            seed = seed * 1103515245u + 12345u;
+            int first = tier_cfg < 0 ? (int)((seed >> 16) % 8u) : (std::min)(tier_cfg, 8);
+            hsvr::Quat q = kinds[i].premade == 2 ? hsvr::quat_from_axes(right, hsvr::cross(Vec3{0, 0, 1}, right), Vec3{0, 0, 1}) : lying;
+            // The game's generator gives no weapon when a kind has none at that tier (Generate Weapon:
+            // the kind's types that the tier allows; mace 2H and secondary at tier 6 gave none in the
+            // test). Then the nearest other tiers are tried.
+            bool got = false;
+            int tier = first;
+            for (int k = 0; k < 17 && !got; ++k)
+            {
+                int d = (k + 1) / 2;
+                tier = k % 2 ? first - d : first + d;
+                if (k == 0) tier = first;
+                if (tier < 0 || tier > 8) continue;
+                UObject* loot = room_spawn(STR("/Game/Blueprints/Procedural/LootPoints/BP_Loot_Weapon.BP_Loot_Weapon_C"), player, at, q, [&](UObject* a) {
+                    set_variable(a, STR("Spawn Chance"), 1.0);
+                    set_variable(a, STR("Tier"), (double)tier);
+                    set_variable(a, STR("Premade"), kinds[i].premade >= 0 ? 1.0 : 0.0);
+                    if (kinds[i].premade >= 0) set_variable(a, STR("Weapon Type (Premade)"), (double)kinds[i].premade);
+                    else
+                    {
+                        set_variable(a, STR("Weapon Type"), (double)kinds[i].specific);
+                        // Enum_WeaponType of that kind (0 1H, 1 2H), which the generator also reads.
+                        int s = kinds[i].specific;
+                        set_variable(a, STR("Weapon Type (Premade)"), (s == 1 || s == 3 || s == 5) ? 0.0 : 1.0);
+                    }
+                });
+                // The loot point is destroyed in its BeginPlay but still readable this tick: its
+                // passport says which weapon class it spawned (none = nothing).
+                UObject* cls = nullptr;
+                if (loot)
+                    if (FProperty* pp = loot->GetPropertyByNameInChain(STR("Weapon Passport")))
+                        if (FProperty* wc = struct_member_prefix(struct_type(pp), STR("WeaponClass")))
+                            cls = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(loot) + pp->GetOffset_Internal() + wc->GetOffset_Internal());
+                got = cls != nullptr;
+                if (got)
+                    HSVR_LOG("TestRoom: %s (tier %d) spawned at (%.0f, %.0f, %.0f): %ls", kinds[i].label, tier, at.x, at.y, at.z, cls->GetName().c_str());
+                else
+                    HSVR_LOG("TestRoom: %s: the game has none at tier %d%s", kinds[i].label, tier, loot ? "" : " (no loot point)");
+            }
+            if (!got) HSVR_LOG("TestRoom: %s NOT spawned at any tier", kinds[i].label);
+        }
+    }
+
+    void test_room_tick(const hsvr::Config& cfg)
+    {
+        if (!g_room.booted || g_room.failed || g_room.done) return;
+        double now = hsvr::now_seconds();
+        // Any save the game writes while the room is up is undone.
+        if (g_room.armed && now >= g_room.next_save_check)
+        {
+            g_room.next_save_check = now + 0.25;
+            FILETIME t{};
+            if (file_time(g_room.save_path, t) && (!g_room.save_time_known || CompareFileTime(&t, &g_room.save_time) != 0)) room_restore_save("the game saved");
+        }
+        UObject* controller = find_player_controller();
+        if (!controller) return;
+        bool in_room = controller->GetFullName().find(g_room.map_key) != std::wstring::npos;
+        if (!in_room)
+        {
+            if (g_room.entered) room_leave();
+            return;
+        }
+        g_room.entered = true;
+        UObject* player = nullptr;
+        find_pawn_mesh(&player);
+        if (!player) return;
+        if (player != g_room.pawn)
+        {
+            g_room.pawn = player;
+            g_room.pawn_at = now;
+            g_room.stage = 0;
+            HSVR_LOG("TestRoom: in the room (%ls)", player->GetFullName().c_str());
+        }
+        // The arena clears weapons, tables and foes at BeginPlay and again at +1 s, then spawns the
+        // foes: the room is set up after that.
+        if (g_room.stage == 0 && now - g_room.pawn_at >= 3.0)
+        {
+            g_room.stage = 1;
+            g_room.origin = actor_location(player);
+            Call fw(player, STR("GetActorForwardVector"));
+            fw.run();
+            hsvr::Vec3 f = fw.vec();
+            f.z = 0.0;
+            double fl = hsvr::length(f);
+            g_room.forward = fl > 1e-3 ? f * (1.0 / fl) : hsvr::Vec3{1, 0, 0};
+            room_place_foes(player);
+            room_place_tables(player);
+            g_room.watch_from = now; // diagnostics: tables now, weapons at +1.5 s
+        }
+        if (g_room.stage == 1 && now - g_room.pawn_at >= 4.5)
+        {
+            g_room.stage = 2;
+            room_spawn_weapons(player);
+        }
+        room_settle_foes();
+        // Diagnostics: for 5 s from the tables (weapons at +1.5 s), every table or loose weapon near the
+        // tables that moves more than 3 cm between samples (20 a second).
+        if (g_room.watch_from > 0.0 && now - g_room.watch_from < 5.0 && now >= g_room.next_watch)
+        {
+            g_room.next_watch = now + 0.05;
+            std::vector<UObject*> items;
+            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), items);
+            std::vector<UObject*> tables;
+            UObjectGlobals::FindAllOf(STR("BP_Container_Master_C"), tables);
+            for (UObject* t : tables) items.push_back(t);
+            for (UObject* o : items)
+            {
+                if (!o || o->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                UObject* c = object_property(o, STR("BaseMesh"));
+                if (!c) c = object_property(o, STR("Box"));
+                if (!c) continue;
+                hsvr::Vec3 p = component_location(c);
+                if (p.x == 0.0 && p.y == 0.0 && p.z == 0.0) continue;
+                bool close_by = false;
+                for (const hsvr::Vec3& ta : g_room.table_at) close_by = close_by || hsvr::length(p - ta) < 400.0;
+                if (!close_by) continue;
+                auto it = g_room.watch_last.find(o);
+                if (it != g_room.watch_last.end() && hsvr::length(p - it->second) > 3.0)
+                    HSVR_LOG("TestRoom: watch +%.2f s: %ls moved %.0f cm to (%.0f, %.0f, %.0f)", now - g_room.watch_from, o->GetName().c_str(), hsvr::length(p - it->second), p.x,
+                             p.y, p.z);
+                g_room.watch_last[o] = p;
+            }
+        }
+        // Every foe's AI is stopped as soon as it is there (they spawn ~1 s in and would start
+        // fighting before the room is set up), and again if it comes back on (zombie revive).
+        if (now >= g_room.next_sweep)
+        {
+            g_room.next_sweep = now + 0.25;
+            std::vector<UObject*> ais;
+            UObjectGlobals::FindAllOf(STR("AI_BP_C"), ais);
+            for (UObject* ai : ais)
+            {
+                if (!ai || ai->GetName().rfind(STR("Default__"), 0) == 0 || bool_property(ai, STR("DED"))) continue;
+                Call gp(ai, STR("K2_GetPawn"));
+                gp.run();
+                UObject* foe = gp.object_result();
+                if (foe && foe != player) make_foe_passive(ai, foe);
+            }
+        }
+        (void)cfg;
+    }
+
+    // hsvr.test_room_report: where everything in the room is (unattended checks): him, every weapon
+    // table (and whether it still stands), every loose weapon (on which table, and where on its top
+    // in the table's own frame) and every foe (standing or down, AI off, what he holds).
+    void room_report()
+    {
+        using hsvr::Vec3;
+        UObject* player = nullptr;
+        find_pawn_mesh(&player);
+        if (!player)
+        {
+            HSVR_LOG("TestRoom: check: no player pawn");
+            return;
+        }
+        Vec3 me = actor_location(player);
+        HSVR_LOG("TestRoom: check: you at (%.0f, %.0f, %.0f), %s", me.x, me.y, me.z, bool_property(player, STR("DED")) ? "DEAD" : "alive");
+        struct Table { Vec3 at; hsvr::Quat q; };
+        std::vector<Table> tables;
+        std::vector<UObject*> containers;
+        UObjectGlobals::FindAllOf(STR("BP_Container_Master_C"), containers);
+        for (UObject* c : containers)
+        {
+            if (!c || c->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            UObject* box = object_property(c, STR("Box"));
+            if (!box) continue;
+            Table t{component_location(box), component_rotation(box)};
+            Vec3 up = t.q.rotate(Vec3{0, 0, 1});
+            HSVR_LOG("TestRoom: check: table %ls at (%.0f, %.0f, %.0f), its up (%.2f, %.2f, %.2f) - %s", c->GetName().c_str(), t.at.x, t.at.y, t.at.z, up.x, up.y, up.z,
+                     up.z > 0.95 ? "standing" : "TIPPED");
+            tables.push_back(t);
+        }
+        std::vector<UObject*> weapons, willies;
+        UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        int loose = 0, on_table = 0;
+        for (UObject* w : weapons)
+        {
+            if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || is_fist(w) || bool_property(w, STR("Is Sheathed"))) continue;
+            bool held = false;
+            for (UObject* c : willies)
+                if (c && (object_property(c, STR("Weapon R")) == w || object_property(c, STR("Weapon L")) == w)) held = true;
+            if (held) continue;
+            UObject* base = object_property(w, STR("BaseMesh"));
+            if (!base) continue;
+            Vec3 at = component_location(base);
+            // The generator's own throwaway weapons (destroyed, waiting for clean-up) sit at 0,0,0.
+            if (at.x == 0.0 && at.y == 0.0 && at.z == 0.0) continue;
+            ++loose;
+            int best = -1;
+            Vec3 local{};
+            double best_d = 1e9;
+            for (size_t i = 0; i < tables.size(); ++i)
+            {
+                Vec3 l = tables[i].q.inverse().rotate(at - tables[i].at);
+                double d = std::sqrt(l.x * l.x + l.y * l.y);
+                if (d < best_d) { best_d = d; best = (int)i; local = l; }
+            }
+            bool on = best >= 0 && std::fabs(local.x) < 55.0 && std::fabs(local.y) < 90.0 && local.z > 80.0 && local.z < 130.0;
+            if (on) ++on_table;
+            HSVR_LOG("TestRoom: check: weapon %ls at (%.0f, %.0f, %.0f); table %d frame (%.0f, %.0f, %.0f) - %s", w->GetName().c_str(), at.x, at.y, at.z, best, local.x,
+                     local.y, local.z, on ? "on the table" : (best >= 0 && local.z <= 80.0 ? "OFF the table (low)" : "OFF the table"));
+        }
+        int foes = 0, standing = 0, ai_on = 0;
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        for (UObject* f : willies)
+        {
+            if (!f || f == player || f->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            ++foes;
+            Vec3 at = actor_location(f);
+            UObject* m = object_property(f, STR("Mesh"));
+            Vec3 pe = m ? socket_location(m, pelvis_bone) : at;
+            UObject* ai = object_property(f, STR("Controller"));
+            bool ai_off = ai && bool_property(ai, STR("DED"));
+            if (ai && !ai_off) ++ai_on;
+            bool up = pe.z - me.z > -40.0;
+            if (up) ++standing;
+            UObject* wr = object_property(f, STR("Weapon R"));
+            HSVR_LOG("TestRoom: check: foe %ls at (%.0f, %.0f, %.0f) %.0f cm from you, pelvis %.0f cm above your capsule centre (%s), %s, AI %s, AI In Combat %d, holds %ls",
+                     f->GetName().c_str(), at.x, at.y, at.z, hsvr::length(at - me), pe.z - me.z, up ? "standing" : "down", bool_property(f, STR("DED")) ? "DEAD" : "alive",
+                     ai ? (ai_off ? "off" : "ON") : "none", (int)bool_property(f, STR("AI In Combat")), wr ? wr->GetName().c_str() : STR("nothing"));
+        }
+        HSVR_LOG("TestRoom: check: %d table(s), %d loose weapon(s) of which %d on a table, %d foe(s) of which %d standing and %d with AI on", (int)tables.size(), loose,
+                 on_table, foes, standing, ai_on);
+    }
+
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -13243,6 +13885,12 @@ namespace
             start = GetTickCount64();
             int n = parse_script_steps(cfg.dev_script, 0.0, entries);
             if (n > 0) HSVR_LOG("Script: %d timed step(s) from the settings file (dev_script)", n);
+            // ini test_room=1: from the first menu straight into the test room.
+            if (cfg.test_room)
+            {
+                parse_script_steps("M+2:hsvr.test_room_boot;M+4:hsvr.test_room_open", 0.0, entries);
+                HSVR_LOG("TestRoom: on (test_room=1); the game goes to %s from the first menu", cfg.test_room_map.c_str());
+            }
         }
         // Live steps: HalfSwordVR_commands.txt next to the ini, checked once a second. Each time it is
         // written, its steps are added with their times counted from that moment, so one game launch
@@ -13324,6 +13972,21 @@ namespace
             {
                 script_set_game_instance(entry.command.substr(9));
                 continue;
+            }
+            if (entry.command == "hsvr.test_room_boot")
+            {
+                room_boot(cfg);
+                continue;
+            }
+            if (entry.command == "hsvr.test_room_report")
+            {
+                room_report();
+                continue;
+            }
+            if (entry.command == "hsvr.test_room_open")
+            {
+                if (g_room.booted && !g_room.failed) run_console_command(std::string("open ") + cfg.test_room_map);
+                return;
             }
             if (entry.command == "hsvr.dump")
             {
@@ -13464,21 +14127,7 @@ namespace
                     gp.run();
                     UObject* foe = gp.object_result();
                     if (!foe || foe == player) continue;
-                    set_variable(ai, STR("DED"), 1.0);
-                    Call tick(ai, STR("SetActorTickEnabled"));
-                    tick.first_flag(false);
-                    tick.run();
-                    Call stop(ai, STR("StopMovement"));
-                    stop.run();
-                    std::wstring missing;
-                    for (const TCHAR* v : {STR("R Hand Active"), STR("L Hand Active"), STR("R Down"), STR("L Down"), STR("Chain Attack"), STR("BobnWeave"),
-                                           STR("Dodging"), STR("Alt Thrusting"), STR("AI In Combat"), STR("Is Crouched??")})
-                        if (!set_variable(foe, v, 0.0)) missing += std::wstring(v) + STR(", ");
-                    if (FProperty* p = foe->GetPropertyByNameInChain(STR("Aim Vector_0")))
-                        write_three(reinterpret_cast<uint8_t*>(foe) + p->GetOffset_Internal(), p, 0.0, 0.0, 0.0);
-                    ++stopped;
-                    HSVR_LOG("Script: hsvr.passive_foe: %ls (controller %ls) made passive%ls%ls", foe->GetName().c_str(), ai->GetName().c_str(),
-                             missing.empty() ? STR("") : STR("; not found: "), missing.c_str());
+                    if (make_foe_passive(ai, foe)) ++stopped;
                 }
                 HSVR_LOG("Script: hsvr.passive_foe: %d foe(s) made passive (%d AI controllers)", stopped, (int)ais.size());
                 continue;
@@ -14740,6 +15389,7 @@ namespace
             keep_clouds_correct(cfg);
             keep_light_samples(cfg);
             run_dev_script(cfg);
+            test_room_tick(cfg);
         }
         // The mod's keys count only while the game has the keyboard, so that Home or End typed in
         // another program does not move the view or hide the panel.
