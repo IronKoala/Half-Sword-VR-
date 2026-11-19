@@ -4409,6 +4409,10 @@ namespace
                      n > 1 ? hi[1] : 0.0, h.slide);
             return false;
         }
+        // A fist still in this hand (made by an earlier empty squeeze) would sit inside the handle and
+        // shove it every tick (playtest 02:44: a fist was in the second hand in 3 of the two-hand holds;
+        // the game's whoosh plays on that tick-to-tick shove, "frozen but swooshing").
+        if (is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))) remove_fist(side, pawn, "the hand takes a weapon in two hands");
         g_two = TwoHand{};
         g_two.active = true;
         g_two.main = other;
@@ -4483,6 +4487,10 @@ namespace
         }
         FreeGrip g = on_handle ? handle_grip(side, mesh, bp, bq, at, hs[hi], t)
                                : make_free_grip(side, mesh, bp, bq, at, bp + bq.rotate(spot), nullptr, "spot where the hand touched it");
+        // A fist still in this hand (made by an earlier empty squeeze) would sit inside the handle and
+        // shove it every tick (playtest 02:44: a fist was in the second hand in 3 of the two-hand holds;
+        // the game's whoosh plays on that tick-to-tick shove, "frozen but swooshing").
+        if (is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))) remove_fist(side, pawn, "the hand takes a weapon in two hands");
         g_two = TwoHand{};
         g_two.active = true;
         g_two.main = other;
