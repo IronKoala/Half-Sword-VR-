@@ -890,6 +890,60 @@ namespace
         double swivel_time[2] = {0.0, 0.0};
     };
     PoseState g_pose;
+
+    // ---- Torso lean (see pose_lean in config.hpp) -----------------------------------------------
+    // The bones it bends, parent first; the last one (head) is only measured, never bent here.
+    const char* const kLeanBones[7] = {"spine_02", "spine_03", "spine_04", "spine_05", "neck_01", "neck_02", "head"};
+    const double kTwistWeight[6] = {0.10, 0.12, 0.14, 0.16, 0.22, 0.26};
+    struct LeanState
+    {
+        bool calibrated = false;
+        hsvr::Vec3 pts[7];       // the bones standing, relative to the actor, in the body's frame (at calibration)
+        double fwd = 0.0, side = 0.0;     // degrees bent now (smoothed and held to what the head height allows)
+        double want_fwd = 0.0, want_side = 0.0; // from the head alone
+        double twist = 0.0;      // torso twist total (degrees), shared with pose_torso_twist
+        hsvr::Quat q[6];         // each bone's turn this frame, in the body's frame (twist and bend)
+        hsvr::Vec3 head_moved;   // how far the bend and twist carry the head, in the body's frame
+        double pitch = 0.0, roll = 0.0; // your head's pitch down and roll right (degrees)
+        double t = 0.0;
+        double held = 1.0;       // share of the wanted bend allowed by the head height
+    };
+    LeanState g_lean;
+    // Test: hsvr.fake_head_tilt <pitch down> <roll right> <drop cm> nods the TRACKED headset about the
+    // base of the neck (12 cm below the head bone) and lowers it, for the pose only (not the view).
+    std::atomic<double> g_fake_tilt_pitch{0.0}, g_fake_tilt_roll{0.0}, g_fake_tilt_drop{0.0};
+    // Test: hsvr.fake_head_pose 1 = with no tracked headset (dev_fake_headset), a still head at the view's
+    // anchor (where your eyes were at recentring), looking straight ahead; the tilt above applies to it.
+    std::atomic<bool> g_fake_head_pose{false};
+    // Test: hsvr.fake_head_wobble <deg> <hz> nods the head (tracked or fake) up and down by that much,
+    // live from the clock, so the pose and the view's late copy see different head poses (as a moving
+    // real head does a frame apart).
+    std::atomic<double> g_fake_wobble_deg{0.0}, g_fake_wobble_hz{1.0};
+
+    // The bend and twist of the 6 bones, and where they carry the head (body frame). Each bone turns
+    // about its own joint and carries everything above it, as the end-of-graph Modify Bone nodes do
+    // in component space (Additive).
+    hsvr::Vec3 lean_fk(double fwd_deg, double side_deg, double twist_deg, hsvr::Quat out[6])
+    {
+        using namespace hsvr;
+        Vec3 p[7];
+        for (int i = 0; i < 7; ++i) p[i] = g_lean.pts[i];
+        const Vec3 up{0, 0, 1}, right{0, 1, 0}, fwd{1, 0, 0};
+        for (int i = 0; i < 6; ++i)
+        {
+            // Half Sword's Bend_F: spine_02..05 +20 deg each, neck_01 and neck_02 -30 each (of 80);
+            // Bend_L/R: spine 22.5 each, neck -30 each (of 90). Forward is a turn about right; a lean to
+            // the right is a turn about forward by minus the angle.
+            double f = i < 4 ? fwd_deg / 4.0 : -fwd_deg * 0.375;
+            double sd = i < 4 ? side_deg / 4.0 : -side_deg / 3.0;
+            Quat bend = (quat_axis_angle(right, f * kDegToRad) * quat_axis_angle(fwd, -sd * kDegToRad)).normalized();
+            Quat q = (quat_axis_angle(up, twist_deg * kTwistWeight[i] * kDegToRad) * bend).normalized();
+            out[i] = q;
+            for (int j = i + 1; j < 7; ++j) p[j] = p[i] + q.rotate(p[j] - p[i]);
+        }
+        return p[6] - g_lean.pts[6];
+    }
+
     UObject* live_posed_pawn()
     {
         UObject* posed = g_pose.pawn;
@@ -988,6 +1042,15 @@ namespace
         g_pose_room_moved_local = {};
 
         g_pose.chest_rot_local = (body_inv * socket_rotation(g_pose.mesh, bone_fname("spine_05"))).normalized();
+        g_lean = LeanState{};
+        g_lean.calibrated = true;
+        for (int i = 0; i < 7; ++i)
+        {
+            if (!bone_exists(d, kLeanBones[i])) g_lean.calibrated = false;
+            g_lean.pts[i] = body_inv.rotate(socket_location(d, bone_fname(kLeanBones[i])) - actor);
+        }
+        HSVR_LOG("Lean: %s; spine_02 at %.1f cm, head %.1f cm above the actor, head %.1f cm in front of spine_02",
+                 g_lean.calibrated ? "calibrated" : "a bone is MISSING, lean off", g_lean.pts[0].z, g_lean.pts[6].z, g_lean.pts[6].x - g_lean.pts[0].x);
         g_pose.pelvis_rot_local = (body_inv * socket_rotation(g_pose.mesh, bone_fname("pelvis"))).normalized();
         g_pose.feet_calibrated = true;
         for (int side = 0; side < 2; ++side)
@@ -1340,6 +1403,7 @@ namespace
 
     // The mod's fist is in that hand (set each tick by grab_button), for the fist's finger shape.
     std::atomic<bool> g_fist_side[2] = {false, false};
+    std::atomic<bool> g_fist_open[2] = {false, false}; // a slap: the fist is there but the hand is open (fingers as the game's)
     std::atomic<int> g_fist_shape_test{-99}; // test: hsvr.fist_shape <n> (-99 = pose_fist_shape)
     bool set_bool_property(UObject* owner, const TCHAR* name, bool value);
     bool set_variable(UObject* owner, const TCHAR* name, double number, UObject* object, const FName* fname);
@@ -1378,7 +1442,7 @@ namespace
             int g = side == g_anim_grip_two_side ? g_anim_grip_two : (now - g_anim_grip_time[side] < 0.1 ? g_anim_grip[side] : -1);
             // A fist: the shape chosen for it (pose_fist_shape). The animation's own fist needs 'Hand
             // Active' (0 in VR), so the hand would stay open (playtest 2026-11-19 21:10).
-            if (g_fist_side[side].load())
+            if (g_fist_side[side].load() && !g_fist_open[side].load())
             {
                 int shape = fist_shape(hsvr::config());
                 if (shape >= 0 && shape <= 17) g = shape;
@@ -1529,6 +1593,24 @@ namespace
         }
         Vec3 up = component_inv.rotate({0.0, 0.0, 1.0});
         double total = rel * (std::min)(1.0, cfg.pose_torso_twist);
+        if (g_lean.calibrated)
+        {
+            // With the torso lean: the same twist plus the bend (lean_fk, the bones' turns in the body's
+            // frame), turned into his component's frame.
+            Quat q[6];
+            lean_fk(g_lean.fwd, g_lean.side, total, q);
+            Quat body = quat_from_yaw_deg(hips_yaw);
+            Quat to_comp = component_inv * body;
+            for (int i = 0; i < 6; ++i)
+            {
+                ModifyBoneNode* n = chain_node(kLeanBones[i]);
+                if (!n) continue;
+                if (total == 0.0 && g_lean.fwd == 0.0 && g_lean.side == 0.0) node_release(*n);
+                else node_add_rotation(*n, (to_comp * q[i] * to_comp.inverse()).normalized());
+            }
+            g_pose.twist_deg = total;
+            return;
+        }
         for (const auto& link : chain)
         {
             ModifyBoneNode* n = chain_node(link.bone);
@@ -2240,6 +2322,305 @@ namespace
             HSVR_LOG("Pose: %s now ticks %s the physics", i == 0 ? "his posed skeleton" : "his visible body", want ? "after" : "before");
         }
         g_pose_post_physics.store(want && set_on[0] == driver && set_post[0]);
+        static UObject* prereq_on = nullptr;
+        if (cfg.pose_mesh_after_driver && mesh && driver && prereq_on != mesh)
+        {
+            Call add(mesh, STR("AddTickPrerequisiteComponent"));
+            add.object(STR("PrerequisiteComponent"), driver);
+            if (add.fn && add.run())
+            {
+                prereq_on = mesh;
+                HSVR_LOG("Pose: his visible body now always ticks after his posed skeleton");
+            }
+        }
+    }
+
+    void set_named_number(UObject* owner, const TCHAR* name, double value);
+
+    // ---- Worn armour: animated every frame, and the helmet measured against your headset ---------
+    // Each worn piece is its own skeletal mesh on CharacterMesh0 copying its pose (ABP_CopyPose,
+    // PostUpdateWork), with update-rate optimisation on (torso_lean_and_helmet.md). pose_no_uro turns
+    // that off on his body, head and armour, and has his body refresh its bones every frame.
+    UObject* g_helmet = nullptr;     // the worn piece tagged "Head 2" or "Head 1" (helmet, hood), or null
+    UObject* g_helmet_pawn = nullptr;
+    std::vector<UObject*> g_head_pieces; // every worn piece on the head, and his head (CharacterMesh_Head)
+    void armour_scan(const hsvr::Config& cfg, UObject* pawn, UObject* mesh)
+    {
+        static double last = 0.0;
+        double now = hsvr::now_seconds();
+        if (pawn == g_helmet_pawn && now - last < 1.0) return;
+        last = now;
+        if (pawn != g_helmet_pawn) g_helmet = nullptr;
+        g_helmet_pawn = pawn;
+        UObject* helmet = nullptr;
+        std::vector<UObject*> parts;
+        Call kids(mesh, STR("GetChildrenComponents"));
+        kids.flag(STR("bIncludeAllDescendants"), false);
+        if (kids.run())
+            if (FProperty* cp = kids.param(STR("Children")))
+            {
+                struct RawArray
+                {
+                    UObject** data;
+                    int32_t num, max;
+                };
+                RawArray* arr = reinterpret_cast<RawArray*>(kids.buffer.data() + cp->GetOffset_Internal());
+                for (int32_t i = 0; arr->data && i < arr->num && i < 512; ++i)
+                    if (UObject* c = arr->data[i])
+                        if (c->GetClassPrivate()->GetName().find(STR("SkeletalMeshComponent")) != std::wstring::npos) parts.push_back(c);
+            }
+        int tagged = 0;
+        std::vector<UObject*> head_pieces;
+        if (UObject* head = object_property(pawn, STR("CharacterMesh_Head"))) head_pieces.push_back(head);
+        for (UObject* c : parts)
+            for (const TCHAR* tag : {STR("Head 2"), STR("Head 1")})
+            {
+                Call has(c, STR("ComponentHasTag"));
+                has.name(STR("Tag"), FName(tag, FNAME_Add));
+                if (!has.run()) continue;
+                FProperty* rp = has.param(STR("ReturnValue"));
+                if (rp && *(has.buffer.data() + rp->GetOffset_Internal()))
+                {
+                    if (!helmet || tag[5] == L'2') helmet = c; // the helmet slot (Head 2) over a hood (Head 1)
+                    head_pieces.push_back(c);
+                    ++tagged;
+                    break;
+                }
+            }
+        if (helmet != g_helmet)
+            HSVR_LOG("Helmet: %ls (%d skeletal pieces on his body, %d on the head)", helmet ? helmet->GetFullName().c_str() : STR("none worn"), (int)parts.size(), tagged);
+        g_helmet = helmet;
+        g_head_pieces = head_pieces;
+        if (cfg.pose_no_uro)
+        {
+            static int said = 0;
+            parts.push_back(mesh);
+            parts.push_back(object_property(pawn, STR("CharacterMesh_Head")));
+            parts.push_back(object_property(pawn, STR("DriverSkeleton")));
+            int changed = 0;
+            for (UObject* c : parts)
+            {
+                if (!c) continue;
+                FProperty* p = c->GetPropertyByNameInChain(STR("bEnableUpdateRateOptimizations"));
+                if (!p || p->GetClass().GetName() != STR("BoolProperty")) continue;
+                auto* flag = static_cast<FBoolProperty*>(p);
+                uint8_t* byte = reinterpret_cast<uint8_t*>(c) + p->GetOffset_Internal() + flag->GetByteOffset();
+                if (*byte & flag->GetFieldMask())
+                {
+                    *byte &= (uint8_t)~flag->GetFieldMask();
+                    ++changed;
+                }
+            }
+            // EVisibilityBasedAnimTickOption: AlwaysTickPoseAndRefreshBones 0.
+            if (FProperty* p = mesh->GetPropertyByNameInChain(STR("VisibilityBasedAnimTickOption")))
+            {
+                uint8_t* at = reinterpret_cast<uint8_t*>(mesh) + p->GetOffset_Internal();
+                if (*at != 0)
+                {
+                    HSVR_LOG("Pose: his body's animation tick option was %d; now refreshes its bones every frame", (int)*at);
+                    *at = 0;
+                }
+            }
+            if (changed && said < 20)
+            {
+                ++said;
+                HSVR_LOG("Pose: update-rate optimisation off on %d of his meshes (body, head, armour)", changed);
+            }
+        }
+    }
+
+    // ---- Helmet on this frame's headset pose (pose_helmet_late) ----------------------------------
+    // The pose runs on the headset pose read when the previous frame's views were set up; the view then
+    // takes a newer one. Right after the view takes it, every head piece is moved rigidly by the change
+    // (new headset pose x the one the pose used, inverted), so it sits exactly where the view is. Its
+    // place on the body is put back at the start of the next pose.
+    bool head_pose_world(const hsvr::Config& cfg, const hsvr::ControllerState& state, hsvr::Vec3& w, hsvr::Quat& r);
+    struct HeadUsed
+    {
+        bool valid = false;
+        hsvr::Vec3 at;   // headset (eyes) in the world, as this frame's pose used it
+        hsvr::Quat rot;
+        UObject* pawn = nullptr;
+    } g_head_used;
+    struct MovedPiece
+    {
+        UObject* comp;
+        double loc[3], rot[3];
+    };
+    std::vector<MovedPiece> g_late_moved;
+    struct LateStats
+    {
+        double worst_cm = 0, worst_deg = 0, sum_cm = 0, after_worst = 0, view_worst = 0, view_worst_deg = 0;
+        int n = 0;
+        double last_log = 0;
+    } g_late_stats;
+
+    void late_restore()
+    {
+        for (auto& m : g_late_moved)
+        {
+            Call c(m.comp, STR("K2_SetRelativeLocationAndRotation"));
+            c.three(STR("NewLocation"), m.loc[0], m.loc[1], m.loc[2]);
+            c.three(STR("NewRotation"), m.rot[0], m.rot[1], m.rot[2]);
+            c.flag(STR("bSweep"), false);
+            c.flag(STR("bTeleport"), true);
+            c.run();
+        }
+        g_late_moved.clear();
+    }
+
+    void helmet_on_latch()
+    {
+        using namespace hsvr;
+        hsvr::Config cfg = config();
+        if (!cfg.pose_helmet_late || !g_head_used.valid || !g_pose_active.load()) return;
+        UObject* pawn = live_posed_pawn();
+        if (!pawn || pawn != g_head_used.pawn || pawn != g_helmet_pawn || g_head_pieces.empty()) return;
+        Vec3 w;
+        Quat r;
+        if (!head_pose_world(cfg, controllers_state(), w, r)) return;
+        // Where the head bone belongs on the view's headset pose (as the head lock puts it).
+        Vec3 want = w - r.rotate(Vec3{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm});
+        Quat want_rot = (r * g_pose.head_offset).normalized();
+        Quat dr = (r * g_head_used.rot.inverse()).normalized();
+        double view_cm = length(w - g_head_used.at), view_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(dr.w))) * kRadToDeg;
+        late_restore();
+        double off_cm = 0.0, off_deg = 0.0, after = 0.0;
+        for (UObject* c : g_head_pieces)
+        {
+            if (!c) continue;
+            FProperty* lp = c->GetPropertyByNameInChain(STR("RelativeLocation"));
+            FProperty* rp = c->GetPropertyByNameInChain(STR("RelativeRotation"));
+            if (!lp || !rp) continue;
+            // Each piece is moved so ITS head bone lands on the view's head spot: this takes out both the
+            // view's newer headset pose and anything his body drew late.
+            Vec3 bone = socket_location(c, bone_fname("head"));
+            Quat bone_rot = socket_rotation(c, bone_fname("head"));
+            Quat d = (want_rot * bone_rot.inverse()).normalized();
+            double cm = length(want - bone), deg = 2.0 * std::acos((std::min)(1.0, std::fabs(d.w))) * kRadToDeg;
+            off_cm = (std::max)(off_cm, cm);
+            off_deg = (std::max)(off_deg, deg);
+            if (cm > 20.0 || deg > 45.0) continue; // not a frame's drift: leave it on the body
+            MovedPiece m{c, {0, 0, 0}, {0, 0, 0}};
+            read_three(reinterpret_cast<uint8_t*>(c) + lp->GetOffset_Internal(), lp, m.loc);
+            read_three(reinterpret_cast<uint8_t*>(c) + rp->GetOffset_Internal(), rp, m.rot);
+            Vec3 at = component_location(c);
+            Quat rot = component_rotation(c);
+            set_component_transform(c, want + d.rotate(at - bone), (d * rot).normalized(), true);
+            g_late_moved.push_back(m);
+            after = (std::max)(after, length(socket_location(c, bone_fname("head")) - want));
+        }
+        auto& st = g_late_stats;
+        st.worst_cm = (std::max)(st.worst_cm, off_cm);
+        st.worst_deg = (std::max)(st.worst_deg, off_deg);
+        st.after_worst = (std::max)(st.after_worst, after);
+        st.sum_cm += off_cm;
+        st.view_worst = (std::max)(st.view_worst, view_cm);
+        st.view_worst_deg = (std::max)(st.view_worst_deg, view_deg);
+        ++st.n;
+        double now = now_seconds();
+        if (now - st.last_log >= 0.25)
+        {
+            st.last_log = now;
+            HSVR_LOG("Helmet: as drawn before the late move, off the view's head spot by worst %.2f cm / %.2f deg (mean %.2f cm) over %d frames, %d head pieces; "
+                     "after the move worst %.3f cm; the view's headset moved %.2f cm / %.2f deg since the pose",
+                     st.worst_cm, st.worst_deg, st.n ? st.sum_cm / st.n : 0.0, st.n, (int)g_head_pieces.size(), st.after_worst, st.view_worst, st.view_worst_deg);
+            st = LateStats{};
+            st.last_log = now;
+        }
+    }
+
+    // Your headset in the world, as the pose uses it (with the test's made-up nod, hsvr.fake_head_tilt).
+    bool head_pose_world(const hsvr::Config& cfg, const hsvr::ControllerState& state, hsvr::Vec3& w, hsvr::Quat& r)
+    {
+        using namespace hsvr;
+        if (state.head_valid)
+        {
+            if (!stereo_tracking_to_world(state.head, w, r)) return false;
+        }
+        else
+        {
+            double base_yaw = 0.0;
+            if (!g_fake_head_pose.load() || !stereo_view_anchor(w, base_yaw)) return false;
+            r = quat_from_yaw_deg(base_yaw);
+        }
+        double p = g_fake_tilt_pitch.load(), ro = g_fake_tilt_roll.load(), dr = g_fake_tilt_drop.load();
+        if (double wa = g_fake_wobble_deg.load(); wa != 0.0) p += wa * std::sin(now_seconds() * 2.0 * kPi * g_fake_wobble_hz.load());
+        if (p != 0.0 || ro != 0.0 || dr != 0.0)
+        {
+            Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
+            Vec3 pivot = w - r.rotate(eye_offset) - Vec3{0.0, 0.0, 12.0};
+            Quat y = quat_from_yaw_deg(quat_yaw_deg(r));
+            Quat t = (quat_axis_angle(y.rotate({0, 1, 0}), p * kDegToRad) * quat_axis_angle(y.rotate({1, 0, 0}), -ro * kDegToRad)).normalized();
+            w = pivot + t.rotate(w - pivot) - Vec3{0.0, 0.0, dr};
+            r = (t * r).normalized();
+        }
+        return true;
+    }
+
+    // Torso lean for this frame: how far to bend (from your head's pitch and roll, smoothed), held to
+    // what the head height allows (his hips can't rise above standing: drop + head_moved.z >= -slack),
+    // and the twist share (pose_torso_twist). Fills g_lean.q / head_moved.
+    void lean_update(const hsvr::Config& cfg, bool have_head, const hsvr::Quat& head_rot, double heading, double drop)
+    {
+        using namespace hsvr;
+        double now = now_seconds(), dt = now - g_lean.t;
+        g_lean.t = now;
+        double want_f = 0.0, want_s = 0.0, twist = 0.0;
+        if (have_head)
+        {
+            Vec3 f = head_rot.rotate({1, 0, 0}), rt = head_rot.rotate({0, 1, 0});
+            g_lean.pitch = std::asin((std::max)(-1.0, (std::min)(1.0, -f.z))) * kRadToDeg;
+            g_lean.roll = std::asin((std::max)(-1.0, (std::min)(1.0, -rt.z))) * kRadToDeg;
+            if (cfg.pose_lean && g_lean.calibrated)
+            {
+                want_f = (std::min)(cfg.pose_lean_max_deg, (std::max)(0.0, g_lean.pitch - cfg.pose_lean_pitch_dead_deg) * cfg.pose_lean_pitch_gain);
+                double r = std::fabs(g_lean.roll) - cfg.pose_lean_roll_dead_deg;
+                want_s = r > 0.0 ? (std::min)(cfg.pose_lean_side_max_deg, r * cfg.pose_lean_roll_gain) * (g_lean.roll < 0.0 ? -1.0 : 1.0) : 0.0;
+            }
+            if (cfg.pose_torso_twist > 0.0)
+            {
+                double rel = quat_yaw_deg(head_rot) - heading;
+                while (rel > 180.0) rel -= 360.0;
+                while (rel < -180.0) rel += 360.0;
+                twist = (std::max)(-90.0, (std::min)(90.0, rel)) * (std::min)(1.0, cfg.pose_torso_twist);
+            }
+        }
+        g_lean.want_fwd = want_f;
+        g_lean.want_side = want_s;
+        double a = (cfg.pose_lean_smooth_s > 1e-4 && dt > 0.0 && dt < 0.2) ? 1.0 - std::exp(-dt / cfg.pose_lean_smooth_s) : 1.0;
+        double f = g_lean.fwd + (want_f - g_lean.fwd) * a, sd = g_lean.side + (want_s - g_lean.side) * a;
+        g_lean.twist = twist;
+        if (!g_lean.calibrated)
+        {
+            g_lean.fwd = g_lean.side = 0.0;
+            for (auto& q : g_lean.q) q = Quat{};
+            g_lean.head_moved = {};
+            return;
+        }
+        // Held to the head height: the largest share of (f, sd) whose head drop fits.
+        double lo = 0.0, hi = 1.0;
+        Quat q[6];
+        Vec3 m = lean_fk(f, sd, twist, q);
+        if (drop + m.z < -cfg.pose_lean_slack_cm)
+        {
+            for (int it = 0; it < 10; ++it)
+            {
+                double mid = 0.5 * (lo + hi);
+                if (drop + lean_fk(f * mid, sd * mid, twist, q).z < -cfg.pose_lean_slack_cm) hi = mid;
+                else lo = mid;
+            }
+            f *= lo;
+            sd *= lo;
+            m = lean_fk(f, sd, twist, q);
+            g_lean.held = lo;
+        }
+        else
+            g_lean.held = 1.0;
+        g_lean.fwd = f;
+        g_lean.side = sd;
+        for (int i = 0; i < 6; ++i) g_lean.q[i] = q[i];
+        g_lean.head_moved = m;
     }
 
     void pose_body(const hsvr::Config& cfg)
@@ -2249,6 +2630,9 @@ namespace
         UObject* mesh = find_pawn_mesh(&pawn);
         // A new map or a new life: everything kept about the old pawn's weapons and holds goes.
         if (g_pose.pawn && pawn != g_pose.pawn) forget_level_objects();
+        if (pawn && pawn == g_pose.pawn) late_restore(); // the head pieces back on his body (pose_helmet_late)
+        else g_late_moved.clear();
+        g_head_used.valid = false;
         bool willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
         UObject* driver = willie ? object_property(pawn, STR("DriverSkeleton")) : nullptr;
         UObject* instance = object_property(driver, STR("AnimScriptInstance"));
@@ -2311,11 +2695,11 @@ namespace
         Vec3 room{0, 0, 0};
         Vec3 anchor;
         double base_yaw = 0.0;
-        if (cfg.pose_follow_room && state.head_valid && stereo_view_anchor(anchor, base_yaw))
+        if (cfg.pose_follow_room && (state.head_valid || g_fake_head_pose.load()) && stereo_view_anchor(anchor, base_yaw))
         {
             Vec3 head_world;
             Quat head_rot;
-            if (stereo_tracking_to_world(state.head, head_world, head_rot))
+            if (head_pose_world(cfg, state, head_world, head_rot))
             {
                 // Walking is measured at your neck, not your eyes: your eyes swing round your neck when
                 // you turn or nod, and that is not a step (a 180 degree turn moved the eyes ~18 cm and
@@ -2379,12 +2763,12 @@ namespace
             double held = g_fake_head_drop.load();
             g_crouch_drop = held >= 0.0 ? (std::min)(55.0 * component_scale_z(mesh), held) : 20.0 - 20.0 * std::cos(now_seconds() * 0.4);
         }
-        else if (cfg.pose_crouch && state.head_valid)
+        else if (cfg.pose_crouch && (state.head_valid || g_fake_head_pose.load()))
         {
             Vec3 view_anchor, head_world;
             Quat head_rot;
             double unused_yaw = 0.0;
-            if (stereo_view_anchor(view_anchor, unused_yaw) && stereo_tracking_to_world(state.head, head_world, head_rot))
+            if (stereo_view_anchor(view_anchor, unused_yaw) && head_pose_world(cfg, state, head_world, head_rot))
             {
                 double scale = component_scale_z(mesh);
                 // Measured at the neck too, so looking down is not crouching.
@@ -2415,6 +2799,17 @@ namespace
         else
             g_button_crouch = 0.0;
         g_crouch_drop = (std::min)(55.0 * component_scale_z(mesh), g_crouch_drop + g_button_crouch);
+        // Torso lean: the bend carries his head forward and down; his hips go back by the forward part
+        // and stay up by the downward part, so his head still ends at your neck and the chest moves in.
+        {
+            Vec3 hw;
+            Quat hr;
+            bool have_head = !cfg.dev_pose_fake_tracking && head_pose_world(cfg, state, hw, hr);
+            lean_update(cfg, have_head, hr, heading, g_crouch_drop);
+            Vec3 m = g_lean.head_moved;
+            place = place - body.rotate(Vec3{m.x, m.y, 0.0});
+            g_crouch_drop = (std::max)(0.0, g_crouch_drop + m.z);
+        }
         if (g_crouch_drop > 10.0) crouch_push_log(pawn, mesh);
         place.z -= g_crouch_drop;
         // Moved, not teleported: a teleport snaps his kinematic physics bodies (the hand holding a
@@ -2439,7 +2834,7 @@ namespace
         {
             Vec3 head_world;
             Quat head_rot;
-            bool have = !cfg.dev_pose_fake_tracking && state.head_valid && stereo_tracking_to_world(state.head, head_world, head_rot);
+            bool have = !cfg.dev_pose_fake_tracking && head_pose_world(cfg, state, head_world, head_rot);
             if (!have && cfg.dev_pose_fake_tracking)
             {
                 // Made-up path: looks left and right, and up and down.
@@ -2448,6 +2843,53 @@ namespace
                 if (g_turn_valid && cfg.pose_body_turn) // the same made-up look the body turning follows
                     head_rot = (quat_from_yaw_deg(g_turn_yaw + 80.0 * std::sin(t * 0.25)) * rot_to_quat(20.0 * std::sin(t * 0.7), 0.0, 0.0)).normalized();
                 have = true;
+            }
+            g_head_used.valid = have && !cfg.dev_pose_fake_tracking;
+            g_head_used.at = head_world;
+            g_head_used.rot = head_rot;
+            g_head_used.pawn = pawn;
+            // The helmet (and his head) as drawn last frame against where the head was sent last frame:
+            // worst and mean over each quarter second (log "Helmet:").
+            {
+                static Vec3 prev_want;
+                static Quat prev_rot;
+                static bool prev_ok = false;
+                static double worst_cm = 0, worst_deg = 0, sum_cm = 0, mesh_worst = 0, last_log = 0;
+                static int count = 0;
+                if (prev_ok)
+                {
+                    auto angle = [](const Quat& a, const Quat& b) {
+                        double d = std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
+                        return 2.0 * std::acos((std::min)(1.0, d)) * kRadToDeg;
+                    };
+                    double mesh_cm = length(socket_location(mesh, bone_fname("head")) - prev_want);
+                    mesh_worst = (std::max)(mesh_worst, mesh_cm);
+                    if (g_helmet && g_helmet_pawn == pawn)
+                    {
+                        double cm = length(socket_location(g_helmet, bone_fname("head")) - prev_want);
+                        double deg = angle(socket_rotation(g_helmet, bone_fname("head")), prev_rot);
+                        worst_cm = (std::max)(worst_cm, cm);
+                        worst_deg = (std::max)(worst_deg, deg);
+                        sum_cm += cm;
+                        ++count;
+                    }
+                }
+                if (now - last_log >= 0.25)
+                {
+                    last_log = now;
+                    if (prev_ok)
+                        HSVR_LOG("Helmet: vs the headset last frame: worst %.2f cm / %.2f deg, mean %.2f cm over %d frames%s; his head bone worst %.2f cm",
+                                 worst_cm, worst_deg, count ? sum_cm / count : 0.0, count, g_helmet ? "" : " (no helmet worn)", mesh_worst);
+                    worst_cm = worst_deg = sum_cm = mesh_worst = 0.0;
+                    count = 0;
+                }
+                prev_ok = false;
+                if (have && cfg.pose_head_lock && g_pose_anchor_fixed && !cfg.dev_pose_fake_tracking)
+                {
+                    prev_want = head_world - head_rot.rotate(Vec3{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm});
+                    prev_rot = (head_rot * g_pose.head_offset).normalized();
+                    prev_ok = true;
+                }
             }
             if (ModifyBoneNode* n = chain_node("head"))
             {
@@ -2486,6 +2928,15 @@ namespace
             node_release(*n);
         }
         pose_torso_twist(cfg, have_look, look_rot, heading, component_inv);
+        // The game's own forward bends (crouch Root Height, Lean Forward (Grabbing)) feed
+        // Anim_Add_Bend_AO from the animation's copies, written by the update this runs after; with the
+        // lean they are set to standing, so only your lean bends him (torso_lean_and_helmet.md).
+        if (cfg.pose_lean && cfg.pose_lean_cancel_game_bend && g_lean.calibrated && cfg.pose_in_anim_update && g_pose_in_anim_at.load() >= now - 0.001)
+        {
+            set_named_number(g_pose.instance, STR("Root Height"), 85.0 * component_scale_z(mesh));
+            set_named_number(g_pose.instance, STR("Lean Forward (Grabbing)"), 0.0);
+        }
+        armour_scan(cfg, pawn, mesh);
         pose_feet(cfg, pawn, actor, heading, component_inv);
         for (int side = 0; side < 2; ++side)
         {
@@ -2518,6 +2969,21 @@ namespace
             double chest_yaw = quat_yaw_deg((socket_rotation(mesh, bone_fname("spine_05")) * g_pose.chest_rot_local.inverse()).normalized());
             double hips_yaw = quat_yaw_deg((socket_rotation(mesh, bone_fname("pelvis")) * g_pose.pelvis_rot_local.inverse()).normalized());
             double look_yaw = have_look ? quat_yaw_deg(look_rot) : 0.0;
+            {
+                // Where his chest is from your eyes (body frame): + forward = under your view when you look down.
+                Vec3 hw;
+                Quat hr;
+                if (!cfg.dev_pose_fake_tracking && head_pose_world(cfg, state, hw, hr))
+                {
+                    Vec3 c = body.inverse().rotate(socket_location(mesh, bone_fname("spine_05")) - hw);
+                    Vec3 cl = body.inverse().rotate(socket_location(mesh, bone_fname("clavicle_l")) - hw);
+                    Vec3 cr = body.inverse().rotate(socket_location(mesh, bone_fname("clavicle_r")) - hw);
+                    HSVR_LOG("Lean: your head pitch %.0f roll %.0f; wanted forward %.0f side %.0f, bent forward %.0f side %.0f (%.0f%% allowed by head height); "
+                             "head carried (%.1f, %.1f, %.1f) cm, crouch %.0f cm; chest (spine_05) %.1f cm in front of your eyes, %.1f below; clavicles %.1f / %.1f in front",
+                             g_lean.pitch, g_lean.roll, g_lean.want_fwd, g_lean.want_side, g_lean.fwd, g_lean.side, g_lean.held * 100.0, g_lean.head_moved.x,
+                             g_lean.head_moved.y, g_lean.head_moved.z, g_crouch_drop, c.x, -c.z, cl.x, cr.x);
+                }
+            }
             HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d, torso twist %.0f deg asked; on screen: head %.0f, chest %.0f, hips %.0f (chest %+.0f from hips)",
                      v[0], v[1], v[2], mode, g_pose.twist_deg, look_yaw, chest_yaw, hips_yaw, wrap_deg(chest_yaw - hips_yaw));
             if (g_feet_active.load())
@@ -2919,6 +3385,7 @@ namespace
     }
 
     void fist_flags_before_tick(UObject* pawn);
+    void body_grab_before_tick(UObject* pawn);
     void fist_flags_after_tick(UObject* pawn);
     void body_grab_after_tick(UObject* pawn);
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
@@ -2939,6 +3406,7 @@ namespace
             stick_walk_before_tick(context);
             swing_speed_before_tick(context);
             fist_flags_before_tick(context);
+            body_grab_before_tick(context);
             for (int side = 0; side < 2; ++side)
                 if (g_draw[side].active) set_bool_property(context, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
             scabbard_before_tick(context);
@@ -5978,6 +6446,25 @@ namespace
                     body_spring_joint(joint, cfg, body_spring_cap(cfg, g_body_grab[side].grip_t));
     }
 
+    // pose_grab_body_no_slip: right before Willie's tick (where the slip rule runs), the held hand's
+    // 'Hand Block Drop' is set while his grip strength is above pose_grab_body_slip_below_t.
+    bool g_body_blocking[2] = {false, false};
+    void body_grab_before_tick(UObject* pawn)
+    {
+        hsvr::Config cfg = hsvr::config();
+        for (int side = 0; side < 2; ++side)
+        {
+            const BodyGrab& b = g_body_grab[side];
+            bool want = cfg.pose_grab_body_no_slip && b.on && b.grip_t >= cfg.pose_grab_body_slip_below_t;
+            const TCHAR* flag = side == 0 ? STR("L Hand Block Drop") : STR("R Hand Block Drop");
+            if (want) set_bool_property(pawn, flag, true);
+            else if (g_body_blocking[side]) set_bool_property(pawn, flag, false);
+            if (want != g_body_blocking[side])
+                HSVR_LOG("Body grab: %s hand's slip rule %s (his grip T %.0f)", side == 0 ? "left" : "right", want ? "held off" : "back to the game's", b.grip_t);
+            g_body_blocking[side] = want;
+        }
+    }
+
     void body_grab_tick(UObject* pawn, const hsvr::Config& cfg_in)
     {
         using namespace hsvr;
@@ -6054,7 +6541,7 @@ namespace
                 b.softened = true;
                 HSVR_LOG("Body grab: %s hand's joint made a spring (%.0f, %.0f, cap %.0f for his grip T %.0f)", hand, cfg.pose_grab_body_spring, cfg.pose_grab_body_damper, cap, b.grip_t);
             }
-            if (cfg.pose_grab_body_hold == 1 && b.stretch > cfg.pose_grab_body_let_go_cm)
+            if ((cfg.pose_grab_body_hold == 1 || cfg.pose_grab_body_no_slip) && b.stretch > cfg.pose_grab_body_let_go_cm)
             {
                 if (b.far_since < 0.0) b.far_since = now;
                 else if (now - b.far_since > 0.3)
@@ -6098,6 +6585,7 @@ namespace
     std::atomic<float> g_fake_thumb[2] = {-1.0f, -1.0f}; // test: hsvr.thumb <0|1> <curl>, -1 = the controller
     bool g_finger_fist[2] = {false, false};
     double g_fist_retry_at[2] = {-10.0, -10.0};
+    double g_slap_until[2] = {-10.0, -10.0};
 
     void fist_finger_log(int side, UObject* pawn)
     {
@@ -6135,20 +6623,30 @@ namespace
                          hand, now ? "closed" : "opened", thumb, index, grip, (int)h.joints_valid, h.joint_deg[0], h.joint_deg[1], h.joint_deg[2], h.joint_deg[3],
                          h.joint_deg[4], h.trigger, (int)h.trigger_touch, h.squeeze, (int)h.thumb_touch);
             UObject* mine = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
-            if (!now)
+            // Slaps (Matthew 2026-11-19): the game has no open-hand weapon; an empty hand swung at Aim Swing
+            // Speed >= 30 becomes its fist (spawn rule @557803, fists_eating.md 1.1). So an open hand moving
+            // that fast gets the fist too (fingers left open), kept pose_fist_slap_keep_s after it slows.
+            double t = hsvr::now_seconds();
+            double lo = cfg.pose_swing_speed_lo, hi = (std::max)(lo + 0.1, cfg.pose_swing_speed_hi);
+            double hand_ass = g_swing_v[side] <= lo ? 0.0 : (std::min)(75.0, (g_swing_v[side] - lo) / (hi - lo) * 75.0);
+            if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass) g_slap_until[side] = t + cfg.pose_fist_slap_keep_s;
+            bool slap = !now && t < g_slap_until[side];
+            if (slap != g_fist_open[side].load() && (slap || is_fist(mine)))
+                HSVR_LOG("Fist: %s hand %s (hand swing speed %.0f)", hand, slap ? "slaps: open-hand fist" : "closed over its slap fist", hand_ass);
+            g_fist_open[side].store(slap);
+            if (!now && !slap)
             {
                 if (is_fist(mine)) remove_fist(side, pawn, "hand opened");
                 continue;
             }
             if (is_fist(mine))
             {
-                fist_finger_log(side, pawn);
+                if (now) fist_finger_log(side, pawn);
                 continue;
             }
             if (mine || menu_up || bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")) || scabbard_held(side) ||
                 (g_two.active && side == g_two.second))
                 continue;
-            double t = hsvr::now_seconds();
             if (t < g_fist_retry_at[side]) continue;
             if (!make_fist(side, pawn, cfg)) g_fist_retry_at[side] = t + 0.5;
         }
@@ -13208,6 +13706,28 @@ namespace
                          (int)bool_property(pawn, STR("Match Won (Player)")));
                 continue;
             }
+            if (entry.command.rfind("hsvr.fake_head_wobble ", 0) == 0)
+            {
+                double a = 0, hz = 1;
+                sscanf(entry.command.c_str() + 22, "%lf %lf", &a, &hz);
+                g_fake_wobble_deg.store(a);
+                g_fake_wobble_hz.store(hz);
+                HSVR_LOG("Script: hsvr.fake_head_wobble %.0f deg at %.2f Hz", a, hz);
+            }
+            if (entry.command.rfind("hsvr.fake_head_pose ", 0) == 0)
+            {
+                g_fake_head_pose.store(atoi(entry.command.c_str() + 20) != 0);
+                HSVR_LOG("Script: hsvr.fake_head_pose %d (a still head at the view anchor when no headset is tracked)", g_fake_head_pose.load() ? 1 : 0);
+            }
+            if (entry.command.rfind("hsvr.fake_head_tilt ", 0) == 0)
+            {
+                double p = 0, r = 0, d = 0;
+                sscanf(entry.command.c_str() + 20, "%lf %lf %lf", &p, &r, &d);
+                g_fake_tilt_pitch.store(p);
+                g_fake_tilt_roll.store(r);
+                g_fake_tilt_drop.store(d);
+                HSVR_LOG("Script: hsvr.fake_head_tilt pitch %.0f roll %.0f drop %.0f cm", p, r, d);
+            }
             if (entry.command.rfind("hsvr.fake_head_drop ", 0) == 0)
             {
                 g_fake_head_drop.store(atof(entry.command.c_str() + 20));
@@ -13848,6 +14368,7 @@ class HalfSwordVR : public CppUserModBase
         if (g_vr_started)
         {
             hsvr::stereo_set_anchor_provider(&provide_anchor);
+            hsvr::stereo_set_latch_callback(&helmet_on_latch);
             hsvr::vr_install_present_hook();
         }
         Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});

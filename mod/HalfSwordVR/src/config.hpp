@@ -184,6 +184,36 @@ namespace hsvr
         // has his neck reach (beyond that the neck would stretch visibly).
         bool pose_head_lock = true;
         double pose_head_lock_max_cm = 12.0;
+        // ---- Torso lean (Matthew 2026-11-19: armour blocked a third of the view looking down) ----
+        // The torso hangs from your neck and bends like Half Sword's own lean (LeftAlt + mouse,
+        // Anim_Add_Bob_AO): spine_02..spine_05 take equal shares, neck_01/neck_02 bend back 3/8 each
+        // (torso_lean_and_helmet.md). Your hips go back by as much as the bend carries the head
+        // forward, so your head stays at the headset and the chest moves in, out of view.
+        // Forward bend = (head pitch below the horizon - pose_lean_pitch_dead_deg) x pose_lean_pitch_gain,
+        // at most pose_lean_max_deg (the game's own lean reaches 60). Sideways = head roll likewise.
+        bool pose_lean = true;
+        double pose_lean_pitch_dead_deg = 10.0;
+        double pose_lean_pitch_gain = 0.7;
+        double pose_lean_max_deg = 60.0;
+        double pose_lean_roll_dead_deg = 5.0;
+        double pose_lean_roll_gain = 0.8;
+        double pose_lean_side_max_deg = 25.0;
+        double pose_lean_smooth_s = 0.08;
+        // A bend lowers his head; his hips can't rise above standing, so the bend is held to what your
+        // headset's drop (plus this much neck slack) allows.
+        double pose_lean_slack_cm = 4.0;
+        // 1 = the game's own forward bend from crouching (Root Height) and reaching for grabs (Lean
+        // Forward (Grabbing)) is taken out of his animation, so only your lean bends him.
+        bool pose_lean_cancel_game_bend = true;
+        // 1 = his body, head and worn armour animate every frame (no update-rate skipping).
+        bool pose_no_uro = true;
+        // 1 = your helmet (and his head) are moved to this frame's headset pose right when the view takes
+        // it, just before drawing. The body is posed from the headset pose of the frame before (the pose
+        // is read when the views are set up), so a helmet following his head trailed your view by one
+        // frame of head motion and slid around in front of your eyes.
+        bool pose_helmet_late = true;
+        // 1 = his visible body updates after his posed skeleton every frame (it copies its pose), never before.
+        bool pose_mesh_after_driver = true;
         bool pose_arms = true;
         bool pose_follow_room = true;
         // 1 = while posed, your character's capsule only moves when you walk: the game's own pull
@@ -520,7 +550,7 @@ namespace hsvr
         // apply to it). 0 = the mod alone opens it (test switch while the first-fist loss is hunted).
         bool pose_fist_mark_spawned = false;
         // Fists from your real hand (Matthew 2026-11-19): the hand is a fist while the grip, the trigger
-        // and your thumb (resting on the stick, a face button or the thumb rest) are all closed, and opens
+        // (and the thumb, only if pose_fist_thumb_on > 0) are closed, and opens
         // when any of them opens. Finger curls (0 open .. 1 closed) come from SteamVR's hand skeleton
         // (input_hand_tracking, XR_EXT_hand_tracking) when it gives one, else from the trigger, grip and
         // touch sensors. index/grip/thumb_on: curls that close it; *_off: below these it opens.
@@ -530,8 +560,15 @@ namespace hsvr
         double pose_fist_index_off = 0.4;
         double pose_fist_grip_on = 0.65;
         double pose_fist_grip_off = 0.4;
-        double pose_fist_thumb_on = 0.5;
-        double pose_fist_thumb_off = 0.3;
+        // The thumb does not gate the fist (Matthew 2026-11-19: stick and button touch are unreliable);
+        // raise thumb_on above 0 to require it.
+        double pose_fist_thumb_on = 0.0;
+        double pose_fist_thumb_off = -1.0;
+        // Slaps: an open hand swung at the game's fist speed (Aim Swing Speed >= slap_ass, the game's own
+        // 30) carries the fist (fingers open) until keep_s after it slows.
+        bool pose_fist_slap = true;
+        double pose_fist_slap_ass = 30.0;
+        double pose_fist_slap_keep_s = 0.3;
         // The fist's finger shape in his animation: -2 = the game's own, -1 = the animation's grab
         // shape (its 'Grabbed' switch), 0..17 = that grip type, 100 = its guard fist ('Guarding' for
         // that hand, with the swing speed its fist blend reads held at 75 in the animation only).
@@ -561,6 +598,14 @@ namespace hsvr
         double pose_grab_body_cap_per_t = 450.0;
         double pose_grab_body_max = 250000.0;    // drive cap when cap_per_t is 0
         double pose_grab_body_let_go_cm = 30.0; // hand this far from the grab point for 0.3 s lets go
+        // The game's grip-slip (joint force > his grip strength T for ~0.1 s) is made for a physical hand;
+        // a tracked hand's own motion trips it (Matthew's playtest 2026-11-19: all three throat grabs
+        // released by it in 0.6-0.7 s with a healthy arm). 1 = while a body is held, the game's own
+        // 'Hand Block Drop' (which it sets itself for the first 0.5 s of a grab) is kept on, and the hand
+        // lets go instead when pulled pose_grab_body_let_go_cm off its hold (B&S). His grip strength T
+        // still counts: below pose_grab_body_slip_below_t (a broken or numb arm) the game's slip applies.
+        bool pose_grab_body_no_slip = true;
+        double pose_grab_body_slip_below_t = 20.0;
         // Eating and drinking: grabbed food within pose_eat_cm of your mouth is bitten (the game's
         // Bite Event); a held bottle at your mouth with its neck below pose_drink_tip (the dot of its
         // axis with up) is drunk from, at most once a second.

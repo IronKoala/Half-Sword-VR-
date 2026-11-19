@@ -307,6 +307,19 @@ namespace hsvr
         flag("pose_head", c.pose_head);
         flag("pose_head_lock", c.pose_head_lock);
         num("pose_head_lock_max_cm", c.pose_head_lock_max_cm);
+        flag("pose_lean", c.pose_lean);
+        num("pose_lean_pitch_dead_deg", c.pose_lean_pitch_dead_deg);
+        num("pose_lean_pitch_gain", c.pose_lean_pitch_gain);
+        num("pose_lean_max_deg", c.pose_lean_max_deg);
+        num("pose_lean_roll_dead_deg", c.pose_lean_roll_dead_deg);
+        num("pose_lean_roll_gain", c.pose_lean_roll_gain);
+        num("pose_lean_side_max_deg", c.pose_lean_side_max_deg);
+        num("pose_lean_smooth_s", c.pose_lean_smooth_s);
+        num("pose_lean_slack_cm", c.pose_lean_slack_cm);
+        flag("pose_lean_cancel_game_bend", c.pose_lean_cancel_game_bend);
+        flag("pose_no_uro", c.pose_no_uro);
+        flag("pose_helmet_late", c.pose_helmet_late);
+        flag("pose_mesh_after_driver", c.pose_mesh_after_driver);
         flag("pose_arms", c.pose_arms);
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);
@@ -482,6 +495,9 @@ namespace hsvr
         num("pose_fist_grip_off", c.pose_fist_grip_off);
         num("pose_fist_thumb_on", c.pose_fist_thumb_on);
         num("pose_fist_thumb_off", c.pose_fist_thumb_off);
+        flag("pose_fist_slap", c.pose_fist_slap);
+        num("pose_fist_slap_ass", c.pose_fist_slap_ass);
+        num("pose_fist_slap_keep_s", c.pose_fist_slap_keep_s);
         integer("pose_fist_shape", c.pose_fist_shape);
         flag("pose_fist_game_flags", c.pose_fist_game_flags);
         flag("log_body_grab", c.log_body_grab);
@@ -490,6 +506,8 @@ namespace hsvr
         num("pose_grab_body_damper", c.pose_grab_body_damper);
         num("pose_grab_body_max", c.pose_grab_body_max);
         num("pose_grab_body_cap_per_t", c.pose_grab_body_cap_per_t);
+        flag("pose_grab_body_no_slip", c.pose_grab_body_no_slip);
+        num("pose_grab_body_slip_below_t", c.pose_grab_body_slip_below_t);
         num("pose_grab_body_let_go_cm", c.pose_grab_body_let_go_cm);
         flag("input_hand_tracking", c.input_hand_tracking);
         flag("pose_eat", c.pose_eat);
