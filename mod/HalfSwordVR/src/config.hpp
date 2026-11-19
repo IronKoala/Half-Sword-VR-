@@ -236,6 +236,8 @@ namespace hsvr
         // out (cm/s; B&S's held dampers with the hand's strength), x stab_wound_head_factor in the
         // head and neck; sideways and in turn it goes with the body.
         bool stab_wound_hold = true;
+        // A weapon the mod holds is never left "Being Rubber Banded" by the game (it then can't stick and hits at x0.1).
+        bool stab_no_rubber_band = true;
         // Reverse grip flip (S&S): a tap (shorter than grip_flip_tap_s) of the holding hand's B / Y
         // turns a one-handed weapon end for end at the same spot on its handle, gliding over grip_flip_s.
         bool grip_flip = true;
