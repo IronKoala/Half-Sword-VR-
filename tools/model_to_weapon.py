@@ -25,6 +25,9 @@ How the parts are found (all printed, so a wrong guess shows):
     it): the head starts where the cross-section narrows back to the haft's width. No guard.
   The edge direction is the widest spread of the blade's (or head's) cross-sections.
 
+Skyrim Special Edition .nif files are read too (tools/nif_reader.py; textures found from the .nif's
+own paths under the folders above it). Their units are Skyrim units: --units skyrim, or --length-cm.
+
 Several materials are merged into one texture atlas (one cell per material, UVs moved to match).
 
 Writes into <out folder>: <name>.obj, <name>_collision.obj, <name>.txt, <name>.json and, when the
@@ -44,7 +47,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # python -I leaves the script folder out
 import weapon_parts as wp  # noqa: E402
 
-UNITS_CM = {"m": 100.0, "cm": 1.0, "mm": 0.1, "in": 2.54}
+UNITS_CM = {"m": 100.0, "cm": 1.0, "mm": 0.1, "in": 2.54,
+            "skyrim": 1.42875}  # Creation Kit wiki "Unit": 1 unit = 0.5625 in
 STEEL, GRIP, HAFT = 7.85, 1.0, 0.75  # g/cm3; grip = wood and leather, haft = ash/oak wood (estimates)
 PART_WORDS = [("Pommel", r"pommel|knob|butt|ferrule"), ("Guard", r"guard|cross|quillon"),
               ("Grip", r"grip|handle|hilt|haft|shaft|pole|staff|shank"),
@@ -60,12 +64,162 @@ def part_of(names):
     return None
 
 
+def gltf_spec_gloss_materials(path):
+    """glTF materials written with KHR_materials_pbrSpecularGlossiness (older exporters, Sketchfab),
+    as metal/rough PBRMaterials by material name. trimesh's own conversion of these gives wrong colours
+    (seen on a Sketchfab GLB: grey and alpha from the wrong image), so the diffuse texture is read
+    straight from the file. Spec/gloss has no metal value: metallic is taken as 1 when the specular
+    colour is bright (> 0.5, a metal's), else 0; roughness = 1 - glossiness."""
+    import base64
+    import io
+    import struct
+    import trimesh
+    from PIL import Image
+    try:
+        raw = open(path, "rb").read()
+        if raw[:4] == b"glTF":
+            n = struct.unpack("<I", raw[12:16])[0]
+            doc = json.loads(raw[20:20 + n])
+            rest = raw[20 + n:]
+            glb_bin = rest[8:8 + struct.unpack("<I", rest[:4])[0]] if len(rest) >= 8 else b""
+        else:
+            doc = json.loads(raw.decode("utf-8"))
+            glb_bin = b""
+        if "KHR_materials_pbrSpecularGlossiness" not in doc.get("extensionsUsed", []):
+            return {}
+        buffers = []
+        for b in doc.get("buffers", []):
+            uri = b.get("uri")
+            if uri is None:
+                buffers.append(glb_bin)
+            elif uri.startswith("data:"):
+                buffers.append(base64.b64decode(uri.split(",", 1)[1]))
+            else:
+                buffers.append(open(os.path.join(os.path.dirname(path), uri), "rb").read())
+
+        def image(tex_ref):
+            if not tex_ref:
+                return None
+            src = doc["textures"][tex_ref["index"]].get("source")
+            if src is None:
+                return None
+            im = doc["images"][src]
+            if "bufferView" in im:
+                bv = doc["bufferViews"][im["bufferView"]]
+                o = bv.get("byteOffset", 0)
+                data = buffers[bv["buffer"]][o:o + bv["byteLength"]]
+            elif im.get("uri", "").startswith("data:"):
+                data = base64.b64decode(im["uri"].split(",", 1)[1])
+            else:
+                data = open(os.path.join(os.path.dirname(path), im["uri"]), "rb").read()
+            return Image.open(io.BytesIO(data)).convert("RGBA")
+
+        out = {}
+        for m in doc.get("materials", []):
+            sg = m.get("extensions", {}).get("KHR_materials_pbrSpecularGlossiness")
+            if sg is None or "name" not in m:
+                continue
+            spec = max(sg.get("specularFactor", [1, 1, 1]))
+            out[m["name"]] = trimesh.visual.material.PBRMaterial(
+                name=m["name"], baseColorTexture=image(sg.get("diffuseTexture")),
+                baseColorFactor=sg.get("diffuseFactor", [1, 1, 1, 1]),
+                normalTexture=image(m.get("normalTexture")), occlusionTexture=image(m.get("occlusionTexture")),
+                metallicFactor=1.0 if spec > 0.5 else 0.0, roughnessFactor=1.0 - sg.get("glossinessFactor", 1.0))
+        if out:
+            print(f"{len(out)} specular-glossiness materials read from the file")
+        return out
+    except Exception as e:  # leave it to trimesh
+        print(f"note: could not read the file's specular-glossiness materials ({e})")
+        return {}
+
+
+def find_texture(model_path, tex):
+    """A texture path as a Bethesda .nif stores it ("textures\\a\\b.dds", relative to the game's Data
+    folder): looked for under every folder above the model, then by file name next to it."""
+    rel = tex.replace("\\", "/").lstrip("/")
+    d = os.path.dirname(os.path.abspath(model_path))
+    while True:
+        for cand in (os.path.join(d, rel), os.path.join(d, "Data", rel)):
+            if os.path.isfile(cand):
+                return cand
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    base = os.path.basename(rel).lower()
+    for root, _, files in os.walk(os.path.dirname(os.path.abspath(model_path))):
+        for f in files:
+            if f.lower() == base:
+                return os.path.join(root, f)
+    return None
+
+
+def load_nif(path):
+    """Skyrim SE .nif: the weapon's shapes as Trimeshes with PBR materials made from the Skyrim maps.
+    Left out: the scabbard ("Scb"), blood decals and effect-shader layers (glow overlays).
+    Skyrim maps: diffuse; _n = normal (DirectX style: the meshes' stored tangent frames put +V of the
+    texture, image-down, on the map's green axis) with specular strength in alpha; _m = environment
+    (reflection) mask. Turned into PBR as: metallic = environment mask, roughness = 1 - 0.65 x specular
+    (an approximation: Skyrim has no roughness map)."""
+    import trimesh
+    from PIL import Image
+    import nif_reader
+    out = []
+    loaded = {}
+
+    def img(tex):
+        if not tex:
+            return None
+        if tex not in loaded:
+            f = find_texture(path, tex)
+            loaded[tex] = Image.open(f).convert("RGBA") if f else None
+            print(f"texture {tex}: " + (os.path.basename(f) if f else "NOT FOUND (the mesh keeps the game's material colour)"))
+        return loaded[tex]
+
+    for name, parents, pos, nrm, uv, faces, tex, kind in nif_reader.read_nif(path):
+        low = name.lower()
+        if kind == "effect" or low == "scb" or "scabbard" in low or "blood" in low or any(p.lower() == "scb" for p in parents):
+            print(f"left out: {name} ({'effect layer' if kind == 'effect' else 'scabbard' if 'scb' in low or 'scabbard' in low else 'blood decal'})")
+            continue
+        tex = list(tex) + [""] * (6 - len(tex))
+        base, nm, env = img(tex[0]), img(tex[1]), img(tex[5])
+        mat = None
+        if base is not None:
+            normal = mr = None
+            if nm is not None:
+                a = np.asarray(nm).astype(np.float64) / 255.0
+                spec = a[:, :, 3]
+                g = np.asarray(nm)[:, :, :3].copy()
+                g[:, :, 1] = 255 - g[:, :, 1]  # DirectX -> OpenGL (PBRMaterial convention)
+                normal = Image.fromarray(g, "RGB")
+                rough = 1.0 - 0.65 * spec
+            else:
+                rough = None
+            if env is not None or rough is not None:
+                w, h = (nm or env).size
+                metal = np.zeros((h, w))
+                if env is not None:
+                    metal = np.asarray(env.convert("L").resize((w, h), Image.BILINEAR)).astype(np.float64) / 255.0
+                if rough is None:
+                    rough = np.full((h, w), 0.5)
+                mr = Image.fromarray((np.dstack([np.zeros((h, w)), rough, metal]) * 255 + 0.5).astype(np.uint8), "RGB")
+            mat = trimesh.visual.material.PBRMaterial(name=name, baseColorTexture=base, normalTexture=normal,
+                                                      metallicRoughnessTexture=mr, metallicFactor=1.0, roughnessFactor=1.0)
+        g = trimesh.Trimesh(vertices=pos, faces=faces, vertex_normals=nrm, process=False,
+                            visual=trimesh.visual.TextureVisuals(uv=uv, material=mat))
+        out.append(([name] + parents, g))
+    return out
+
+
 def load_model(path):
     """The model's meshes in its own units, each with its transform applied: [(names, Trimesh)]."""
     import trimesh
+    if path.lower().endswith(".nif"):
+        return load_nif(path)
     # process=False keeps the file's vertices (merging would join UV seams). trimesh gives UVs in OBJ
     # convention (v up; it flips glTF's on load) and keeps the files' counter-clockwise fronts.
     scene = trimesh.load(path, force="scene", process=False)
+    spec_gloss = gltf_spec_gloss_materials(path) if path.lower().endswith((".glb", ".gltf")) else {}
     out = []
     for node in scene.graph.nodes_geometry:
         xf, geom_name = scene.graph[node]
@@ -76,6 +230,8 @@ def load_model(path):
         g.apply_transform(xf)
         names = [str(node), str(geom_name)]
         mat = getattr(g.visual, "material", None)
+        if mat is not None and getattr(mat, "name", None) in spec_gloss:
+            g.visual.material = mat = spec_gloss[mat.name]
         if mat is not None and getattr(mat, "name", None):
             names.append(str(mat.name))
         out.append((names, g))
@@ -231,7 +387,9 @@ def main(argv=None):
         blade_up = (t.max() - g_hi) > (g_lo - t.min())
         # The widest part right at one end means a head on a haft, not a guard.
         at = (widths[peak][0] - t.min()) / max(float(np.ptp(t)), 1e-9)
-        hafted = args.type == "hafted" or (args.type is None and (at < 0.15 or at > 0.85))
+        # So does a wide part much longer than a guard (an axe's head reaches over a fifth of the length).
+        long_run = (g_hi - g_lo) > 0.2 * float(np.ptp(t))
+        hafted = args.type == "hafted" or (args.type is None and (at < 0.15 or at > 0.85 or long_run))
         if hafted:
             blade_up = at > 0.5
             middle = [w for s_, w in widths if w > 0 and 0.3 <= (s_ - t.min()) / np.ptp(t) <= 0.7]
@@ -338,16 +496,28 @@ def main(argv=None):
         pieces = wp.build_pieces(frame_pos, tris, handle_bottom, guard_bottom, guard_top)
 
     # ---- textures (before writing the model: an atlas moves the UVs) ----------------------------------
-    mats, mat_tris = [], []
+    # Materials that look the same (same texture images and factors, as when an exporter writes one
+    # material per mesh) share one atlas cell, so the texture keeps its full size.
+    def mat_key(m):
+        if m is None:
+            return None
+        parts = []
+        for a in ("baseColorTexture", "image", "normalTexture", "metallicRoughnessTexture", "occlusionTexture"):
+            im = getattr(m, a, None)
+            parts.append(None if im is None else (im.size, im.mode, hash(im.tobytes())))
+        for a in ("baseColorFactor", "diffuse", "metallicFactor", "roughnessFactor"):
+            v = getattr(m, a, None)
+            parts.append(None if v is None else tuple(np.asarray(v, dtype=np.float64).ravel().round(4)))
+        return type(m).__name__, tuple(parts)
+
+    mats, keys, material_of_mesh = [], [], []
     for names, g in meshes:
         m = getattr(g.visual, "material", None)
-        idx = next((i for i, x in enumerate(mats) if x is m), None)
-        if idx is None:
+        k = mat_key(m)
+        if k not in keys:
+            keys.append(k)
             mats.append(m)
-            mat_tris.append(0)
-            idx = len(mats) - 1
-        mat_tris[idx] += len(g.faces)
-    material_of_mesh = [next(i for i, x in enumerate(mats) if x is getattr(g.visual, "material", None)) for _, g in meshes]
+        material_of_mesh.append(keys.index(k))
     texture_set = None
     if any(m is not None for m in mats):
         def tex_size(m):
@@ -357,22 +527,27 @@ def main(argv=None):
                     return im.size
             return None
         sizes = [tex_size(m) for m in mats]
-        cell = max([max(s) for s in sizes if s] or [16])
         n = len(mats)
         grid = int(math.ceil(math.sqrt(n)))
-        cell = min(cell, 4096 // grid)
-        maps = [material_maps(m, (cell, cell), args.metallic, args.roughness) for m in mats]
+        if n == 1 and sizes[0]:
+            # One material: its own proportions, longest side at most 4096 (no quality lost below that).
+            w0, h0 = sizes[0]
+            f = min(1.0, 4096.0 / max(w0, h0))
+            cw, ch = max(1, int(round(w0 * f))), max(1, int(round(h0 * f)))
+        else:
+            cw = ch = min(max([max(s) for s in sizes if s] or [16]), 4096 // grid)
+        maps = [material_maps(m, (cw, ch), args.metallic, args.roughness) for m in mats]
         if any(has for _, has in maps):
-            W = grid * cell
-            colour = np.ones((W, W, 3))
-            nx, ny = np.zeros((W, W)), np.zeros((W, W))
-            orm = np.dstack([np.ones((W, W)), np.full((W, W), args.roughness), np.full((W, W), args.metallic)])
+            Ww, Wh = grid * cw, grid * ch
+            colour = np.ones((Wh, Ww, 3))
+            nx, ny = np.zeros((Wh, Ww)), np.zeros((Wh, Ww))
+            orm = np.dstack([np.ones((Wh, Ww)), np.full((Wh, Ww), args.roughness), np.full((Wh, Ww), args.metallic)])
             for i, ((c, x, y, o), _) in enumerate(maps):
-                r0, c0 = (i // grid) * cell, (i % grid) * cell
-                colour[r0:r0 + cell, c0:c0 + cell] = c
-                nx[r0:r0 + cell, c0:c0 + cell] = x
-                ny[r0:r0 + cell, c0:c0 + cell] = y
-                orm[r0:r0 + cell, c0:c0 + cell] = o
+                r0, c0 = (i // grid) * ch, (i % grid) * cw
+                colour[r0:r0 + ch, c0:c0 + cw] = c
+                nx[r0:r0 + ch, c0:c0 + cw] = x
+                ny[r0:r0 + ch, c0:c0 + cw] = y
+                orm[r0:r0 + ch, c0:c0 + cw] = o
             if n > 1:
                 # UVs into each material's cell (v up: image row 0 is the top of the atlas).
                 for k, (names, g) in enumerate(meshes):
@@ -387,7 +562,7 @@ def main(argv=None):
                     col, row = i % grid, i // grid
                     uvs[sel, 0] = (col + uv[:, 0]) / grid
                     uvs[sel, 1] = (grid - 1 - row + uv[:, 1]) / grid
-                print(f"{n} materials merged into one {W}x{W} texture atlas ({grid}x{grid} cells of {cell})")
+                print(f"{n} materials merged into one {Ww}x{Wh} texture atlas ({grid}x{grid} cells of {cw}x{ch})")
             texture_set = (colour, nx, ny, orm)
         else:
             print("no texture maps: the mod keeps the game's material")

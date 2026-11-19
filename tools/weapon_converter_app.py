@@ -35,7 +35,8 @@ except Exception:
     TkinterDnD = None
 
 UNITS = [("metres", 100.0), ("centimetres", 1.0), ("millimetres", 0.1), ("inches", 2.54)]
-MODEL_TYPES = "*.glb *.gltf *.obj *.fbx *.stl *.ply *.dae *.off"
+MODEL_TYPES = "*.glb *.gltf *.obj *.nif *.stl *.ply *.dae *.off"
+MODEL_EXTS = tuple(e[1:] for e in MODEL_TYPES.split())
 TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or spear", "hafted")]
 ZONE_COLOURS = {"Pommel": "#b07a3c", "Grip": "#7a4a2a", "Guard": "#c9a227", "Head": "#8fa3b8"}
 SETTINGS = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "HalfSwordWeaponConverter.json")
@@ -293,7 +294,19 @@ class App:
             self.set_model(path)
 
     def set_model(self, path):
-        if self.busy or not os.path.isfile(path):
+        if self.busy:
+            return
+        if os.path.isdir(path):  # a downloaded mod folder: the model files in it
+            found = sorted(os.path.join(r, f) for r, _, fs in os.walk(path) for f in fs
+                           if f.lower().endswith(MODEL_EXTS))
+            if not found:
+                self.model_info.config(text=f"No model files ({', '.join(MODEL_EXTS)}) in that folder.")
+                return
+            if len(found) > 1:
+                self.choose_model(path, found)
+                return
+            path = found[0]
+        if not os.path.isfile(path):
             return
         self.settings["model_dir"] = os.path.dirname(path)
         save_settings(self.settings)
@@ -306,6 +319,26 @@ class App:
             w.destroy()
         self.model_info.config(text="Reading the model...")
         self.run(self.measure, path)
+
+    def choose_model(self, folder, files):
+        win = tk.Toplevel(self.root)
+        win.title("Which model?")
+        win.transient(self.root)
+        ttk.Label(win, text="That folder has several models. Pick one:", padding=8).pack(anchor="w")
+        lb = tk.Listbox(win, width=70, height=min(12, len(files)))
+        for f in files:
+            lb.insert("end", os.path.relpath(f, folder))
+        lb.selection_set(0)
+        lb.pack(fill="both", expand=True, padx=8)
+
+        def ok(*_):
+            sel = lb.curselection()
+            win.destroy()
+            if sel:
+                self.set_model(files[sel[0]])
+        lb.bind("<Double-Button-1>", ok)
+        ttk.Button(win, text="Use this one", command=ok).pack(pady=8)
+        win.grab_set()
 
     def measure(self, path):
         raw = model_to_weapon.model_length(path)
@@ -322,7 +355,8 @@ class App:
         else:
             self.model_info.config(text="This file does not say what unit it uses. Pick the one that gives a "
                                         "sensible length, or type the real length below:")
-            for word, cm in UNITS:
+            units = UNITS + ([("Skyrim units", 1.42875)] if path.lower().endswith(".nif") else [])
+            for word, cm in units:
                 ttk.Button(self.unit_buttons, text=f"{word}: {raw * cm:,.1f} cm",
                            command=lambda v=raw * cm: self.length_var.set(f"{v:.1f}")).pack(side="left", padx=(0, 6))
 
@@ -442,7 +476,11 @@ class App:
         zn = info["zones_cm"]
         hafted = info["type"] == "hafted"
         how = "found by the model's part names" if info["parts_by_name"] else "found from the model's shape"
-        mass = f"{info['mass_kg']:.2f} kg" + ("" if info["mass_note"] == "given" else " (estimated: type the real weight if you know it)")
+        mass = f"{info['mass_kg']:.2f} kg"
+        if info["mass_note"] != "given":
+            mass += (" (estimated: type the real weight if you know it)" if info["mass_kg"] <= 6 else
+                     " (estimated, and heavier than any real weapon: the model is probably much thicker than "
+                     "the real thing. Type a weight, for example 1.5 for a sword or 2 for an axe)")
         if hafted:
             parts = (f"haft {-zn['handle_bottom']:.0f} cm, head {zn['tip']:.0f} cm"
                      + (f", butt cap {zn['handle_bottom'] - zn['pommel_end']:.0f} cm" if zn['handle_bottom'] > zn['pommel_end'] + 0.5 else ""))
