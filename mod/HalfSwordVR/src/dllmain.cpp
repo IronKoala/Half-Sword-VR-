@@ -1058,28 +1058,58 @@ namespace
     // bends the knees. The height is the floor under the foot (a trace straight down) plus his ankle
     // height when standing; the game's own foot height drifts 20-45 cm off in a deep crouch.
     // The floor's height under a point: a straight-down trace on the Visibility channel that ignores
-    // your own character. False if nothing is hit within 2 m below `from_z`.
+    // your own character. Weapons (held, belted or loose, scabbards included: a scabbard is a part of
+    // its weapon) and creatures are looked through: the trace starts at his hips, and a weapon on the
+    // left hip or in a hand over a foot used to count as the floor (the left foot popped up 85 cm,
+    // about 40 times a minute). False if nothing else is hit within 2 m below `from_z`.
+    bool is_a(UObject* object, const TCHAR* class_name);
     bool ground_below(UObject* pawn, double x, double y, double from_z, double& ground_z)
     {
         static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
         if (!cdo || !pawn) return false;
-        Call trace(cdo, STR("LineTraceSingle"));
-        if (!trace.fn) return false;
-        trace.object(STR("WorldContextObject"), pawn);
-        trace.three(STR("Start"), x, y, from_z);
-        trace.three(STR("End"), x, y, from_z - 200.0);
-        trace.flag(STR("bIgnoreSelf"), true);
-        if (!trace.run()) return false;
-        FProperty* ret = trace.param(STR("ReturnValue"));
-        if (!ret || !(*(trace.buffer.data() + ret->GetOffset_Internal()) & 1)) return false;
-        FProperty* hit = trace.param(STR("OutHit"));
-        FProperty* point = hit ? struct_member(struct_type(hit), STR("ImpactPoint")) : nullptr;
-        UScriptStruct* vec_type = struct_type(point);
-        FProperty* z = vec_type ? struct_member(vec_type, STR("Z")) : nullptr;
-        if (!z) return false;
-        const uint8_t* at = trace.buffer.data() + hit->GetOffset_Internal() + point->GetOffset_Internal() + z->GetOffset_Internal();
-        ground_z = z->GetClass().GetName() == STR("DoubleProperty") ? *reinterpret_cast<const double*>(at) : *reinterpret_cast<const float*>(at);
-        return true;
+        const double bottom = from_z - 200.0;
+        double start = from_z;
+        for (int attempt = 0; attempt < 5 && start > bottom; ++attempt)
+        {
+            Call trace(cdo, STR("LineTraceSingle"));
+            if (!trace.fn) return false;
+            trace.object(STR("WorldContextObject"), pawn);
+            trace.three(STR("Start"), x, y, start);
+            trace.three(STR("End"), x, y, bottom);
+            trace.flag(STR("bIgnoreSelf"), true);
+            if (!trace.run()) return false;
+            FProperty* ret = trace.param(STR("ReturnValue"));
+            if (!ret || !(*(trace.buffer.data() + ret->GetOffset_Internal()) & 1)) return false;
+            FProperty* hit = trace.param(STR("OutHit"));
+            FProperty* point = hit ? struct_member(struct_type(hit), STR("ImpactPoint")) : nullptr;
+            UScriptStruct* vec_type = struct_type(point);
+            FProperty* z = vec_type ? struct_member(vec_type, STR("Z")) : nullptr;
+            if (!z) return false;
+            const uint8_t* at = trace.buffer.data() + hit->GetOffset_Internal() + point->GetOffset_Internal() + z->GetOffset_Internal();
+            double hit_z = z->GetClass().GetName() == STR("DoubleProperty") ? *reinterpret_cast<const double*>(at) : *reinterpret_cast<const float*>(at);
+            // What was hit (the game's BreakHitResult gives the actor).
+            UObject* actor = nullptr;
+            if (gs)
+            {
+                Call b(gs, STR("BreakHitResult"));
+                if (FProperty* hp = b.param(STR("Hit")))
+                {
+                    std::memcpy(b.buffer.data() + hp->GetOffset_Internal(), trace.buffer.data() + hit->GetOffset_Internal(), (std::min)(hp->GetSize(), hit->GetSize()));
+                    b.run();
+                    actor = b.object_result(STR("HitActor"));
+                }
+            }
+            bool look_through = actor && actor != pawn && (is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")));
+            if (!look_through)
+            {
+                ground_z = hit_z;
+                return true;
+            }
+            HSVR_LOG_EVERY(2.0, "Feet: ground trace looked through %ls at z %.0f (%.0f cm below the hips)", actor->GetName().c_str(), hit_z, from_z - hit_z);
+            start = hit_z - 1.0;
+        }
+        return false;
     }
 
     struct FootState
