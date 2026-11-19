@@ -351,6 +351,8 @@ namespace hsvr
         flag("pose_hold_hand_on_weapon", c.pose_hold_hand_on_weapon);
         num("pose_hold_blocked_from_cm", c.pose_hold_blocked_from_cm);
         flag("pose_hold_hand_follows", c.pose_hold_hand_follows);
+        flag("pose_hold_hand_follows_draw", c.pose_hold_hand_follows_draw);
+        num("pose_draw_force_scale_follows", c.pose_draw_force_scale_follows);
         flag("pose_hold_let_go", c.pose_hold_let_go);
         num("pose_hold_let_go_s", c.pose_hold_let_go_s);
         flag("pose_hold_let_go_ignore_self", c.pose_hold_let_go_ignore_self);

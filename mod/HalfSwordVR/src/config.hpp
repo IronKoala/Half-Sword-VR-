@@ -396,6 +396,11 @@ namespace hsvr
         double pose_draw_settle_s = 0.15;
         double pose_draw_step_cm = 6.0; // the most it moves along the scabbard per tick
         double pose_draw_force_scale = 0.3; // the hold's force/torque caps while drawing or sheathing
+        // With the drawn hand on the weapon during a draw/sheathe too (pose_hold_hand_follows_draw), the
+        // game's hand joint no longer pulls the blade along (it follows the hand, which is on the blade),
+        // so the hold pulls with this share of its strength instead (test b3: 0.3 alone took 6.5 s).
+        bool pose_hold_hand_follows_draw = true;
+        double pose_draw_force_scale_follows = 1.0;
         bool pose_draw_scabbard_free = false; // the game's loose scabbard pin while drawing (else locked)
         // Sheathing: a held (scabbarded) weapon's tip within mouth_cm of its side's empty belt scabbard
         // mouth, its blade within angle_deg of the scabbard's line, goes in; the game seats it and lets go.

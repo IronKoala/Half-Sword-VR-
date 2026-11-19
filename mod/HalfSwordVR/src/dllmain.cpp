@@ -5759,7 +5759,7 @@ namespace
         t = t * t * (3.0 - 2.0 * t);
         // Not while drawing or sheathing: there the game's hand joint helps pull the blade along the
         // scabbard toward your hand (test b3: with the hand on the weapon a draw took 6.5 s, not 2.4).
-        bool follows = cfg.pose_hold_hand_follows && !g_draw[side].active;
+        bool follows = cfg.pose_hold_hand_follows && (!g_draw[side].active || cfg.pose_hold_hand_follows_draw);
         if (follows) t = 1.0; // B&S: the drawn hand is always on the item
         h.on_weapon = t;
         if (t <= 0.0) return false;
@@ -6727,12 +6727,13 @@ namespace
         // Stuck in someone (a stab or an edge lodged): the hand pulls with only part of its strength, so
         // the hold's own catch-up does not tear the blade out at once (stab-test8: the game released
         // every lodge 10-20 ms later while the hold pulled 356-2860 N); pulling it out is your doing.
-        if (g_draw[side].active && g_draw[side].weapon == weapon && cfg.pose_draw_force_scale < 1.0)
+        double draw_scale_cfg = cfg.pose_hold_hand_follows && cfg.pose_hold_hand_follows_draw ? cfg.pose_draw_force_scale_follows : cfg.pose_draw_force_scale;
+        if (g_draw[side].active && g_draw[side].weapon == weapon && draw_scale_cfg < 1.0)
         {
             // Drawing or sheathing: the hand slides it along the scabbard with part of its strength,
             // so it never drags the scabbard (and the belt) along with it.
-            max_force *= (std::max)(0.0, cfg.pose_draw_force_scale);
-            max_torque *= (std::max)(0.0, cfg.pose_draw_force_scale);
+            max_force *= (std::max)(0.0, draw_scale_cfg);
+            max_torque *= (std::max)(0.0, draw_scale_cfg);
         }
         if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body")))
         {
