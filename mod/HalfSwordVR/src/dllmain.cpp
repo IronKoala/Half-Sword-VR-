@@ -8477,6 +8477,21 @@ namespace
                 HSVR_LOG("Script: hsvr.passive_foe: %d foe(s) made passive (%d AI controllers)", stopped, (int)ais.size());
                 continue;
             }
+            if (entry.command == "hsvr.unstick")
+            {
+                // Stab tests: the weapon in his right hand lets go of any body it is stuck in (the
+                // game's own Release All Jammed Bones).
+                UObject* player = nullptr;
+                find_pawn_mesh(&player);
+                UObject* wr = player ? object_property(player, STR("Weapon R")) : nullptr;
+                if (wr)
+                {
+                    Call r(wr, STR("Release All Jammed Bones"));
+                    bool ok = r.run();
+                    HSVR_LOG("Script: hsvr.unstick: %s; stuck in body now %d", ok ? "released" : "function not found", (int)bool_property(wr, STR("Stuck In Body")));
+                }
+                continue;
+            }
             if (entry.command.rfind("hsvr.foe_front ", 0) == 0)
             {
                 // Stab tests: every foe stood this many cm in front of him, facing him.
@@ -8507,7 +8522,10 @@ namespace
                     mv.flag(STR("bTeleport"), true);
                     mv.run();
                     ++moved;
-                    HSVR_LOG("Script: hsvr.foe_front: %ls put %.0f cm in front of him, at (%.0f, %.0f, %.0f), yaw %.0f", foe->GetName().c_str(), cm, at.x, at.y, at.z, yaw);
+                    Vec3 body_at;
+                    if (UObject* fm = object_property(foe, STR("Mesh"))) body_at = socket_location(fm, FName(STR("pelvis"), FNAME_Add));
+                    HSVR_LOG("Script: hsvr.foe_front: %ls put %.0f cm in front of him, at (%.0f, %.0f, %.0f), yaw %.0f; his pelvis now (%.0f, %.0f, %.0f)", foe->GetName().c_str(),
+                             cm, at.x, at.y, at.z, yaw, body_at.x, body_at.y, body_at.z);
                 }
                 if (!moved) HSVR_LOG("Script: hsvr.foe_front: no foe found");
                 continue;
