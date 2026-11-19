@@ -288,6 +288,11 @@ namespace hsvr
         // side of the hand or jitters in it (Matthew 2026-11-19). 0 = the hand follows the controller
         // and only goes onto a stopped weapon (pose_hold_blocked_from_cm).
         bool pose_hold_hand_follows = true;
+        // How the drawn hand predicts where the item will be after this frame's physics: 1 = from how it
+        // actually moved last frame (at most pose_hold_follow_predict_max_cm ahead), 2 = from the
+        // physics velocity (jumped when the item was blocked), 0 = none (a frame behind the item).
+        int pose_hold_hand_follows_predict = 1;
+        double pose_hold_follow_predict_max_cm = 12.0;
         // The stuck rule: a stopped weapon whose grip is out of his reach from the shoulder, or more
         // than an arm's length from your hand, for pose_hold_let_go_s, is let go (the game's own drop).
         // A weapon stopped by his own body is never let go by the stuck rule (vanilla weapons collide with him too).
