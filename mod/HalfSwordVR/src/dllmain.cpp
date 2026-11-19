@@ -6246,6 +6246,191 @@ namespace
         HSVR_LOG("Force: watching %d engine physics functions for calls on his weapons and his body", hooked);
     }
 
+    // ---- Stab log (read only) ------------------------------------------------------------------
+    // Why VR stabs bounce (defaults\stabbing_and_ss_reference.md in the decompile folder): the game
+    // sticks a blade only when CuttingRate * |NormalImpulse| >= 10000 (ModularWeaponBP @44253-@44512)
+    // and the weapon is not "Being Rubber Banded" or "Just Picked Up". This logs, for every hit of a
+    // weapon in his hands on a person, what the game was given (a hook on the weapon's own
+    // "Collision Hit" event, before it runs) and what it decided (the weapon's variables one tick
+    // and 0.15 s later, after its 0.1 s delay), with the controller's speed along the blade.
+    struct StabWatch
+    {
+        UObject* weapon = nullptr;
+        int id = 0;
+        double hit_at = -1.0;
+        bool logged_next = true, logged_late = true;
+    };
+    StabWatch g_stab_watch[2];
+    hsvr::Vec3 g_stab_ctrl_last[2];
+    hsvr::Vec3 g_stab_ctrl_vel[2];
+    double g_stab_ctrl_time[2] = {-1.0, -1.0};
+    int g_stab_count = 0;
+
+    double stab_var(UObject* owner, const TCHAR* name)
+    {
+        if (!owner) return -999.0;
+        FProperty* p = owner->GetPropertyByNameInChain(name);
+        return p ? number_property(owner, p) : -999.0;
+    }
+
+    int stab_array_num(UObject* owner, const TCHAR* name)
+    {
+        if (!owner) return -1;
+        FProperty* p = owner->GetPropertyByNameInChain(name);
+        if (!p || p->GetClass().GetName() != STR("ArrayProperty")) return -1;
+        const uint8_t* at = reinterpret_cast<const uint8_t*>(owner) + p->GetOffset_Internal();
+        return *reinterpret_cast<const int32_t*>(at + sizeof(void*));
+    }
+
+    std::wstring stab_name_var(UObject* owner, const TCHAR* name)
+    {
+        if (!owner) return STR("?");
+        FName* n = owner->GetValuePtrByPropertyNameInChain<FName>(name);
+        return n ? n->ToString() : STR("?");
+    }
+
+    // The weapon's blade axis (BaseMesh +Z, pommel to tip) and the controller's and the weapon's
+    // speed along it (cm/s; positive = toward the tip).
+    void stab_speeds(int side, UObject* weapon, double& ctrl_along, double& weapon_along, double& ctrl_speed, double& mass)
+    {
+        using namespace hsvr;
+        ctrl_along = weapon_along = ctrl_speed = mass = 0.0;
+        UObject* base = object_property(weapon, STR("BaseMesh"));
+        if (!base) return;
+        Vec3 axis = component_rotation(base).rotate({0.0, 0.0, 1.0});
+        Call lv(base, STR("GetPhysicsLinearVelocity"));
+        lv.run();
+        Vec3 wv = lv.vec();
+        Call m(base, STR("GetMass"));
+        m.run();
+        mass = m.number();
+        Vec3 cv = g_stab_ctrl_vel[side];
+        ctrl_along = cv.x * axis.x + cv.y * axis.y + cv.z * axis.z;
+        weapon_along = wv.x * axis.x + wv.y * axis.y + wv.z * axis.z;
+        ctrl_speed = length(cv);
+    }
+
+    void stab_log_state(const char* when, const StabWatch& w)
+    {
+        UObject* wp = w.weapon;
+        UObject* pawn = g_pose.pawn;
+        UObject* jammed = object_property(wp, STR("Jammed Tip"));
+        UObject* hit_comp = object_property(wp, STR("Hit Comp"));
+        HSVR_LOG("Stab: #%d %s: cutting rate %.1f, tip align %.2f, edge align %.2f, stab %.0f, normal impulse %.0f, last hit power %.0f, "
+                 "sliding %.0f/%.0f, stuck in body %.0f, stuck joints %d, jammed tip %s, hit %ls bone %ls, surface %.0f, temp no damage %.0f, "
+                 "rubber banded %.0f, high threshold %.0f, just picked up %.0f; his soft-not-attached R %.0f L %.0f",
+                 w.id, when, stab_var(wp, STR("Cutting Rate")), stab_var(wp, STR("Tip Alignment")), stab_var(wp, STR("Edge Alignment")),
+                 stab_var(wp, STR("Stab?")), stab_var(wp, STR("Normal Impulse")), stab_var(wp, STR("Last Hit Power")), stab_var(wp, STR("Sliding")),
+                 stab_var(wp, STR("Sliding 2")), stab_var(wp, STR("Stuck In Body")), stab_array_num(wp, STR("Stuck Constraints Array")),
+                 jammed ? "yes" : "no", hit_comp ? hit_comp->GetName().c_str() : STR("none"), stab_name_var(wp, STR("Hit Bone Name")).c_str(),
+                 stab_var(wp, STR("Hit Surface")), stab_var(wp, STR("Temp Disable Damage")), stab_var(wp, STR("Being Rubber Banded")),
+                 stab_var(wp, STR("High Collision Threshold")), stab_var(wp, STR("Just Picked Up")), stab_var(pawn, STR("R Hand Soft Not Attached")),
+                 stab_var(pawn, STR("L Hand Soft Not Attached")));
+    }
+
+    void stab_hit_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        if (!hsvr::config().stab_log) return;
+        UObject* weapon = context.Context;
+        UObject* pawn = g_pose.pawn;
+        if (!weapon || !pawn) return;
+        int side = weapon == object_property(pawn, STR("Weapon R")) ? 1 : weapon == object_property(pawn, STR("Weapon L")) ? 0 : -1;
+        if (side < 0) return;
+        UFunction* fn = static_cast<UFunction*>(custom_data);
+        uint8_t* locals = context.TheStack.Locals();
+        if (!fn || !locals) return;
+        UObject* other = nullptr;
+        UObject* comp = nullptr;
+        double ni[3] = {0, 0, 0};
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            uint8_t* at = locals + p->GetOffset_Internal();
+            if (n == STR("OtherActor") || n == STR("Other Actor")) other = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("HitComp") || n == STR("Hit Comp")) comp = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("NormalImpulse") || n == STR("Normal Impulse")) read_three(at, p, ni);
+        }
+        // People only (the game itself drops hits on the wielder).
+        if (!other || other == pawn || !is_a(other, STR("Willie_BP_C"))) return;
+        // At most 30 hits a second.
+        static double window = 0.0;
+        static int in_window = 0;
+        double now = hsvr::now_seconds();
+        if (now - window >= 1.0) window = now, in_window = 0;
+        if (++in_window > 30) return;
+        double ctrl_along, weapon_along, ctrl_speed, mass;
+        stab_speeds(side, weapon, ctrl_along, weapon_along, ctrl_speed, mass);
+        StabWatch& w = g_stab_watch[side];
+        w.weapon = weapon;
+        w.id = ++g_stab_count;
+        w.hit_at = now;
+        w.logged_next = w.logged_late = false;
+        double ni_len = hsvr::length(hsvr::Vec3{ni[0], ni[1], ni[2]});
+        HSVR_LOG("Stab: #%d %s %ls hit %ls (%ls): impulse %.0f kg cm/s, weapon along blade %.0f cm/s, controller along blade %.0f cm/s "
+                 "(controller speed %.0f), weapon mass %.2f kg",
+                 w.id, side == 0 ? "left" : "right", weapon->GetName().c_str(), other->GetName().c_str(), comp ? comp->GetName().c_str() : STR("?"), ni_len,
+                 weapon_along, ctrl_along, ctrl_speed, mass);
+        stab_log_state("before", w);
+    }
+
+    void install_stab_log()
+    {
+        static bool installed = false;
+        static double last_try = -10.0;
+        if (installed) return;
+        double now = hsvr::now_seconds();
+        if (now - last_try < 2.0) return;
+        last_try = now;
+        UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C:Collision Hit"));
+        if (!fn) return; // not loaded yet
+        installed = true;
+        UObjectGlobals::RegisterHook(fn, &stab_hit_hook, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+        std::wstring params;
+        for (FProperty* p : fn->ForEachProperty()) params += p->GetName() + STR(", ");
+        HSVR_LOG("Stab: watching the weapons' Collision Hit (parameters %ls)", params.c_str());
+    }
+
+    // Every tick after his: the controllers' velocity, and the deferred lines after a hit.
+    void stab_log_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        if (!config().stab_log || !pawn) return;
+        install_stab_log();
+        double now = now_seconds();
+        for (int side = 0; side < 2; ++side)
+        {
+            if (g_pose.hand_valid[side])
+            {
+                Vec3 at = g_pose.target[side];
+                double dt = now - g_stab_ctrl_time[side];
+                if (g_stab_ctrl_time[side] > 0.0 && dt > 1e-4 && dt < 0.1)
+                {
+                    Vec3 v = (at - g_stab_ctrl_last[side]) * (1.0 / dt);
+                    g_stab_ctrl_vel[side] = g_stab_ctrl_vel[side] * 0.5 + v * 0.5;
+                }
+                g_stab_ctrl_last[side] = at;
+                g_stab_ctrl_time[side] = now;
+            }
+            StabWatch& w = g_stab_watch[side];
+            if (!w.weapon || w.hit_at < 0.0) continue;
+            if (w.weapon != object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
+            {
+                w.weapon = nullptr;
+                continue;
+            }
+            if (!w.logged_next && now > w.hit_at)
+            {
+                w.logged_next = true;
+                stab_log_state("next tick", w);
+            }
+            if (!w.logged_late && now - w.hit_at >= 0.15)
+            {
+                w.logged_late = true;
+                stab_log_state("0.15 s later", w);
+            }
+        }
+    }
+
     // Between a grab and the start of its hold (the game's set-up snaps the item to its own grip and
     // takes several frames to make the hand joint; playtest 3: a sword taken by the blade showed in
     // the hand by its grip for 0.15 s, then jumped 30 cm), the item is kept exactly where the mod's
@@ -6700,6 +6885,7 @@ namespace
             crouch_after_tick(context);
             weapon_spring_after_tick(context);
         }
+        stab_log_tick(context);
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
         using namespace hsvr;
