@@ -3735,6 +3735,37 @@ namespace
     };
     std::vector<Thrown> g_thrown;
 
+    // The held weapon's centre of mass over the last ticks (time, position), for a throw's speed: the
+    // physics' own velocity on the release tick is whatever the hold last set, which can be a large
+    // catch-up (playtest 11:25: 40.1 m/s from a 2.2 m/s hand = the B&S solver's 20 m/s clamp x2).
+    struct ComSample { double t; hsvr::Vec3 p; UObject* weapon; };
+    ComSample g_com_hist[2][8];
+    int g_com_head[2] = {0, 0};
+    void note_com(int side, UObject* weapon, const hsvr::Vec3& p)
+    {
+        g_com_hist[side][g_com_head[side]] = ComSample{hsvr::now_seconds(), p, weapon};
+        g_com_head[side] = (g_com_head[side] + 1) % 8;
+    }
+    // Its velocity over about the last 60 ms (false when there is too little history for it).
+    bool recent_com_velocity(int side, UObject* weapon, hsvr::Vec3& v)
+    {
+        int newest = (g_com_head[side] + 7) % 8;
+        const ComSample& a = g_com_hist[side][newest];
+        if (a.weapon != weapon) return false;
+        for (int k = 1; k < 8; ++k)
+        {
+            const ComSample& b = g_com_hist[side][(newest - k + 8) % 8];
+            if (b.weapon != weapon || b.t <= 0.0) return false;
+            if (a.t - b.t >= 0.06 || k == 7)
+            {
+                if (a.t - b.t < 1e-3) return false;
+                v = (a.p - b.p) * (1.0 / (a.t - b.t));
+                return true;
+            }
+        }
+        return false;
+    }
+
     void drop_weapon(int side, UObject* pawn, bool thrown = false)
     {
         UObject* held = pawn ? object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) : nullptr;
@@ -3796,7 +3827,15 @@ namespace
                 Call lv(base, STR("GetPhysicsLinearVelocity"));
                 lv.run();
                 v = lv.vec();
-                if (cfg.pose_throw_multiplier != 1.0)
+                Vec3 mv;
+                bool measured = recent_com_velocity(side, held, mv);
+                if (measured)
+                {
+                    HSVR_LOG("Throw: %s hand's weapon moved at %.1f m/s over the last ticks (the physics had %.1f)", side == 0 ? "left" : "right", length(mv) / 100.0,
+                             length(v) / 100.0);
+                    v = mv;
+                }
+                if (cfg.pose_throw_multiplier != 1.0 || measured)
                 {
                     Vec3 nv = v * cfg.pose_throw_multiplier;
                     Call slv(base, STR("SetPhysicsLinearVelocity"));
@@ -6480,6 +6519,7 @@ namespace
         Call cm(base, STR("GetCenterOfMass"));
         cm.run();
         Vec3 com = cm.vec();
+        note_com(side, weapon, com);
         Call lv(base, STR("GetPhysicsLinearVelocity"));
         lv.run();
         Call av(base, STR("GetPhysicsAngularVelocityInRadians"));
