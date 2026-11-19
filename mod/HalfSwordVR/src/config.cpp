@@ -383,6 +383,9 @@ namespace hsvr
         flag("pose_draw_scabbard_free", c.pose_draw_scabbard_free);
         num("pose_hold_stuck_force_scale", c.pose_hold_stuck_force_scale);
         flag("stab_wound_hold", c.stab_wound_hold);
+        num("stab_start_depth_cm", c.stab_start_depth_cm);
+        num("stab_start_depth_per_ms", c.stab_start_depth_per_ms);
+        num("stab_start_depth_max_cm", c.stab_start_depth_max_cm);
         num("stab_wound_in_cms", c.stab_wound_in_cms);
         num("stab_wound_out_cms", c.stab_wound_out_cms);
         num("stab_wound_head_factor", c.stab_wound_head_factor);

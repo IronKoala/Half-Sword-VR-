@@ -6654,6 +6654,7 @@ namespace
         int id = 0;
         double hit_at = -1.0;
         bool logged_next = true, logged_late = true;
+        bool was_stuck = false;
         UObject* push_comp = nullptr; // the slow push: same body part hit again and again
         double push_since = -1.0, push_last = -1.0;
     };
@@ -6889,6 +6890,52 @@ namespace
         stab_log_state("before", w);
     }
 
+    // After the game handled the hit: a blade it has just stuck in a body is set into the wound by
+    // stab_start_depth_cm along the jammed tip (S&S starts every stab 2 cm in). Without it the tip
+    // sits on the skin, the stuck joint's first trace along the blade misses the body and the game
+    // lets go on the next tick (stab-test10: 4 of 5 sticks, "hitting body 0" on their first tick).
+    void stab_set_depth(int side, UObject* weapon, const char* when);
+    void stab_hit_post(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        if (cfg.stab_start_depth_cm <= 0.0) return;
+        UObject* weapon = context.Context;
+        UObject* pawn = g_pose.pawn;
+        if (!weapon || !pawn) return;
+        int side = weapon == object_property(pawn, STR("Weapon R")) ? 1 : weapon == object_property(pawn, STR("Weapon L")) ? 0 : -1;
+        if (side < 0) return;
+        StabWatch& w = g_stab_watch[side];
+        bool stuck = bool_property(weapon, STR("Stuck In Body"));
+        bool fresh = stuck && !w.was_stuck;
+        w.was_stuck = stuck;
+        if (fresh) stab_set_depth(side, weapon, "hit");
+    }
+
+    void stab_set_depth(int side, UObject* weapon, const char* when)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        if (cfg.stab_start_depth_cm <= 0.0) return;
+        UObject* jt = object_property(weapon, STR("Jammed Tip"));
+        UObject* base = object_property(weapon, STR("BaseMesh"));
+        if (!jt || !base) return;
+        Call f(jt, STR("GetForwardVector"));
+        f.run();
+        Vec3 u = f.vec();
+        double ul = length(u);
+        if (ul < 0.5) return;
+        u = u * (1.0 / ul);
+        double speed = (std::max)(0.0, dot(g_stab_ctrl_vel[side], u));
+        double depth = (std::min)(cfg.stab_start_depth_max_cm, cfg.stab_start_depth_cm + speed * cfg.stab_start_depth_per_ms);
+        Call off(base, STR("K2_AddWorldOffset"));
+        off.three(STR("DeltaLocation"), u.x * depth, u.y * depth, u.z * depth);
+        off.flag(STR("bTeleport"), true);
+        off.run();
+        HSVR_LOG("Stab: %s %ls stuck in %ls (%s): set %.1f cm into the wound (controller %.0f cm/s along it)", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                 stab_name_var(weapon, STR("Hit Bone Name")).c_str(), when, depth, speed);
+    }
+
     void install_stab_log()
     {
         static bool installed = false;
@@ -6900,7 +6947,7 @@ namespace
         UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C:Collision Hit"));
         if (!fn) return; // not loaded yet
         installed = true;
-        UObjectGlobals::RegisterHook(fn, &stab_hit_hook, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+        UObjectGlobals::RegisterHook(fn, &stab_hit_hook, &stab_hit_post, fn);
         std::wstring params;
         for (FProperty* p : fn->ForEachProperty()) params += p->GetName() + STR(", ");
         HSVR_LOG("Stab: watching the weapons' Collision Hit (parameters %ls)", params.c_str());
@@ -7034,6 +7081,13 @@ namespace
                 }
             }
             StabWatch& w = g_stab_watch[side];
+            // A stick the post-hook did not see (the game stuck it later than the hit): set it in now.
+            if (UObject* held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
+            {
+                bool stuck = bool_property(held, STR("Stuck In Body"));
+                if (stuck && !w.was_stuck) stab_set_depth(side, held, "tick");
+                w.was_stuck = stuck;
+            }
             if (!w.weapon || w.hit_at < 0.0) continue;
             if (w.weapon != object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
             {

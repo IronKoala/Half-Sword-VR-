@@ -220,6 +220,12 @@ namespace hsvr
         // out (cm/s; B&S's held dampers with the hand's strength), x stab_wound_head_factor in the
         // head and neck; sideways and in turn it goes with the body.
         bool stab_wound_hold = true;
+        // A blade the game has just stuck is set this far into the wound along its tip (cm), plus
+        // stab_start_depth_per_ms cm for each cm/s of the controller along it, at most _max_cm
+        // (the game's stuck joint lets the blade slide 5 cm along a thrust).
+        double stab_start_depth_cm = 2.5;
+        double stab_start_depth_per_ms = 0.01;
+        double stab_start_depth_max_cm = 4.5;
         double stab_wound_in_cms = 50.0;
         double stab_wound_out_cms = 40.0;
         double stab_wound_head_factor = 0.35;
