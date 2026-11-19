@@ -2446,6 +2446,16 @@ namespace
     // A blade just drawn still has its tip at the mouth, lined up: no sheathe until it has been taken
     // well away first (playtest 02:44: every draw went straight back into a sheathe, 1 ms after it freed).
     bool g_sheathe_armed[2] = {true, true};
+    // Where each drawn weapon's own scabbard really opens, measured when it was drawn (it sat seated):
+    // the blade's start (the guard end of its blade zone) and its line, in the scabbard's frame. The
+    // belt socket is only where the scabbard hangs from, and moves with it when the off hand angles it.
+    struct SheathFit
+    {
+        UObject* scab = nullptr;
+        int slot_side = 1;
+        hsvr::Vec3 mouth_local, axis_local;
+    };
+    std::unordered_map<UObject*, SheathFit> g_sheath_fit;
     bool any_draw() { return g_draw[0].active || g_draw[1].active; }
     bool cfg_scabbard_free() { return hsvr::config().pose_draw_scabbard_free; }
     bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg);
@@ -4228,6 +4238,7 @@ namespace
         hsvr::Vec3 ha, hb;
         double t = 0.0;
         std::string handle;
+        double couple = 0.0; // the second hand's force x the hands' distance on the weapon (kg cm^2/s^2), this tick
     };
     TwoHand g_two;
 
@@ -4946,8 +4957,25 @@ namespace
         double best = -1.0;
         auto it = g_weapon_parts.find(weapon);
         if (it == g_weapon_parts.end()) return -1.0;
+        // The weapon's scabbard is one of its own components too (NODE_AddStaticMeshComponent-N, its
+        // "Scabbard"), and stays on the belt after a draw: it is not the weapon (playtest 09:38: the
+        // off hand on the belt scabbard took the drawn sword "by its spot" 55-92 cm away from it).
+        UObject* scab = object_property(weapon, STR("Scabbard"));
+        auto under_scabbard = [&](UObject* c) {
+            if (!scab) return false;
+            UObject* p = c;
+            for (int i = 0; i < 6 && p; ++i)
+            {
+                if (p == scab) return true;
+                Call ap(p, STR("GetAttachParent"));
+                if (!ap.fn || !ap.run()) return false;
+                p = ap.object_result();
+            }
+            return false;
+        };
         for (UObject* c : it->second)
         {
+            if (under_scabbard(c)) continue;
             Call q(c, STR("GetClosestPointOnCollision"));
             if (!q.fn) continue;
             q.three(STR("Point"), point.x, point.y, point.z);
@@ -6266,6 +6294,7 @@ namespace
                 // Both hands pull: the second adds its own strength (B&S: two hands, twice the hold).
                 BodyStrength first = body_strength(pawn, side, cfg), second = body_strength(pawn, s2, cfg);
                 two_hand_gain = 1.0 + (std::max)(0.0, cfg.pose_two_hand_strength - 1.0) * (second.total / (std::max)(0.05, first.total));
+                g_two.couple = std::fabs(dz) > 1.0 ? cfg.pose_hold_max_force * (std::max)(0.0, cfg.pose_hold_strength) * second.total * 100.0 * std::fabs(dz) : 0.0;
                 // A controller pulled well off its spot on the weapon lets go (B&S).
                 Vec3 spot = bp_now + bq_now.rotate(local2);
                 double off = length(p2 - spot);
@@ -6554,11 +6583,22 @@ namespace
                 Vec3 alpha_need = (wn - w_now) * (1.0 / DT);
                 Vec3 lever = cross(r, aP) * mass;
                 Vec3 tau_need = inertia * alpha_need + lever;
-                double tcap = max_torque * (std::max)(0.0, cfg.pose_hold_weight_torque_scale);
+                double couple = (cfg.pose_hold_weight_two_hand_couple && g_two.active && g_two.main == side && g_two.weapon == weapon) ? g_two.couple : 0.0;
+                double tcap = (max_torque + couple) * (std::max)(0.0, cfg.pose_hold_weight_torque_scale);
                 bool tc = length(tau_need) > tcap;
                 Vec3 tau = clamp_length(tau_need, tcap);
                 Vec3 alpha = inertia.inverse() * (tau - lever);
                 w_next = clamp_length(w_now + alpha * DT, 60.0);
+                if (cfg.pose_hold_weight_spin_extra >= 0.0)
+                {
+                    double most = length(wn) + cfg.pose_hold_weight_spin_extra;
+                    if (length(w_next) > most)
+                    {
+                        HSVR_LOG_EVERY(0.25, "Hold: %s weight: %ls would spin at %.0f deg/s for a %.0f deg/s turn; held to %.0f", side == 0 ? "left" : "right",
+                                       weapon->GetName().c_str(), length(w_next) * 57.2958, length(wn) * 57.2958, most * 57.2958);
+                        w_next = normalized(w_next) * most;
+                    }
+                }
                 Vec3 vP_next = v + dvP;
                 exact_v = clamp_length(vP_next + cross(w_next, r), 2000.0);
                 h.force_capped = fcap;
@@ -6566,8 +6606,8 @@ namespace
                 h.force_n = length(dvP) * mass / DT / 100.0;
                 h.torque_nm = length(tau) / 1e4;
                 if (tc)
-                    HSVR_LOG_EVERY(0.5, "Hold: %s weight: %ls needs %.0f N m at the grip to turn as you do, the hand has %.0f", side == 0 ? "left" : "right",
-                                   weapon->GetName().c_str(), length(tau_need) / 1e4, tcap / 1e4);
+                    HSVR_LOG_EVERY(0.5, "Hold: %s weight: %ls needs %.0f N m at the grip to turn as you do, the hand has %.0f%s", side == 0 ? "left" : "right",
+                                   weapon->GetName().c_str(), length(tau_need) / 1e4, tcap / 1e4, couple > 0.0 ? " (with both hands)" : "");
             }
             com_next = com + exact_v * DT + g * (DT * DT * 0.5);
             exact_set = true;
@@ -7590,6 +7630,23 @@ namespace
         g.place = false;
         g.hold_at = false;
         g_pending_free[side] = g;
+        if (scab && base)
+        {
+            // Its real mouth for sheathing it again: where the blade leaves the scabbard while seated.
+            double z0 = 0.0;
+            for (const Handle& hd : item_handles(w, base))
+                if (hd.name == "blade") z0 = (std::min)(hd.a.z, hd.b.z);
+            Vec3 sp = component_location(scab);
+            Quat sq = component_rotation(scab);
+            SheathFit f;
+            f.scab = scab;
+            f.slot_side = sd.side;
+            f.mouth_local = sq.inverse().rotate(w0_pos + w0_rot.rotate(Vec3{0, 0, z0}) - sp);
+            f.axis_local = sq.inverse().rotate(w0_rot.rotate(Vec3{0, 0, 1}));
+            g_sheath_fit[w] = f;
+            HSVR_LOG("Draw: %ls's scabbard opens at (%.1f, %.1f, %.1f) in its frame, blade along (%.2f, %.2f, %.2f) (blade starts %.1f cm up the weapon)",
+                     w->GetName().c_str(), f.mouth_local.x, f.mouth_local.y, f.mouth_local.z, f.axis_local.x, f.axis_local.y, f.axis_local.z, z0);
+        }
         DrawState ds;
         ds.active = true;
         ds.slot_side = sd.side;
@@ -7708,13 +7765,34 @@ namespace
         UObject* w = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
         if (!w || is_fist(w) || g_hold[side].weapon != w || !object_property(w, STR("Scabbard"))) return;
         UObject* base = object_property(w, STR("BaseMesh"));
-        Vec3 mouth, ax;
-        if (!base || !belt_mouth(side, pawn, mouth, ax)) return;
+        if (!base) return;
+        Vec3 sock_mouth, sock_ax;
+        bool have_sock = belt_mouth(side, pawn, sock_mouth, sock_ax);
+        // Its own scabbard's real mouth (measured at the draw), when that scabbard hangs on this hand's
+        // side (the game's Assign for this hand only sheathes into this side's slots).
+        Vec3 mouth = sock_mouth, ax = sock_ax;
+        bool real = false, other_side = false;
+        auto fit = g_sheath_fit.find(w);
+        if (fit != g_sheath_fit.end() && fit->second.scab == object_property(w, STR("Scabbard")))
+        {
+            Vec3 sp = component_location(fit->second.scab);
+            Quat sq = component_rotation(fit->second.scab);
+            if (fit->second.slot_side == side)
+            {
+                mouth = sp + sq.rotate(fit->second.mouth_local);
+                ax = sq.rotate(fit->second.axis_local);
+                real = true;
+            }
+            else
+                other_side = true;
+        }
+        if (!real && !have_sock) return;
         Vec3 bp = component_location(base);
         Quat bq = component_rotation(base);
         Vec3 blade = bq.rotate(Vec3{0, 0, 1});
         Vec3 tip = bp + blade * blade_length(w);
         double d = length(tip - mouth), c = dot(blade, ax);
+        double off_deg = std::acos((std::max)(-1.0, (std::min)(1.0, c))) * 57.2958;
         if (!g_sheathe_armed[side])
         {
             if (d > 2.0 * cfg.pose_sheathe_mouth_cm + 10.0)
@@ -7722,6 +7800,18 @@ namespace
                 g_sheathe_armed[side] = true;
                 HSVR_LOG("Sheathe: %s hand's blade is clear of the scabbard (tip %.0f cm from the mouth); it can be sheathed again", side == 0 ? "left" : "right", d);
             }
+            return;
+        }
+        // Playtest 09:38: no sheathe ever began and nothing said how close the tip came. Near a mouth,
+        // twice a second: how far and how lined up (and where the belt socket's mouth is, for comparison).
+        if (d < 40.0 || other_side)
+            HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's tip %.1f cm from the %s mouth, %.0f deg off its line (needs %.0f cm, %.0f deg)%s%s",
+                           side == 0 ? "left" : "right", d, real ? "scabbard's" : "belt socket's", off_deg, cfg.pose_sheathe_mouth_cm, cfg.pose_sheathe_angle_deg,
+                           real && have_sock ? "; the belt socket's is " : "", real && have_sock ? (std::to_string((int)std::lround(length(tip - sock_mouth))) + " cm").c_str() : "");
+        if (other_side)
+        {
+            HSVR_LOG_EVERY(2.0, "Sheathe: %s hand's %ls has its scabbard on the other hip; sheathing across is not built yet", side == 0 ? "left" : "right",
+                           w->GetName().c_str());
             return;
         }
         if (d <= cfg.pose_sheathe_mouth_cm && c >= std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0)) sheathe_begin(side, pawn, w);

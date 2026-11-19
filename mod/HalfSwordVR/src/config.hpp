@@ -248,6 +248,13 @@ namespace hsvr
         // long weapons trail fast turns, B&S-style). torque_scale multiplies pose_hold_max_torque for it.
         bool pose_hold_weight = true;
         double pose_hold_weight_torque_scale = 1.0;
+        // Two hands turn a weapon by pushing the hands opposite ways: that couple (the second hand's
+        // force x their distance apart on it) adds to the torque cap (playtest 09:38: a 2.2 kg axe in
+        // two hands needed 550-930 N m against a 486 N m wrist cap and shook).
+        bool pose_hold_weight_two_hand_couple = true;
+        // The weight's own swing never spins it faster than the turn wanted plus this (rad/s): one tick
+        // of a deadbeat grip pull fed back into the lever spun the axe to the 60 rad/s cap (playtest 09:38).
+        double pose_hold_weight_spin_extra = 5.0;
         // While held, his visible hand sits on the weapon (1): when the weapon is stopped by something,
         // the hand stays on it instead of going on with your controller. It eases from following the
         // controller to sitting on the weapon as the weapon falls 1 to pose_hold_blocked_from_cm behind.
