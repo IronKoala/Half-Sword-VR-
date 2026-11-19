@@ -4378,7 +4378,7 @@ namespace
         {
             if (cls != f.shield) continue;
             ++known;
-            Vec3 c{f.cx, f.cy, f.cz}, a = normalize(Vec3{f.ax, f.ay, f.az});
+            Vec3 c{f.cx, f.cy, f.cz}, a = normalized(Vec3{f.ax, f.ay, f.az});
             double t = (std::max)(-f.length * 0.5, (std::min)(f.length * 0.5, dot(local - c, a)));
             Vec3 on = c + a * t;
             double d = length(local - on);
