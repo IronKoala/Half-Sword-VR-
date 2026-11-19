@@ -9337,7 +9337,7 @@ namespace
     {
         if (g_deep_dir.empty())
         {
-            std::wstring base = mod_dir() + L"logs\\";
+            std::wstring base = hsvr::mod_dir() + L"logs\\";
             CreateDirectoryW(base.c_str(), nullptr);
             SYSTEMTIME st{};
             GetLocalTime(&st);
