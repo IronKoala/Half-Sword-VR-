@@ -335,6 +335,17 @@ namespace hsvr
         bool pose_sheathe = true;
         double pose_sheathe_mouth_cm = 10.0;
         double pose_sheathe_angle_deg = 30.0;
+        // The off hand on a belt scabbard: a squeeze within touch_cm of it takes it; it turns with the hand
+        // up to angle_deg on the belt (the game's own loose limit is 30) and stays pinned there; let go and it
+        // turns back. follow_s: how fast it catches up with the hand's angle. let_go_cm: the hand pulled this
+        // far off it for 0.3 s lets go. block_auto: keep the game's own teleporting off-hand grab from firing.
+        bool pose_scabbard_grab = true;
+        double pose_scabbard_touch_cm = 8.0;
+        double pose_scabbard_angle_deg = 30.0;
+        double pose_scabbard_follow_s = 0.05;
+        double pose_scabbard_let_go_cm = 25.0;
+        double pose_scabbard_grip_type = 2.0;
+        bool pose_scabbard_block_auto = true;
         double pose_grab_seat_reverse_bias_deg = 45.0; // a reversed seat must be this much nearer to win
         double pose_swing_speed_lo = 1.5;
         double pose_swing_speed_hi = 7.0;

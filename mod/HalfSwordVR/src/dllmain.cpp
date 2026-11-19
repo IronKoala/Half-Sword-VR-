@@ -2446,6 +2446,11 @@ namespace
     bool any_draw() { return g_draw[0].active || g_draw[1].active; }
     bool cfg_scabbard_free() { return hsvr::config().pose_draw_scabbard_free; }
     bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg);
+    bool try_scabbard_grab(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg);
+    void scabbard_let_go(int side, const char* why);
+    bool scabbard_held(int side);
+    void scabbard_before_tick(UObject* pawn);
+    void scabbard_tick(UObject* pawn, const hsvr::Config& cfg);
     double g_swing_want = 0.0, g_swing_written = 0.0, g_swing_keep = 0.89, g_swing_last_t = -1.0;
     hsvr::Vec3 g_swing_rel[2];
     double g_swing_v[2] = {0.0, 0.0};
@@ -2550,6 +2555,7 @@ namespace
             swing_speed_before_tick(context);
             for (int side = 0; side < 2; ++side)
                 if (g_draw[side].active) set_bool_property(context, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
+            scabbard_before_tick(context);
         }
     }
 
@@ -5183,6 +5189,12 @@ namespace
                 mine = nullptr;
                 if (!now_held) continue;
             }
+            if (!now_held && scabbard_held(side))
+            {
+                set_anim_grip(side, -1);
+                scabbard_let_go(side, "grip released");
+                continue;
+            }
             if (!now_held)
             {
                 if (g_two.active && side == g_two.second)
@@ -5210,6 +5222,7 @@ namespace
             if (cfg.pose_grab_handles ? try_second_hand(side, pawn, mesh, cfg) : try_two_hand(side, pawn, mesh, cfg)) continue;
             Vec3 at = hand_grab_point(mesh, side);
             if (cfg.pose_draw && try_draw(side, pawn, mesh, at, cfg)) continue;
+            if (try_scabbard_grab(side, pawn, mesh, at, cfg)) continue;
             std::vector<UObject*> weapons, willies;
             UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
@@ -7363,6 +7376,276 @@ namespace
         for (int side = 0; side < 2; ++side) sheathe_check(side, pawn, cfg);
     }
 
+    // ---- The off hand on a belt scabbard (Matthew 2026-11-19: the off hand can grab the scabbard and
+    // angle it; B&S-style, on a squeeze, not the game's automatic grab) -------------------------------
+    // The scabbard is pinned to the pelvis by a PhysicsConstraintComponent that is the scabbard's child 0
+    // (Set Scabbard Constraint Free / Return Scabbard Constraint To Locked act on it; component 2 is
+    // Mesh:pelvis; hs_scabbard_offhand.md). While held, the mod widens that pin's angular limits to
+    // pose_scabbard_angle_deg (its linear limit stays at the locked 2 cm, so it stays on the belt) and
+    // turns the scabbard toward the hand's angle; let go and it is turned back to where it sat on the
+    // belt before the game's locked limits (5 deg) are put back. The game's own automatic off-hand grab
+    // (teleports the scabbard into the left hand) is kept from firing (scabbard_before_tick).
+    struct ScabHold
+    {
+        bool active = false;
+        bool returning = false;
+        UObject* scab = nullptr;
+        hsvr::Quat rel;        // the scabbard's rotation in the hand's frame at the grab
+        hsvr::Vec3 touch;      // where the hand took it, in the scabbard's frame
+        hsvr::Quat rest;       // its rotation in the pelvis's frame before it was taken
+        hsvr::Vec3 rest_pos;   // and its place there (how far it moves off the belt is logged)
+        bool test = false;     // hsvr.scabbard_test: the hand's angle from hand_l, no let-go
+        double t0 = 0.0;
+        double far_since = -1.0;
+        double last_log = -1e9;
+    };
+    ScabHold g_scab[2];
+
+    UObject* scabbard_pin(UObject* scab)
+    {
+        Call c(scab, STR("GetChildComponent"));
+        if (!c.fn) return nullptr;
+        if (FProperty* p = c.param(STR("ChildIndex"))) *reinterpret_cast<int32_t*>(c.buffer.data() + p->GetOffset_Internal()) = 0;
+        c.run();
+        UObject* pin = c.object_result();
+        return pin && is_a(pin, STR("PhysicsConstraintComponent")) ? pin : nullptr;
+    }
+
+    // SetAngularSwing1Limit / Swing2 / Twist: (motion byte, angle) whatever the parameters are called.
+    void pin_angular_limit(UObject* pin, const TCHAR* fn, uint8_t motion, double degrees)
+    {
+        Call c(pin, fn);
+        if (!c.fn) return;
+        bool byte_done = false, num_done = false;
+        for (FProperty* p : c.fn->ForEachProperty())
+        {
+            auto kind = p->GetClass().GetName();
+            uint8_t* at = c.buffer.data() + p->GetOffset_Internal();
+            if (!byte_done && (kind == STR("ByteProperty") || kind == STR("EnumProperty")))
+            {
+                *at = motion;
+                byte_done = true;
+            }
+            else if (!num_done && kind == STR("FloatProperty"))
+            {
+                *reinterpret_cast<float*>(at) = (float)degrees;
+                num_done = true;
+            }
+            else if (!num_done && kind == STR("DoubleProperty"))
+            {
+                *reinterpret_cast<double*>(at) = degrees;
+                num_done = true;
+            }
+        }
+        c.run();
+    }
+
+    void widen_scabbard_pin(UObject* scab, double degrees)
+    {
+        UObject* pin = scabbard_pin(scab);
+        if (!pin) return;
+        pin_angular_limit(pin, STR("SetAngularSwing1Limit"), 1, degrees); // 1 = Limited
+        pin_angular_limit(pin, STR("SetAngularSwing2Limit"), 1, degrees);
+        pin_angular_limit(pin, STR("SetAngularTwistLimit"), 1, degrees);
+    }
+
+    // The scabbards on his belt: the empty ones left by a draw and those of the sheathed weapons.
+    std::vector<UObject*> belt_scabbards(UObject* pawn)
+    {
+        std::vector<UObject*> out;
+        auto add = [&](UObject* s) {
+            if (s && std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
+        };
+        add(object_property(pawn, STR("Current Scabbard R")));
+        add(object_property(pawn, STR("Current Scabbard L")));
+        for (const SlotDef& sd : k_slots)
+            if (UObject* w = object_property(pawn, sd.var)) add(object_property(w, STR("Scabbard")));
+        return out;
+    }
+
+    double scabbard_length(UObject* scab)
+    {
+        Call c(scab, STR("GetOwner"));
+        c.run();
+        return blade_length(c.object_result());
+    }
+
+    void take_scabbard(int side, UObject* mesh, UObject* scab, const hsvr::Vec3& touch, const hsvr::Quat& hand_rot, const hsvr::Quat& turn, bool test,
+                       const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        ScabHold& s = g_scab[side];
+        s = ScabHold{};
+        s.active = true;
+        s.test = test;
+        s.scab = scab;
+        s.touch = touch;
+        s.t0 = now_seconds();
+        Quat sq = component_rotation(scab);
+        // turn (tests only): the scabbard is wanted this much turned from where it is.
+        s.rel = (hand_rot.inverse() * turn * sq).normalized();
+        Quat pelvis = socket_rotation(mesh, bone_fname("pelvis"));
+        s.rest = (pelvis.inverse() * sq).normalized();
+        s.rest_pos = pelvis.inverse().rotate(component_location(scab) - socket_location(mesh, bone_fname("pelvis")));
+        widen_scabbard_pin(scab, cfg.pose_scabbard_angle_deg);
+    }
+
+    bool try_scabbard_grab(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_scabbard_grab || g_scab[1 - side].active) return false;
+        UObject* best = nullptr;
+        double best_d = 1e9;
+        Vec3 best_touch;
+        for (UObject* s : belt_scabbards(pawn))
+        {
+            if (!scabbard_pin(s)) continue; // not pinned to the belt (fallen off)
+            Vec3 sp = component_location(s);
+            Quat sq = component_rotation(s);
+            Vec3 local = sq.inverse().rotate(at - sp);
+            double len = scabbard_length(s);
+            Vec3 on{0, 0, (std::min)(len, (std::max)(0.0, local.z))};
+            double d = length(local - on);
+            if (d < best_d)
+            {
+                best_d = d;
+                best = s;
+                best_touch = on;
+            }
+        }
+        if (!best) return false;
+        const char* hand = side == 0 ? "left" : "right";
+        if (best_d > cfg.pose_scabbard_touch_cm)
+        {
+            if (best_d < 30.0) HSVR_LOG("Scabbard: %s hand squeezed %.1f cm from a belt scabbard (needs %.0f)", hand, best_d, cfg.pose_scabbard_touch_cm);
+            return false;
+        }
+        if (!g_pose.hand_valid[side]) return false;
+        take_scabbard(side, mesh, best, best_touch, g_pose.hand_rot[side], Quat{}, false, cfg);
+        controllers_buzz(side, 0.3f);
+        HSVR_LOG("Scabbard: %s hand took %ls at %.1f cm along it (%.1f cm from the hand); it turns up to %.0f deg on the belt", hand, best->GetName().c_str(),
+                 best_touch.z, best_d, cfg.pose_scabbard_angle_deg);
+        return true;
+    }
+
+    void scabbard_let_go(int side, const char* why)
+    {
+        ScabHold& s = g_scab[side];
+        if (!s.active) return;
+        s.active = false;
+        s.returning = true;
+        s.t0 = hsvr::now_seconds();
+        HSVR_LOG("Scabbard: %s hand lets go (%s); turning it back onto the belt", side == 0 ? "left" : "right", why);
+    }
+
+    bool scabbard_held(int side) { return g_scab[side].active; }
+
+    // Before his tick: keep the game's automatic off-hand scabbard grab (UG @451824-452352) from firing
+    // for the player. Its gate needs "L Hand Occupied by R Unsheath" false and its release fires when it
+    // is true while the rest of the gate (C) fails, so it is set to exactly C && a scabbard: neither runs.
+    void scabbard_before_tick(UObject* pawn)
+    {
+        if (!hsvr::config().pose_scabbard_block_auto) return;
+        bool c = !bool_property(pawn, STR("Hand L Torn Off")) && !bool_property(pawn, STR("Grabbed L")) && !bool_property(pawn, STR("Grab L Target Found")) &&
+                 !bool_property(pawn, STR("Fallen")) && read_number_variable(pawn, STR("Arm_L Health")) > 25.0 && read_number_variable(pawn, STR("L_GripType_Current")) == 0.0 &&
+                 (bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("R Weapon Sheathing")));
+        bool occupied = c && object_property(pawn, STR("Current Scabbard R")) != nullptr;
+        if (bool_property(pawn, STR("L Hand Occupied by R Unsheath")) != occupied)
+        {
+            set_bool_property(pawn, STR("L Hand Occupied by R Unsheath"), occupied);
+            HSVR_LOG_EVERY(1.0, "Scabbard: the game's own off-hand scabbard grab held off (occupied %d)", (int)occupied);
+        }
+    }
+
+    // After his tick: the held scabbard turns toward the hand's angle (its pin keeps it on the belt and
+    // within the widened limits); a let-go one turns back to where it sat, then the game's lock returns.
+    void scabbard_tick(UObject* pawn, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        if (!mesh) return;
+        double now = now_seconds();
+        for (int side = 0; side < 2; ++side)
+        {
+            ScabHold& s = g_scab[side];
+            if (!s.active && !s.returning) continue;
+            const char* hand = side == 0 ? "left" : "right";
+            UObject* pin = s.scab ? scabbard_pin(s.scab) : nullptr;
+            if (!pin)
+            {
+                HSVR_LOG("Scabbard: %s hand's scabbard is no longer on the belt; let go", hand);
+                if (s.active) set_anim_grip(side, -1);
+                s = ScabHold{};
+                continue;
+            }
+            Quat cur = component_rotation(s.scab);
+            Quat want;
+            Quat pelvis_q = socket_rotation(mesh, bone_fname("pelvis"));
+            Vec3 pelvis_p = socket_location(mesh, bone_fname("pelvis"));
+            double off_belt = length(pelvis_q.inverse().rotate(component_location(s.scab) - pelvis_p) - s.rest_pos);
+            if (s.active)
+            {
+                Quat hand_rot = g_pose.hand_rot[side];
+                if (s.test) hand_rot = socket_rotation(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+                else if (!g_pose.hand_valid[side])
+                {
+                    scabbard_let_go(side, "no controller");
+                    continue;
+                }
+                // The game's draw/sheathe calls put its locked or free limits back: widen again each tick.
+                widen_scabbard_pin(s.scab, cfg.pose_scabbard_angle_deg);
+                set_anim_grip(side, (int)cfg.pose_scabbard_grip_type);
+                want = (hand_rot * s.rel).normalized();
+                Vec3 spot = component_location(s.scab) + cur.rotate(s.touch);
+                double off = length(g_pose.target[side] - spot);
+                if (!s.test && off > cfg.pose_scabbard_let_go_cm)
+                {
+                    if (s.far_since < 0.0) s.far_since = now;
+                    else if (now - s.far_since > 0.3)
+                    {
+                        set_anim_grip(side, -1);
+                        scabbard_let_go(side, "the hand was pulled off it");
+                        continue;
+                    }
+                }
+                else
+                    s.far_since = -1.0;
+                if (now - s.last_log > 0.5)
+                {
+                    s.last_log = now;
+                    double ang = length(scaled_axis((s.rest.inverse() * pelvis_q.inverse() * cur).normalized())) * 57.2958;
+                    HSVR_LOG("Scabbard: %s hand holds it %.1f deg off its belt angle, %.1f cm off its belt spot (hand %.1f cm from where it took it; %.1f deg to the hand's angle)",
+                             hand, ang, off_belt, off, length(scaled_axis((want * cur.inverse()).normalized())) * 57.2958);
+                }
+            }
+            else
+            {
+                want = (pelvis_q * s.rest).normalized();
+                double left = length(scaled_axis((want * cur.inverse()).normalized())) * 57.2958;
+                if (left < 3.0 || now - s.t0 > 0.5)
+                {
+                    UObject* scab = s.scab;
+                    s = ScabHold{};
+                    bool drawing = false;
+                    for (int k = 0; k < 2; ++k) drawing = drawing || g_draw[k].active;
+                    call_one_object(pawn, drawing && cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+                    HSVR_LOG("Scabbard: back on the belt (%.1f deg, %.1f cm off), the game's lock put back", left, off_belt);
+                    continue;
+                }
+            }
+            Vec3 err = scaled_axis((want * cur.inverse()).normalized());
+            Vec3 w = err * (1.0 / (std::max)(0.01, cfg.pose_scabbard_follow_s));
+            double wl = length(w);
+            if (wl > 25.0) w = w * (25.0 / wl);
+            Call wake(s.scab, STR("WakeRigidBody"));
+            wake.run();
+            Call sav(s.scab, STR("SetPhysicsAngularVelocityInRadians"));
+            sav.three(STR("NewAngVel"), w.x, w.y, w.z);
+            sav.flag(STR("bAddToCurrent"), false);
+            sav.run();
+        }
+    }
+
     void keep_pending_in_hand(UObject* pawn)
     {
         using namespace hsvr;
@@ -7397,6 +7680,7 @@ namespace
         Config cfg = config();
         keep_pending_in_hand(pawn);
         draw_tick(pawn);
+        scabbard_tick(pawn, cfg);
         for (int side = 0; side < 2; ++side)
         {
             GripLog& log = g_grip_log[side];
@@ -9057,6 +9341,39 @@ namespace
                     hsvr::Vec3 p = socket_location(fm, pelvis_bone);
                     HSVR_LOG("Script: hsvr.foe_freeze %d: %ls, pelvis (%.0f, %.0f, %.0f)", (int)freeze, foe->GetName().c_str(), p.x, p.y, p.z);
                 }
+                continue;
+            }
+            if (entry.command.rfind("hsvr.scabbard_test", 0) == 0)
+            {
+                // Off-hand scabbard test: the left hand takes the first belt scabbard (wherever the hand
+                // is) and wants it turned <deg> about its own X; "hsvr.scabbard_test off" lets go.
+                UObject* player = nullptr;
+                UObject* pm = find_pawn_mesh(&player);
+                std::string arg = entry.command.size() > 19 ? entry.command.substr(19) : "20";
+                if (arg == "off")
+                {
+                    set_anim_grip(0, -1);
+                    scabbard_let_go(0, "test");
+                    continue;
+                }
+                double deg = std::atof(arg.c_str());
+                UObject* sc = nullptr;
+                if (player)
+                    for (UObject* c : belt_scabbards(player))
+                        if (scabbard_pin(c))
+                        {
+                            sc = c;
+                            break;
+                        }
+                if (sc && pm)
+                {
+                    hsvr::Vec3 ax = hsvr::normalized(component_rotation(sc).rotate(hsvr::Vec3{1, 0, 0}));
+                    take_scabbard(0, pm, sc, hsvr::Vec3{0, 0, 20}, socket_rotation(pm, bone_fname("hand_l")), hsvr::quat_axis_angle(ax, deg * 3.14159265358979 / 180.0), true,
+                                  hsvr::config());
+                    HSVR_LOG("Script: hsvr.scabbard_test: left hand took %ls, wanted %.0f deg turned (limit %.0f)", sc->GetName().c_str(), deg, hsvr::config().pose_scabbard_angle_deg);
+                }
+                else
+                    HSVR_LOG("Script: hsvr.scabbard_test: no belt scabbard with a pin");
                 continue;
             }
             if (entry.command == "hsvr.sheathe_test")
