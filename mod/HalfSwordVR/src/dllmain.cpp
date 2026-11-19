@@ -7082,6 +7082,37 @@ namespace
                         }
                     }
                     double bm = stab_var(cs, STR("Bone Mass"));
+                    // The joint's own keep test, redone here (@35540-@37600): a sphere (3 cm, 15 with
+                    // spikes) from the blade's Base, moved toward the Tip by 50 - length for a thrust,
+                    // to the Tip, against his body; kept when the first bone hit is the stuck bone.
+                    std::wstring trace_bone = STR("-");
+                    int trace_hit = -1;
+                    UObject* tipc = object_property(cs, STR("Tip"));
+                    UObject* basec = object_property(cs, STR("Base"));
+                    UObject* bodyc = object_property(cs, STR("Component 2 (Body)"));
+                    if (tipc && basec && bodyc)
+                    {
+                        Vec3 tp = component_location(tipc), bp = component_location(basec);
+                        Vec3 d = tp - bp;
+                        double len = length(d);
+                        Vec3 dir = len > 1e-3 ? d * (1.0 / len) : Vec3{};
+                        double shift = bool_property(cs, STR("Thrust?")) ? (std::max)(0.0, 50.0 - len) : 0.0;
+                        if (len >= 50.0) shift = 0.0;
+                        Vec3 start = bp + dir * shift;
+                        Call tr(bodyc, STR("K2_SphereTraceComponent"));
+                        tr.three(STR("TraceStart"), start.x, start.y, start.z);
+                        tr.three(STR("TraceEnd"), tp.x, tp.y, tp.z);
+                        tr.number(STR("SphereRadius"), bool_property(cs, STR("Spikes (temp)")) ? 15.0 : 3.0);
+                        tr.run();
+                        if (FProperty* rp = tr.param(STR("ReturnValue")))
+                        {
+                            auto* bp2 = static_cast<FBoolProperty*>(rp);
+                            trace_hit = (tr.buffer[rp->GetOffset_Internal() + bp2->GetByteOffset()] & bp2->GetFieldMask()) ? 1 : 0;
+                        }
+                        if (FProperty* np = tr.param(STR("BoneName"))) trace_bone = reinterpret_cast<FName*>(tr.buffer.data() + np->GetOffset_Internal())->ToString();
+                        HSVR_LOG("Stab: stuck trace: blade %.1f cm, start shifted %.1f, trace hit %d bone %ls, stuck bone %ls",
+                                 len, shift, trace_hit, trace_bone.c_str(), stab_name_var(cs, STR("Dismember Bone Name")).c_str());
+                    }
                     const HoldState& h = g_hold[side];
                     HSVR_LOG("Stab: stuck tick: joint %ls hitting body %.0f, activate %.0f, distance %.1f, force lin %.0f + ang %.0f vs keep limit %.0f "
                              "(bone mass %.2f); hold lag %.1f cm, force %.0f N, torque %.1f N m",
