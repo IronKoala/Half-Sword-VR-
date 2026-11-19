@@ -381,6 +381,9 @@ namespace hsvr
         // Finger shapes go only to the animation's copy of each hand's grip type (written right after
         // ABP_Willie's update), never to the pawn's, so the game's two-handed rules and Set Up never see them.
         bool pose_fingers_anim_only = true;
+        // Write the body pose inside his animation update (right before it is evaluated) rather than at the
+        // start of the engine tick (the drawn hand on a held item showed the previous frame's solve).
+        bool pose_in_anim_update = true;
         // The game's swing speed (Aim Swing Speed) fed from the controllers: the faster hand that holds
         // something, lo..hi m/s relative to the body -> 0..75; falls with this time constant.
         bool pose_feed_swing_speed = true;

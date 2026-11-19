@@ -393,6 +393,7 @@ namespace hsvr
         num("pose_two_hand_let_go_cm", c.pose_two_hand_let_go_cm);
         flag("pose_two_hand_curl", c.pose_two_hand_curl);
         flag("pose_fingers_anim_only", c.pose_fingers_anim_only);
+        flag("pose_in_anim_update", c.pose_in_anim_update);
         flag("pose_feed_swing_speed", c.pose_feed_swing_speed);
         flag("pose_grab_seat", c.pose_grab_seat);
         flag("pose_throw", c.pose_throw);

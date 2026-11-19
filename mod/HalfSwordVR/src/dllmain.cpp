@@ -1286,6 +1286,33 @@ namespace
         g_anim_grip[side] = g;
         g_anim_grip_time[side] = hsvr::now_seconds();
     }
+    // The body pose written inside his animation update (pose_in_anim_update), right before the arm
+    // nodes are evaluated, instead of at the start of the engine tick: on frames where a held item
+    // moved, his drawn hand showed the previous frame's solve (96% of the worst ticks, playtest 10:36),
+    // which shook the hand on a steady sword. The engine tick still runs it when this has not fired.
+    void pose_body(const hsvr::Config& cfg);
+    std::atomic<double> g_pose_in_anim_at{-1.0};
+    void pose_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        if (!context || !g_pose.instance || context != g_pose.instance || !function) return;
+        if (g_anim_update) { if (function != g_anim_update) return; }
+        else
+        {
+            if (function->GetName() != STR("BlueprintUpdateAnimation")) return;
+            g_anim_update = function;
+        }
+        hsvr::Config cfg = hsvr::config();
+        if (!cfg.pose_in_anim_update) return;
+        static bool said = false;
+        if (!said)
+        {
+            said = true;
+            HSVR_LOG("Pose: written inside his animation update (pose_in_anim_update)");
+        }
+        g_pose_in_anim_at.store(hsvr::now_seconds());
+        pose_body(cfg);
+    }
+
     void fingers_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!g_pose_active.load() || !context || context != g_pose.instance || !function) return;
@@ -12175,7 +12202,9 @@ namespace
         log_controllers(cfg);
         body_log_tick(cfg);
         pose_probe(cfg);
-        pose_body(cfg);
+        // Inside his animation update when that runs (pose_after_anim_update); here otherwise (first
+        // frames, menus, the switch off), so the pose still starts and releases.
+        if (!cfg.pose_in_anim_update || hsvr::now_seconds() - g_pose_in_anim_at.load() > 0.25) pose_body(cfg);
         hide_own_head(cfg);
         grab_button(cfg, hsvr::controllers_state(), shared.menu_up.load());
         watch_vars_tick();
@@ -12261,6 +12290,7 @@ class HalfSwordVR : public CppUserModBase
         }
         Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});
         Hook::RegisterProcessEventPostCallback(&capsule_after_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleAfter")});
+        Hook::RegisterProcessEventPostCallback(&pose_after_anim_update, {false, false, STR("HalfSwordVR"), STR("PoseAfterAnim")});
         Hook::RegisterProcessEventPostCallback(&feet_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FeetAfterAnim")});
         Hook::RegisterProcessEventPostCallback(&fingers_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FingersAfterAnim")});
         Hook::RegisterEngineTickPreCallback(
