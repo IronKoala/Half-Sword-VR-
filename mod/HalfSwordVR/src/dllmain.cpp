@@ -4652,7 +4652,7 @@ namespace
                             const hsvr::Vec3* axis, const char* what);
     FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t);
     int clamp_grip_type(int side, int g);
-    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out = nullptr);
+    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out = nullptr, UObject** out_part = nullptr);
 
     // The grab button (Phase 4): squeezing a controller's grip with that hand empty picks up the
     // nearest loose weapon whose body is within pose_grab_radius_cm of the hand; letting go of the
@@ -5493,7 +5493,7 @@ namespace
     std::unordered_map<UObject*, std::vector<UObject*>> g_weapon_parts;
     double g_weapon_parts_time = -10.0;
 
-    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out)
+    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part)
     {
         if (!weapon) return -1.0;
         double now = hsvr::now_seconds();
@@ -5540,6 +5540,7 @@ namespace
             if (d < 0.0 || (best >= 0.0 && d >= best)) continue;
             best = d;
             if (out) *out = q.vec(STR("OutPointOnBody"));
+            if (out_part) *out_part = c;
         }
         return best;
     }
@@ -6121,24 +6122,35 @@ namespace
             Quat br = component_rotation(base);
             Vec3 side[4] = {br.rotate({1, 0, 0}), br.rotate({-1, 0, 0}), br.rotate({0, 1, 0}), br.rotate({0, -1, 0})};
             const double out = 12.0, step = 2.0;
-            // 0 = on the weapon and narrow, 1 = wide, 2 = off the weapon
+            const Config& hc = hsvr::config();
+            // 0 = on the weapon and narrow, 1 = wide, 2 = off the weapon; width = how far the widest part
+            // level with the step reaches from the axis (cm), part = that part.
+            struct Probe { int state; double width; UObject* part; double off; };
             auto probe = [&](double z) {
                 Vec3 a = bp + br.rotate({pivot.x, pivot.y, pivot.z + z});
+                Probe r{0, 0.0, nullptr, 0.0};
                 double d = closest_on_weapon(weapon, a);
-                if (d < 0.0 || d > 3.0) return 2;
+                r.off = d;
+                if (d < 0.0 || d > 3.0) { r.state = 2; return r; }
                 // The nearest point of the parts seen from 12 cm out: wide only when that point is level
                 // with this step (a guard a few cm further along would otherwise read as wide here).
                 for (const Vec3& dir : side)
                 {
                     Vec3 q;
-                    double e = closest_on_weapon(weapon, a + dir * out, &q);
+                    UObject* part = nullptr;
+                    double e = closest_on_weapon(weapon, a + dir * out, &q, &part);
                     if (e < 0.0) continue;
                     Vec3 l = br.inverse().rotate(q - a);
-                    if (std::fabs(l.z) <= step * 0.75 && std::sqrt(l.x * l.x + l.y * l.y) > wide_cm) return 1;
+                    double w = std::sqrt(l.x * l.x + l.y * l.y);
+                    if (std::fabs(l.z) <= step * 0.75 && w > r.width) { r.width = w; r.part = part; }
                 }
-                return 0;
+                if (r.width > wide_cm) r.state = 1;
+                return r;
             };
-            if (probe(0.0) != 2)
+            auto part_name = [](UObject* p) { return p ? p->GetName() : std::wstring(STR("?")); };
+            double bottom = 0.0;
+            if (FProperty* bpz = weapon->GetPropertyByNameInChain(STR("Length to Bottom"))) bottom = number_property(weapon, bpz);
+            if (probe(0.0).state != 2)
             {
                 m.ok = true;
                 double limit = (std::max)(300.0, tip + 20.0);
@@ -6148,13 +6160,48 @@ namespace
                     bool wide = false;
                     for (double z = step; z <= limit; z += step)
                     {
-                        int r = probe(dirn * z);
-                        if (r != 0)
+                        Probe r = probe(dirn * z);
+                        if (r.state == 0)
                         {
-                            wide = r == 1;
-                            break;
+                            last = z;
+                            continue;
                         }
-                        last = z;
+                        // A short wide bit (a ring, a langet's end) or a short gap between parts, with narrow
+                        // haft past it, is crossed (pose_slide_ring_*); a guard, a rondel or a head is not.
+                        double run_w = r.state == 1 ? r.width : 0.0;
+                        UObject* run_part = r.part;
+                        bool any_off = r.state == 2, resumed = false;
+                        double z2 = z;
+                        double scan = (std::max)(hc.pose_slide_ring_max_len_cm, hc.pose_slide_gap_max_cm) + step;
+                        // Below the grip, the game's own bottom length says how far the weapon goes on.
+                        if (dirn < 0 && hc.pose_slide_butt_is_haft && bottom > z + step) scan = (std::max)(scan, (std::min)(bottom - z, 40.0));
+                        for (; z2 <= z + scan; z2 += step)
+                        {
+                            Probe r2 = z2 == z ? r : probe(dirn * z2);
+                            if (r2.state == 0) { resumed = true; break; }
+                            if (r2.state == 1 && r2.width > run_w) { run_w = r2.width; run_part = r2.part; }
+                            any_off |= r2.state == 2;
+                        }
+                        double run_len = z2 - z;
+                        bool hafted = last >= 30.0;
+                        bool rondel = hafted && run_part && part_name(run_part).find(STR("Guard")) != std::wstring::npos;
+                        bool butt = dirn < 0 && resumed && bottom > z2 && hc.pose_slide_butt_is_haft; // a pollaxe butt cap: 9 cm wide, haft past it
+                        bool cross = hc.pose_slide_ring_max_len_cm > 0.0 && resumed && !(rondel && hc.pose_slide_rondel_stops) &&
+                                     (butt || (run_len <= (any_off ? hc.pose_slide_gap_max_cm : hc.pose_slide_ring_max_len_cm) &&
+                                               run_w <= hc.pose_slide_ring_max_width_cm));
+                        if (cross)
+                        {
+                            HSVR_LOG("Haft: %ls %s %.0f..%.0f cm (%.0f cm long, %.1f cm from the axis, part %ls%s): crossed", weapon->GetName().c_str(),
+                                     any_off ? "gap" : "wide bit", dirn * z, dirn * z2, run_len, run_w, part_name(run_part).c_str(), butt ? ", butt end" : "");
+                            last = z2;
+                            z = z2;
+                            continue;
+                        }
+                        HSVR_LOG("Haft: %ls stops at %.0f cm: %s (%.1f cm from the axis, part %ls, %.0f cm long%s%s; parts nearest %.1f cm)",
+                                 weapon->GetName().c_str(), dirn * z, r.state == 1 ? "wide" : "off the parts", run_w, part_name(run_part).c_str(), run_len,
+                                 resumed ? ", narrow again past it" : "", rondel ? ", a rondel" : "", r.off);
+                        wide = r.state == 1;
+                        break;
                     }
                     // A wide part stops the hand at the part itself (its near edge, a step past the last narrow one).
                     if (dirn < 0) { m.lo = -(wide ? last + step * 0.5 : last); m.wide_lo = wide; }
@@ -6475,9 +6522,43 @@ namespace
     // 1 for a fresh, healthy Willie of usual strength. Each part can be switched off for testing.
     struct BodyStrength
     {
-        double total = 1.0, strength = 1.0, injury = 1.0, stamina = 1.0;
+        double total = 1.0, strength = 1.0, injury = 1.0, stamina = 1.0, size = 1.0;
         double muscle_rate = -1.0, tonus = -1.0, consciousness = -1.0, stamina_value = -1.0;
     };
+
+    // His arm's mass against a default creator body's (Height 0.5 -> scale 0.9375, Weight 0.5 -> Mass Scale
+    // 1.125). Flat Half Sword's arm motors are the same for every body (acceleration-mode drives, CPA's
+    // strength ratio Mass Scale / GetMassScale = 1), so a weapon slows a light arm more than a heavy one:
+    // what differs between bodies is the arm's mass next to the weapon's. Arm mass = (upperarm 1.39 +
+    // lowerarm 1.22 kg, from their volume, so x scale^3) + hand 1 kg (a fixed override), all x Mass Scale
+    // (willie_physics_assets.md; Set Character Height: scale = MapRange(Height 0..1 -> 0.875..1);
+    // Mass Scale (Set in BP) = MapRange(Muscle Rate 0..1 -> 1..1.25)). Range 0.78 (min/min) .. 1.27 (max/max).
+    double body_size_factor(UObject* pawn)
+    {
+        static UObject* last_pawn = nullptr;
+        static double last = 1.0;
+        if (pawn == last_pawn) return last;
+        double scale = -1.0, mass_scale = -1.0;
+        if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Character Scale (Set in BP)")))
+        {
+            if (p->GetClass().GetName() == STR("StructProperty"))
+            {
+                double v[3] = {0, 0, 0};
+                read_three(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal(), p, v);
+                scale = v[0];
+            }
+        }
+        if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Mass Scale (Set in BP)"))) mass_scale = number_property(pawn, p);
+        // Read too early (before the game sets them) they are 0: try again next time.
+        if (!(scale > 0.3 && scale < 3.0) || !(mass_scale > 0.1 && mass_scale < 5.0)) return 1.0;
+        auto arm = [](double sc, double ms) { return (2.61 * sc * sc * sc + 1.0) * ms; };
+        double f = arm(scale, mass_scale) / arm(0.9375, 1.125);
+        last_pawn = pawn;
+        last = f;
+        HSVR_LOG("Strength: body size: Character Scale %.4f, Mass Scale %.3f -> arm mass %.2f kg vs %.2f kg for a default body -> hold x%.2f", scale, mass_scale,
+                 arm(scale, mass_scale), arm(0.9375, 1.125), f);
+        return f;
+    }
     BodyStrength body_strength(UObject* pawn, int side, const hsvr::Config& cfg)
     {
         BodyStrength b;
@@ -6497,13 +6578,14 @@ namespace
         // The arm's tonus already falls with exhaustion (the game caps it 1 -> 0.25 as Exhaustion rises,
         // which happens only once stamina is nearly gone), so stamina and tonus are not multiplied
         // (strength test 1: that counted it twice, 0.33 at stamina 0): the weaker of the two counts.
-        b.total = (std::max)(cfg.pose_body_strength_min, b.strength * (std::min)(b.injury, b.stamina));
+        if (cfg.pose_body_size_strength) b.size = body_size_factor(pawn);
+        b.total = (std::max)(cfg.pose_body_strength_min, b.strength * b.size * (std::min)(b.injury, b.stamina));
         static bool reported = false;
         if (!reported)
         {
             reported = true;
-            HSVR_LOG("Strength: Muscle Rate %.2f, Arm %s Tonus %.3f, Consciousness %.0f, Stamina %.1f (-1 = not found) -> strength %.2f x injury %.2f x stamina %.2f = %.2f",
-                     b.muscle_rate, side == 0 ? "L" : "R", b.tonus, b.consciousness, b.stamina_value, b.strength, b.injury, b.stamina, b.total);
+            HSVR_LOG("Strength: Muscle Rate %.2f, Arm %s Tonus %.3f, Consciousness %.0f, Stamina %.1f (-1 = not found) -> strength %.2f x size %.2f x injury %.2f x stamina %.2f = %.2f",
+                     b.muscle_rate, side == 0 ? "L" : "R", b.tonus, b.consciousness, b.stamina_value, b.strength, b.size, b.injury, b.stamina, b.total);
         }
         return b;
     }

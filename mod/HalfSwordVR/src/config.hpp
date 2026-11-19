@@ -323,6 +323,19 @@ namespace hsvr
         // polearm's hook or head, a wide pommel). 0 = the game's lengths and its Head module only.
         bool pose_slide_zone_measured = true;
         double pose_slide_wide_cm = 4.0;
+        // The hold's force and torque caps x his arm mass against a default creator body's (height and
+        // weight/muscle; 0.78 smallest .. 1.27 biggest), as flat Half Sword's weapon-to-arm mass ratio.
+        bool pose_body_size_strength = true;
+        // Thin bits on a haft the hand slides over: a wide stretch no longer than ring_max_len_cm along the
+        // haft and reaching no more than ring_max_width_cm from its axis, or a gap between parts no longer
+        // than gap_max_cm, with narrow haft past it (ring_max_len_cm 0 = every wide bit stops the hand).
+        // rondel_stops: a Guard part on a haft (a pollaxe's rondel) stops the hand. butt_is_haft: below the
+        // grip, parts that carry on toward the game's own bottom length (a pollaxe's butt) count as haft.
+        double pose_slide_ring_max_len_cm = 2.5; // measured: war staff lug 2 cm; rondel and sword guards 6 cm
+        double pose_slide_ring_max_width_cm = 10.5; // war staff lug 10 cm; sword guards 11-12 cm
+        double pose_slide_gap_max_cm = 4.0;
+        bool pose_slide_rondel_stops = true;
+        bool pose_slide_butt_is_haft = true;
         double pose_slide_rate_min = 3.0;
         double pose_slide_rate_max = 40.0;
         double pose_slide_max_cm_s = 250.0; // fastest the hand runs along a weapon

@@ -368,6 +368,12 @@ namespace hsvr
         num("pose_slide_hand_half_cm", c.pose_slide_hand_half_cm);
         flag("pose_slide_zone_measured", c.pose_slide_zone_measured);
         num("pose_slide_wide_cm", c.pose_slide_wide_cm);
+        flag("pose_body_size_strength", c.pose_body_size_strength);
+        num("pose_slide_ring_max_len_cm", c.pose_slide_ring_max_len_cm);
+        num("pose_slide_ring_max_width_cm", c.pose_slide_ring_max_width_cm);
+        num("pose_slide_gap_max_cm", c.pose_slide_gap_max_cm);
+        flag("pose_slide_rondel_stops", c.pose_slide_rondel_stops);
+        flag("pose_slide_butt_is_haft", c.pose_slide_butt_is_haft);
         num("pose_slide_rate_min", c.pose_slide_rate_min);
         num("pose_slide_rate_max", c.pose_slide_rate_max);
         num("pose_slide_max_cm_s", c.pose_slide_max_cm_s);
