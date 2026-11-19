@@ -5110,27 +5110,71 @@ namespace
         return b;
     }
 
-    // Holding and swinging tire him. The game's own drain (strength_stamina.md, @441296 and @354657)
-    // reads the hand joint's force, which the hold leaves at 0, and the mouse's "Aim Swing Speed",
-    // which VR never moves. The mod runs the same formula on the hold: the hand's burn rate is the
-    // force it pulls with (in the game's units, x0.01, so N) times MRC(Muscle Rate, 0..3 -> 1..0.1),
-    // kept only from 10 up, and the swing is the speed at the grip mapped like the mouse's aim speed
-    // (pose_stamina_swing_cm_s lo..hi -> x10..x85), x0.0125, x pose_stamina_scale.
-    void drain_stamina(UObject* pawn, double force_n, double grip_speed_cm_s, double dt, const hsvr::Config& cfg)
+    // Holding and swinging tire him, by the game's own drain (stamina_calibration.md, Willie @441248,
+    // "R Hand Stamina Burn Rate f", @354657), which reads the hand joint (0 under the mod's hold) and
+    // the mouse's "Aim Swing Speed" (never moved in VR). Per hand:
+    //   burn B = (F + 100 tau) / 60 x MRC(Muscle Rate, 0..3 -> 1..0.1), kept only from 10 up
+    //     (the game's joint "force" is an impulse per step, so at 60 fps it is (F N + 100 tau N m) / 60);
+    //     F and tau the hold's own, capped at pose_stamina_force_cap_n / pose_stamina_torque_cap_nm
+    //     (a weapon snagged or blocked made 680 N and emptied the bar in a second, playtest 2026-11-18);
+    //   swing M = the controller's speed at the grip, smoothed over pose_stamina_speed_smooth_s,
+    //     lo..hi cm/s -> x10..x85 (the game's Aim Swing Speed builds up the same way: one swing stays near x10);
+    //   per second = B x M x 0.0125 x MRC(Fat Rate, -1..10 -> 0.5..2.25) x pose_stamina_scale.
+    struct StaminaHand
     {
-        if (!pawn || cfg.pose_stamina_scale <= 0.0) return;
-        double mr = read_number_variable(pawn, STR("Muscle Rate"));
-        double strength = mr >= 0.0 ? 1.0 - 0.9 * (std::min)(1.0, (std::max)(0.0, mr / 3.0)) : 1.0;
-        double burn = force_n * strength;
-        if (burn < 10.0) return;
+        bool have = false;
+        hsvr::Vec3 last;
+        double speed = 0.0;
+    };
+    StaminaHand g_stamina_hand[2];
+    double number_var(UObject* owner, const TCHAR* name, bool& found)
+    {
+        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        found = p != nullptr;
+        return p ? number_property(owner, p) : 0.0;
+    }
+    double map_range(double v, double a, double b, double x, double y)
+    {
+        double t = (std::min)(1.0, (std::max)(0.0, (v - a) / (b - a)));
+        return x + (y - x) * t;
+    }
+    void drain_stamina(int side, UObject* pawn, double force_n, double torque_nm, const hsvr::Vec3& grip_target, double dt, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        StaminaHand& sh = g_stamina_hand[side];
+        if (!pawn || dt <= 0.0) return;
+        if (sh.have)
+        {
+            double inst = length(grip_target - sh.last) / dt;
+            if (inst > 3000.0) inst = sh.speed; // a recentre or teleport, not a swing
+            double a = (std::min)(1.0, dt / (std::max)(0.01, cfg.pose_stamina_speed_smooth_s));
+            sh.speed += (inst - sh.speed) * a;
+        }
+        sh.last = grip_target;
+        sh.have = true;
+        if (cfg.pose_stamina_scale <= 0.0) return;
+        bool has_mr = false, has_fat = false;
+        double mr = number_var(pawn, STR("Muscle Rate"), has_mr);
+        double fat = number_var(pawn, STR("Fat Rate"), has_fat);
+        double strength = has_mr ? map_range(mr, 0.0, 3.0, 1.0, 0.1) : 1.0;
+        double fat_k = has_fat ? map_range(fat, -1.0, 10.0, 0.5, 2.25) : 1.0;
+        double f = (std::min)(force_n, cfg.pose_stamina_force_cap_n), t = (std::min)(torque_nm, cfg.pose_stamina_torque_cap_nm);
+        double burn = (f + 100.0 * t) / 60.0 * strength;
         double lo = cfg.pose_stamina_swing_lo_cm_s, hi = (std::max)(lo + 1.0, cfg.pose_stamina_swing_hi_cm_s);
-        double t = (std::min)(1.0, (std::max)(0.0, (grip_speed_cm_s - lo) / (hi - lo)));
-        double swing = 10.0 + 75.0 * t;
+        double swing = map_range(sh.speed, lo, hi, 10.0, 85.0);
+        double per_s = burn >= 10.0 ? burn * swing * 0.0125 * fat_k * cfg.pose_stamina_scale : 0.0;
         double st = read_number_variable(pawn, STR("Stamina"));
         if (st < 0.0) return;
-        double per_s = burn * swing * 0.0125 * cfg.pose_stamina_scale;
-        set_variable(pawn, STR("Stamina"), (std::max)(0.0, st - per_s * dt));
-        HSVR_LOG_EVERY(1.0, "Stamina: %.1f, taking %.1f a second (hold %.0f N, grip %.0f cm/s, swing x%.0f)", st, per_s, force_n, grip_speed_cm_s, swing);
+        if (per_s > 0.0) set_variable(pawn, STR("Stamina"), (std::max)(0.0, st - per_s * dt));
+        static double last_line[2] = {0.0, 0.0};
+        double now = now_seconds();
+        if (now - last_line[side] >= 1.0)
+        {
+            last_line[side] = now;
+            HSVR_LOG("Stamina: %s hand: %.1f, taking %.1f a second (burn %.1f from %.0f N, %.1f N m; speed %.0f cm/s -> x%.0f; Muscle Rate %s%.2f x%.2f, Fat Rate %s%.2f x%.2f)",
+                     side == 0 ? "left" : "right", st, per_s, burn, force_n, torque_nm, sh.speed, swing, has_mr ? "" : "(not found) ", mr, strength,
+                     has_fat ? "" : "(not found) ", fat, fat_k);
+        }
     }
 
     // One tick of the hold for one hand. `joint` is the game's hand joint (its frames say where on the
@@ -5437,7 +5481,6 @@ namespace
         force = clamp_length(force, max_force);
         Vec3 v_next = v + force * (dt / mass);
         h.force_n = length(force) / 100.0;
-        drain_stamina(pawn, h.force_n, length(v), dt, cfg);
         // The weight (less what the grip's acceleration takes) turns the weapon about the point held.
         double gz = g_weapon_gravity.load() == 0 ? 0.0 : -980.0;
         Vec3 gravity{0.0, 0.0, gz};
@@ -5471,6 +5514,7 @@ namespace
         h.torque_capped = length(torque) > max_torque;
         torque = clamp_length(torque, max_torque);
         h.torque_nm = length(torque) / 1e4;
+        drain_stamina(side, pawn, h.force_n, h.torque_nm, target_pivot, dt, cfg);
         Vec3 w_next = clamp_length(w + inertia.inverse() * ((torque + weight) * dt), 60.0);
         // 20 m/s is beyond any real hand; it only guards against tracking glitches.
         v_next = clamp_length(v_next, 2000.0);

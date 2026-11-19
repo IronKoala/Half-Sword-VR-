@@ -198,11 +198,15 @@ namespace hsvr
         bool pose_body_strength = true;
         double pose_body_stamina_floor = 0.5;
         double pose_body_strength_min = 0.1;
-        // Holding and swinging cost stamina by the game's own formula, run on the hold's force and the
-        // grip's speed (mapped like the mouse's aim speed: lo..hi cm/s -> x10..x85), times this scale.
+        // Holding and swinging cost stamina by the game's own formula, run on the hold's force and
+        // torque (capped) and the controller's speed at the grip, smoothed (lo..hi cm/s -> x10..x85),
+        // times this scale (3-5 if continuous swinging should empty the bar in 10-20 s).
         double pose_stamina_scale = 1.0;
         double pose_stamina_swing_lo_cm_s = 200.0;
-        double pose_stamina_swing_hi_cm_s = 600.0;
+        double pose_stamina_swing_hi_cm_s = 700.0;
+        double pose_stamina_speed_smooth_s = 0.7;
+        double pose_stamina_force_cap_n = 150.0;
+        double pose_stamina_torque_cap_nm = 15.0;
         double pose_hold_spring = 5000.0;
         double pose_hold_damper = 100.0;
         double pose_hold_max_force = 3000.0;
