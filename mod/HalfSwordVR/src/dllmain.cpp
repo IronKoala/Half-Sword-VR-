@@ -1902,10 +1902,38 @@ namespace
                 static int seen18 = -1;
                 if (seen18 != g_fake_arm_epoch.load()) t0 = now;
                 seen18 = g_fake_arm_epoch.load();
-                Vec3 a{18.0, out * 38.0, 12.0}, b{18.0, -out * 12.0, 12.0};
+                // Aimed at the nearest other Willie's head when there is one (the sweep's frame faces him, the
+                // hand passing at 60% of his distance, so the forearm and elbow cross his head/neck).
+                Quat frame = body;
+                double reach = 18.0, height = 12.0;
+                {
+                    std::vector<UObject*> ws;
+                    UObjectGlobals::FindAllOf(STR("Willie_BP_C"), ws);
+                    UObject* foe = nullptr;
+                    double best = 1e9;
+                    for (UObject* w : ws)
+                    {
+                        if (!w || w == g_pose.pawn || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                        double d = length(actor_location(w) - shoulder);
+                        if (d < best) { best = d; foe = w; }
+                    }
+                    if (UObject* fm = foe ? object_property(foe, STR("Mesh")) : nullptr)
+                    {
+                        Vec3 head = socket_location(fm, bone_fname("head"));
+                        Vec3 to = head - shoulder;
+                        double flat = std::sqrt(to.x * to.x + to.y * to.y);
+                        if (flat > 5.0 && flat < 120.0)
+                        {
+                            frame = quat_from_yaw_deg(std::atan2(to.y, to.x) * 180.0 / 3.14159265358979);
+                            reach = flat * 0.6;
+                            height = to.z;
+                        }
+                    }
+                }
+                Vec3 a{reach, out * 38.0, height}, b{reach, -out * 25.0, height};
                 double t = std::fmod(now - t0, 2.2);
                 double u = t < 1.4 ? 0.0 : (t < 1.52 ? (t - 1.4) / 0.12 : (t < 1.6 ? 1.0 : (std::max)(0.0, 1.0 - (t - 1.6) / 0.6)));
-                grip = shoulder + body.rotate(a + (b - a) * u);
+                grip = shoulder + frame.rotate(a + (b - a) * u);
             }
             if ((mode == 16 || mode == 17) && side == 1 && g_pose.pawn)
             {
