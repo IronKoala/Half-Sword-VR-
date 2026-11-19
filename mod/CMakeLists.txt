@@ -6,3 +6,4 @@ project(HalfSwordVRMod)
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../deps/RE-UE4SS ${CMAKE_BINARY_DIR}/RE-UE4SS)
 add_subdirectory(HalfSwordVR)
+add_subdirectory(HalfSwordCustomWeapon)
