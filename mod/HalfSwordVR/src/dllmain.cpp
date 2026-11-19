@@ -1642,7 +1642,30 @@ namespace
             grip_rot = (body * rot_to_quat(60.0, 0.0, 0.0)).normalized(); // controller handle tilted forward, as held
             // Mode 9: at the mouth, the hand turning over (a full turn about his right in 6 s), so a
             // held bottle tips its neck down at some point (drinking tests).
-            if (mode == 10 && side == 1) grip_rot = (body * rot_to_quat(g_fake_thrust_pitch.load(), 0.0, 0.0)).normalized();
+            if (mode == 10 && side == 1)
+            {
+                // The test hand turns, a little each tick, until the held weapon's tip points
+                // straight ahead (its first "Tip" marker's forward, the direction the game reads a
+                // thrust in), pitched down by hsvr.arm_move 10's pitch argument.
+                static Quat aim{0, 0, 0, 1};
+                Vec3 want = (body * rot_to_quat(-g_fake_thrust_pitch.load(), 0.0, 0.0)).normalized().rotate({1.0, 0.0, 0.0});
+                UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
+                RawArray* tips = held ? held->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")) : nullptr;
+                if (tips && tips->Data && tips->Num > 0 && tips->Data[0])
+                {
+                    Call f(static_cast<UObject*>(tips->Data[0]), STR("GetForwardVector"));
+                    f.run();
+                    Vec3 have = f.vec();
+                    Vec3 axis = cross(have, want);
+                    double sn = length(axis), cs = have.x * want.x + have.y * want.y + have.z * want.z;
+                    if (sn > 1e-6)
+                    {
+                        double ang = std::atan2(sn, cs) * 0.15;
+                        aim = (quat_axis_angle(axis * (1.0 / sn), ang) * aim).normalized();
+                    }
+                }
+                grip_rot = (aim * body * rot_to_quat(60.0, 0.0, 0.0)).normalized();
+            }
             if (mode == 9) grip_rot = (body * quat_axis_angle(Vec3{0, 1, 0}, std::fmod(now, 6.0) / 6.0 * 2.0 * 3.14159265358979) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
         }
         Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
@@ -6500,7 +6523,12 @@ namespace
     {
         if (!owner) return -999.0;
         FProperty* p = owner->GetPropertyByNameInChain(name);
-        return p ? number_property(owner, p) : -999.0;
+        if (!p) return -999.0;
+        auto kind = p->GetClass().GetName();
+        const uint8_t* at = reinterpret_cast<const uint8_t*>(owner) + p->GetOffset_Internal();
+        if (kind == STR("ByteProperty") || kind == STR("EnumProperty")) return *at;
+        if (kind == STR("IntProperty")) return *reinterpret_cast<const int32_t*>(at);
+        return number_property(owner, p);
     }
 
     int stab_array_num(UObject* owner, const TCHAR* name)
@@ -6548,14 +6576,17 @@ namespace
         UObject* hit_comp = object_property(wp, STR("Hit Comp"));
         HSVR_LOG("Stab: #%d %s: cutting rate %.1f, tip align %.2f, edge align %.2f, stab %.0f, normal impulse %.0f, last hit power %.0f, "
                  "sliding %.0f/%.0f, stuck in body %.0f, stuck joints %d, jammed tip %s, hit %ls bone %ls, surface %.0f, temp no damage %.0f, "
-                 "rubber banded %.0f, high threshold %.0f, just picked up %.0f; his soft-not-attached R %.0f L %.0f",
+                 "rubber banded %.0f, high threshold %.0f, just picked up %.0f; his soft-not-attached R %.0f L %.0f; just parried %.2f, "
+                 "edge sharp %.0f, tip sharp %.0f, rigidity %.2f, mat density %.0f, stab rate %.2f, piercing %.0f",
                  w.id, when, stab_var(wp, STR("Cutting Rate")), stab_var(wp, STR("Tip Alignment")), stab_var(wp, STR("Edge Alignment")),
                  stab_var(wp, STR("Stab?")), stab_var(wp, STR("Normal Impulse")), stab_var(wp, STR("Last Hit Power")), stab_var(wp, STR("Sliding")),
                  stab_var(wp, STR("Sliding 2")), stab_var(wp, STR("Stuck In Body")), stab_array_num(wp, STR("Stuck Constraints Array")),
                  jammed ? "yes" : "no", hit_comp ? hit_comp->GetName().c_str() : STR("none"), stab_name_var(wp, STR("Hit Bone Name")).c_str(),
                  stab_var(wp, STR("Hit Surface")), stab_var(wp, STR("Temp Disable Damage")), stab_var(wp, STR("Being Rubber Banded")),
                  stab_var(wp, STR("High Collision Threshold")), stab_var(wp, STR("Just Picked Up")), stab_var(pawn, STR("R Hand Soft Not Attached")),
-                 stab_var(pawn, STR("L Hand Soft Not Attached")));
+                 stab_var(pawn, STR("L Hand Soft Not Attached")), stab_var(wp, STR("Just Parried Rate")), stab_var(wp, STR("Edge Sharpness")),
+                 stab_var(wp, STR("Tip Sharpness")), stab_var(wp, STR("Rigidity")), stab_var(wp, STR("Mat Density")), stab_var(wp, STR("Stab Rate")),
+                 stab_var(wp, STR("Piercing")));
     }
 
     void stab_hit_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
@@ -6620,7 +6651,8 @@ namespace
                 std::memcpy(b.buffer.data() + hp->GetOffset_Internal(), src, (std::min)(hp->GetSize(), hit_prop->GetSize()));
                 b.run();
                 if (FProperty* c = b.param(STR("HitComponent"))) victim_comp = *reinterpret_cast<UObject**>(b.buffer.data() + c->GetOffset_Internal());
-                if (FProperty* c = b.param(STR("BoneName"))) bone = *reinterpret_cast<FName*>(b.buffer.data() + c->GetOffset_Internal()), bone_s = bone.ToString();
+                // HitBoneName is the bone of what was hit; BoneName is our own (none on a weapon part).
+                if (FProperty* c = b.param(STR("HitBoneName"))) bone = *reinterpret_cast<FName*>(b.buffer.data() + c->GetOffset_Internal()), bone_s = bone.ToString();
                 impact = b.vec(STR("ImpactPoint"));
             }
         }
