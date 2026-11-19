@@ -548,6 +548,14 @@ namespace hsvr
         double pose_grab_body_cap_per_t = 450.0;
         double pose_grab_body_max = 250000.0;    // drive cap when cap_per_t is 0
         double pose_grab_body_let_go_cm = 30.0; // hand this far from the grab point for 0.3 s lets go
+        // The game's grip-slip (joint force > his grip strength T for ~0.1 s) is made for a physical hand;
+        // a tracked hand's own motion trips it (Matthew's playtest 2026-11-19: all three throat grabs
+        // released by it in 0.6-0.7 s with a healthy arm). 1 = while a body is held, the game's own
+        // 'Hand Block Drop' (which it sets itself for the first 0.5 s of a grab) is kept on, and the hand
+        // lets go instead when pulled pose_grab_body_let_go_cm off its hold (B&S). His grip strength T
+        // still counts: below pose_grab_body_slip_below_t (a broken or numb arm) the game's slip applies.
+        bool pose_grab_body_no_slip = true;
+        double pose_grab_body_slip_below_t = 20.0;
         // Eating and drinking: grabbed food within pose_eat_cm of your mouth is bitten (the game's
         // Bite Event); a held bottle at your mouth with its neck below pose_drink_tip (the dot of its
         // axis with up) is drunk from, at most once a second.

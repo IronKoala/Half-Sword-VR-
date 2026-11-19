@@ -2919,6 +2919,7 @@ namespace
     }
 
     void fist_flags_before_tick(UObject* pawn);
+    void body_grab_before_tick(UObject* pawn);
     void fist_flags_after_tick(UObject* pawn);
     void body_grab_after_tick(UObject* pawn);
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
@@ -2939,6 +2940,7 @@ namespace
             stick_walk_before_tick(context);
             swing_speed_before_tick(context);
             fist_flags_before_tick(context);
+            body_grab_before_tick(context);
             for (int side = 0; side < 2; ++side)
                 if (g_draw[side].active) set_bool_property(context, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
             scabbard_before_tick(context);
@@ -5978,6 +5980,25 @@ namespace
                     body_spring_joint(joint, cfg, body_spring_cap(cfg, g_body_grab[side].grip_t));
     }
 
+    // pose_grab_body_no_slip: right before Willie's tick (where the slip rule runs), the held hand's
+    // 'Hand Block Drop' is set while his grip strength is above pose_grab_body_slip_below_t.
+    bool g_body_blocking[2] = {false, false};
+    void body_grab_before_tick(UObject* pawn)
+    {
+        hsvr::Config cfg = hsvr::config();
+        for (int side = 0; side < 2; ++side)
+        {
+            const BodyGrab& b = g_body_grab[side];
+            bool want = cfg.pose_grab_body_no_slip && b.on && b.grip_t >= cfg.pose_grab_body_slip_below_t;
+            const TCHAR* flag = side == 0 ? STR("L Hand Block Drop") : STR("R Hand Block Drop");
+            if (want) set_bool_property(pawn, flag, true);
+            else if (g_body_blocking[side]) set_bool_property(pawn, flag, false);
+            if (want != g_body_blocking[side])
+                HSVR_LOG("Body grab: %s hand's slip rule %s (his grip T %.0f)", side == 0 ? "left" : "right", want ? "held off" : "back to the game's", b.grip_t);
+            g_body_blocking[side] = want;
+        }
+    }
+
     void body_grab_tick(UObject* pawn, const hsvr::Config& cfg_in)
     {
         using namespace hsvr;
@@ -6054,7 +6075,7 @@ namespace
                 b.softened = true;
                 HSVR_LOG("Body grab: %s hand's joint made a spring (%.0f, %.0f, cap %.0f for his grip T %.0f)", hand, cfg.pose_grab_body_spring, cfg.pose_grab_body_damper, cap, b.grip_t);
             }
-            if (cfg.pose_grab_body_hold == 1 && b.stretch > cfg.pose_grab_body_let_go_cm)
+            if ((cfg.pose_grab_body_hold == 1 || cfg.pose_grab_body_no_slip) && b.stretch > cfg.pose_grab_body_let_go_cm)
             {
                 if (b.far_since < 0.0) b.far_since = now;
                 else if (now - b.far_since > 0.3)
