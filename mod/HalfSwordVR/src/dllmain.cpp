@@ -1607,6 +1607,7 @@ namespace
                     double t_in = 42.0 / v;
                     double t = std::fmod(now, 2.5);
                     double x = 20.0;
+                    if (g_fake_two_up.load() < 1.0) t = 99.0; // speed 0: held back, aiming only
                     if (t < t_in) x = 20.0 + v * t;
                     else if (t < t_in + 0.4) x = 62.0;
                     else if (t < t_in + 1.2) x = 62.0 - 42.0 * (t - t_in - 0.4) / 0.8;
@@ -8494,10 +8495,15 @@ namespace
             }
             if (entry.command.rfind("hsvr.foe_front ", 0) == 0)
             {
-                // Stab tests: every foe stood this many cm in front of him, facing him.
+                // Stab tests: every foe stood in front of him, facing him: "hsvr.foe_front <cm>" from
+                // his actor, or "hsvr.foe_front tip <cm>" with the foe's chest that far beyond the tip of
+                // the weapon in his right hand. His ragdoll is moved with him (a teleport of the
+                // actor alone leaves the simulated body where it lay, stab-test3).
                 using hsvr::Vec3;
                 using hsvr::length;
-                double cm = atof(entry.command.c_str() + 15);
+                std::string arg = entry.command.substr(15);
+                bool from_tip = arg.rfind("tip ", 0) == 0;
+                double cm = atof(from_tip ? arg.c_str() + 4 : arg.c_str());
                 UObject* player = nullptr;
                 find_pawn_mesh(&player);
                 if (!player) continue;
@@ -8508,11 +8514,28 @@ namespace
                 double fl = length(f);
                 if (fl < 1e-3) continue;
                 f = f * (1.0 / fl);
-                Vec3 at = actor_location(player) + f * cm;
+                Vec3 base_at = actor_location(player);
+                double ahead = cm;
+                if (from_tip)
+                {
+                    UObject* wr = object_property(player, STR("Weapon R"));
+                    RawArray* tips = wr ? wr->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")) : nullptr;
+                    double best = 0.0;
+                    if (tips && tips->Data)
+                        for (int32_t i = 0; i < tips->Num; ++i)
+                            if (UObject* t = static_cast<UObject*>(tips->Data[i]))
+                            {
+                                Vec3 d = component_location(t) - base_at;
+                                best = (std::max)(best, d.x * f.x + d.y * f.y);
+                            }
+                    ahead = best + 15.0 + cm; // his chest is about 15 cm in front of his pelvis line
+                }
+                Vec3 at = base_at + f * ahead;
                 double yaw = std::atan2(-f.y, -f.x) * 57.29577951308232;
                 std::vector<UObject*> foes;
                 UObjectGlobals::FindAllOf(STR("Willie_BP_C"), foes);
                 int moved = 0;
+                static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
                 for (UObject* foe : foes)
                 {
                     if (!foe || foe == player || foe->GetName().rfind(STR("Default__"), 0) == 0) continue;
@@ -8521,11 +8544,24 @@ namespace
                     mv.three(STR("NewRotation"), 0.0, yaw, 0.0);
                     mv.flag(STR("bTeleport"), true);
                     mv.run();
+                    UObject* fm = object_property(foe, STR("Mesh"));
+                    Vec3 before, after;
+                    if (fm)
+                    {
+                        before = socket_location(fm, pelvis_bone);
+                        Call off(fm, STR("K2_AddWorldOffset"));
+                        off.three(STR("DeltaLocation"), at.x - before.x, at.y - before.y, 0.0);
+                        off.flag(STR("bTeleport"), true);
+                        off.run();
+                        Call still(fm, STR("SetAllPhysicsLinearVelocity"));
+                        still.three(STR("NewVel"), 0.0, 0.0, 0.0);
+                        still.run();
+                        after = socket_location(fm, pelvis_bone);
+                    }
                     ++moved;
-                    Vec3 body_at;
-                    if (UObject* fm = object_property(foe, STR("Mesh"))) body_at = socket_location(fm, FName(STR("pelvis"), FNAME_Add));
-                    HSVR_LOG("Script: hsvr.foe_front: %ls put %.0f cm in front of him, at (%.0f, %.0f, %.0f), yaw %.0f; his pelvis now (%.0f, %.0f, %.0f)", foe->GetName().c_str(),
-                             cm, at.x, at.y, at.z, yaw, body_at.x, body_at.y, body_at.z);
+                    HSVR_LOG("Script: hsvr.foe_front: %ls put %.0f cm in front of him%s, at (%.0f, %.0f, %.0f), yaw %.0f; his pelvis was (%.0f, %.0f, %.0f), now (%.0f, %.0f, %.0f)%s",
+                             foe->GetName().c_str(), ahead, from_tip ? " (from the tip)" : "", at.x, at.y, at.z, yaw, before.x, before.y, before.z, after.x, after.y,
+                             after.z, after.z < at.z - 40.0 ? " - he is down" : "");
                 }
                 if (!moved) HSVR_LOG("Script: hsvr.foe_front: no foe found");
                 continue;
