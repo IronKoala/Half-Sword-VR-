@@ -912,6 +912,9 @@ namespace
     // Test: hsvr.fake_head_tilt <pitch down> <roll right> <drop cm> nods the TRACKED headset about the
     // base of the neck (12 cm below the head bone) and lowers it, for the pose only (not the view).
     std::atomic<double> g_fake_tilt_pitch{0.0}, g_fake_tilt_roll{0.0}, g_fake_tilt_drop{0.0};
+    // Test: hsvr.fake_head_pose 1 = with no tracked headset (dev_fake_headset), a still head at the view's
+    // anchor (where your eyes were at recentring), looking straight ahead; the tilt above applies to it.
+    std::atomic<bool> g_fake_head_pose{false};
 
     // The bend and twist of the 6 bones, and where they carry the head (body frame). Each bone turns
     // about its own joint and carries everything above it, as the end-of-graph Modify Bone nodes do
@@ -2321,7 +2324,16 @@ namespace
     bool head_pose_world(const hsvr::Config& cfg, const hsvr::ControllerState& state, hsvr::Vec3& w, hsvr::Quat& r)
     {
         using namespace hsvr;
-        if (!state.head_valid || !stereo_tracking_to_world(state.head, w, r)) return false;
+        if (state.head_valid)
+        {
+            if (!stereo_tracking_to_world(state.head, w, r)) return false;
+        }
+        else
+        {
+            double base_yaw = 0.0;
+            if (!g_fake_head_pose.load() || !stereo_view_anchor(w, base_yaw)) return false;
+            r = quat_from_yaw_deg(base_yaw);
+        }
         double p = g_fake_tilt_pitch.load(), ro = g_fake_tilt_roll.load(), dr = g_fake_tilt_drop.load();
         if (p != 0.0 || ro != 0.0 || dr != 0.0)
         {
@@ -2469,7 +2481,7 @@ namespace
         Vec3 room{0, 0, 0};
         Vec3 anchor;
         double base_yaw = 0.0;
-        if (cfg.pose_follow_room && state.head_valid && stereo_view_anchor(anchor, base_yaw))
+        if (cfg.pose_follow_room && (state.head_valid || g_fake_head_pose.load()) && stereo_view_anchor(anchor, base_yaw))
         {
             Vec3 head_world;
             Quat head_rot;
@@ -2537,7 +2549,7 @@ namespace
             double held = g_fake_head_drop.load();
             g_crouch_drop = held >= 0.0 ? (std::min)(55.0 * component_scale_z(mesh), held) : 20.0 - 20.0 * std::cos(now_seconds() * 0.4);
         }
-        else if (cfg.pose_crouch && state.head_valid)
+        else if (cfg.pose_crouch && (state.head_valid || g_fake_head_pose.load()))
         {
             Vec3 view_anchor, head_world;
             Quat head_rot;
@@ -12598,6 +12610,11 @@ namespace
                          game_mode ? game_mode->GetFullName().c_str() : STR("missing"), (int)a, (int)bool_property(game_mode, STR("Match Won")), (int)b,
                          (int)bool_property(pawn, STR("Match Won (Player)")));
                 continue;
+            }
+            if (entry.command.rfind("hsvr.fake_head_pose ", 0) == 0)
+            {
+                g_fake_head_pose.store(atoi(entry.command.c_str() + 20) != 0);
+                HSVR_LOG("Script: hsvr.fake_head_pose %d (a still head at the view anchor when no headset is tracked)", g_fake_head_pose.load() ? 1 : 0);
             }
             if (entry.command.rfind("hsvr.fake_head_tilt ", 0) == 0)
             {
