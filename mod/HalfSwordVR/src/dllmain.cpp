@@ -8048,7 +8048,8 @@ namespace
     void slide_grip(int side, HoldState& h, UObject* weapon, UObject* base, const hsvr::Vec3& hand_point, const hsvr::Config& cfg, double dt)
     {
         using namespace hsvr;
-        if (!cfg.pose_slide || h.forearm) return;
+        // A fist (the game's invisible 13 cm sphere) has no handle to slide along.
+        if (!cfg.pose_slide || h.forearm || is_fist(weapon)) return;
         if (!h.zone_known) find_grip_zone(h, weapon, base, cfg);
         ControllerState st = controllers_state();
         float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : st.hand[side].trigger;
