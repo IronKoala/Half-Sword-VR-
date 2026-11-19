@@ -4210,6 +4210,8 @@ namespace
         bool active = false;
         int main = 1, second = 0;
         UObject* weapon = nullptr;
+        hsvr::Quat last_rot;       // last tick's two-hand target turn (diagnostics: how far it jumps per tick)
+        bool have_last_rot = false;
         double z = 0.0;            // the second hand's spot along the weapon, cm from the game's grip point
         bool on_blade = false;
         hsvr::Vec3 local{0, 0, 0}; // that spot in BaseMesh's frame (set by the hold each tick)
@@ -6223,6 +6225,23 @@ namespace
                     Vec3 mid_local = (pivot + local2) * 0.5;
                     target_pos = (p1 + p2) * 0.5 - target_rot.rotate(mid_local);
                     pivot = mid_local;
+                }
+                // Playtest 02:44 ("frozen in mid-air, but it swooshes"): while the weapon trails its
+                // two-hand target, every tick says how the target moves and what holds it back.
+                {
+                    double jump = g_two.have_last_rot ? length(scaled_axis((target_rot * g_two.last_rot.inverse()).normalized())) * 57.2958 : 0.0;
+                    g_two.last_rot = target_rot;
+                    g_two.have_last_rot = true;
+                    if (h.lag > 8.0 || jump > 6.0)
+                    {
+                        UObject* bm = base;
+                        Call av(bm, STR("GetPhysicsAngularVelocityInRadians"));
+                        av.run();
+                        HSVR_LOG_EVERY(0.05, "Two hands trail: hands %.1f cm apart for %.1f on the weapon, target turned %.1f deg this tick, weapon %.0f deg/s, "
+                                             "behind %.1f cm, force %.0f N%s torque %.1f N m%s, contact miss %.1f cm, hand speeds %.1f / %.1f m/s",
+                                       length(between), std::fabs(dz), jump, length(av.vec()) * 57.2958, h.lag, h.force_n, h.force_capped ? " (cap)" : "", h.torque_nm,
+                                       h.torque_capped ? " (cap)" : "", h.miss_cm, g_hand_world_v[side], g_hand_world_v[s2]);
+                    }
                 }
                 // Both hands pull: the second adds its own strength (B&S: two hands, twice the hold).
                 BodyStrength first = body_strength(pawn, side, cfg), second = body_strength(pawn, s2, cfg);
