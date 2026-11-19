@@ -384,6 +384,9 @@ namespace hsvr
         // Write the body pose inside his animation update (right before it is evaluated) rather than at the
         // start of the engine tick (the drawn hand on a held item showed the previous frame's solve).
         bool pose_in_anim_update = true;
+        // His posed skeleton and visible body tick after the physics step (with pose_in_anim_update), so a
+        // drawn hand riding a held item sits on it where it is drawn this frame (no guess ahead).
+        bool pose_post_physics = true;
         // The game's swing speed (Aim Swing Speed) fed from the controllers: the faster hand that holds
         // something, lo..hi m/s relative to the body -> 0..75; falls with this time constant.
         bool pose_feed_swing_speed = true;

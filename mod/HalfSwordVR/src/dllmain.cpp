@@ -2045,6 +2045,36 @@ namespace
         node_set_rotation(*chain_node("hand" + sx), component_inv * Wh);
     }
 
+    // pose_post_physics: his posed skeleton (the driver, where the pose is written in its animation
+    // update, and the visible body that copies it) ticks after the physics step, so a drawn hand riding a
+    // held item is placed on the item where it is drawn this frame, with no guess ahead. Posed before
+    // the physics (as the game ticks it), the hand was placed from where the item was a frame earlier
+    // plus a guess, while the hold sets the item a new velocity after that; the guess missed by about
+    // the item's own frame-to-frame change and the hand shook on a steady sword (playtest 11:00).
+    std::atomic<bool> g_pose_post_physics{false};
+    void pose_tick_group(const hsvr::Config& cfg, UObject* driver, UObject* mesh)
+    {
+        static UObject* set_on[2] = {nullptr, nullptr};
+        static bool set_post[2] = {false, false};
+        bool want = cfg.pose_post_physics && cfg.pose_in_anim_update;
+        UObject* comps[2] = {driver, mesh};
+        for (int i = 0; i < 2; ++i)
+        {
+            UObject* c = comps[i];
+            if (!c) continue;
+            if (set_on[i] == c && set_post[i] == want) continue;
+            Call tg(c, STR("SetTickGroup"));
+            if (!tg.fn) continue;
+            // ETickingGroup: TG_PrePhysics 0, TG_PostPhysics 4.
+            tg.byte(STR("NewTickGroup"), want ? 4 : 0);
+            tg.run();
+            set_on[i] = c;
+            set_post[i] = want;
+            HSVR_LOG("Pose: %s now ticks %s the physics", i == 0 ? "his posed skeleton" : "his visible body", want ? "after" : "before");
+        }
+        g_pose_post_physics.store(want && set_on[0] == driver && set_post[0]);
+    }
+
     void pose_body(const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -2093,6 +2123,7 @@ namespace
         if (now - g_pose.last_check >= 0.5)
         {
             g_pose.last_check = now;
+            pose_tick_group(cfg, driver, mesh);
             if (is_simulating(mesh, "pelvis") == 1)
             {
                 HSVR_LOG_EVERY(5.0, "Pose: the game switched physics on again; switching it off");
@@ -4953,6 +4984,7 @@ namespace
         const Config& cfg = hsvr::config();
         int mode = cfg.pose_hold_hand_follows_predict;
         if (mode <= 0 || !base) return;
+        if (g_pose_post_physics.load()) return; // the item is already where it is drawn this frame
         double DT = world_delta_seconds(g_pose.pawn);
         if (!(DT > 1e-4 && DT < 0.1)) DT = 1.0 / 90.0;
         if (mode >= 2)
