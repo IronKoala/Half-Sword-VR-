@@ -205,6 +205,11 @@ namespace
 
     // Called by the stereo device while the frame's views are being set up (game thread).
     double g_button_crouch = 0.0; // button crouch depth (cm), see g_button_crouch_on
+    // His capsule's height as the view and his body use it: smoothed (pose_actor_z_smooth_s), because
+    // walking, the game's capsule loses and finds its floor every other tick and hops ~2 cm about once
+    // a second; the view hopped at once and his body a frame later (playtest 11:44). -1e9 = not yet.
+    double g_actor_z_smooth = -1e9;
+    bool g_actor_z_smooth_on = false;
     void crouch_push_log(UObject* pawn, UObject* mesh);
     bool provide_anchor(hsvr::PlayerAnchor& out)
     {
@@ -224,6 +229,8 @@ namespace
         pawn->ProcessEvent(actor_fn, &actor);
         out.head_position = {socket.ReturnValue.X, socket.ReturnValue.Y, socket.ReturnValue.Z};
         out.actor_position = {actor.ReturnValue.X, actor.ReturnValue.Y, actor.ReturnValue.Z};
+        if (g_actor_z_smooth_on && g_actor_z_smooth > -1e8 && std::fabs(out.actor_position.z - g_actor_z_smooth) < 15.0)
+            out.actor_position.z = g_actor_z_smooth;
         out.has_head = true;
         double body_yaw = 0.0;
         if (UObject* controller = find_player_controller())
@@ -2203,6 +2210,19 @@ namespace
         // pelvis; a pelvis anywhere else would drag the capsule along and the body with it.
         Vec3 mesh_now = component_location(mesh);
         Vec3 pelvis_off = socket_location(driver, bone_fname("pelvis")) - mesh_now;
+        // The capsule's height, smoothed once a frame (see g_actor_z_smooth); the view uses the same value.
+        {
+            static double last_t = 0.0;
+            double tnow = now_seconds(), dt = tnow - last_t;
+            last_t = tnow;
+            double tau = cfg.pose_actor_z_smooth_s;
+            g_actor_z_smooth_on = tau > 1e-4;
+            if (!g_actor_z_smooth_on || g_actor_z_smooth < -1e8 || std::fabs(actor.z - g_actor_z_smooth) > 15.0 || !(dt > 0.0 && dt < 0.2))
+                g_actor_z_smooth = actor.z;
+            else
+                g_actor_z_smooth += (actor.z - g_actor_z_smooth) * (1.0 - std::exp(-dt / tau));
+        }
+        actor.z = g_actor_z_smooth;
         Vec3 place = actor + body.rotate(g_pose.mesh_offset_local);
         place.x = actor.x - pelvis_off.x;
         place.y = actor.y - pelvis_off.y;

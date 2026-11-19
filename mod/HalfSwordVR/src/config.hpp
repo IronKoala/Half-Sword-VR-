@@ -390,6 +390,9 @@ namespace hsvr
         // His posed skeleton and visible body tick after the physics step (with pose_in_anim_update), so a
         // drawn hand riding a held item sits on it where it is drawn this frame (no guess ahead).
         bool pose_post_physics = true;
+        // The capsule's height as his body and the view use it, smoothed over this time (s): walking, the
+        // game's capsule hops ~2 cm about once a second. 0 = the capsule's own height.
+        double pose_actor_z_smooth_s = 0.08;
         // The game's swing speed (Aim Swing Speed) fed from the controllers: the faster hand that holds
         // something, lo..hi m/s relative to the body -> 0..75; falls with this time constant.
         bool pose_feed_swing_speed = true;
