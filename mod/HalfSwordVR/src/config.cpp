@@ -334,6 +334,17 @@ namespace hsvr
         flag("pose_hold_weight", c.pose_hold_weight);
         num("pose_hold_weight_torque_scale", c.pose_hold_weight_torque_scale);
         flag("pose_hold_weight_two_hand_couple", c.pose_hold_weight_two_hand_couple);
+        flag("pose_hold_bs", c.pose_hold_bs);
+        num("pose_bs_two_pos_k", c.pose_bs_two_pos_k);
+        num("pose_bs_two_pos_c", c.pose_bs_two_pos_c);
+        num("pose_bs_two_pos_max", c.pose_bs_two_pos_max);
+        num("pose_bs_two_rot_k", c.pose_bs_two_rot_k);
+        num("pose_bs_two_rot_c", c.pose_bs_two_rot_c);
+        num("pose_bs_two_rot_max", c.pose_bs_two_rot_max);
+        num("pose_bs_max_spin", c.pose_bs_max_spin);
+        integer("pose_bs_iterations", c.pose_bs_iterations);
+        num("pose_bs_two_let_go_cm", c.pose_bs_two_let_go_cm);
+        flag("pose_hold_ignore_body", c.pose_hold_ignore_body);
         num("pose_hold_weight_spin_extra", c.pose_hold_weight_spin_extra);
         flag("pose_hold_hand_on_weapon", c.pose_hold_hand_on_weapon);
         num("pose_hold_blocked_from_cm", c.pose_hold_blocked_from_cm);

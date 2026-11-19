@@ -252,6 +252,18 @@ namespace hsvr
         // force x their distance apart on it) adds to the torque cap (playtest 09:38: a 2.2 kg axe in
         // two hands needed 550-930 N m against a 486 N m wrist cap and shook).
         bool pose_hold_weight_two_hand_couple = true;
+        // B&S's hold (bs_hold_measured.md, from Matthew's B&S session 2026-11-19): soft drives instead
+        // of the exact hold. One hand: pose_hold_spring/damper/max_force and turn_spring/damper/
+        // max_torque (5000/100/3000, 1100/45/250). Two hands: both hands' points 10000/150/6000, only
+        // the first hand turns it (2200/90/500), the second has no turning. Solved per frame as soft
+        // constraints (pose_bs_iterations), all hands together.
+        bool pose_hold_bs = true;
+        double pose_bs_two_pos_k = 10000.0, pose_bs_two_pos_c = 150.0, pose_bs_two_pos_max = 6000.0;
+        double pose_bs_two_rot_k = 2200.0, pose_bs_two_rot_c = 90.0, pose_bs_two_rot_max = 500.0;
+        int pose_bs_iterations = 8;
+        double pose_bs_two_let_go_cm = 45.0; // B&S gaps reach 18 cm (p95) on fast two-hand swings
+        bool pose_hold_ignore_body = true;   // the held weapon never collides with his own body (B&S)
+        double pose_bs_max_spin = 60.0; // rad/s
         // The weight's own swing never spins it faster than the turn wanted plus this (rad/s): one tick
         // of a deadbeat grip pull fed back into the lever spun the axe to the 60 rad/s cap (playtest 09:38).
         double pose_hold_weight_spin_extra = 5.0;

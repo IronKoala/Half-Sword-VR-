@@ -2963,7 +2963,10 @@ namespace
             // The hand too (kick-test3: the hand body, 7.4 cm off the bone, sits in the grip; when the
             // pair collides it shoves the weapon out across the palm about twice a second). B&S never
             // lets a held item touch the hand that holds it.
-            if ((!hsvr::config().pose_hold_ignore_hand && bone.ToString() == hand.ToString()) || !in_forearm(mesh, bone, side)) continue;
+            // B&S: a held item ignores the whole player body (item.ignoredRagdoll, bs_hold_measured.md §1);
+            // the other hand's call (a second hand on it) adds only its own forearm.
+            bool whole = hsvr::config().pose_hold_ignore_body && g_arm_ignore[1 - side].weapon != weapon;
+            if ((!hsvr::config().pose_hold_ignore_hand && bone.ToString() == hand.ToString()) || (!whole && !in_forearm(mesh, bone, side))) continue;
             Call add(pawn, STR("AddComponentByClass"));
             add.object(STR("Class"), cls);
             add.flag(STR("bManualAttachment"), false);
@@ -3316,6 +3319,75 @@ namespace
             return r;
         }
     };
+
+    // ---- B&S's hold (Matthew 2026-11-19, measured from his own B&S session: bs_hold_measured.md) ----
+    // Each hand holds the item by soft drives (a spring and damper with a force cap), not by putting it
+    // exactly on the hand: PhysX's D6 drives, solved here the same way, as soft constraints with
+    // sequential impulses over the frame (Box2D-style soft step: gamma = 1/(dt(c + dt k)), bias =
+    // k/(c + dt k) * error), all hands together. Positions cm, mass kg, so forces are N x 100 and
+    // torques N m x 1e4; springs in N/m are the same number in kg/s^2.
+    struct SoftPoint
+    {
+        hsvr::Vec3 r;      // from the centre of mass to the held point (world)
+        hsvr::Vec3 err;    // held point minus its target
+        hsvr::Vec3 vt;     // the target's velocity
+        double k = 0.0, c = 0.0, fmax = 0.0;
+        bool slide = false; // free along `axis` (the hand sliding on the handle)
+        hsvr::Vec3 axis;
+        hsvr::Vec3 acc;    // accumulated impulse
+    };
+    inline Mat3 skew(const hsvr::Vec3& r)
+    {
+        Mat3 m;
+        m.m[0][1] = -r.z, m.m[0][2] = r.y, m.m[1][0] = r.z, m.m[1][2] = -r.x, m.m[2][0] = -r.y, m.m[2][1] = r.x;
+        return m;
+    }
+    // v, w: the item's centre-of-mass velocity and spin, changed in place. Angular drive (the main
+    // hand's turn) when ka > 0: err_rot = the turn from target to current (scaled axis), wt its target spin.
+    void bs_solve(double mass, const Mat3& invI, hsvr::Vec3& v, hsvr::Vec3& w, SoftPoint* pts, int n, const hsvr::Vec3& err_rot, const hsvr::Vec3& wt, double ka,
+                  double ca, double tmax, double dt, int iters, hsvr::Vec3& ang_acc)
+    {
+        using namespace hsvr;
+        Mat3 I3 = Mat3::diag(1, 1, 1);
+        Mat3 Ksoft[4];
+        for (int i = 0; i < n; ++i)
+        {
+            SoftPoint& p = pts[i];
+            Mat3 S = skew(p.r);
+            Mat3 K = I3 * (1.0 / mass) + (S * invI * S) * -1.0;
+            double gamma = 1.0 / (dt * (p.c + dt * p.k) + 1e-12);
+            Ksoft[i] = (K + I3 * gamma).inverse();
+            p.acc = Vec3{};
+        }
+        double ga = ka > 0.0 ? 1.0 / (dt * (ca + dt * ka) + 1e-12) : 0.0;
+        Mat3 Kang = ka > 0.0 ? (invI + I3 * ga).inverse() : Mat3{};
+        ang_acc = Vec3{};
+        for (int it = 0; it < iters; ++it)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                SoftPoint& p = pts[i];
+                double gamma = 1.0 / (dt * (p.c + dt * p.k) + 1e-12);
+                Vec3 bias = p.err * (p.k / (p.c + dt * p.k + 1e-12));
+                Vec3 cdot = v + cross(w, p.r) - p.vt;
+                Vec3 lam = (Ksoft[i] * (cdot + bias + p.acc * gamma)) * -1.0;
+                if (p.slide) lam = lam - p.axis * dot(lam, p.axis);
+                Vec3 old = p.acc;
+                p.acc = clamp_length(p.acc + lam, p.fmax * dt);
+                lam = p.acc - old;
+                v = v + lam * (1.0 / mass);
+                w = w + invI * cross(p.r, lam);
+            }
+            if (ka > 0.0)
+            {
+                Vec3 bias = err_rot * (ka / (ca + dt * ka + 1e-12));
+                Vec3 lam = (Kang * ((w - wt) + bias + ang_acc * ga)) * -1.0;
+                Vec3 old = ang_acc;
+                ang_acc = clamp_length(ang_acc + lam, tmax * dt);
+                w = w + invI * (ang_acc - old);
+            }
+        }
+    }
 
     hsvr::Vec3 clamp_length(const hsvr::Vec3& v, double most)
     {
@@ -4239,6 +4311,9 @@ namespace
         double t = 0.0;
         std::string handle;
         double couple = 0.0; // the second hand's force x the hands' distance on the weapon (kg cm^2/s^2), this tick
+        // B&S hold: the second hand's palm point (world), its velocity, and its spot on the weapon (BaseMesh frame).
+        hsvr::Vec3 bs_p2, bs_vel, bs_local;
+        bool bs_valid = false;
     };
     TwoHand g_two;
 
@@ -6272,7 +6347,17 @@ namespace
                 Vec3 dl = local2 - pivot;
                 double dz = g_two.use_rel ? length(dl) : local2.z - pivot.z;
                 Vec3 between = p2 - p1;
-                if (std::fabs(dz) > 1.0 && length(between) > 1.0)
+                // B&S: the second hand only pulls its own point toward its controller (no turning); the
+                // first keeps its own target (bs_hold_measured.md §3).
+                {
+                    double dtp = (std::min)(1.0 / 30.0, (std::max)(1.0 / 240.0, now - h.last_time));
+                    g_two.bs_vel = g_two.bs_valid && h.have_last ? (p2 - g_two.bs_p2) * (1.0 / dtp) : Vec3{};
+                    if (length(g_two.bs_vel) > 3000.0) g_two.bs_vel = Vec3{};
+                    g_two.bs_p2 = p2;
+                    g_two.bs_local = local2;
+                    g_two.bs_valid = true;
+                }
+                if (std::fabs(dz) > 1.0 && length(between) > 1.0 && !cfg.pose_hold_bs)
                 {
                     Vec3 axis_now = g_two.use_rel ? target_rot.rotate(normalized(dl)) : target_rot.rotate(Vec3{0, 0, 1});
                     Vec3 want_axis = normalized(between) * (g_two.use_rel || dz > 0.0 ? 1.0 : -1.0);
@@ -6309,7 +6394,7 @@ namespace
                 // A controller pulled well off its spot on the weapon lets go (B&S).
                 Vec3 spot = bp_now + bq_now.rotate(local2);
                 double off = length(p2 - spot);
-                if (off > cfg.pose_two_hand_let_go_cm)
+                if (off > (cfg.pose_hold_bs ? cfg.pose_bs_two_let_go_cm : cfg.pose_two_hand_let_go_cm))
                 {
                     if (g_two.far_since < 0.0) g_two.far_since = now;
                     else if (now - g_two.far_since > 0.3) end_two_hand("your hand was pulled off it");
@@ -6360,7 +6445,7 @@ namespace
 
         // The hand's hold (SI as in the framework, then in Unreal's units: cm, so a force x100, a
         // turning spring, damper and torque x100^2), times its strength (its dampers by half of it past 1).
-        double strength = (std::max)(0.0, cfg.pose_hold_strength) * two_hand_gain;
+        double strength = (std::max)(0.0, cfg.pose_hold_strength) * (cfg.pose_hold_bs ? 1.0 : two_hand_gain);
         double damp_strength = (std::max)(1.0, strength * 0.5);
         double k = cfg.pose_hold_spring * strength;
         double c = cfg.pose_hold_damper * damp_strength;
@@ -6580,7 +6665,7 @@ namespace
             // 1:1; a polearm (5 kg m^2 about its grip) trails a fast flick and droops under its own lever.
             // (The plain exact hold above split it into the centre of mass's push plus a turn about it,
             // so the lever was free and every weapon followed 1:1.)
-            if (cfg.pose_hold_weight && !in_wound && !h.handle_slide && !(g_draw[side].active && g_draw[side].weapon == weapon))
+            if (cfg.pose_hold_weight && !cfg.pose_hold_bs && !in_wound && !h.handle_slide && !(g_draw[side].active && g_draw[side].weapon == weapon))
             {
                 Vec3 r = com - pivot_now; // grip -> centre of mass
                 Vec3 P_t = com_t - rot_t.rotate(local_com - pivot);
@@ -6619,6 +6704,60 @@ namespace
                 if (tc)
                     HSVR_LOG_EVERY(0.5, "Hold: %s weight: %ls needs %.0f N m at the grip to turn as you do, the hand has %.0f%s", side == 0 ? "left" : "right",
                                    weapon->GetName().c_str(), length(tau_need) / 1e4, tcap / 1e4, couple > 0.0 ? " (with both hands)" : "");
+            }
+            if (cfg.pose_hold_bs && !in_wound && !(g_draw[side].active && g_draw[side].weapon == weapon))
+            {
+                bool two = g_two.active && g_two.main == side && g_two.weapon == weapon && g_two.bs_valid && g_pose.hand_valid[g_two.second];
+                BodyStrength s2b = two ? body_strength(pawn, g_two.second, cfg) : BodyStrength{};
+                double pk = two ? cfg.pose_bs_two_pos_k : cfg.pose_hold_spring, pc = two ? cfg.pose_bs_two_pos_c : cfg.pose_hold_damper,
+                       pf = two ? cfg.pose_bs_two_pos_max : cfg.pose_hold_max_force;
+                double rk = two ? cfg.pose_bs_two_rot_k : cfg.pose_hold_turn_spring, rc = two ? cfg.pose_bs_two_rot_c : cfg.pose_hold_turn_damper,
+                       rf = two ? cfg.pose_bs_two_rot_max : cfg.pose_hold_max_torque;
+                double st = (std::max)(0.0, cfg.pose_hold_strength);
+                double dst = (std::max)(1.0, st * 0.5);
+                double draw_scale = 1.0;
+                if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body"))) draw_scale = (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
+                SoftPoint pts[2];
+                int n = 0;
+                {
+                    SoftPoint& p = pts[n++];
+                    p.r = pivot_now - com;
+                    p.err = pivot_now - target_pivot;
+                    p.vt = target_vel;
+                    p.k = pk * st;
+                    p.c = pc * dst;
+                    p.fmax = pf * st * body.total * 100.0 * draw_scale;
+                    p.slide = h.handle_slide;
+                    p.axis = h.handle_axis;
+                }
+                if (two)
+                {
+                    SoftPoint& p = pts[n++];
+                    Vec3 at = pos + rot.rotate(g_two.bs_local);
+                    p.r = at - com;
+                    p.err = at - g_two.bs_p2;
+                    p.vt = g_two.bs_vel;
+                    p.k = pk * st;
+                    p.c = pc * dst;
+                    p.fmax = pf * st * s2b.total * 100.0 * draw_scale;
+                }
+                Mat3 invI = about_com.inverse();
+                Vec3 vb = v_com_now + g * DT, wb = w_now; // gravity this frame, taken off again below (the physics adds it)
+                Vec3 ang;
+                Vec3 err_rot = scaled_axis((rot * target_rot.inverse()).normalized());
+                bs_solve(mass, invI, vb, wb, pts, n, err_rot, target_ang, rk * st * 1e4, rc * dst * 1e4, rf * st * body.total * 1e4 * draw_scale, DT,
+                         (std::max)(1, cfg.pose_bs_iterations), ang);
+                exact_v = clamp_length(vb - g * DT, 2000.0);
+                w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
+                h.force_n = length(pts[0].acc) / DT / 100.0;
+                h.force_capped = length(pts[0].acc) >= pts[0].fmax * DT * 0.999;
+                h.torque_nm = length(ang) / DT / 1e4;
+                h.torque_capped = length(ang) >= rf * st * body.total * 1e4 * draw_scale * DT * 0.999;
+                HSVR_LOG_EVERY(0.5, "Hold: %s B&S hold%s: grip %.1f cm / %.0f deg off, %.0f N%s, turn %.1f N m%s%s", side == 0 ? "left" : "right",
+                               two ? " (two hands)" : "", length(pts[0].err), length(err_rot) * 57.2958, h.force_n, h.force_capped ? " (cap)" : "", h.torque_nm,
+                               h.torque_capped ? " (cap)" : "",
+                               two ? (std::string(", second hand ") + std::to_string((int)std::lround(length(pts[1].err))) + " cm off, " +
+                                      std::to_string((int)std::lround(length(pts[1].acc) / DT / 100.0)) + " N").c_str() : "");
             }
             com_next = com + exact_v * DT + g * (DT * DT * 0.5);
             exact_set = true;
