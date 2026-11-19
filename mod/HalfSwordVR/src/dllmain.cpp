@@ -117,6 +117,15 @@ namespace
         return object_property(pawn, STR("Mesh"));
     }
 
+    // The posed player pawn, only while it is still the one the player controller has. g_pose.pawn is
+    // a plain pointer refreshed from the game tick; the hooks below (weapon hits, releases, forces) also
+    // fire while a map unloads, after the old pawn has been freed, and reading it then crashed the game
+    // on every level change (UE4SS+4163ee via stab_hit_hook, 2026-11-19 17:47 and the night before).
+    // The controller's Pawn is a property the engine clears, so it never points at a freed pawn.
+    struct PoseState;
+    UObject* live_posed_pawn();
+    void forget_level_objects();
+
     struct SocketLocationParams
     {
         FName InSocketName;
@@ -873,6 +882,14 @@ namespace
         double swivel_time[2] = {0.0, 0.0};
     };
     PoseState g_pose;
+    UObject* live_posed_pawn()
+    {
+        UObject* posed = g_pose.pawn;
+        if (!posed) return nullptr;
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        return pawn == posed ? pawn : nullptr;
+    }
     std::atomic<bool> g_hold_capsule{false}; // see "The capsule stays where you are" below
     // Posed and calibrated this frame (crouch and body turning run around his tick).
     std::atomic<bool> g_pose_active{false};
@@ -2080,6 +2097,8 @@ namespace
         using namespace hsvr;
         UObject* pawn = nullptr;
         UObject* mesh = find_pawn_mesh(&pawn);
+        // A new map or a new life: everything kept about the old pawn's weapons and holds goes.
+        if (g_pose.pawn && pawn != g_pose.pawn) forget_level_objects();
         bool willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
         UObject* driver = willie ? object_property(pawn, STR("DriverSkeleton")) : nullptr;
         UObject* instance = object_property(driver, STR("AnimScriptInstance"));
@@ -7359,7 +7378,8 @@ namespace
                 counts.clear();
             }
         }
-        if (!target || !g_pose.pawn) return;
+        UObject* posed = target ? live_posed_pawn() : nullptr;
+        if (!target || !posed) return;
         if (!caller || caller == hooked) return; // ours, through ProcessEvent
         UObject* outer = target->GetOuterPrivate();
         if (outer && !is_a(outer, STR("Actor")))
@@ -7368,10 +7388,10 @@ namespace
             own_call.run();
             if (UObject* o = own_call.object_result()) outer = o;
         }
-        UObject* wr = object_property(g_pose.pawn, STR("Weapon R"));
-        UObject* wl = object_property(g_pose.pawn, STR("Weapon L"));
+        UObject* wr = object_property(posed, STR("Weapon R"));
+        UObject* wl = object_property(posed, STR("Weapon L"));
         bool weapon = outer && (outer == wr || outer == wl);
-        bool own = target == g_pose.mesh || outer == g_pose.pawn;
+        bool own = target == g_pose.mesh || outer == posed;
         if (!weapon && !own) return;
         long long offset = -1;
         const auto& script = caller->GetScript();
@@ -7516,7 +7536,7 @@ namespace
             if (!c.stab_log && !c.stab_assist) return;
         }
         UObject* weapon = context.Context;
-        UObject* pawn = g_pose.pawn;
+        UObject* pawn = live_posed_pawn();
         if (!weapon || !pawn) return;
         int side = weapon == object_property(pawn, STR("Weapon R")) ? 1 : weapon == object_property(pawn, STR("Weapon L")) ? 0 : -1;
         if (side < 0) return;
@@ -7712,7 +7732,7 @@ namespace
         Config cfg = config();
         if (cfg.stab_start_depth_cm <= 0.0) return;
         UObject* weapon = context.Context;
-        UObject* pawn = g_pose.pawn;
+        UObject* pawn = live_posed_pawn();
         if (!weapon || !pawn) return;
         int side = weapon == object_property(pawn, STR("Weapon R")) ? 1 : weapon == object_property(pawn, STR("Weapon L")) ? 0 : -1;
         if (side < 0) return;
@@ -7775,7 +7795,7 @@ namespace
     void stab_release_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
         UObject* self = context.Context;
-        UObject* pawn = g_pose.pawn;
+        UObject* pawn = live_posed_pawn();
         if (!self || !pawn) return;
         UFunction* hooked = static_cast<UFunction*>(custom_data);
         UObject* wr = object_property(pawn, STR("Weapon R"));
@@ -9839,6 +9859,31 @@ namespace
             for (FILE* f : {g_frames, g_state, g_events, g_creatures})
                 if (f) fflush(f);
         }
+    }
+
+    // Pointers kept to the old pawn's weapons, scabbards and thrown items are dropped when the pawn
+    // changes (a map change frees them; the old pawn's holds end with it).
+    void forget_level_objects()
+    {
+        static int times = 0;
+        HSVR_LOG("Pose: the player's pawn changed: forgetting the old one's holds, draws, scabbards, stabs and throws (%d)", ++times);
+        for (int side = 0; side < 2; ++side)
+        {
+            g_stab_watch[side] = StabWatch{};
+            g_hold[side] = HoldState{};
+            g_draw[side] = DrawState{};
+            g_scab[side] = ScabHold{};
+            g_grip_log[side] = GripLog{};
+            g_pending_item[side] = nullptr;
+            g_pending_free[side] = FreeGrip{};
+            g_arm_ignore[side].joints.clear();
+            g_arm_ignore[side].weapon = nullptr;
+        }
+        g_two = TwoHand{};
+        g_anim_grip_two_side = -1;
+        g_thrown.clear();
+        g_item_track.clear();
+        g_sheath_fit.clear();
     }
 
     void capsule_after_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
