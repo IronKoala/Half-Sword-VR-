@@ -1442,6 +1442,7 @@ namespace
 
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool two_hand_pose(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
+    bool hand_on_scabbard(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     std::atomic<bool> g_hold_reach_clamp{true};
     // Test counters since the last hsvr.mark (for hsvr.expect): stuck let-goes, kicks (a held weapon
     // ending a tick more than 8 cm from where it was sent) and the worst hold lag (cm) per hand.
@@ -1790,6 +1791,7 @@ namespace
         Quat controller_rot = Wh;
         bool on_weapon = hand_on_weapon(side, cfg, target, Wh);
         if (two_hand_pose(side, target, Wh)) on_weapon = true;
+        if (!on_weapon && hand_on_scabbard(side, target, Wh)) on_weapon = true;
         // Where your real hand is, while his stays on a stopped weapon.
         ghost_hand(side, cfg, on_weapon && hand_on_weapon_amount(side) > 0.5 && length(controller_wrist - target) > cfg.pose_ghost_from_cm, controller_wrist,
                    controller_rot);
@@ -8496,8 +8498,25 @@ namespace
         double t0 = 0.0;
         double far_since = -1.0;
         double last_log = -1e9;
+        hsvr::Vec3 hand_pos_local; // the hand bone in the scabbard's frame at the grab
+        hsvr::Quat hand_rot_local;
+        bool hand_set = false;
     };
     ScabHold g_scab[2];
+
+    // B&S (as for weapons, pose_hold_hand_follows): his hand holding a scabbard is drawn on the scabbard
+    // where it took it, not on your controller (the scabbard is pinned to the belt and only turns).
+    bool hand_on_scabbard(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot)
+    {
+        using namespace hsvr;
+        const ScabHold& s = g_scab[side];
+        if (!hsvr::config().pose_hold_hand_follows || !s.active || !s.hand_set || !s.scab) return false;
+        Vec3 sp = component_location(s.scab);
+        Quat sq = component_rotation(s.scab);
+        hand_rot = (sq * s.hand_rot_local).normalized();
+        target = sp + sq.rotate(s.hand_pos_local);
+        return true;
+    }
 
     UObject* scabbard_pin(UObject* scab)
     {
@@ -8611,6 +8630,13 @@ namespace
         s.rest = (pelvis.inverse() * sq).normalized();
         s.rest_pos = pelvis.inverse().rotate(component_location(scab) - socket_location(mesh, bone_fname("pelvis")));
         s.test_rel = (pelvis.inverse() * turn * sq).normalized();
+        if (g_pose.hand_valid[side])
+        {
+            Vec3 sp = component_location(scab);
+            s.hand_pos_local = sq.inverse().rotate(g_pose.target[side] - sp);
+            s.hand_rot_local = (sq.inverse() * g_pose.hand_rot[side]).normalized();
+            s.hand_set = true;
+        }
         log_scabbard_pin(scab, "before");
         widen_scabbard_pin(scab, cfg.pose_scabbard_angle_deg);
         log_scabbard_pin(scab, "widened");
