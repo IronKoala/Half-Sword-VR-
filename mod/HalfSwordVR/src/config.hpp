@@ -732,6 +732,11 @@ namespace hsvr
         bool hit_buzz_blade_on_plate = true;
         // The game's impulse (kg cm/s) that counts as a full-strength blow on a held item.
         double hit_buzz_impulse_full = 3000.0;
+        // Hits under this intensity (0..1 of B&S's speed range) are touch, not hits: no buzz.
+        double hit_buzz_min_intensity = 0.05;
+        // An open hand, forearm or arm on a person buzzes only when it strikes this fast (m/s,
+        // against him at the contact).
+        double hit_buzz_limb_min_ms = 3.0;
         // Log every hit buzz ("Hit buzz:" lines).
         bool hit_buzz_log = true;
         // Stab assist: the VR hold moves the weapon on its own (the game's hand joint is free), so a

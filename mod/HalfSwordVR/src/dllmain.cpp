@@ -9547,6 +9547,14 @@ namespace
         double intensity = (std::max)(i_speed, i_imp);
 
         UObject* key = mine ? other : weapon;
+        // B&S spawns no hit sound for a contact under its range's low end (intensity 0): a fist or
+        // blade resting against something is touch, not a hit (test hb-hits2: 0 m/s at volume 0.20).
+        if (tgt != HitTarget::World && intensity < cfg.hit_buzz_min_intensity)
+        {
+            for (int hand = 0; hand < 2; ++hand)
+                if (mask & (1 << hand)) hit_is_new(hand, key, intensity, hit.point, now);
+            return;
+        }
         if (tgt == HitTarget::World)
         {
             // B&S: blades on stone and dirt make no hit buzz, only scrape ticks while sliding.
@@ -9561,7 +9569,7 @@ namespace
         if (src == HitSource::Fist) play &= mine;
         if (!play) return;
         double vol = hit_play(play, src, tgt, intensity);
-        if (cfg.hit_buzz_log)
+        if (cfg.hit_buzz_log && vol > 0.0)
             HSVR_LOG("Hit buzz: %ls %s %ls (%ls bone %ls) %s, %.1f m/s, impulse %.0f, intensity %.2f (speed %.2f, impulse %.2f), hands %s, volume %.2f",
                      weapon->GetName().c_str(), mine ? "hit" : "hit our", other ? other->GetName().c_str() : STR("?"), target_comp ? target_comp->GetName().c_str() : STR("?"),
                      hit.bone.ToString().c_str(),
@@ -9607,11 +9615,16 @@ namespace
         UObject* mesh = object_property(pawn, STR("Mesh"));
         Vec3 va = hit_body_velocity(mesh, hit.my_bone, hit.point);
         Vec3 vb = hit_body_velocity(hit.comp ? hit.comp : other_comp, hit.bone, hit.point);
-        double speed = (std::max)(length(va - vb) / 100.0, g_hand_world_v[side]);
+        // The arm's speed against him at the contact (not the hand's world speed: walking into him
+        // with an arm on him is not a strike).
+        double speed = length(va - vb) / 100.0;
         double intensity = inverse_lerp(2.0, 9.0, speed);
-        if (!hit_is_new(side, other, intensity, hit.point, now)) return;
+        // An arm resting or leaning on him is touch: only a strike from hit_buzz_limb_min_ms counts
+        // (hb-hits2: arms on the foe buzzed faintly about once a second at 1.3-2.7 m/s).
+        bool strike = speed >= cfg.hit_buzz_limb_min_ms && intensity >= cfg.hit_buzz_min_intensity;
+        if (!hit_is_new(side, other, strike ? intensity : 0.0, hit.point, now) || !strike) return;
         double vol = hit_play(1 << side, HitSource::Fist, HitTarget::Flesh, intensity);
-        if (cfg.hit_buzz_log)
+        if (cfg.hit_buzz_log && vol > 0.0)
             HSVR_LOG("Hit buzz: %s %ls hit %ls (%ls bone %ls), %.1f m/s, intensity %.2f, volume %.2f", side == 0 ? "left" : "right", bone.c_str(), other->GetName().c_str(),
                      hit.comp ? hit.comp->GetName().c_str() : STR("?"), hit.bone.ToString().c_str(), speed, intensity, vol);
     }

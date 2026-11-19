@@ -580,6 +580,8 @@ namespace hsvr
         flag("hit_buzz_blade_on_plate", c.hit_buzz_blade_on_plate);
         num("hit_buzz_impulse_full", c.hit_buzz_impulse_full);
         flag("hit_buzz_log", c.hit_buzz_log);
+        num("hit_buzz_min_intensity", c.hit_buzz_min_intensity);
+        num("hit_buzz_limb_min_ms", c.hit_buzz_limb_min_ms);
         flag("stab_assist", c.stab_assist);
         num("stab_min_speed_cms", c.stab_min_speed_cms);
         num("stab_min_into_cos", c.stab_min_into_cos);
