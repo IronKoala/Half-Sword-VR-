@@ -1408,6 +1408,7 @@ namespace
     bool set_bool_property(UObject* owner, const TCHAR* name, bool value);
     bool set_variable(UObject* owner, const TCHAR* name, double number, UObject* object, const FName* fname);
     double read_number_variable(UObject* owner, const TCHAR* name);
+    bool fingers_tracked_on(int side); // the hand's fingers follow yours (then the fist needs no shape)
     int fist_shape(const hsvr::Config& cfg)
     {
         int t = g_fist_shape_test.load();
@@ -1442,7 +1443,7 @@ namespace
             int g = side == g_anim_grip_two_side ? g_anim_grip_two : (now - g_anim_grip_time[side] < 0.1 ? g_anim_grip[side] : -1);
             // A fist: the shape chosen for it (pose_fist_shape). The animation's own fist needs 'Hand
             // Active' (0 in VR), so the hand would stay open (playtest 2026-11-19 21:10).
-            if (g_fist_side[side].load() && !g_fist_open[side].load())
+            if (g_fist_side[side].load() && !g_fist_open[side].load() && !fingers_tracked_on(side))
             {
                 int shape = fist_shape(hsvr::config());
                 if (shape >= 0 && shape <= 17) g = shape;
@@ -6677,10 +6678,447 @@ namespace
     }
 
     // ---- Fists from your real hand ---------------------------------------------------------------
+    // ---- Fingers from the real hand (Matthew 2026-11-19) ----------------------------------------
+    // ABP_Willie has no finger nodes (its 22 end-of-graph Modify Bone nodes are all the arms/head),
+    // so the fingers are written where his visible body takes its pose: CharacterMesh0's ABP_CopyPose1
+    // copies the DriverSkeleton through a Copy Pose From Mesh node, whose PreUpdate (game thread, right
+    // before BlueprintUpdateAnimation) snapshots the driver's component-space bones into the node's
+    // SourceMeshTransformArray; the worker evaluation later turns each into a local transform against
+    // its parent's snapshot (finger_pose_research.md section 3). So after that update the mod turns
+    // each finger joint, parent first, in that snapshot. Head, armour and gore copy CharacterMesh0,
+    // so gauntlets follow. Curl per joint at a full curl: the VR framework's table (ik/fingers.rs).
+    // The bend axis is found from the hand's own geometry (finger direction x palm normal), not
+    // assumed from the bone axes, and checked by sign each time.
+    struct XForm96
+    {
+        double qx, qy, qz, qw;
+        double tx, ty, tz, tpad;
+        double sx, sy, sz, spad;
+    };
+    static_assert(sizeof(XForm96) == 96, "FTransform (double) is 96 bytes in UE 5.4");
+    struct XFormArray
+    {
+        XForm96* data;
+        int32_t num;
+        int32_t max;
+    };
+
+    struct FingerRig
+    {
+        UObject* instance = nullptr; // ABP_CopyPose1 on CharacterMesh0
+        UObject* driver = nullptr;
+        bool looked = false;
+        bool ok = false;
+        int node_offset = -1;  // the copy node inside the anim instance
+        int array_offset = -1; // SourceMeshTransformArray inside the node
+        int bone_count = 0;
+        int hand[2] = {-1, -1};
+        int chain[2][5][3]; // [side][thumb..pinky][_01.._03]
+        std::vector<int> parent;
+            std::vector<int> subtree[2][5][3];           // bone and all its descendants
+        double found_at = -1.0;
+        int tries = 0;
+        double next_try = 0.0;
+    };
+    FingerRig g_frig;
+    // What the hand wants, set on the game tick (fingers_track_tick), read by the animation hook.
+    struct FingerWant
+    {
+        bool on = false;            // the hand is free: its fingers follow yours
+        double curl[5] = {0, 0, 0, 0, 0};    // smoothed, thumb .. little (the thumb may go below 0: lifted)
+        double target[5] = {0, 0, 0, 0, 0};
+        double splay = 0.0, target_splay = 0.0;
+        double at = -1.0;
+    };
+    FingerWant g_fwant[2];
+    std::atomic<float> g_fake_thumb[2] = {-1.0f, -1.0f}; // test: hsvr.thumb <0|1> <curl>, -1 = the controller
+    std::atomic<float> g_fake_fingers[2][5] = {{-1.0f, -1.0f, -1.0f, -1.0f, -1.0f}, {-1.0f, -1.0f, -1.0f, -1.0f, -1.0f}}; // test: hsvr.fingers
+    std::atomic<bool> g_finger_log_now{false};
+
+    // Full-curl bend per joint (radians), thumb .. little, _01 .. _03.
+    // The VR framework's table (avatar/src/rig.rs CURL, finger_pose_research.md 1.3), with how far a
+    // base may bend back (LIFT, a curl below 0) and each base's spread at splay 1 (+ toward the thumb).
+    const double g_finger_full[5][3] = {
+        {0.45, 0.60, 0.80},
+        {1.22, 1.66, 1.05},
+        {1.36, 1.75, 1.13},
+        {1.43, 1.75, 1.08},
+        {1.54, 1.66, 1.05},
+    };
+    const double g_finger_lift[5] = {1.6, 0.35, 0.35, 0.35, 0.35};
+    const double g_finger_spread[5] = {0.35, 0.21, 0.03, -0.14, -0.31};
+    const char* kFingerNames[5] = {"thumb", "index", "middle", "ring", "pinky"};
+
+    int driver_bone_index(UObject* mesh, const std::string& bone)
+    {
+        Call c(mesh, STR("GetBoneIndex"));
+        c.name(STR("BoneName"), bone_fname(bone));
+        return c.run() ? c.integer() : -1;
+    }
+
+    // The bone's transform in the component's space, by GetSocketTransform(RTS_Component).
+    bool component_space_bone(UObject* mesh, const std::string& bone, XForm96& out)
+    {
+        Call c(mesh, STR("GetSocketTransform"));
+        if (!c.fn) return false;
+        c.name(STR("InSocketName"), bone_fname(bone));
+        c.byte(STR("TransformSpace"), 2); // RTS_Component
+        FProperty* r = c.param(STR("ReturnValue"));
+        if (!r || r->GetSize() != (int)sizeof(XForm96)) return false;
+        if (!c.run()) return false;
+        std::memcpy(&out, c.buffer.data() + r->GetOffset_Internal(), sizeof(out));
+        return true;
+    }
+
+    bool readable(const void* p, size_t n)
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (!p || !VirtualQuery(p, &mbi, sizeof(mbi))) return false;
+        if (mbi.State != MEM_COMMIT) return false;
+        if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+        const uint8_t* end = reinterpret_cast<const uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
+        return reinterpret_cast<const uint8_t*>(p) + n <= end;
+    }
+
+    bool finger_rig_find(UObject* instance, UObject* driver)
+    {
+        FingerRig& R = g_frig;
+        R = FingerRig{};
+        R.instance = instance;
+        R.driver = driver;
+        R.looked = true;
+        // The driver's bones: count, parents, the hand and finger chains.
+        {
+            Call n(driver, STR("GetNumBones"));
+            if (!n.run()) return false;
+            R.bone_count = n.integer();
+        }
+        if (R.bone_count <= 0 || R.bone_count > 1024) return false;
+        R.parent.assign(R.bone_count, -1);
+        for (int i = 0; i < R.bone_count; ++i)
+        {
+            Call bn(driver, STR("GetBoneName"));
+            if (FProperty* p = bn.param(STR("BoneIndex"))) *reinterpret_cast<int32_t*>(bn.buffer.data() + p->GetOffset_Internal()) = i;
+            bn.run();
+            FProperty* rp = bn.param(STR("ReturnValue"));
+            if (!rp) return false;
+            FName name = *reinterpret_cast<FName*>(bn.buffer.data() + rp->GetOffset_Internal());
+            Call pb(driver, STR("GetParentBone"));
+            pb.name(STR("BoneName"), name);
+            pb.run();
+            FProperty* pr = pb.param(STR("ReturnValue"));
+            if (!pr) return false;
+            FName parent = *reinterpret_cast<FName*>(pb.buffer.data() + pr->GetOffset_Internal());
+            std::wstring pw = parent.ToString();
+            R.parent[i] = pw == STR("None") ? -1 : driver_bone_index(driver, std::string(pw.begin(), pw.end()));
+        }
+        bool bones_ok = true;
+        for (int side = 0; side < 2; ++side)
+        {
+            std::string sx = side == 0 ? "_l" : "_r";
+            R.hand[side] = driver_bone_index(driver, "hand" + sx);
+            if (R.hand[side] < 0) bones_ok = false;
+            for (int f = 0; f < 5; ++f)
+                for (int j = 0; j < 3; ++j)
+                {
+                    char nm[32];
+                    std::snprintf(nm, sizeof(nm), "%s_%02d%s", kFingerNames[f], j + 1, sx.c_str());
+                    R.chain[side][f][j] = driver_bone_index(driver, nm);
+                    if (R.chain[side][f][j] < 0) bones_ok = false;
+                }
+        }
+        if (!bones_ok)
+        {
+            HSVR_LOG("Fingers: the driver lacks a hand or finger bone; per-finger posing off");
+            return false;
+        }
+        // Each joint's subtree (it and everything below it), for turning a joint with what it carries.
+        for (int side = 0; side < 2; ++side)
+            for (int f = 0; f < 5; ++f)
+                for (int j = 0; j < 3; ++j)
+                {
+                    int root = R.chain[side][f][j];
+                    auto& out = R.subtree[side][f][j];
+                    for (int i = 0; i < R.bone_count; ++i)
+                        for (int a = i, guard = 0; a >= 0 && guard < 64; a = R.parent[a], ++guard)
+                            if (a == root)
+                            {
+                                out.push_back(i);
+                                break;
+                            }
+                }
+        // The copy node: a struct property of the anim instance whose struct is a Copy Pose From Mesh.
+        UScriptStruct* node_struct = nullptr;
+        for (UStruct* level = static_cast<UStruct*>(instance->GetClassPrivate()); level && R.node_offset < 0; level = level->GetSuperStruct())
+            for (FProperty* p : level->ForEachProperty())
+            {
+                if (p->GetClass().GetName() != STR("StructProperty")) continue;
+                UScriptStruct* s = static_cast<FStructProperty*>(p)->GetStruct();
+                if (!s || s->GetName().find(STR("AnimNode_CopyPoseFromMesh")) == std::wstring::npos) continue;
+                R.node_offset = p->GetOffset_Internal();
+                node_struct = s;
+                HSVR_LOG("Fingers: copy node %ls (%ls) at +%d, %d bytes", p->GetName().c_str(), s->GetName().c_str(), R.node_offset, s->GetPropertiesSize());
+                break;
+            }
+        if (R.node_offset < 0 || !node_struct)
+        {
+            HSVR_LOG("Fingers: no Copy Pose From Mesh node in %ls; per-finger posing off", instance->GetClassPrivate()->GetName().c_str());
+            return false;
+        }
+        // Its private snapshot: a transform array as long as the driver's skeleton, whose hand matches
+        // the driver's hand in component space.
+        XForm96 hand_cs{};
+        if (!component_space_bone(driver, "hand_r", hand_cs)) return false;
+        uint8_t* node = reinterpret_cast<uint8_t*>(instance) + R.node_offset;
+        int size = node_struct->GetPropertiesSize();
+        for (int off = 0; off + (int)sizeof(XFormArray) <= size; off += 8)
+        {
+            auto* a = reinterpret_cast<XFormArray*>(node + off);
+            if (a->num != R.bone_count || a->max < a->num || a->max > 4096 || !a->data) continue;
+            if (!readable(a->data, sizeof(XForm96) * (size_t)a->num)) continue;
+            const XForm96& h = a->data[R.hand[1]];
+            double d = std::sqrt((h.tx - hand_cs.tx) * (h.tx - hand_cs.tx) + (h.ty - hand_cs.ty) * (h.ty - hand_cs.ty) + (h.tz - hand_cs.tz) * (h.tz - hand_cs.tz));
+            HSVR_LOG("Fingers: transform array at node+%d (%d bones): hand_r (%.1f, %.1f, %.1f) vs driver (%.1f, %.1f, %.1f), %.2f cm apart, scale %.2f",
+                     off, a->num, h.tx, h.ty, h.tz, hand_cs.tx, hand_cs.ty, hand_cs.tz, d, h.sx);
+            if (d < 3.0)
+            {
+                R.array_offset = off;
+                break;
+            }
+        }
+        if (R.array_offset < 0)
+        {
+            HSVR_LOG("Fingers: the copy node's snapshot was not found; per-finger posing off (the fist shape stays)");
+            return false;
+        }
+        R.ok = true;
+        R.found_at = hsvr::now_seconds();
+        return true;
+    }
+
+    hsvr::Vec3 xf_pos(const XForm96& x) { return {x.tx, x.ty, x.tz}; }
+    hsvr::Quat xf_rot(const XForm96& x) { return {x.qx, x.qy, x.qz, x.qw}; }
+
+    // Turns bone `j` of a finger (and all it carries) about `axis` through its own position.
+    void turn_subtree(XForm96* bones, const std::vector<int>& subtree, const hsvr::Vec3& pivot, const hsvr::Quat& turn)
+    {
+        for (int i : subtree)
+        {
+            XForm96& b = bones[i];
+            hsvr::Quat r = (turn * xf_rot(b)).normalized();
+            hsvr::Vec3 p = pivot + turn.rotate(xf_pos(b) - pivot);
+            b.qx = r.x, b.qy = r.y, b.qz = r.z, b.qw = r.w;
+            b.tx = p.x, b.ty = p.y, b.tz = p.z;
+        }
+    }
+
+    // Signed bend of `child_dir` from `parent_dir` about `axis` (radians; + = toward the palm).
+    double bend_about(const hsvr::Vec3& parent_dir, const hsvr::Vec3& child_dir, const hsvr::Vec3& axis)
+    {
+        using namespace hsvr;
+        Vec3 a = parent_dir - axis * dot(parent_dir, axis), b = child_dir - axis * dot(child_dir, axis);
+        if (length(a) < 1e-6 || length(b) < 1e-6) return 0.0;
+        a = normalized(a), b = normalized(b);
+        return std::atan2(dot(cross(a, b), axis), dot(a, b));
+    }
+
+    // Writes one hand's fingers into the snapshot (the framework's Finger::bend, avatar/src/rig.rs):
+    // each finger's base spreads (splay), then each joint bends about the finger's flex axis to
+    // curl x CURL, replacing the bend the pose had (so curl 0 = straight); the thumb's base adds its
+    // bend to the pose's own (the game's open hand, the framework's rest pose). Axes from the hand
+    // bone (hand_bones.md: fingers +X on hand_l / -X on hand_r, thumb +Y, palm -Z), checked against
+    // the knuckles' own geometry in the log.
+    bool pose_hand_fingers(XForm96* B, int side, const double curl[5], double splay, bool log)
+    {
+        using namespace hsvr;
+        FingerRig& R = g_frig;
+        auto P = [&](int i) { return xf_pos(B[i]); };
+        const int(*ch)[3] = R.chain[side];
+        Quat hr = xf_rot(B[R.hand[side]]);
+        Vec3 hand = P(R.hand[side]);
+        Vec3 along = normalized(hr.rotate(Vec3{side == 0 ? 1.0 : -1.0, 0, 0}));
+        Vec3 thumbward = normalized(hr.rotate(Vec3{0, 1, 0}));
+        Vec3 palm = normalized(hr.rotate(Vec3{0, 0, -1}));
+        char line[900];
+        int at = 0;
+        if (log)
+        {
+            Vec3 g_along = normalized(P(ch[2][0]) - hand);
+            Vec3 g_across = normalized(P(ch[1][0]) - P(ch[4][0]));
+            Vec3 g_palm = normalized(cross(g_across, g_along) * (side == 1 ? -1.0 : 1.0));
+            at += std::snprintf(line, sizeof(line), " axes vs knuckles: along %.2f, thumb side %.2f, palm %.2f;", dot(along, g_along), dot(thumbward, g_across),
+                                dot(palm, g_palm));
+        }
+        Vec3 splay_axis = normalized(cross(along, thumbward)); // + turns a finger toward the thumb
+        for (int f = 0; f < 5; ++f)
+        {
+            bool thumb = f == 0;
+            int b0 = ch[f][0], b1 = ch[f][1], b2 = ch[f][2];
+            Vec3 seg1 = P(b2) - P(b1);
+            if (length(seg1) < 0.05) continue;
+            // The last segment has no child bone: it points as the one before it does, in its own bone's frame.
+            Vec3 u = xf_rot(B[b1]).inverse().rotate(normalized(seg1));
+            auto seg = [&](int j) {
+                return normalized(j < 2 ? P(ch[f][j + 1]) - P(ch[f][j]) : xf_rot(B[ch[f][j]]).rotate(u));
+            };
+            Vec3 tip_before = P(b2) + xf_rot(B[b2]).rotate(u) * 2.5;
+            double c0 = (std::max)(-g_finger_lift[f], (std::min)(1.0, curl[f]));
+            double c12 = (std::max)(0.0, (std::min)(1.0, curl[f]));
+            // Splay at the base: the fingers close up as the base curls.
+            double sp = (std::max)(0.0, (std::min)(1.0, splay)) * (1.0 - (std::max)(0.0, (std::min)(1.0, c0)));
+            double spread_now = bend_about(along, seg(0), splay_axis);
+            double spread_turn = thumb ? (sp - 0.3) * g_finger_spread[0] : sp * g_finger_spread[f] - spread_now;
+            turn_subtree(B, R.subtree[side][f][0], P(b0), quat_axis_angle(splay_axis, spread_turn));
+            Vec3 d0 = seg(0);
+            Vec3 toward = thumb ? normalized(palm * 0.6 - thumbward) : palm;
+            Vec3 axis = cross(d0, toward);
+            if (length(axis) < 1e-6) continue;
+            axis = normalized(axis);
+            double before[3] = {0, 0, 0}, after[3] = {0, 0, 0};
+            for (int j = 0; j < 3; ++j)
+            {
+                Vec3 prev = j == 0 ? along : seg(j - 1);
+                double bend = bend_about(prev, seg(j), axis);
+                double c = j == 0 ? c0 : c12;
+                double turn = (j == 0 && thumb) ? c * g_finger_full[0][0] : c * g_finger_full[f][j] - bend;
+                before[j] = bend;
+                turn_subtree(B, R.subtree[side][f][j], P(ch[f][j]), quat_axis_angle(axis, turn));
+                after[j] = bend_about(prev, seg(j), axis);
+            }
+            if (log && at < (int)sizeof(line) - 160)
+            {
+                Vec3 tip = P(b2) + xf_rot(B[b2]).rotate(u) * 2.5;
+                at += std::snprintf(line + at, sizeof(line) - at, " %s %.2f: %.0f/%.0f/%.0f -> %.0f/%.0f/%.0f deg, spread %.0f->%.0f, tip %.1f cm from hand, palmward %.1f->%.1f;",
+                                    kFingerNames[f], curl[f], before[0] * 57.3, before[1] * 57.3, before[2] * 57.3, after[0] * 57.3, after[1] * 57.3,
+                                    after[2] * 57.3, spread_now * 57.3, bend_about(along, d0, splay_axis) * 57.3, length(tip - hand), dot(tip_before - hand, palm),
+                                    dot(tip - hand, palm));
+            }
+        }
+        if (log) HSVR_LOG("Fingers %s (splay %.2f):%s", side == 0 ? "left" : "right", splay, line);
+        return true;
+    }
+
+    UFunction* g_copy_update_fn = nullptr;
+    void fingers_after_copy_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        FingerRig& R = g_frig;
+        if (!context || !function || !R.instance || context != R.instance || !g_pose_active.load()) return;
+        if (g_copy_update_fn) { if (function != g_copy_update_fn) return; }
+        else
+        {
+            if (function->GetName() != STR("BlueprintUpdateAnimation")) return;
+            g_copy_update_fn = function;
+            HSVR_LOG("Fingers: %ls's animation update seen", context->GetClassPrivate()->GetName().c_str());
+        }
+        if (!R.ok)
+        {
+            // Looked for every 2 s, up to 10 times (the snapshot can be empty or a frame apart at first).
+            double t = hsvr::now_seconds();
+            if (R.tries >= 10 || t < R.next_try || !R.driver) return;
+            int tries = R.tries + 1;
+            bool found = finger_rig_find(context, R.driver);
+            R.tries = tries;
+            R.next_try = t + 2.0;
+            if (!found)
+            {
+                if (tries == 10) HSVR_LOG("Fingers: gave up finding the copy node's snapshot; the fist shape stays");
+                return;
+            }
+            HSVR_LOG("Fingers: per-finger posing on (try %d)", tries);
+        }
+        uint8_t* node = reinterpret_cast<uint8_t*>(context) + R.node_offset;
+        auto* a = reinterpret_cast<XFormArray*>(node + R.array_offset);
+        if (a->num != R.bone_count || !a->data) return;
+        static double last_log = -10.0;
+        double now = hsvr::now_seconds();
+        bool log = g_finger_log_now.exchange(false) || (hsvr::config().log_fingers && now - last_log >= 1.0 && (g_fwant[0].on || g_fwant[1].on));
+        if (log) last_log = now;
+        for (int side = 0; side < 2; ++side)
+        {
+            const FingerWant& w = g_fwant[side];
+            if (!w.on || now - w.at > 0.2) continue;
+            pose_hand_fingers(a->data, side, w.curl, w.splay, log);
+        }
+    }
+
+    // Game tick: which hands are free, and the curls they want (smoothed).
+    void fingers_track_tick(const hsvr::Config& cfg, const hsvr::ControllerState& state, UObject* pawn)
+    {
+        double now = hsvr::now_seconds();
+        UObject* copy = g_pose.mesh ? object_property(g_pose.mesh, STR("AnimScriptInstance")) : nullptr;
+        if (copy != g_frig.instance || g_pose.driver != g_frig.driver)
+        {
+            g_frig = FingerRig{};
+            g_frig.instance = copy;
+            g_frig.driver = g_pose.driver;
+            g_copy_update_fn = nullptr;
+        }
+        for (int side = 0; side < 2; ++side)
+        {
+            FingerWant& w = g_fwant[side];
+            UObject* mine = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            bool free = cfg.pose_fingers_tracked && (!mine || is_fist(mine)) &&
+                        !bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")) && !scabbard_held(side) && !(g_two.active && side == g_two.second);
+            const hsvr::HandState& h = state.hand[side];
+            double target[5];
+            double touch_override = -1.0;
+            if (h.joints_valid && cfg.input_hand_tracking)
+                for (int f = 0; f < 5; ++f) target[f] = h.joint_curl[f];
+            else
+            {
+                // The VR framework's empty-hand curls from the sensors (ik/src/fingers.rs FingerSolver::target).
+                double sq = g_fake_squeeze[side].load() >= 0.0f ? g_fake_squeeze[side].load() : h.squeeze;
+                double trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : h.trigger;
+                if (g_fake_thumb[side].load() >= 0.0f) touch_override = g_fake_thumb[side].load();
+                double tc = touch_override >= 0.0 ? touch_override : h.sensor_curl[0];
+                bool touch_thumb = tc >= 0.79, thumb_press = tc >= 0.99;
+                target[0] = touch_thumb ? 0.12 + (0.75 - 0.12) * sq + (thumb_press ? 0.1 : 0.0) : -0.5; // lifted: a thumbs-up
+                target[1] = 0.05 + 0.95 * trig; // the trigger's touch sensor does not move it
+                const double lead[3] = {1.0, 1.03, 1.06};
+                for (int f = 2; f < 5; ++f) target[f] = 0.15 + 0.85 * sq * lead[f - 2];
+            }
+            for (int f = 0; f < 5; ++f)
+            {
+                float fake = g_fake_fingers[side][f].load();
+                if (fake >= 0.0f) target[f] = fake;
+                target[f] = (std::max)(f == 0 ? -g_finger_lift[0] : 0.0, (std::min)(1.0, target[f]));
+            }
+            double open = 1.0 - (target[1] + target[2] + target[3] + target[4]) / 4.0;
+            if (!free) { w.on = false; w.at = now; continue; }
+            double dt = w.on ? (std::min)(3.0 / 90.0, (std::max)(0.0, now - w.at)) : 1.0; // MAX_DT 3/90 s
+            double k = cfg.pose_fingers_tau_s > 0.0 ? 1.0 - std::exp(-dt / cfg.pose_fingers_tau_s) : 1.0;
+            for (int f = 0; f < 5; ++f)
+            {
+                w.target[f] = target[f];
+                w.curl[f] = w.on ? w.curl[f] + (target[f] - w.curl[f]) * k : target[f];
+            }
+            w.target_splay = 0.5 * open;
+            w.splay = w.on ? w.splay + (w.target_splay - w.splay) * k : w.target_splay;
+            w.on = true;
+            w.at = now;
+            // What the visible body shows (its last evaluated pose): fingertips from the hand bone.
+            static double shown_at[2] = {-10.0, -10.0};
+            if (cfg.log_fingers && g_frig.ok && now - shown_at[side] >= 1.0 && g_pose.mesh)
+            {
+                shown_at[side] = now;
+                std::string sx = side == 0 ? "_l" : "_r";
+                hsvr::Vec3 hand = socket_location(g_pose.mesh, bone_fname("hand" + sx));
+                double d[5];
+                for (int f = 0; f < 5; ++f) d[f] = hsvr::length(socket_location(g_pose.mesh, bone_fname(std::string(kFingerNames[f]) + "_03" + sx)) - hand);
+                HSVR_LOG("Fingers shown: %s curls %.2f/%.2f/%.2f/%.2f/%.2f; _03 from the hand bone: thumb %.1f, index %.1f, middle %.1f, ring %.1f, pinky %.1f cm (four-finger mean %.1f)",
+                         side == 0 ? "left" : "right", w.curl[0], w.curl[1], w.curl[2], w.curl[3], w.curl[4], d[0], d[1], d[2], d[3], d[4], (d[1] + d[2] + d[3] + d[4]) / 4.0);
+            }
+        }
+    }
+
+    bool fingers_tracked_on(int side)
+    {
+        return g_frig.ok && g_fwant[side].on && hsvr::now_seconds() - g_fwant[side].at < 0.2;
+    }
+
     // Matthew 2026-11-19: the hand is a fist while you close it (grip, trigger, thumb resting on the
     // stick or a button), and opens when you open it. Curls come from SteamVR's hand skeleton when it
     // gives one, else from the sensors (controllers.cpp). A squeeze near something still grabs it.
-    std::atomic<float> g_fake_thumb[2] = {-1.0f, -1.0f}; // test: hsvr.thumb <0|1> <curl>, -1 = the controller
     bool g_finger_fist[2] = {false, false};
     double g_fist_retry_at[2] = {-10.0, -10.0};
     double g_slap_until[2] = {-10.0, -10.0};
@@ -6817,6 +7255,9 @@ namespace
                 }
         for (int side = 0; side < 2; ++side)
             g_fist_side[side].store(pawn && is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))));
+        // Fingers every tick the body is posed, even with the controllers idle (test 10: behind the grab
+        // gate below, an unfaked fake headset never reached it).
+        if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
         {
             if (held[0] || held[1])
@@ -13614,6 +14055,27 @@ namespace
                 HSVR_LOG("Script: hsvr.thumb %d %.2f", side, v);
                 continue;
             }
+            if (entry.command.rfind("hsvr.fingers ", 0) == 0)
+            {
+                // hsvr.fingers <side> <thumb> <index> <middle> <ring> <little> (-1 = your hand), or hsvr.fingers log
+                if (entry.command == "hsvr.fingers log")
+                {
+                    g_finger_log_now.store(true);
+                    continue;
+                }
+                const char* at = entry.command.c_str() + 13;
+                char* end = nullptr;
+                int side = (int)std::strtol(at, &end, 10) != 0 ? 1 : 0;
+                float v[5];
+                for (int f = 0; f < 5; ++f)
+                {
+                    v[f] = end ? std::strtof(end, &end) : -1.0f;
+                    g_fake_fingers[side][f].store(v[f]);
+                }
+                g_finger_log_now.store(true);
+                HSVR_LOG("Script: hsvr.fingers %d %.2f %.2f %.2f %.2f %.2f", side, v[0], v[1], v[2], v[3], v[4]);
+                continue;
+            }
             if (entry.command.rfind("hsvr.fist_shape ", 0) == 0)
             {
                 g_fist_shape_test.store(atoi(entry.command.c_str() + 16));
@@ -14358,6 +14820,7 @@ class HalfSwordVR : public CppUserModBase
         Hook::RegisterProcessEventPostCallback(&pose_after_anim_update, {false, false, STR("HalfSwordVR"), STR("PoseAfterAnim")});
         Hook::RegisterProcessEventPostCallback(&feet_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FeetAfterAnim")});
         Hook::RegisterProcessEventPostCallback(&fingers_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FingersAfterAnim")});
+        Hook::RegisterProcessEventPostCallback(&fingers_after_copy_update, {false, false, STR("HalfSwordVR"), STR("FingersAfterCopy")});
         Hook::RegisterEngineTickPreCallback(
                 [](auto&, UEngine* engine, float delta_seconds, bool) {
                     game_tick(reinterpret_cast<UObject*>(engine), delta_seconds);
