@@ -5882,6 +5882,7 @@ namespace
     // One tick of the hold for one hand. `joint` is the game's hand joint (its frames say where on the
     // weapon the hand holds it and how the weapon sits in the hand); `base` the weapon's BaseMesh.
     std::wstring stab_name_var(UObject* owner, const TCHAR* name);
+    double g_wound_since[2] = {-1.0, -1.0}; // when each hand's weapon went into a wound
 
     void hold_weapon(int side, UObject* pawn, UObject* joint, UObject* base, UObject* weapon, double mass, const hsvr::Config& cfg)
     {
@@ -6400,6 +6401,10 @@ namespace
             // cone). Pulling back far enough draws it out; the game lets go once the tip box leaves
             // the body (stab-test9).
             bool in_wound = cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body"));
+            static bool was_in_wound[2] = {false, false};
+            if (!in_wound && was_in_wound[side]) HSVR_LOG("Hold: %s hand's weapon is out of the wound", side == 0 ? "left" : "right");
+            was_in_wound[side] = in_wound;
+            if (!in_wound) g_wound_since[side] = -1.0;
             if (in_wound)
             {
                 Vec3 u = rot.rotate({0.0, 0.0, 1.0});
@@ -6414,7 +6419,11 @@ namespace
                 bool head = bone == STR("Head") || bone == STR("head") || bone.rfind(STR("neck"), 0) == 0;
                 double k = head ? cfg.stab_wound_head_factor : 1.0;
                 double need_ax = dot(v_need, u), now_ax = dot(v_com_now, u);
-                double ax = (std::min)(cfg.stab_wound_in_cms * k, (std::max)(-cfg.stab_wound_out_cms * k, need_ax));
+                // The first moments in the wound: no pulling out yet (stab-test11: the hold's target
+                // sits behind a blade that has just gone in, and its catch-up drew it straight out).
+                if (g_wound_since[side] < 0.0) g_wound_since[side] = now;
+                double out_most = now - g_wound_since[side] < cfg.stab_wound_settle_s ? 0.0 : cfg.stab_wound_out_cms * k;
+                double ax = (std::min)(cfg.stab_wound_in_cms * k, (std::max)(-out_most, need_ax));
                 v_need = (v_com_now - u * now_ax) + u * ax;
                 HSVR_LOG_EVERY(0.25, "Hold: %s hand's %ls in a wound (%ls): wanted %.0f cm/s along it, slides %.0f", side == 0 ? "left" : "right",
                                weapon->GetName().c_str(), bone.c_str(), need_ax, ax);
