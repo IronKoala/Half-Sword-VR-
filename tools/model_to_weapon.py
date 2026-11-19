@@ -133,6 +133,20 @@ def gltf_spec_gloss_materials(path):
         return {}
 
 
+# Typical masses of real weapons by overall length (cm, kg): swords and daggers from dagger (0.2-0.45 kg)
+# through arming sword (~1.1 kg at 90 cm) and longsword (1.1-1.8 kg at 110-125 cm) to two-handers
+# (2-3.5 kg at 140-180 cm); hafted from hand axes and maces (1-1.6 kg) to spears (1.5-2.5 kg) and
+# halberds/poleaxes (2.5-3.5 kg). Commonly quoted ranges for surviving originals, used only to keep the
+# estimate sane; a weight the user types always wins.
+TYPICAL_SWORD = [(20, 0.2), (40, 0.4), (60, 0.7), (90, 1.1), (120, 1.5), (150, 2.2), (180, 3.0), (220, 3.8)]
+TYPICAL_HAFTED = [(40, 0.6), (70, 1.2), (90, 1.6), (120, 2.0), (200, 2.2), (250, 2.8), (300, 3.3)]
+
+
+def typical_mass_kg(length_cm, hafted):
+    pts = TYPICAL_HAFTED if hafted else TYPICAL_SWORD
+    return float(np.interp(length_cm, [p[0] for p in pts], [p[1] for p in pts]))
+
+
 def find_texture(model_path, tex):
     """A texture path as a Bethesda .nif stores it ("textures\\a\\b.dds", relative to the game's Data
     folder): looked for under every folder above the model, then by file name next to it."""
@@ -599,7 +613,18 @@ def main(argv=None):
             mass_note = f"estimated: model volume {enclosed:.0f} cm3 (convex {convex:.0f}), steel/grip densities"
         else:
             mass_note = f"estimated from convex volume {convex:.0f} cm3 (model volume {enclosed:.0f} not usable), steel/grip densities"
-        mass = round(grams / 1000.0, 3)
+        # Models are often far thicker than the real thing (stylised or blocky ones especially), so the
+        # volume guess is checked against what real weapons of this type and length weigh: kept within
+        # 0.6x..1.6x of that, then met halfway (geometric mean) with it.
+        from_volume = grams / 1000.0
+        length_cm = float(z.max() - z.min())
+        typical = typical_mass_kg(length_cm, hafted)
+        kept = min(max(from_volume, 0.6 * typical), 1.6 * typical)
+        mass = round(math.sqrt(kept * typical), 3)
+        mass_note += (f"; volume gives {from_volume:.2f} kg, real {'hafted weapons' if hafted else 'swords'} of "
+                      f"{length_cm:.0f} cm weigh about {typical:.2f} kg"
+                      + (" (volume guess far off: the model is thicker or thinner than a real one)"
+                         if kept != from_volume else ""))
     print(f"mass {mass} kg ({mass_note}); volumes cm3: " + ", ".join(f"{s} {v:.0f}" for s, v in volume.items()))
 
     top = float(z.max())
