@@ -3,7 +3,10 @@
 Launching the game with `test_room=1` in `HalfSwordVR.ini` goes from the first menu straight into a Free Mode arena set up for testing:
 
 - `test_room_foes` Willies (default 4, 1-10) whose AI is switched off. They never attack, move, kick or block, but keep the game's own physics: they stand, balance, fall when hit or pushed, get up again, can be grabbed, punched, stabbed and killed. They are stood in an arc 2.2 m behind you, facing you. A foe whose AI comes back on (zombie revive) is switched off again.
-- Two of the game's weapon tables (`BP_Container_Weapon_Table_1`) 1.1 m in front of you, stocked through the game's own loot point (`BP_Loot_Weapon`, Spawn Chance 1) with one of each: 1H sword, 2H sword, 1H mace, 2H mace, shield, 1H hafted, 2H hafted, polearm, secondary. Each table also stocks one random piece of its own (weapon, maybe armour).
+- Two of the game's weapon tables (`BP_Container_Weapon_Table_1`) 1.1 m in front of you, stocked through the game's own loot point (`BP_Loot_Weapon`, Spawn Chance 1) with one of each: 1H sword, 2H sword, 1H mace, 2H mace, shield, 1H hafted, 2H hafted, polearm, secondary (the game's secondary kind can be a bottle). The tables' own random loot is switched off (it landed on the same spots and threw the weapons). When the game has no weapon of a kind at the chosen tier, the nearest other tier is used (log: `the game has none at tier N`).
+- The foes are moved with their physics off and get it back 0.4 s later at rest (a teleport of a simulating Willie throws him about 5 m).
+- `hsvr.test_room_report` (live command, HalfSwordVR_commands.txt) logs every table, loose weapon and foe (`TestRoom: check:`); `TestRoom: watch` lines follow everything near the tables that moves in the room's first 5 s.
+- The tables are physics props (very heavy, but they can be shoved): a long weapon swung into them knocks them and what lies on them.
 
 | Setting | Default | Meaning |
 |---|---|---|
