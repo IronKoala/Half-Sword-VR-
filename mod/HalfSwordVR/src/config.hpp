@@ -275,6 +275,9 @@ namespace hsvr
         // bouncing, the least lag that does): from its mass and its inertia about the grip. 0 = the fixed
         // pose_hold_damper / turn_damper / pose_bs_two_*_c values.
         double pose_hold_damping_ratio = 1.0;
+        // The hand's velocity the hold's dampers follow, smoothed over this time (s): tracking noise
+        // differentiated frame to frame shook a held weapon ~1 cm at ~10 Hz. 0 = raw.
+        double pose_hold_target_vel_smooth_s = 0.05;
         // Weight: the hold's turn is limited by torque about the grip, not the centre of mass (heavy and
         // long weapons trail fast turns, B&S-style). torque_scale multiplies pose_hold_max_torque for it.
         bool pose_hold_weight = true;

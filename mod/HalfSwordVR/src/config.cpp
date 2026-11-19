@@ -376,6 +376,7 @@ namespace hsvr
         flag("pose_scabbard_handle", c.pose_scabbard_handle);
         flag("pose_grab_weapon_handles_only", c.pose_grab_weapon_handles_only);
         num("pose_hold_damping_ratio", c.pose_hold_damping_ratio);
+        num("pose_hold_target_vel_smooth_s", c.pose_hold_target_vel_smooth_s);
         flag("pose_body_size_strength", c.pose_body_size_strength);
         num("pose_slide_ring_max_len_cm", c.pose_slide_ring_max_len_cm);
         num("pose_slide_ring_max_width_cm", c.pose_slide_ring_max_width_cm);
