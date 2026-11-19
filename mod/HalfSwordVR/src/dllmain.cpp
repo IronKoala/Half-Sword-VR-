@@ -3095,6 +3095,13 @@ namespace
         std::string what; // for the log: "rim", a strap's name...
         bool place = false; // put the weapon there on the hold's first tick
         bool fingers = false; // curl that hand's fingers (pose_shield_hand_grip_type) while held
+        // On a handle (B&S): the segment it may slide along (BaseMesh frame), where on it (0..1), and
+        // the finger shape (game grip type, -1 = the game's own).
+        bool has_handle = false;
+        hsvr::Vec3 ha, hb;
+        double t = 0.0;
+        std::string handle;
+        int grip_type = -1;
     };
     FreeGrip g_pending_free[2]; // applied when that hand's next hold starts
 
@@ -3102,6 +3109,10 @@ namespace
     {
         UObject* weapon = nullptr;
         FreeGrip free;
+        bool handle_slide = false;     // sliding along its handle this tick (axial momentum kept)
+        hsvr::Vec3 handle_axis;        // that handle's line, world
+        double handle_keep = 0.0;      // how much of its own motion along the line it keeps (0..1)
+        bool handle_sliding_logged = false;
         hsvr::Vec3 last_target_pos;
         hsvr::Quat last_target_rot;
         double last_time = 0.0;
@@ -3793,6 +3804,25 @@ namespace
                  (int)bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R")));
     }
 
+    // ---- Handles (the grab rebuild, B&S-style) --------------------------------------------------
+    // Every item's handles: segments in its BaseMesh frame a hand can hold and slide along. Weapons:
+    // the grip (measured along the axis from the real parts: the haft of a polearm, a sword's grip
+    // between guard and pommel) and the blade past the guard (half-swording). Shields: each measured
+    // strap and handle. Anywhere else on an item, the hand holds it where it touched, with no slide.
+    struct Handle
+    {
+        hsvr::Vec3 a, b;
+        std::string name;
+        int grip_r = -1, grip_l = -1; // finger shape for that hand (-1 = the game's own)
+    };
+    const std::vector<Handle>& item_handles(UObject* item, UObject* base);
+    int nearest_handle(const std::vector<Handle>& hs, const hsvr::Vec3& local, double& t, double& dist);
+    FreeGrip make_free_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const hsvr::Vec3& point,
+                            const hsvr::Vec3* axis, const char* what);
+    FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t);
+    int clamp_grip_type(int side, int g);
+    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out = nullptr);
+
     // The grab button (Phase 4): squeezing a controller's grip with that hand empty picks up the
     // nearest loose weapon whose body is within pose_grab_radius_cm of the hand; letting go of the
     // grip drops what that hand holds (B&S-style hold-to-hold). A weapon he already holds when the
@@ -3818,6 +3848,13 @@ namespace
         double far_since = -1.0;
         bool sliding = false;
         double grip_type_before = -1.0; // the second hand's grip type before it took hold (its finger pose)
+        // The handle system (pose_grab_handles): the second hand's own grip on the weapon.
+        bool use_rel = false;
+        hsvr::Quat rel;              // weapon rotation in the second hand's frame
+        bool has_handle = false;
+        hsvr::Vec3 ha, hb;
+        double t = 0.0;
+        std::string handle;
     };
     TwoHand g_two;
 
@@ -3916,6 +3953,22 @@ namespace
         double z = g_two.z;
         Vec3 pos = component_location(base);
         Quat rot = component_rotation(base);
+        FreeGrip keep;
+        if (g_two.use_rel)
+        {
+            // The handle system: the second hand keeps its own grip as it was.
+            keep.set = true;
+            keep.pivot = g_two.local;
+            keep.in_anchor = g_two.in_hand;
+            keep.rel = g_two.rel;
+            keep.what = g_two.handle;
+            keep.has_handle = g_two.has_handle;
+            keep.ha = g_two.ha;
+            keep.hb = g_two.hb;
+            keep.t = g_two.t;
+            keep.handle = g_two.handle;
+            keep.grip_type = g_two.grip_type_before >= 0.0 ? (int)read_number_variable(pawn, grip_type_name(to)) : -1;
+        }
         g_two = TwoHand{};
         drop_weapon(from, pawn);
         bool ok = give_hand_weapon(to, pawn, weapon);
@@ -3923,7 +3976,8 @@ namespace
         if (now == weapon)
         {
             set_component_transform(base, pos, rot, true);
-            g_pending_slide[to] = z;
+            if (keep.set) g_pending_free[to] = keep;
+            else g_pending_slide[to] = z;
         }
         HSVR_LOG("Two hands: %s hand lets go, %ls handed to the %s hand at %.1f cm (%s, %s hand now holds %ls)", from == 0 ? "left" : "right", weapon->GetName().c_str(),
                  to == 0 ? "left" : "right", z, ok ? "set up" : "set-up call missing", to == 0 ? "left" : "right", now ? now->GetName().c_str() : STR("nothing"));
@@ -3995,6 +4049,78 @@ namespace
         return true;
     }
 
+    // The handle system's second hand (B&S): the free hand squeezes on a weapon the other hand holds,
+    // touching it (pose_grab_touch_cm): it holds the nearest handle (grip, blade, a strap) lined up
+    // with its grip line, or the spot it touched. The weapon then lies along the line between the two
+    // hands' points, the first hand sets its roll, and the hold is pose_two_hand_strength as strong.
+    bool try_second_hand(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_two_hand) return false;
+        int other = 1 - side;
+        UObject* weapon = object_property(pawn, other == 0 ? STR("Weapon L") : STR("Weapon R"));
+        HoldState& h = g_hold[other];
+        if (!weapon || h.weapon != weapon || !h.have_last || is_fist(weapon) || h.forearm) return false;
+        UObject* base = object_property(weapon, STR("BaseMesh"));
+        if (!base) return false;
+        Vec3 at = hand_grab_point(mesh, side);
+        double touch_d = closest_on_weapon(weapon, at);
+        if (touch_d < 0.0 || touch_d > cfg.pose_grab_touch_cm)
+        {
+            HSVR_LOG("Two hands: %s grip squeezed %.0f cm from %ls (needs %.0f), not on it", side == 0 ? "left" : "right", touch_d, weapon->GetName().c_str(),
+                     cfg.pose_grab_touch_cm);
+            return false;
+        }
+        Vec3 bp = component_location(base);
+        Quat bq = component_rotation(base);
+        Vec3 local = bq.inverse().rotate(at - bp);
+        const std::vector<Handle>& hs = item_handles(weapon, base);
+        double t = 0.0, hd = 1e9;
+        int hi = nearest_handle(hs, local, t, hd);
+        bool on_handle = hi >= 0 && hd <= cfg.pose_grab_handle_cm;
+        Vec3 spot = local;
+        if (!on_handle)
+        {
+            Vec3 touch;
+            if (closest_on_weapon(weapon, at, &touch) >= 0.0) spot = bq.inverse().rotate(touch - bp);
+        }
+        // Not on the first hand's own spot.
+        if (length(spot - h.free.pivot) < 2.0 * cfg.pose_slide_hand_half_cm && h.free.set)
+        {
+            HSVR_LOG("Two hands: %s grip squeezed on the first hand's spot of %ls", side == 0 ? "left" : "right", weapon->GetName().c_str());
+            return false;
+        }
+        FreeGrip g = on_handle ? handle_grip(side, mesh, bp, bq, at, hs[hi], t)
+                               : make_free_grip(side, mesh, bp, bq, at, bp + bq.rotate(spot), nullptr, "spot where the hand touched it");
+        g_two = TwoHand{};
+        g_two.active = true;
+        g_two.main = other;
+        g_two.second = side;
+        g_two.weapon = weapon;
+        g_two.use_rel = true;
+        g_two.rel = g.rel;
+        g_two.in_hand = g.in_anchor;
+        g_two.local = g.pivot;
+        g_two.have_local = true;
+        g_two.has_handle = g.has_handle;
+        g_two.ha = g.ha;
+        g_two.hb = g.hb;
+        g_two.t = g.t;
+        g_two.handle = on_handle ? hs[hi].name : std::string("spot");
+        g_two.on_blade = on_handle && hs[hi].name == "blade";
+        int gt = on_handle ? clamp_grip_type(side, side == 1 ? hs[hi].grip_r : hs[hi].grip_l) : 5;
+        if (gt < 0) gt = 2;
+        if (cfg.pose_two_hand_curl)
+        {
+            g_two.grip_type_before = read_number_variable(pawn, grip_type_name(side));
+            if (!set_variable(pawn, grip_type_name(side), gt)) g_two.grip_type_before = -1.0;
+        }
+        controllers_buzz(side, 0.4f);
+        HSVR_LOG("Two hands: %s hand takes %ls by its %s (%.1f cm from the handle, touched at %.1f cm), at (%.1f, %.1f, %.1f) on it, fingers %d",
+                 side == 0 ? "left" : "right", weapon->GetName().c_str(), g_two.handle.c_str(), on_handle ? hd : 0.0, touch_d, spot.x, spot.y, spot.z, gt);
+        return true;
+    }
+
     // The second hand's arm: its palm on its spot on the weapon, and the hand locked onto the weapon
     // the way the first hand holds it, mirrored (playtest 2026-11-18: following the controller's turn,
     // it twisted and clipped through the handle). Willie's hands mirror across the hand bone's X and
@@ -4029,7 +4155,9 @@ namespace
         if (!base) return false;
         Quat weapon_rot = component_rotation(base);
         const HoldState& first = g_hold[g_two.main];
-        if (hsvr::config().pose_two_hand_lock_rotation)
+        if (g_two.use_rel)
+            hand_rot = (weapon_rot * g_two.rel.inverse()).normalized();
+        else if (hsvr::config().pose_two_hand_lock_rotation)
         {
             Quat r = (first.f2 * first.f1.inverse()).normalized(); // the weapon in the first hand's frame
             Vec3 x = r.rotate(Vec3{1, 0, 0}), y = r.rotate(Vec3{0, 1, 0}), z = r.rotate(Vec3{0, 0, 1});
@@ -4385,7 +4513,7 @@ namespace
     std::unordered_map<UObject*, std::vector<UObject*>> g_weapon_parts;
     double g_weapon_parts_time = -10.0;
 
-    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out = nullptr)
+    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out)
     {
         if (!weapon) return -1.0;
         double now = hsvr::now_seconds();
@@ -4691,13 +4819,13 @@ namespace
             }
             if (!mine && bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R"))) continue; // already holds an object
             if (mine || menu_up) continue;
-            if (try_two_hand(side, pawn, mesh, cfg)) continue;
+            if (cfg.pose_grab_handles ? try_second_hand(side, pawn, mesh, cfg) : try_two_hand(side, pawn, mesh, cfg)) continue;
             Vec3 at = hand_grab_point(mesh, side);
             std::vector<UObject*> weapons, willies;
             UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
             UObject* best = nullptr;
-            double best_d = cfg.pose_grab_radius_cm;
+            double best_d = cfg.pose_grab_handles ? cfg.pose_grab_touch_cm : cfg.pose_grab_radius_cm;
             UObject* nearest = nullptr;
             double nearest_d = 1e9;
             int looked = 0;
@@ -4734,9 +4862,45 @@ namespace
                 // Nothing to take: the hand closes into a fist.
                 make_fist(side, pawn, cfg);
                 HSVR_LOG("Grab: %s grip squeezed, no loose weapon within %.0f cm (%d loose of %d; nearest %ls at %.0f cm; hand at %.0f %.0f %.0f)", hand,
-                         cfg.pose_grab_radius_cm, looked, (int)weapons.size(), nearest ? nearest->GetName().c_str() : STR("none"), nearest ? nearest_d : -1.0,
+                         cfg.pose_grab_handles ? cfg.pose_grab_touch_cm : cfg.pose_grab_radius_cm, looked, (int)weapons.size(), nearest ? nearest->GetName().c_str() : STR("none"), nearest ? nearest_d : -1.0,
                          at.x, at.y, at.z);
                 continue;
+            }
+            if (cfg.pose_grab_handles)
+            {
+                // B&S: the hand touched it; it lands in the hand on the nearest handle (lined up with
+                // the hand's grip line), or where the hand touched it when no handle is near.
+                UObject* hb = object_property(best, STR("BaseMesh"));
+                if (hb)
+                {
+                    Vec3 w0_pos = component_location(hb), touch;
+                    Quat w0_rot = component_rotation(hb);
+                    if (closest_on_weapon(best, at, &touch) < 0.0) touch = at;
+                    const std::vector<Handle>& hs = item_handles(best, hb);
+                    double t = 0.0, hd = 1e9;
+                    int hi = nearest_handle(hs, w0_rot.inverse().rotate(at - w0_pos), t, hd);
+                    bool ok = give_hand_weapon(side, pawn, best);
+                    UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+                    if (ok && now == best)
+                    {
+                        if (hi >= 0 && hd <= cfg.pose_grab_handle_cm)
+                        {
+                            g_pending_free[side] = handle_grip(side, mesh, w0_pos, w0_rot, at, hs[hi], t);
+                            set_component_transform(hb, w0_pos, w0_rot, true);
+                            HSVR_LOG("Grab: %s hand took %ls by its %s at %.0f%% along it (%.1f cm from the hand, touched at %.1f cm)", hand, best->GetName().c_str(),
+                                     hs[hi].name.c_str(), t * 100.0, hd, best_d);
+                        }
+                        else
+                        {
+                            hold_where_touched(side, mesh, best, hb, w0_pos, w0_rot, at, touch, "spot where the hand touched it", nullptr, true);
+                            g_pending_free[side].grip_type = 5;
+                        }
+                    }
+                    controllers_buzz(side, 0.4f);
+                    HSVR_LOG("Grab: %s grip took %ls (%.1f cm from the hand): %s, hand now holds %ls", hand, best->GetName().c_str(), best_d,
+                             ok ? "set up" : "set-up call missing", now ? now->GetName().c_str() : STR("nothing"));
+                    continue;
+                }
             }
             // Shields: where the hand touched it, before the game's set-up snaps it to its own grip.
             bool is_shield = class_name_starts(best, STR("Shield"));
@@ -4869,7 +5033,7 @@ namespace
     // a part level with the step reaches out further than wide_cm from the axis. lo/hi = the last step on the weapon and not wide, each
     // way; wide_lo/hi say whether it stopped at a wide part (else at the weapon's end). False when
     // the grip itself is not inside the parts. Cached per weapon.
-    struct AxisMeasure { bool ok; double lo, hi; bool wide_lo, wide_hi; };
+    struct AxisMeasure { bool ok; double lo, hi; bool wide_lo, wide_hi; double at_z; };
     std::unordered_map<UObject*, AxisMeasure> g_axis_measures;
     bool measure_weapon_axis(UObject* weapon, UObject* base, const hsvr::Vec3& pivot, double wide_cm, double tip, double& lo, double& hi, bool& wide_lo,
                              bool& wide_hi)
@@ -4878,7 +5042,7 @@ namespace
         auto cached = g_axis_measures.find(weapon);
         if (cached == g_axis_measures.end())
         {
-            AxisMeasure m{false, 0.0, 0.0, false, false};
+            AxisMeasure m{false, 0.0, 0.0, false, false, pivot.z};
             Vec3 bp = component_location(base);
             Quat br = component_rotation(base);
             Vec3 side[4] = {br.rotate({1, 0, 0}), br.rotate({-1, 0, 0}), br.rotate({0, 1, 0}), br.rotate({0, -1, 0})};
@@ -4926,11 +5090,100 @@ namespace
             cached = g_axis_measures.emplace(weapon, m).first;
         }
         const AxisMeasure& m = cached->second;
-        lo = m.lo;
-        hi = m.hi;
+        // Measured from the point it was first asked about; given from this one.
+        lo = m.lo + m.at_z - pivot.z;
+        hi = m.hi + m.at_z - pivot.z;
         wide_lo = m.wide_lo;
         wide_hi = m.wide_hi;
         return m.ok;
+    }
+
+    std::unordered_map<UObject*, std::vector<Handle>> g_item_handles;
+    std::wstring shield_class(UObject* shield);
+    const std::vector<Handle>& item_handles(UObject* item, UObject* base)
+    {
+        using namespace hsvr;
+        auto found = g_item_handles.find(item);
+        if (found != g_item_handles.end()) return found->second;
+        const Config& cfg = hsvr::config();
+        std::vector<Handle> hs;
+        double half = cfg.pose_slide_hand_half_cm;
+        if (class_name_starts(item, STR("Shield")))
+        {
+            std::wstring cls = shield_class(item);
+            for (const ShieldFitting& f : k_shield_fittings)
+            {
+                if (cls != f.shield) continue;
+                Vec3 c{f.cx, f.cy, f.cz}, a = normalized(Vec3{f.ax, f.ay, f.az});
+                double h = (std::max)(0.0, f.length * 0.5 - half);
+                hs.push_back(Handle{c - a * h, c + a * h, f.name, 5, 5});
+            }
+        }
+        else
+        {
+            double lo = 0.0, hi = 0.0, top = 0.0;
+            bool wide_lo = false, wide_hi = false;
+            if (FProperty* p = item->GetPropertyByNameInChain(STR("Length to Top R Default"))) top = number_property(item, p);
+            if (measure_weapon_axis(item, base, Vec3{}, cfg.pose_slide_wide_cm, top, lo, hi, wide_lo, wide_hi))
+            {
+                double g0 = (std::min)(0.0, lo + half), g1 = (std::max)(0.0, hi - half);
+                hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, g1}, "grip", -1, 2});
+                double b0 = hi + half + cfg.pose_two_hand_blade_gap_cm, b1 = top - half;
+                if (wide_hi && top > 0.0 && b1 > b0 + 2.0) hs.push_back(Handle{Vec3{0, 0, b0}, Vec3{0, 0, b1}, "blade", 5, 5});
+            }
+            else
+                hs.push_back(Handle{Vec3{}, Vec3{}, "grip", -1, 2});
+        }
+        std::string list;
+        for (const Handle& h : hs)
+        {
+            char one[160];
+            std::snprintf(one, sizeof(one), "%s%s (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f)", list.empty() ? "" : "; ", h.name.c_str(), h.a.x, h.a.y, h.a.z, h.b.x, h.b.y, h.b.z);
+            list += one;
+        }
+        HSVR_LOG("Handles: %ls: %s", item->GetName().c_str(), list.empty() ? "none (held where touched)" : list.c_str());
+        return g_item_handles.emplace(item, std::move(hs)).first->second;
+    }
+
+    int nearest_handle(const std::vector<Handle>& hs, const hsvr::Vec3& local, double& t, double& dist)
+    {
+        using namespace hsvr;
+        int best = -1;
+        dist = 1e9;
+        for (int i = 0; i < (int)hs.size(); ++i)
+        {
+            Vec3 ab = hs[i].b - hs[i].a;
+            double len2 = dot(ab, ab);
+            double u = len2 > 1e-6 ? (std::min)(1.0, (std::max)(0.0, dot(local - hs[i].a, ab) / len2)) : 0.0;
+            double d = length(local - (hs[i].a + ab * u));
+            if (d < dist)
+            {
+                dist = d;
+                best = i;
+                t = u;
+            }
+        }
+        return best;
+    }
+
+    int clamp_grip_type(int side, int g) { return side == 0 && g >= 10 && g <= 15 ? 2 : g; } // left 10-15 = no curl
+
+    // A hand's grip on a handle: the handle's point at t in the palm, its line along the hand's grip
+    // line (turned the least from how the item was), the item turned as it was otherwise.
+    FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t)
+    {
+        using namespace hsvr;
+        Vec3 local = hd.a + (hd.b - hd.a) * t;
+        Vec3 axis_local = length(hd.b - hd.a) > 1e-3 ? normalized(hd.b - hd.a) : Vec3{0, 0, 1};
+        Vec3 axis = w0_rot.rotate(axis_local);
+        FreeGrip g = make_free_grip(side, mesh, w0_pos, w0_rot, palm, w0_pos + w0_rot.rotate(local), &axis, hd.name.c_str());
+        g.has_handle = length(hd.b - hd.a) > 1e-3;
+        g.ha = hd.a;
+        g.hb = hd.b;
+        g.t = t;
+        g.handle = hd.name;
+        g.grip_type = clamp_grip_type(side, side == 1 ? hd.grip_r : hd.grip_l);
+        return g;
     }
 
     // The grip zone of a weapon along its blade axis (BaseMesh +Z, cm from the game's grip point
@@ -5266,8 +5519,12 @@ namespace
                 if (shield_into_hand(side, pawn, weapon, base, g)) h.free = g;
             }
         }
-        if (h.free.set && h.free.fingers && cfg.pose_shield_hand_grip_type >= 0.0 &&
-            read_number_variable(pawn, grip_type_name(side)) != cfg.pose_shield_hand_grip_type)
+        if (h.free.set && h.free.grip_type >= 0)
+        {
+            if (read_number_variable(pawn, grip_type_name(side)) != h.free.grip_type) set_variable(pawn, grip_type_name(side), h.free.grip_type);
+        }
+        else if (h.free.set && h.free.fingers && cfg.pose_shield_hand_grip_type >= 0.0 &&
+                 read_number_variable(pawn, grip_type_name(side)) != cfg.pose_shield_hand_grip_type)
             set_variable(pawn, grip_type_name(side), cfg.pose_shield_hand_grip_type);
         if (h.free.set)
         {
@@ -5303,6 +5560,70 @@ namespace
         Vec3 in_hand = ax(STR("Pos2")); // where the hand holds it, in the hand bone's frame
         Quat f1 = quat_from_axes(ax(STR("PriAxis1")), ax(STR("SecAxis1")));
         Quat f2 = quat_from_axes(ax(STR("PriAxis2")), ax(STR("SecAxis2")));
+        h.handle_slide = false;
+        if (cfg.pose_grab_handles && !h.free.set && !h.forearm && !is_fist(weapon))
+        {
+            // The handle system: the game's own grip (a weapon he spawned with, or set up by the game)
+            // becomes the same kind of grip as any other, on the handle nearest its grip point, so
+            // either hand can slide along it.
+            FreeGrip g;
+            g.set = true;
+            g.pivot = pivot;
+            g.in_anchor = in_hand;
+            g.rel = (f2 * f1.inverse()).normalized();
+            g.what = "game's grip";
+            const std::vector<Handle>& hs = item_handles(weapon, base);
+            double t = 0.0, d = 1e9;
+            int hi = nearest_handle(hs, pivot, t, d);
+            if (hi >= 0 && d <= 4.0 && length(hs[hi].b - hs[hi].a) > 1e-3)
+            {
+                g.has_handle = true;
+                g.ha = hs[hi].a;
+                g.hb = hs[hi].b;
+                Vec3 ab = g.hb - g.ha;
+                g.t = (std::min)(1.0, (std::max)(0.0, dot(pivot - g.ha, ab) / dot(ab, ab)));
+                g.handle = hs[hi].name;
+                // Its point onto the handle's line (the hand stays where the game put it along it).
+                g.pivot = g.ha + ab * g.t;
+            }
+            h.free = g;
+            HSVR_LOG("Hold: %s hand holds %ls by the game's grip%s%s", side == 0 ? "left" : "right", weapon->GetName().c_str(), g.has_handle ? ", on its " : " (no handle near)",
+                     g.has_handle ? g.handle.c_str() : "");
+        }
+        if (h.free.set && h.free.has_handle && cfg.pose_slide && cfg.pose_hold_exact)
+        {
+            // The slide (B&S): hold the trigger and the hand runs along the handle; the item keeps its
+            // own motion along it (a light squeeze drags, a full one lets it slide freely) and the hand
+            // stays where it is on it. It stops at the handle's ends.
+            ControllerState st = controllers_state();
+            float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : st.hand[side].trigger;
+            bool on = h.handle_sliding_logged ? trig > 0.15f : trig > 0.3f;
+            if (on != h.handle_sliding_logged)
+            {
+                h.handle_sliding_logged = on;
+                HSVR_LOG("Slide: %s hand %s on the %s of %ls at %.0f%%", side == 0 ? "left" : "right", on ? "starts sliding" : "holds", h.free.handle.c_str(),
+                         weapon->GetName().c_str(), h.free.t * 100.0);
+            }
+            if (on && !(h.started >= 0.0 && now - h.started < cfg.pose_hold_let_go_grace_s))
+            {
+                Vec3 bp = component_location(base);
+                Quat bq = component_rotation(base);
+                Vec3 palm = hand_pos + hand_rot.rotate(h.free.in_anchor);
+                Vec3 local = bq.inverse().rotate(palm - bp);
+                Vec3 ab = h.free.hb - h.free.ha;
+                double u = (std::min)(1.0, (std::max)(0.0, dot(local - h.free.ha, ab) / dot(ab, ab)));
+                h.free.t = u;
+                h.free.pivot = h.free.ha + ab * u;
+                bool at_end = u <= 0.0 || u >= 1.0;
+                if (!at_end)
+                {
+                    h.handle_slide = true;
+                    h.handle_axis = bq.rotate(normalized(ab));
+                    double squeeze = (std::min)(1.0, (std::max)(0.0, (trig - 0.15) / 0.85));
+                    h.handle_keep = cfg.pose_slide_keep_light + (cfg.pose_slide_keep_full - cfg.pose_slide_keep_light) * squeeze;
+                }
+            }
+        }
         if (h.free.set)
         {
             // weapon rotation = anchor x rel, and the point held sits on the anchor's point (no slide).
@@ -5353,7 +5674,24 @@ namespace
                 }
                 Vec3 bp_now = component_location(base);
                 Quat bq_now = component_rotation(base);
-                if (on && h.have_last)
+                if (g_two.use_rel)
+                {
+                    // The handle system: the second hand slides along its handle (trigger), its point
+                    // the projection of your hand onto it.
+                    if (on && g_two.has_handle)
+                    {
+                        Vec3 local = bq_now.inverse().rotate(p2 - bp_now);
+                        Vec3 ab = g_two.hb - g_two.ha;
+                        double u = (std::min)(1.0, (std::max)(0.0, dot(local - g_two.ha, ab) / dot(ab, ab)));
+                        Vec3 cand = g_two.ha + ab * u;
+                        if (length(cand - pivot) >= 2.0 * cfg.pose_slide_hand_half_cm)
+                        {
+                            g_two.t = u;
+                            g_two.local = cand;
+                        }
+                    }
+                }
+                else if (on && h.have_last)
                 {
                     double dt2 = (std::min)(1.0 / 30.0, (std::max)(1.0 / 240.0, now - h.last_time));
                     double want = bq_now.inverse().rotate(p2 - bp_now).z - game_z;
@@ -5371,15 +5709,16 @@ namespace
                             if (std::fabs(z - h.slide) >= 2.0 * cfg.pose_slide_hand_half_cm) g_two.z = z;
                         }
                 }
-                Vec3 local2{pivot.x, pivot.y, game_z + g_two.z};
+                Vec3 local2 = g_two.use_rel ? g_two.local : Vec3{pivot.x, pivot.y, game_z + g_two.z};
                 g_two.local = local2;
                 g_two.have_local = true;
-                double dz = local2.z - pivot.z;
+                Vec3 dl = local2 - pivot;
+                double dz = g_two.use_rel ? length(dl) : local2.z - pivot.z;
                 Vec3 between = p2 - p1;
                 if (std::fabs(dz) > 1.0 && length(between) > 1.0)
                 {
-                    Vec3 axis_now = target_rot.rotate(Vec3{0, 0, 1});
-                    Vec3 want_axis = normalized(between) * (dz > 0.0 ? 1.0 : -1.0);
+                    Vec3 axis_now = g_two.use_rel ? target_rot.rotate(normalized(dl)) : target_rot.rotate(Vec3{0, 0, 1});
+                    Vec3 want_axis = normalized(between) * (g_two.use_rel || dz > 0.0 ? 1.0 : -1.0);
                     Vec3 c = cross(axis_now, want_axis);
                     double d = dot(axis_now, want_axis);
                     Quat swing = d < -0.9999 ? quat_axis_angle(normalized(target_rot.rotate(Vec3{1, 0, 0})), 3.14159265358979) : Quat{c.x, c.y, c.z, 1.0 + d}.normalized();
@@ -5554,6 +5893,13 @@ namespace
             Vec3 g{0.0, 0.0, gz};
             Vec3 v_com_now = lv.vec();
             Vec3 v_need = (com_t - com) * (1.0 / DT) - g * (DT * 0.5);
+            if (h.handle_slide)
+            {
+                // Sliding: along the handle it keeps (most of) its own motion; across it, in the hand.
+                Vec3 u = h.handle_axis;
+                double now_ax = dot(v_com_now, u), need_ax = dot(v_need, u);
+                v_need = v_need + u * ((now_ax * h.handle_keep + need_ax * (1.0 - h.handle_keep)) - need_ax);
+            }
             Vec3 dv = v_need - v_com_now;
             double dv_most = (max_force / (std::max)(0.05, mass)) * DT + std::fabs(gz) * DT;
             bool f_capped = length(dv) > dv_most;

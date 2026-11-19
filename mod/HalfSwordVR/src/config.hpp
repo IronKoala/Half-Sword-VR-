@@ -255,6 +255,17 @@ namespace hsvr
         // drop what that hand holds (pose_grab_release_drops).
         bool pose_grab_button = true;
         double pose_grab_radius_cm = 18.0;
+        // The handle system (B&S-style grab rebuild): a hand takes only what it touches (its palm
+        // within pose_grab_touch_cm of the item's real collision), on the nearest handle within
+        // pose_grab_handle_cm (lined up with the hand's grip line), else where it touched. Both hands
+        // work the same: the other hand's weapon is taken the same way. Sliding along a handle keeps
+        // pose_slide_keep_light (light trigger) .. pose_slide_keep_full (full) of the item's own
+        // motion along it. 0 = the old grab (radius, game grips, zones).
+        bool pose_grab_handles = true;
+        double pose_grab_touch_cm = 5.0;
+        double pose_grab_handle_cm = 6.0;
+        double pose_slide_keep_light = 0.6;
+        double pose_slide_keep_full = 0.97;
         // Shields: every measured strap and handle is a grab point; anywhere else (the rim, an edge)
         // the hand holds it where it touched (pose_shield_free_grip; 0 = always the game's grip).
         bool pose_shield_free_grip = true;

@@ -349,6 +349,11 @@ namespace hsvr
         num("pose_slide_max_cm_s", c.pose_slide_max_cm_s);
         flag("pose_grab_button", c.pose_grab_button);
         num("pose_grab_radius_cm", c.pose_grab_radius_cm);
+        flag("pose_grab_handles", c.pose_grab_handles);
+        num("pose_grab_touch_cm", c.pose_grab_touch_cm);
+        num("pose_grab_handle_cm", c.pose_grab_handle_cm);
+        num("pose_slide_keep_light", c.pose_slide_keep_light);
+        num("pose_slide_keep_full", c.pose_slide_keep_full);
         flag("pose_shield_free_grip", c.pose_shield_free_grip);
         flag("pose_weapon_free_grip", c.pose_weapon_free_grip);
         num("pose_weapon_free_cm", c.pose_weapon_free_cm);

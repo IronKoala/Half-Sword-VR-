@@ -181,3 +181,12 @@ Unattended: with `dev_pose_fake_tracking`, `hsvr.fake_head_drop <cm>` holds a cr
 | Setting | Default | What it does |
 |---|---|---|
 | `pose_hold_exact` | 1 | Each frame the held weapon gets the velocity that puts it exactly where the hand is drawn at the end of this frame's physics (this frame's own delta time, GetWorldDeltaSeconds; gravity during the frame taken off ahead). Only the hand's strength (`pose_hold_max_force`, `pose_hold_max_torque` x his strength) limits the change, so a blocked or too-heavy weapon falls behind. 0 = the old spring. Why: the spring trailed the hand by its lag and used the last frame's time; Willie's kinematic hand also moves in one jump per frame inside the physics substeps (grab_rebuild_research.md section 3), so nothing is driven through the hand body. Logged as "Hold: right exact hold, frame ... ms (measured ...), ... cm and ... deg to go". |
+
+## Handle system (2026-11-19, grab rebuild step 2)
+
+| Setting | Default | What it does |
+|---|---|---|
+| `pose_grab_handles` | 1 | One grab for everything, B&S-style. Each item's handles are found once and logged ("Handles: <item>: grip (..)..(..); blade ..."): a weapon's grip measured along its axis from its real parts (a polearm's whole haft), the blade past the guard, and every measured shield strap and handle. A squeeze takes only an item the palm touches (`pose_grab_touch_cm` 5), held on the nearest handle within `pose_grab_handle_cm` 6 (its line laid along the hand's grip line), else where it was touched. A weapon the other hand holds is taken the same way (two hands). The game's own grip (weapons he spawns with) becomes the same kind of grip on its handle. 0 = the old grab. |
+| `pose_slide_keep_light`, `pose_slide_keep_full` | 0.6, 0.97 | Holding the trigger, either hand slides along its handle: the item keeps this much of its own motion along the handle (light .. full squeeze) while staying in the hand across it; the hand's spot is where your hand is on the handle. Stops at the handle's ends. Needs `pose_hold_exact`. |
+
+Finger shapes: grips keep the game's own (the second hand's sword grip 2); blades, shield straps and spots touched take the hammer grip (5). A left hand never gets grip types 10-15 (no curl).
