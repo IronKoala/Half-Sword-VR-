@@ -3326,6 +3326,7 @@ namespace
     // sequential impulses over the frame (Box2D-style soft step: gamma = 1/(dt(c + dt k)), bias =
     // k/(c + dt k) * error), all hands together. Positions cm, mass kg, so forces are N x 100 and
     // torques N m x 1e4; springs in N/m are the same number in kg/s^2.
+    hsvr::Vec3 clamp_length(const hsvr::Vec3& v, double most);
     struct SoftPoint
     {
         hsvr::Vec3 r;      // from the centre of mass to the held point (world)
