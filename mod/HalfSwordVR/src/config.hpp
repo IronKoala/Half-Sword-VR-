@@ -105,6 +105,10 @@ namespace hsvr
         bool idle_helper = true;
         // Developer switches.
         bool log_poses = false;
+        // Frame-by-frame recording (like the B&S logger): every tick of his, one CSV row with the
+        // headset, both controllers and their buttons, his drawn hands, head, pelvis and feet, each held
+        // item and its hold, crouch and the game's own state; logs\frames-<time>.csv (Matthew 2026-11-19).
+        bool log_frames = true;
         // Write "Input:" lines to the log: which window has the keyboard, Esc and menu clicks,
         // gamepad sticks, and how fast the view is turning.
         bool log_input = true;

@@ -9311,6 +9311,357 @@ namespace
         }
     }
 
+    // ---- Deep recording (log_frames; Matthew 2026-11-19: "make it as deep as you can") ------------------
+    // logs\deep-<time>\: frames.csv (one row per tick of his: headset, controllers and every input, his
+    // drawn hands and every physics body of his, each held item and its hold, crouch, game state),
+    // state.txt (every change of every plain variable on him, his movement, his held weapons and every
+    // fighter within 10 m), events.txt (every Blueprint function or event the engine calls on a fighter,
+    // a weapon or an AI, with all its parameters) and creatures.txt (fighters within 10 m, 10 a second).
+    std::wstring g_deep_dir;
+    FILE* g_frames = nullptr;
+    FILE* g_state = nullptr;
+    FILE* g_events = nullptr;
+    FILE* g_creatures = nullptr;
+    double g_frames_flush = 0.0;
+    std::vector<FName> g_frame_bones;
+
+    std::string narrow(const std::wstring& w)
+    {
+        std::string s;
+        s.reserve(w.size());
+        for (wchar_t c : w) s.push_back(c > 0 && c < 128 ? (char)c : '?');
+        return s;
+    }
+
+    FILE* deep_open(const wchar_t* name)
+    {
+        if (g_deep_dir.empty())
+        {
+            std::wstring base = mod_dir() + L"logs\\";
+            CreateDirectoryW(base.c_str(), nullptr);
+            SYSTEMTIME st{};
+            GetLocalTime(&st);
+            wchar_t dir[64];
+            swprintf(dir, 64, L"deep-%04u-%02u-%02u_%02u-%02u-%02u\\", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+            g_deep_dir = base + dir;
+            CreateDirectoryW(g_deep_dir.c_str(), nullptr);
+            HSVR_LOG("Deep log: recording to logs\\%ls", dir);
+        }
+        FILE* f = _wfopen((g_deep_dir + name).c_str(), L"wb");
+        if (f) setvbuf(f, nullptr, _IOFBF, 1 << 20);
+        return f;
+    }
+
+    // A property's value as text, for the plain kinds (false: a kind not written).
+    bool prop_text(FProperty* p, const uint8_t* at, std::string& out)
+    {
+        auto k = p->GetClass().GetName();
+        char b[96];
+        if (k == STR("BoolProperty"))
+        {
+            auto* f = static_cast<FBoolProperty*>(p);
+            out = (at[f->GetByteOffset()] & f->GetFieldMask()) ? "1" : "0";
+        }
+        else if (k == STR("ByteProperty") || k == STR("EnumProperty")) out = std::to_string((int)*at);
+        else if (k == STR("IntProperty")) out = std::to_string(*reinterpret_cast<const int32_t*>(at));
+        else if (k == STR("Int64Property")) out = std::to_string(*reinterpret_cast<const int64_t*>(at));
+        else if (k == STR("FloatProperty")) snprintf(b, sizeof b, "%.5g", *reinterpret_cast<const float*>(at)), out = b;
+        else if (k == STR("DoubleProperty")) snprintf(b, sizeof b, "%.5g", *reinterpret_cast<const double*>(at)), out = b;
+        else if (k == STR("NameProperty")) out = narrow(reinterpret_cast<const FName*>(at)->ToString());
+        else if (k == STR("ObjectProperty"))
+        {
+            UObject* o = *reinterpret_cast<UObject* const*>(at);
+            out = o ? narrow(o->GetName()) : "None";
+        }
+        else if (k == STR("StructProperty"))
+        {
+            UScriptStruct* t = struct_type(p);
+            std::wstring tn = t ? t->GetName() : STR("");
+            if (tn != STR("Vector") && tn != STR("Rotator")) return false;
+            double v[3];
+            read_three(at, p, v);
+            snprintf(b, sizeof b, "(%.2f;%.2f;%.2f)", v[0], v[1], v[2]);
+            out = b;
+        }
+        else
+            return false;
+        return true;
+    }
+
+    // Every plain variable of an object, written when it changes (all of them the first time).
+    struct Watched
+    {
+        std::vector<FProperty*> props;
+        std::vector<std::vector<uint8_t>> last;
+        bool first = true;
+        UStruct* cls = nullptr; // a freed object's address taken by another kind of object starts afresh
+    };
+    std::unordered_map<UObject*, Watched> g_watch;
+    void state_delta(UObject* o, const char* label, double t)
+    {
+        if (!o || !g_state) return;
+        Watched& w = g_watch[o];
+        if (w.cls != o->GetClassPrivate()) w = Watched{}, w.cls = o->GetClassPrivate();
+        if (w.props.empty())
+        {
+            for (UStruct* level = o->GetClassPrivate(); level; level = level->GetSuperStruct())
+                for (FProperty* p : level->ForEachProperty())
+                {
+                    std::string probe;
+                    static const uint8_t zero[64] = {};
+                    if (p->GetSize() <= 0 || p->GetSize() > 64) continue;
+                    auto k = p->GetClass().GetName();
+                    if (k == STR("StructProperty"))
+                    {
+                        UScriptStruct* st = struct_type(p);
+                        if (!st || (st->GetName() != STR("Vector") && st->GetName() != STR("Rotator"))) continue;
+                    }
+                    if (!prop_text(p, zero, probe)) continue;
+                    w.props.push_back(p);
+                }
+            w.last.resize(w.props.size());
+        }
+        std::string out;
+        for (size_t i = 0; i < w.props.size(); ++i)
+        {
+            FProperty* p = w.props[i];
+            const uint8_t* at = reinterpret_cast<const uint8_t*>(o) + p->GetOffset_Internal();
+            int n = p->GetSize();
+            std::vector<uint8_t>& last = w.last[i];
+            if (!w.first && (int)last.size() == n && std::memcmp(last.data(), at, n) == 0) continue;
+            last.assign(at, at + n);
+            std::string v;
+            if (!prop_text(p, at, v)) continue;
+            out += "\t" + narrow(p->GetName()) + "=" + v;
+        }
+        w.first = false;
+        if (!out.empty()) fprintf(g_state, "%.4f\t%s\t%s%s\n", t, label, narrow(o->GetName()).c_str(), out.c_str());
+    }
+
+    // Every Blueprint function or event the engine calls on a fighter, a weapon or an AI.
+    std::unordered_map<UStruct*, bool> g_event_class;
+    std::unordered_map<UFunction*, std::pair<double, int>> g_event_rate;
+    void deep_event_cb(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void* parms)
+    {
+        if (!g_events || !context || !function) return;
+        UStruct* cls = context->GetClassPrivate();
+        auto it = g_event_class.find(cls);
+        bool want;
+        if (it == g_event_class.end())
+        {
+            want = false;
+            for (UStruct* level = cls; level && !want; level = level->GetSuperStruct())
+            {
+                std::wstring n = level->GetName();
+                want = n == STR("Willie_BP_C") || n == STR("ModularWeaponBP_C") || n.find(STR("AI_BP")) == 0 || n.find(STR("BP_GameManager")) == 0 ||
+                       n.find(STR("GameMode")) != std::wstring::npos;
+            }
+            g_event_class[cls] = want;
+        }
+        else
+            want = it->second;
+        if (!want) return;
+        std::wstring fname = function->GetName();
+        if (fname == STR("ReceiveTick") || fname == STR("BlueprintUpdateAnimation") || fname.rfind(STR("ExecuteUbergraph"), 0) == 0) return;
+        double t = hsvr::now_seconds();
+        auto& r = g_event_rate[function];
+        if (t - r.first >= 1.0)
+        {
+            if (r.second > 40) fprintf(g_events, "%.4f\t(%s: %d more calls in the last second not written)\n", t, narrow(fname).c_str(), r.second - 40);
+            r.first = t;
+            r.second = 0;
+        }
+        if (++r.second > 40) return;
+        std::string line;
+        char b[64];
+        snprintf(b, sizeof b, "%.4f\t", t);
+        line = b;
+        line += narrow(context->GetName()) + "\t" + narrow(fname);
+        if (parms)
+            for (FProperty* p : function->ForEachProperty())
+            {
+                std::string v;
+                if (p->GetSize() > 0 && prop_text(p, reinterpret_cast<const uint8_t*>(parms) + p->GetOffset_Internal(), v))
+                    line += "\t" + narrow(p->GetName()) + "=" + v;
+            }
+        line += "\n";
+        fputs(line.c_str(), g_events);
+    }
+
+    // Fighters within 10 m, 10 a second: where they are, their pelvis, head and right hand, and what they hold.
+    void creatures_tick(UObject* pawn, double t)
+    {
+        static double last = 0.0;
+        if (t - last < 0.1) return;
+        last = t;
+        std::vector<UObject*> willies;
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        hsvr::Vec3 me = actor_location(pawn);
+        for (UObject* w : willies)
+        {
+            if (!w || w == pawn) continue;
+            hsvr::Vec3 at = actor_location(w);
+            if (hsvr::length(at - me) > 1000.0) continue;
+            UObject* m = object_property(w, STR("Mesh"));
+            UObject* wr = object_property(w, STR("Weapon R"));
+            UObject* wl = object_property(w, STR("Weapon L"));
+            if (g_creatures && m)
+            {
+                hsvr::Vec3 pe = socket_location(m, bone_fname("pelvis")), hd = socket_location(m, bone_fname("head")), hr = socket_location(m, bone_fname("hand_r"));
+                fprintf(g_creatures, "%.4f\t%s\tactor (%.1f;%.1f;%.1f)\tpelvis (%.1f;%.1f;%.1f)\thead (%.1f;%.1f;%.1f)\thand_r (%.1f;%.1f;%.1f)\tR %s\tL %s\n", t,
+                        narrow(w->GetName()).c_str(), at.x, at.y, at.z, pe.x, pe.y, pe.z, hd.x, hd.y, hd.z, hr.x, hr.y, hr.z, wr ? narrow(wr->GetName()).c_str() : "-",
+                        wl ? narrow(wl->GetName()).c_str() : "-");
+            }
+            state_delta(w, "foe", t);
+            if (wr) state_delta(wr, "foe weapon", t);
+        }
+    }
+    void frames_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        const Config& cfg = hsvr::config();
+        if (!cfg.log_frames || !pawn || !g_pose.driver)
+        {
+            if (g_frames && !cfg.log_frames)
+            {
+                fclose(g_frames);
+                g_frames = nullptr;
+            }
+            return;
+        }
+        double now = now_seconds();
+        if (!g_frames)
+        {
+            g_frames = deep_open(L"frames.csv");
+            if (!g_frames) return;
+            g_state = deep_open(L"state.txt");
+            g_events = deep_open(L"events.txt");
+            g_creatures = deep_open(L"creatures.txt");
+            static bool hooked = false;
+            if (!hooked)
+            {
+                hooked = true;
+                Hook::RegisterProcessEventPostCallback(&deep_event_cb, {false, false, STR("HalfSwordVR"), STR("DeepEvents")});
+            }
+            g_frame_bones = physics_body_bones(g_pose.mesh ? g_pose.mesh : g_pose.driver);
+            std::string h = "t,dt,head_x,head_y,head_z,head_qx,head_qy,head_qz,head_qw";
+            for (const char* s : {"l", "r"})
+            {
+                std::string p = std::string(s) + "_";
+                for (const char* c : {"ctl_x", "ctl_y", "ctl_z", "ctl_qx", "ctl_qy", "ctl_qz", "ctl_qw", "trigger", "squeeze", "stick_x", "stick_y", "buttons",
+                                      "target_x", "target_y", "target_z", "hand_x", "hand_y", "hand_z", "hand_qx", "hand_qy", "hand_qz", "hand_qw", "item",
+                                      "grip_x", "grip_y", "grip_z", "item_qx", "item_qy", "item_qz", "item_qw", "item_vx", "item_vy", "item_vz", "item_wx",
+                                      "item_wy", "item_wz", "lag_cm", "turn_deg", "force_n", "torque_nm", "capped", "strength", "on_item", "sliding", "drawing",
+                                      "scabbard"})
+                    h += "," + p + c;
+            }
+            h += ",actor_x,actor_y,actor_z,pelvis_x,pelvis_y,pelvis_z,headbone_x,headbone_y,headbone_z,foot_l_x,foot_l_y,foot_l_z,foot_r_x,foot_r_y,foot_r_z,"
+                 "crouch_cm,button_crouch_cm,two_hands,stamina,aim_swing_speed,kicking_l,kicking_r,fallen,conc_r,conc_l";
+            for (FName bn : g_frame_bones)
+            {
+                std::string n = narrow(bn.ToString());
+                h += "," + n + "_x," + n + "_y," + n + "_z";
+            }
+            h += "\n";
+            fputs(h.c_str(), g_frames);
+        }
+        static double last_t = -1.0;
+        double dt = last_t > 0.0 ? now - last_t : 0.0;
+        last_t = now;
+        ControllerState st = controllers_state();
+        std::string row;
+        row.reserve(2048);
+        char b[160];
+        auto num = [&](double v) {
+            snprintf(b, sizeof b, ",%.3f", v);
+            row += b;
+        };
+        auto v3 = [&](const Vec3& v) { num(v.x), num(v.y), num(v.z); };
+        auto q4 = [&](const Quat& q) {
+            snprintf(b, sizeof b, ",%.4f,%.4f,%.4f,%.4f", q.x, q.y, q.z, q.w);
+            row += b;
+        };
+        snprintf(b, sizeof b, "%.4f,%.4f", now, dt);
+        row += b;
+        Vec3 hp;
+        Quat hq;
+        if (st.head_valid && stereo_tracking_to_world(st.head, hp, hq)) v3(hp), q4(hq);
+        else row += ",,,,,,,";
+        for (int side = 0; side < 2; ++side)
+        {
+            const HandState& hs = st.hand[side];
+            Vec3 cp;
+            Quat cq;
+            if (hs.grip_valid && stereo_tracking_to_world(hs.grip, cp, cq)) v3(cp), q4(cq);
+            else row += ",,,,,,,";
+            num(hs.trigger), num(hs.squeeze), num(hs.stick_x), num(hs.stick_y);
+            snprintf(b, sizeof b, ",%d", (hs.primary ? 1 : 0) | (hs.secondary ? 2 : 0) | (hs.stick_click ? 4 : 0) | (hs.menu ? 8 : 0));
+            row += b;
+            v3(g_pose.target[side]);
+            FName bn = bone_fname(side == 0 ? "hand_l" : "hand_r");
+            v3(socket_location(g_pose.driver, bn));
+            q4(socket_rotation(g_pose.driver, bn));
+            UObject* w = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            UObject* base = w ? object_property(w, STR("BaseMesh")) : nullptr;
+            const HoldState& h = g_hold[side];
+            if (base)
+            {
+                std::string nm = narrow(w->GetName());
+                for (char& c : nm)
+                    if (c == ',') c = ';';
+                row += "," + nm;
+                Vec3 p = component_location(base);
+                Quat q = component_rotation(base);
+                v3(p + q.rotate(h.weapon == w ? h.pivot : Vec3{0, 0, 0}));
+                q4(q);
+                Call lv(base, STR("GetPhysicsLinearVelocity"));
+                lv.run();
+                Call av(base, STR("GetPhysicsAngularVelocityInRadians"));
+                av.run();
+                v3(lv.vec() * 0.01);
+                v3(av.vec());
+                num(h.lag), num(h.turn_deg), num(h.force_n), num(h.torque_nm);
+                snprintf(b, sizeof b, ",%d", (h.force_capped ? 1 : 0) | (h.torque_capped ? 2 : 0));
+                row += b;
+                num(h.body_strength), num(h.on_weapon);
+                snprintf(b, sizeof b, ",%d,%d", h.handle_slide ? 1 : 0, g_draw[side].active ? (g_draw[side].sheathing ? 2 : 1) : 0);
+                row += b;
+            }
+            else
+                row += ",,,,,,,,,,,,,,,,,,,,,,,";
+            snprintf(b, sizeof b, ",%d", g_scab[side].active ? 1 : 0);
+            row += b;
+        }
+        UObject* mesh = g_pose.mesh ? g_pose.mesh : g_pose.driver;
+        v3(actor_location(pawn));
+        v3(socket_location(mesh, bone_fname("pelvis")));
+        v3(socket_location(mesh, bone_fname("head")));
+        v3(socket_location(mesh, bone_fname("foot_l")));
+        v3(socket_location(mesh, bone_fname("foot_r")));
+        num(g_crouch_drop), num(g_button_crouch);
+        snprintf(b, sizeof b, ",%d", g_two.active ? 1 : 0);
+        row += b;
+        num(read_number_variable(pawn, STR("Stamina"))), num(read_number_variable(pawn, STR("Aim Swing Speed")));
+        snprintf(b, sizeof b, ",%d,%d,%d", (int)bool_property(pawn, STR("Kicking L")), (int)bool_property(pawn, STR("Kicking R")), (int)bool_property(pawn, STR("Fallen")));
+        row += b;
+        num(read_number_variable(pawn, STR("R Sheath Slot Concrete"))), num(read_number_variable(pawn, STR("L Sheath Slot Concrete")));
+        for (FName bn : g_frame_bones) v3(socket_location(mesh, bn));
+        row += "\n";
+        fputs(row.c_str(), g_frames);
+        // His every variable, his movement and his held weapons, as they change; then the fighters near him.
+        state_delta(pawn, "player", now);
+        state_delta(object_property(pawn, STR("CharacterMovement")), "player movement", now);
+        for (const TCHAR* slot : {STR("Weapon L"), STR("Weapon R")})
+            if (UObject* w = object_property(pawn, slot)) state_delta(w, "player weapon", now);
+        creatures_tick(pawn, now);
+        if (now - g_frames_flush > 1.0)
+        {
+            g_frames_flush = now;
+            for (FILE* f : {g_frames, g_state, g_events, g_creatures})
+                if (f) fflush(f);
+        }
+    }
+
     void capsule_after_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
@@ -9321,6 +9672,7 @@ namespace
             weapon_spring_after_tick(context);
             swing_speed_after_tick(context);
             thrown_tick(context);
+            frames_tick(context);
         }
         stab_log_tick(context);
         grip_flip_tick(context);
