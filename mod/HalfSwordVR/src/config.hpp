@@ -312,8 +312,8 @@ namespace hsvr
         // pose_slide_keep_light (light trigger) .. pose_slide_keep_full (full) of the item's own
         // motion along it. 0 = the old grab (radius, game grips, zones).
         bool pose_grab_handles = true;
-        double pose_grab_touch_cm = 5.0;
-        double pose_grab_handle_cm = 6.0;
+        double pose_grab_touch_cm = 10.0; // B&S fight session: ~6 cm typical, up to 25 cm from the handle surface (bs_full_measured.md)
+        double pose_grab_handle_cm = 10.0;
         double pose_slide_keep_light = 0.6;
         double pose_slide_keep_full = 0.97;
         // B&S slide damper along the handle (N s/m) at a light .. full trigger: the item keeps
