@@ -6191,6 +6191,7 @@ namespace
         const Config& cfg = hsvr::config();
         std::vector<Handle> hs;
         double half = cfg.pose_slide_hand_half_cm;
+        bool measured = true; // false: the weapon's parts were not found (yet)
         if (class_name_starts(item, STR("Shield")))
         {
             std::wstring cls = shield_class(item);
@@ -6207,7 +6208,9 @@ namespace
             double lo = 0.0, hi = 0.0, top = 0.0;
             bool wide_lo = false, wide_hi = false;
             if (FProperty* p = item->GetPropertyByNameInChain(STR("Length to Top R Default"))) top = number_property(item, p);
-            if (measure_weapon_axis(item, base, Vec3{}, cfg.pose_slide_wide_cm, top, lo, hi, wide_lo, wide_hi))
+            bool ok = measure_weapon_axis(item, base, Vec3{}, cfg.pose_slide_wide_cm, top, lo, hi, wide_lo, wide_hi);
+            measured = ok && !(lo == 0.0 && hi == 0.0);
+            if (ok)
             {
                 double g0 = (std::min)(0.0, lo + half), g1 = (std::max)(0.0, hi - half);
                 hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, g1}, "grip", -1, 2});
@@ -6224,14 +6227,18 @@ namespace
             std::snprintf(one, sizeof(one), "%s%s (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f)", list.empty() ? "" : "; ", h.name.c_str(), h.a.x, h.a.y, h.a.z, h.b.x, h.b.y, h.b.z);
             list += one;
         }
-        HSVR_LOG("Handles: %ls: %s", item->GetName().c_str(), list.empty() ? "none (held where touched)" : list.c_str());
-        // A weapon whose grip came out as a point (its parts not found yet) is measured again next time.
-        bool point_only = !hs.empty() && length(hs[0].b - hs[0].a) < 1e-3 && hs[0].name == "grip";
-        if (point_only)
+        // A weapon whose parts were not found yet (spawned straight into the hand) is measured again next
+        // time, up to 40 times; a grip that is really this short (fists, a short dagger grip) is kept.
+        static std::unordered_map<UObject*, int> unsure_tries;
+        if (!measured && ++unsure_tries[item] <= 40)
         {
+            if (unsure_tries[item] == 1)
+                HSVR_LOG("Handles: %ls: its parts are not found yet (%s), measuring again", item->GetName().c_str(), list.empty() ? "none" : list.c_str());
             static std::unordered_map<UObject*, std::vector<Handle>> unsure;
             return unsure[item] = std::move(hs);
         }
+        HSVR_LOG("Handles: %ls: %s%s", item->GetName().c_str(), list.empty() ? "none (held where touched)" : list.c_str(),
+                 unsure_tries.count(item) ? " (measured again after its parts appeared)" : "");
         return g_item_handles.emplace(item, std::move(hs)).first->second;
     }
 
