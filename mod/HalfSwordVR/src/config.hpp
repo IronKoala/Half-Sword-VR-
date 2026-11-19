@@ -271,7 +271,7 @@ namespace hsvr
         std::string pose_fist_class = "/Game/Assets/Weapons/Blueprints/Built_Weapons/Weapon_Fists.Weapon_Fists_C";
         // Set the game's "Fist R/L Spawned" on a fist the mod makes (so the game's own removal rules
         // apply to it). 0 = the mod alone opens it (test switch while the first-fist loss is hunted).
-        bool pose_fist_mark_spawned = true;
+        bool pose_fist_mark_spawned = false;
         // Eating and drinking: grabbed food within pose_eat_cm of your mouth is bitten (the game's
         // Bite Event); a held bottle at your mouth with its neck below pose_drink_tip (the dot of its
         // axis with up) is drunk from, at most once a second.

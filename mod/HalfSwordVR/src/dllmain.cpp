@@ -4325,6 +4325,17 @@ namespace
             last_pawn = pawn;
             held[0] = held[1] = false;
         }
+        // Not marked as the game's fist (pose_fist_mark_spawned 0: its one-shot removal fired at once,
+        // "R Hand Active" being 0 in VR, fist test 6), so its other reasons are the mod's: knocked
+        // out or falling, the fist opens (UF @556985).
+        if (pawn && !cfg.pose_fist_mark_spawned)
+            for (int side = 0; side < 2; ++side)
+                if (is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))))
+                {
+                    double conscious = read_number_variable(pawn, STR("Consciousness"));
+                    double falling = read_number_variable(pawn, STR("Free Fall Rate"));
+                    if ((conscious >= 0.0 && conscious <= 0.0) || falling > 0.5) remove_fist(side, pawn, conscious <= 0.0 ? "knocked out" : "falling");
+                }
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
         {
             if (held[0] || held[1])
@@ -4452,7 +4463,7 @@ namespace
                 Call closest(best_base, STR("GetClosestPointOnCollision"));
                 closest.three(STR("Point"), at.x, at.y, at.z);
                 closest.run();
-                touch = closest.number() > 0.0 ? closest.vec(STR("ClosestPointOnCollision")) : at;
+                touch = closest.number() > 0.0 ? closest.vec(STR("OutPointOnBody")) : at;
             }
             bool ok = give_hand_weapon(side, pawn, best);
             UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
@@ -6468,6 +6479,21 @@ namespace
         pawn->ProcessEvent(fn, parameters);
         UObject* weapon = object_property(pawn, left ? STR("Weapon L") : STR("Weapon R"));
         HSVR_LOG("Script: hsvr.give_weapon: %s hand now holds %ls", left ? "left" : "right", weapon ? weapon->GetFullName().c_str() : STR("nothing"));
+        // A bottle given this way comes empty (drink test 3: Liquid Amount In Bottle 0, the class
+        // default 1): it gets its class default back, read from the default object.
+        if (weapon && class_name_starts(weapon, STR("BP_Weapon_Consumable_Bottle")) && read_number_variable(weapon, STR("Liquid Amount In Bottle")) < 0.1)
+        {
+            std::wstring full = weapon->GetClassPrivate()->GetFullName(); // "BlueprintGeneratedClass /Game/.../BP_X.BP_X_C"
+            size_t space = full.find(L' ');
+            std::wstring path = space == std::wstring::npos ? full : full.substr(space + 1);
+            size_t dot = path.rfind(L'.');
+            UObject* cdo = dot == std::wstring::npos ? nullptr
+                                                     : UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, (path.substr(0, dot + 1) + STR("Default__") + path.substr(dot + 1)).c_str());
+            double full_amount = cdo ? read_number_variable(cdo, STR("Liquid Amount In Bottle")) : -1.0;
+            if (full_amount > 0.0) set_variable(weapon, STR("Liquid Amount In Bottle"), full_amount);
+            HSVR_LOG("Script: hsvr.give_weapon: the bottle came empty; filled to %.2f (class default %ls)", read_number_variable(weapon, STR("Liquid Amount In Bottle")),
+                     cdo ? STR("found") : STR("NOT FOUND"));
+        }
     }
 
     // Parses "<time>: <command>" steps separated by ';' or new lines. Times are seconds from `base`
@@ -7027,7 +7053,7 @@ namespace
                                 Call cl(best, STR("GetClosestPointOnCollision"));
                                 cl.three(STR("Point"), from.x, from.y, from.z);
                                 cl.run();
-                                hsvr::Vec3 p = cl.number() > 0.0 ? cl.vec(STR("ClosestPointOnCollision")) : centre;
+                                hsvr::Vec3 p = cl.number() > 0.0 ? cl.vec(STR("OutPointOnBody")) : centre;
                                 double e = hsvr::dot(p - centre, dir);
                                 across[a] += e;
                                 if (sgn > 0) edge[a] = p;
