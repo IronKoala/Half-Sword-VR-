@@ -7885,6 +7885,35 @@ namespace
         HSVR_LOG("Stab: watching %d release functions of the stuck joint and the weapon", n);
     }
 
+    // After his tick, before the physics (where the weapons' hits happen): a weapon the mod holds is
+    // never "Being Rubber Banded". Willie sets that every tick unless BOTH hands' "Soft Not Attached"
+    // are true (UG @459904-@460309); the mod handles the left hand itself, so the game's left flag
+    // stays false and the right weapon was rubber-banded on 40% of his hits (playtest 2026-11-19:
+    // 475 of 1116, 644 of 1768). A rubber-banded weapon never sticks, deals x0.1 damage clamped to
+    // 1000 and needs a 100-1000 impulse to register a hit at all (ModularWeaponBP @38582-@42321):
+    // "poking him with a stick".
+    void stab_no_rubber_band(UObject* pawn)
+    {
+        if (!hsvr::config().stab_no_rubber_band || !pawn) return;
+        static int cleared[2] = {0, 0};
+        static double last_log = 0.0;
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (!weapon || g_hold[side].weapon != weapon) continue;
+            if (!bool_property(weapon, STR("Being Rubber Banded"))) continue;
+            set_variable(weapon, STR("Being Rubber Banded"), 0.0);
+            ++cleared[side];
+            double now = hsvr::now_seconds();
+            if (now - last_log >= 5.0)
+            {
+                last_log = now;
+                HSVR_LOG("Stab: rubber band taken off the held weapons (right %d, left %d ticks so far; his soft-not-attached R %d L %d)", cleared[1], cleared[0],
+                         (int)bool_property(pawn, STR("R Hand Soft Not Attached")), (int)bool_property(pawn, STR("L Hand Soft Not Attached")));
+            }
+        }
+    }
+
     // Every tick after his: the controllers' velocity, and the deferred lines after a hit.
     void stab_log_tick(UObject* pawn)
     {
@@ -9918,6 +9947,7 @@ namespace
             thrown_tick(context);
             frames_tick(context);
         }
+        stab_no_rubber_band(context);
         stab_log_tick(context);
         grip_flip_tick(context);
         if (!g_hold_have || !g_hold_capsule.load()) return;
