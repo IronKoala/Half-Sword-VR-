@@ -1,7 +1,7 @@
 Half Sword Custom Weapon (test build)
 =====================================
 
-Puts your own 3D sword model into Half Sword. You supply the model; none ship with this download.
+Puts your own 3D weapon model into Half Sword. You supply the model; none ship with this download.
 
 What you need
 - Half Sword (Steam).
@@ -14,13 +14,17 @@ Install the mod
    Half Sword\HalfswordUE5\Binaries\Win64\ue4ss\Mods\
    (it holds dlls\main.dll, CustomWeapon.ini, enabled.txt).
 
-Add a sword
-1. Get a sword model as GLB/glTF (best: it keeps its textures) or OBJ.
-2. Drag the model file onto WeaponConverter.exe (or double-click it and pick the file).
-3. Answer its questions (the real length in cm, since downloaded models often have odd scales; weight,
-   or Enter to estimate) and check what it
-   found: guard, which end is the blade, grip and pommel. Type y to use it.
-   It writes the converted sword into the mod folder and selects it.
+Add a weapon
+1. Get a weapon model as GLB/glTF (best: it keeps its textures) or OBJ. Swords, daggers, axes, maces,
+   hammers and spears work.
+2. Start WeaponConverter.exe and press Browse (or drop the model on the window, or on the exe).
+3. Type the real length in cm (downloaded models often have odd scales) and the weight in kg if you
+   know it (leave it empty and it is estimated). Weapon type can stay on Detect.
+4. Press Convert and look at the picture: handle on the left, blade or head on the right, and the
+   coloured bar under it marks pommel, grip, guard and blade. If the blade is on the left, press
+   "Blade is on the wrong end".
+5. Press "Install into Half Sword". It copies the weapon into the mod folder and selects it. Nothing
+   is written there before you press Install.
 
 In the game
 - Pick up a sword in your RIGHT hand and press F9. The sword becomes your model.

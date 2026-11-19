@@ -1,4 +1,4 @@
-"""Converts a 3D sword model (OBJ, glTF/GLB, and other formats trimesh reads) into the files the
+"""Converts a 3D weapon model (OBJ, glTF/GLB, and other formats trimesh reads) into the files the
 HalfSwordCustomWeapon mod reads. The user supplies the model; nothing ships with this repo.
 
     python -I tools/model_to_weapon.py <model> <out folder> [options]
@@ -21,8 +21,9 @@ How the parts are found (all printed, so a wrong guess shows):
     pommel), those meshes ARE the parts.
   - Otherwise from the shape: the long axis (principal axis), the guard (the widest run of slices),
     the blade (the longer side of the guard), the pommel (where the handle widens again near its end).
-  The edge direction is the widest spread of the blade's cross-sections.
-  Swords and other guard-plus-blade weapons only, for now.
+  - A widest part right at one end is a head on a haft (axe, mace, hammer, spear; --type hafted forces
+    it): the head starts where the cross-section narrows back to the haft's width. No guard.
+  The edge direction is the widest spread of the blade's (or head's) cross-sections.
 
 Several materials are merged into one texture atlas (one cell per material, UVs moved to match).
 
