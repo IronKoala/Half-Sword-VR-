@@ -383,6 +383,7 @@ namespace hsvr
         bool pose_sheathe = true;
         double pose_sheathe_mouth_cm = 10.0;
         double pose_sheathe_angle_deg = 30.0;
+        bool pose_sheathe_cross = true; // a weapon whose scabbard hangs on the other hip goes back across (the game's cross path)
         // The off hand on a belt scabbard: a squeeze within touch_cm of it takes it; it turns with the hand
         // up to angle_deg on the belt (the game's own loose limit is 30) and stays pinned there; let go and it
         // turns back. follow_s: how fast it catches up with the hand's angle. let_go_cm: the hand pulled this

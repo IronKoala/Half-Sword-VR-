@@ -2453,6 +2453,8 @@ namespace
     {
         UObject* scab = nullptr;
         int slot_side = 1;
+        int slot = 0; // 0 = slot 1, 1 = slot 2 of that side
+        const char* socket = "";
         hsvr::Vec3 mouth_local, axis_local;
     };
     std::unordered_map<UObject*, SheathFit> g_sheath_fit;
@@ -7832,6 +7834,8 @@ namespace
             SheathFit f;
             f.scab = scab;
             f.slot_side = sd.side;
+            f.slot = sd.slot;
+            f.socket = sd.socket;
             f.mouth_local = sq.inverse().rotate(w0_pos + w0_rot.rotate(Vec3{0, 0, z0}) - sp);
             f.axis_local = sq.inverse().rotate(w0_rot.rotate(Vec3{0, 0, 1}));
             g_sheath_fit[w] = f;
@@ -7948,6 +7952,78 @@ namespace
         return true;
     }
 
+    // Across the body (Matthew's playtest 11:25: the rondel drawn by the right hand from the left hip
+    // could not go back): the game's own cross path (cross_sheathe.md). Check Scabbard Unsheath State
+    // <slot side> already handles "Cross Unsheath": it reads the HAND's concrete and grip, and seats
+    // with Set Up <hand> Hand Weapon(None). Create Sheath Constraint <slot side> reads "Weapon <slot
+    // side>", so the weapon is written there for that one call only (the other hand must be empty).
+    bool sheathe_cross_begin(int side, UObject* pawn, UObject* w, const SheathFit& fit)
+    {
+        using namespace hsvr;
+        int ss = fit.slot_side;
+        const wchar_t* H = side == 0 ? L"L" : L"R";
+        const wchar_t* S = ss == 0 ? L"L" : L"R";
+        auto nm = [](const wchar_t* fmt, const wchar_t* a) {
+            wchar_t buf[96];
+            std::swprintf(buf, 96, fmt, a);
+            return std::wstring(buf);
+        };
+        const char* hand = side == 0 ? "left" : "right";
+        std::wstring slot_var = nm(L"Weapon Slot %ls ", S) + (fit.slot == 0 ? L"1" : L"2");
+        if (fit.slot < 0 || fit.slot > 1 || object_property(pawn, slot_var.c_str())) return false;
+        if (object_property(pawn, ss == 0 ? STR("Weapon L") : STR("Weapon R")))
+        {
+            HSVR_LOG_EVERY(2.0, "Sheathe: %s hand can't sheathe across: the other hand holds something", hand);
+            return false;
+        }
+        double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
+        if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
+            bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
+            return false;
+        double hafted = read_number_variable(w, STR("SheathSlot"));
+        if (hafted != 0.0 && hafted != 1.0)
+        {
+            HSVR_LOG_EVERY(2.0, "Sheathe: %ls has sheath slot type %.0f; only belt slots sheathe across", w->GetName().c_str(), hafted);
+            return false;
+        }
+        UObject* scab = fit.scab;
+        // The value Draw Weapon writes for that physical slot (L1 5, L2 6, L1/L2 hafted 7/8; R1 0, R2 1, hafted 2/3).
+        double concrete = ss == 0 ? (hafted == 0.0 ? 5.0 : 7.0) + fit.slot : (hafted == 0.0 ? 0.0 : 2.0) + fit.slot;
+        Vec3 sp = component_location(scab);
+        Quat sq = component_rotation(scab);
+        FName sock = bone_fname(fit.socket);
+        bool ok = set_bool_property(pawn, STR("Cross Unsheath"), true);
+        ok &= set_variable(pawn, nm(L"Sheath Slot %ls", S).c_str(), fit.slot);
+        ok &= set_variable(pawn, nm(L"%ls Sheath Slot Name", S).c_str(), 0.0, nullptr, &sock);
+        ok &= set_variable(pawn, nm(L"%ls Sheath Slot Concrete", H).c_str(), concrete);
+        set_variable(pawn, nm(L"Current Scabbard %ls", H).c_str(), 0.0, scab, nullptr);
+        set_variable(pawn, nm(L"Current Scabbard %ls", S).c_str(), 0.0, scab, nullptr);
+        set_variable(pawn, ss == 0 ? STR("Weapon L") : STR("Weapon R"), 0.0, w, nullptr);
+        Call make(pawn, nm(L"Create Sheath Constraint %ls", S).c_str());
+        make.byte(STR("Slot"), (uint8_t)fit.slot);
+        bool made = make.run();
+        set_variable(pawn, ss == 0 ? STR("Weapon L") : STR("Weapon R"), 0.0, nullptr, nullptr);
+        set_component_transform(scab, sp, sq, true);
+        call_one_object(pawn, cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+        set_bool_property(pawn, nm(L"%ls Weapon Sheathing", S).c_str(), true);
+        set_bool_property(pawn, nm(L"Block %ls Weapon From Sheathing", S).c_str(), true);
+        set_bool_property(pawn, nm(L"Weapon UnSheathing %ls", S).c_str(), true);
+        DrawState d;
+        d.active = true;
+        d.slot_side = ss;
+        d.weapon = w;
+        d.scabbard = scab;
+        d.t0 = now_seconds();
+        d.sheathing = true;
+        d.length = blade_length(w);
+        d.socket = fit.socket;
+        g_draw[side] = d;
+        controllers_buzz(side, 0.3f);
+        HSVR_LOG("Sheathe: %s hand puts %ls across into slot %ls %d (concrete %.0f)%s%s", hand, w->GetName().c_str(), S, fit.slot + 1, concrete,
+                 made ? "" : " (Create Sheath Constraint NOT found)", ok ? "" : " (a game variable was NOT set)");
+        return true;
+    }
+
     // Each tick, for a hand holding a weapon: its tip at its side's empty belt scabbard mouth, lined up.
     void sheathe_check(int side, UObject* pawn, const hsvr::Config& cfg)
     {
@@ -8001,8 +8077,17 @@ namespace
                            real && have_sock ? "; the belt socket's is " : "", real && have_sock ? (std::to_string((int)std::lround(length(tip - sock_mouth))) + " cm").c_str() : "");
         if (other_side)
         {
-            HSVR_LOG_EVERY(2.0, "Sheathe: %s hand's %ls has its scabbard on the other hip; sheathing across is not built yet", side == 0 ? "left" : "right",
-                           w->GetName().c_str());
+            // Its own scabbard on the other hip: its real mouth, and the game's cross path.
+            Vec3 sp = component_location(fit->second.scab);
+            Quat sq = component_rotation(fit->second.scab);
+            Vec3 m2 = sp + sq.rotate(fit->second.mouth_local), a2 = sq.rotate(fit->second.axis_local);
+            double d2 = length(tip - m2), c2 = dot(blade, a2);
+            if (d2 < 40.0)
+                HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's tip %.1f cm from the mouth on the other hip, %.0f deg off its line (needs %.0f cm, %.0f deg)",
+                               side == 0 ? "left" : "right", d2, std::acos((std::max)(-1.0, (std::min)(1.0, c2))) * 57.2958, cfg.pose_sheathe_mouth_cm,
+                               cfg.pose_sheathe_angle_deg);
+            if (cfg.pose_sheathe_cross && d2 <= cfg.pose_sheathe_mouth_cm && c2 >= std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0))
+                sheathe_cross_begin(side, pawn, w, fit->second);
             return;
         }
         if (d <= cfg.pose_sheathe_mouth_cm && c >= std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0)) sheathe_begin(side, pawn, w);
@@ -8031,7 +8116,8 @@ namespace
             }
             const TCHAR* S = d.slot_side == 0 ? STR("L") : STR("R");
             bool unsheathing = bool_property(pawn, d.slot_side == 0 ? STR("Weapon UnSheathing L") : STR("Weapon UnSheathing R"));
-            double conc = read_number_variable(pawn, d.slot_side == 0 ? STR("L Sheath Slot Concrete") : STR("R Sheath Slot Concrete"));
+            // The concrete is the HAND's (Draw Weapon @751), the flags the slot side's (cross_sheathe.md).
+            double conc = read_number_variable(pawn, side == 0 ? STR("L Sheath Slot Concrete") : STR("R Sheath Slot Concrete"));
             Vec3 bp = component_location(base);
             Quat bq = component_rotation(base);
             double z = d.scabbard ? bq.inverse().rotate(component_location(d.scabbard) - bp).z : 0.0;
