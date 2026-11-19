@@ -371,6 +371,7 @@ namespace hsvr
         num("pose_slide_hand_half_cm", c.pose_slide_hand_half_cm);
         flag("pose_slide_zone_measured", c.pose_slide_zone_measured);
         num("pose_slide_wide_cm", c.pose_slide_wide_cm);
+        num("pose_hold_damping_ratio", c.pose_hold_damping_ratio);
         flag("pose_body_size_strength", c.pose_body_size_strength);
         num("pose_slide_ring_max_len_cm", c.pose_slide_ring_max_len_cm);
         num("pose_slide_ring_max_width_cm", c.pose_slide_ring_max_width_cm);

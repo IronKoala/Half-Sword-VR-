@@ -7338,6 +7338,21 @@ namespace
                        rf = two ? cfg.pose_bs_two_rot_max : cfg.pose_hold_max_torque;
                 double st = (std::max)(0.0, cfg.pose_hold_strength);
                 double dst = (std::max)(1.0, st * 0.5);
+                // Dampers per weapon (pose_hold_damping_ratio): critical damping for this weapon's own mass and
+                // its inertia about the grip, so a long heavy one (war staff, 1.9 kg m^2 about a low grip) settles
+                // without bouncing and a short sword (0.04 kg m^2) doesn't trail the wrist and swing on past a stop
+                // (playtest 14:19 with fixed dampers tuned for the staff). 0 = the fixed dampers above.
+                if (cfg.pose_hold_damping_ratio > 0.0)
+                {
+                    Vec3 rp = pivot_now - com;
+                    double ig = (std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp); // kg cm^2
+                    double z = cfg.pose_hold_damping_ratio;
+                    double per_point = two ? mass * 0.5 : mass;
+                    pc = 2.0 * z * std::sqrt((std::max)(0.0, pk * st * per_point)) / dst;
+                    rc = 2.0 * z * std::sqrt((std::max)(0.0, rk * st * 1e4 * ig)) / (dst * 1e4);
+                    HSVR_LOG_EVERY(2.0, "Hold: %s dampers for %ls (%.2f kg, %.3f kg m^2 about the grip): position %.0f, turn %.1f", side == 0 ? "left" : "right",
+                                   weapon->GetName().c_str(), mass, ig / 1e4, pc * dst, rc * dst);
+                }
                 double draw_scale = 1.0;
                 if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body"))) draw_scale = (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
                 SoftPoint pts[2];

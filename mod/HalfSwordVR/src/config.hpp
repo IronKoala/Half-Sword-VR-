@@ -269,6 +269,10 @@ namespace hsvr
         double pose_hold_wrist_free_deg = 25.0;
         double pose_hold_wrist_stop_deg = 50.0;
         double pose_hold_wrist_stop_torque = 250.0;
+        // B&S hold dampers computed per weapon for this damping ratio (1 = critical: settles without
+        // bouncing, the least lag that does): from its mass and its inertia about the grip. 0 = the fixed
+        // pose_hold_damper / turn_damper / pose_bs_two_*_c values.
+        double pose_hold_damping_ratio = 1.0;
         // Weight: the hold's turn is limited by torque about the grip, not the centre of mass (heavy and
         // long weapons trail fast turns, B&S-style). torque_scale multiplies pose_hold_max_torque for it.
         bool pose_hold_weight = true;
