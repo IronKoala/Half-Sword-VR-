@@ -339,6 +339,9 @@ namespace hsvr
         // polearm's hook or head, a wide pommel). 0 = the game's lengths and its Head module only.
         bool pose_slide_zone_measured = true;
         double pose_slide_wide_cm = 4.0;
+        // A belt scabbard is a handle (B&S): taken only within pose_grab_handle_cm of its length, lined up
+        // with the hand's grip line, the trigger slides the hand along it. 0 = held where touched, as before.
+        bool pose_scabbard_handle = true;
         // B&S: a weapon or tool is taken only by a handle (its grip, any haft stretch, a sword's blade), not
         // anywhere the hand touched it (shields and bottles still are). 0 = anywhere, as before.
         bool pose_grab_weapon_handles_only = true;

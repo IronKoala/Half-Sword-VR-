@@ -6239,7 +6239,7 @@ namespace
                     else { m.hi = wide ? last + step * 0.5 : last; m.wide_hi = wide; }
                 }
                 // A hafted weapon (a grip stretch of 30 cm or more) goes on past its first stop: every further
-                // narrow stretch of 10 cm or more on its axis is haft too (a pollaxe above its rondel, a war
+                // narrow stretch of 15 cm or more on its axis is haft too (a pollaxe above its rondel, a war
                 // staff above its fitting); the stops between them stay stops (B&S: grab only on a handle).
                 if (m.hi - m.lo >= 30.0)
                 {
@@ -6254,7 +6254,8 @@ namespace
                             last = z;
                             z += step;
                         }
-                        if (last - s0 >= 10.0)
+                        // 15 cm: a pollaxe's top spike (14) and a halberd's (12) are not haft.
+                        if (last - s0 >= 15.0)
                         {
                             m.extra.push_back({s0 - step * 0.5, last + step * 0.5});
                             HSVR_LOG("Haft: %ls more haft at %.0f .. %.0f cm", weapon->GetName().c_str(), s0 - step * 0.5, last + step * 0.5);
@@ -8965,8 +8966,52 @@ namespace
         hsvr::Vec3 hand_pos_local; // the hand bone in the scabbard's frame at the grab
         hsvr::Quat hand_rot_local;
         bool hand_set = false;
+        // Held as a handle (pose_scabbard_handle): its length along its own Z (z0..z1, measured from its
+        // collision), the palm in the hand's frame, and the trigger slide.
+        bool seg = false;
+        double z0 = 0.0, z1 = 0.0;
+        hsvr::Vec3 palm_h;
+        bool sliding = false;
+        double last_slide_t = -1.0;
     };
     ScabHold g_scab[2];
+
+    // A scabbard's length along its own Z, from its collision: the stretch of its axis within 3.5 cm of it.
+    bool scabbard_segment(UObject* scab, double len, double& z0, double& z1)
+    {
+        using namespace hsvr;
+        static std::unordered_map<UObject*, std::pair<double, double>> cache;
+        auto f = cache.find(scab);
+        if (f != cache.end())
+        {
+            z0 = f->second.first;
+            z1 = f->second.second;
+            return z1 > z0;
+        }
+        Vec3 sp = component_location(scab);
+        Quat sq = component_rotation(scab);
+        double lo = 1e9, hi = -1e9;
+        double reach = (std::max)(20.0, len + 10.0);
+        for (double z = -reach; z <= reach; z += 2.0)
+        {
+            Vec3 a = sp + sq.rotate(Vec3{0, 0, z});
+            Call cp(scab, STR("GetClosestPointOnCollision"));
+            cp.three(STR("Point"), a.x, a.y, a.z);
+            if (!cp.run()) return false;
+            double d = cp.number();
+            if (d >= 0.0 && d <= 3.5)
+            {
+                lo = (std::min)(lo, z);
+                hi = (std::max)(hi, z);
+            }
+        }
+        if (hi <= lo) return false;
+        cache[scab] = {lo, hi};
+        z0 = lo;
+        z1 = hi;
+        HSVR_LOG("Scabbard: %ls is a handle from %.0f to %.0f cm along it", scab->GetName().c_str(), lo, hi);
+        return true;
+    }
 
     // B&S (as for weapons, pose_hold_hand_follows): his hand holding a scabbard is drawn on the scabbard
     // where it took it, not on your controller (the scabbard is pinned to the belt and only turns).
@@ -9077,7 +9122,7 @@ namespace
     }
 
     void take_scabbard(int side, UObject* mesh, UObject* scab, const hsvr::Vec3& touch, const hsvr::Quat& hand_rot, const hsvr::Quat& turn, bool test,
-                       const hsvr::Config& cfg)
+                       const hsvr::Config& cfg, const hsvr::Vec3* palm_at = nullptr)
     {
         using namespace hsvr;
         ScabHold& s = g_scab[side];
@@ -9100,6 +9145,33 @@ namespace
             s.hand_pos_local = sq.inverse().rotate(g_pose.target[side] - sp);
             s.hand_rot_local = (sq.inverse() * g_pose.hand_rot[side]).normalized();
             s.hand_set = true;
+        }
+        // As a handle (B&S): it lines up with the hand's grip line (either way along it), and the hand sits
+        // on its axis where it closed (pose_scabbard_handle).
+        double z0 = 0.0, z1 = 0.0;
+        if (!test && palm_at && cfg.pose_scabbard_handle && g_pose.hand_valid[side] && scabbard_segment(scab, scabbard_length(scab), z0, z1))
+        {
+            Vec3 sp = component_location(scab);
+            Vec3 f = normalized(hand_rot.inverse().rotate(sq.rotate(Vec3{0, 0, 1}))), want = hand_grip_axis(side);
+            if (dot(f, want) < 0.0) want = want * -1.0;
+            Vec3 n = cross(f, want);
+            double sn = length(n), c = dot(f, want);
+            Quat line_up = sn > 1e-6 ? quat_axis_angle(n * (1.0 / sn), std::atan2(sn, c)) : Quat{};
+            s.rel = (line_up * hand_rot.inverse() * sq).normalized();
+            double half = cfg.pose_slide_hand_half_cm;
+            double lz = sq.inverse().rotate(*palm_at - sp).z;
+            double a = z0 + half, b = z1 - half;
+            if (b < a) a = b = (z0 + z1) * 0.5;
+            s.touch = Vec3{0, 0, (std::min)(b, (std::max)(a, lz))};
+            s.palm_h = hand_rot.inverse().rotate(*palm_at - g_pose.target[side]);
+            s.hand_rot_local = s.rel.inverse();
+            s.hand_pos_local = s.touch - s.hand_rot_local.rotate(s.palm_h);
+            s.hand_set = true;
+            s.seg = true;
+            s.z0 = a;
+            s.z1 = b;
+            HSVR_LOG("Scabbard: %s hand holds it as a handle at %.1f cm (handle %.0f .. %.0f), turned %.0f deg to lie along the hand's grip line",
+                     side == 0 ? "left" : "right", s.touch.z, z0, z1, std::atan2(sn, c) * 57.2958);
         }
         log_scabbard_pin(scab, "before");
         widen_scabbard_pin(scab, cfg.pose_scabbard_angle_deg);
@@ -9152,7 +9224,22 @@ namespace
             return false;
         }
         if (!g_pose.hand_valid[side]) return false;
-        take_scabbard(side, mesh, best, best_touch, g_pose.hand_rot[side], Quat{}, false, cfg);
+        // Only on its handle: within pose_grab_handle_cm of its axis, along its length.
+        if (cfg.pose_scabbard_handle)
+        {
+            double z0 = 0.0, z1 = 0.0;
+            if (scabbard_segment(best, scabbard_length(best), z0, z1))
+            {
+                Vec3 local = component_rotation(best).inverse().rotate(at - component_location(best));
+                double d = length(local - Vec3{0, 0, (std::min)(z1, (std::max)(z0, local.z))});
+                if (d > cfg.pose_grab_handle_cm)
+                {
+                    HSVR_LOG("Scabbard: %s hand squeezed %.1f cm from the handle of %ls (needs %.0f): not taken", hand, d, best->GetName().c_str(), cfg.pose_grab_handle_cm);
+                    return false;
+                }
+            }
+        }
+        take_scabbard(side, mesh, best, best_touch, g_pose.hand_rot[side], Quat{}, false, cfg, &at);
         controllers_buzz(side, 0.3f);
         HSVR_LOG("Scabbard: %s hand took %ls at %.1f cm along it (%.1f cm from the hand); it turns up to %.0f deg on the belt", hand, best->GetName().c_str(),
                  best_touch.z, best_d, cfg.pose_scabbard_angle_deg);
@@ -9237,6 +9324,32 @@ namespace
                     Vec3 v = scaled_axis((rest_w.inverse() * want).normalized());
                     double a = cfg.pose_scabbard_angle_deg * 3.14159265358979 / 180.0, vl = length(v);
                     if (vl > a) want = (rest_w * from_scaled_axis(v * (a / vl))).normalized();
+                }
+                // The trigger slides the hand along it (as on a weapon's handle), within its length.
+                if (s.seg && !s.test)
+                {
+                    ControllerState cs = controllers_state();
+                    float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : cs.hand[side].trigger;
+                    bool on = s.sliding ? trig > 0.15f : trig > 0.3f;
+                    if (on != s.sliding)
+                    {
+                        s.sliding = on;
+                        HSVR_LOG("Scabbard: %s hand %s at %.1f cm (%.0f .. %.0f)", hand, on ? "starts sliding" : "holds", s.touch.z, s.z0, s.z1);
+                    }
+                    double dt = s.last_slide_t > 0.0 ? (std::min)(1.0 / 30.0, (std::max)(1.0 / 240.0, now - s.last_slide_t)) : 1.0 / 72.0;
+                    s.last_slide_t = now;
+                    if (on)
+                    {
+                        Vec3 palm = g_pose.target[side] + hand_rot.rotate(s.palm_h);
+                        double wz = cur.inverse().rotate(palm - component_location(s.scab)).z;
+                        double k = cfg.pose_slide_rate_min +
+                                   (cfg.pose_slide_rate_max - cfg.pose_slide_rate_min) * (std::min)(1.0, (std::max)(0.0, (trig - 0.15) / 0.85));
+                        double step = (wz - s.touch.z) * (1.0 - std::exp(-k * dt));
+                        double most = cfg.pose_slide_max_cm_s * dt;
+                        double nz = (std::min)(s.z1, (std::max)(s.z0, s.touch.z + (std::min)(most, (std::max)(-most, step))));
+                        s.hand_pos_local.z += nz - s.touch.z;
+                        s.touch.z = nz;
+                    }
                 }
                 Vec3 spot = component_location(s.scab) + cur.rotate(s.touch);
                 double off = length(g_pose.target[side] - spot);
