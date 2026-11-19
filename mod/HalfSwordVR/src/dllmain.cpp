@@ -12346,6 +12346,11 @@ namespace
         std::vector<hsvr::Vec3> table_at;
         double table_yaw = 0.0;
         double next_sweep = 0.0, next_save_check = 0.0;
+        std::vector<UObject*> settling; // foe meshes moved with physics off (room_settle_foes)
+        double settle_at = 0.0;
+        bool settled = false;
+        double watch_from = 0.0, next_watch = 0.0;     // diagnostics after the weapons are put down
+        std::map<UObject*, hsvr::Vec3> watch_last;
     };
     TestRoom g_room;
 
@@ -12546,6 +12551,8 @@ namespace
             foes.push_back(foe);
         }
         static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        g_room.settling.clear();
+        g_room.settled = false;
         int n = (int)foes.size();
         for (int i = 0; i < n; ++i)
         {
@@ -12555,26 +12562,68 @@ namespace
             Vec3 at = g_room.origin + dir * 220.0;
             double yaw = std::atan2(-dir.y, -dir.x) * 57.29577951308232;
             UObject* foe = foes[i];
+            UObject* fm = object_property(foe, STR("Mesh"));
+            // A teleport of a simulating body throws him ~5 m (test 2026-11-19 16:31: the pose drives
+            // see a 10 m jump in one frame). His body stops simulating while he is moved, and comes
+            // back to physics 0.4 s later at rest (room_settle_foes).
+            if (fm)
+            {
+                Call sim(fm, STR("SetAllBodiesSimulatePhysics"));
+                sim.first_flag(false);
+                sim.run();
+            }
             Call mv(foe, STR("K2_SetActorLocationAndRotation"));
             mv.three(STR("NewLocation"), at.x, at.y, at.z);
             mv.three(STR("NewRotation"), 0.0, yaw, 0.0);
             mv.flag(STR("bTeleport"), true);
             mv.run();
-            // His ragdoll moves with him (a teleport of the actor alone leaves the simulated body).
-            if (UObject* fm = object_property(foe, STR("Mesh")))
+            // His body moves with him (a teleport of the actor alone leaves the body where it lay).
+            if (fm)
             {
                 Vec3 before = socket_location(fm, pelvis_bone);
                 Call off(fm, STR("K2_AddWorldOffset"));
                 off.three(STR("DeltaLocation"), at.x - before.x, at.y - before.y, 0.0);
                 off.flag(STR("bTeleport"), true);
                 off.run();
-                Call still(fm, STR("SetAllPhysicsLinearVelocity"));
-                still.three(STR("NewVel"), 0.0, 0.0, 0.0);
-                still.run();
+                g_room.settling.push_back(fm);
             }
             HSVR_LOG("TestRoom: %ls stood at (%.0f, %.0f, %.0f), facing him", foe->GetName().c_str(), at.x, at.y, at.z);
         }
+        g_room.settle_at = hsvr::now_seconds();
         HSVR_LOG("TestRoom: %d passive foe(s)", n);
+    }
+
+    // Foes placed by room_place_foes: physics back on 0.4 s after the move, then held at rest
+    // (no velocity) for 1 s, so that they stand where they were put.
+    void room_settle_foes()
+    {
+        if (g_room.settling.empty()) return;
+        double since = hsvr::now_seconds() - g_room.settle_at;
+        if (since < 0.4) return;
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        for (UObject* fm : g_room.settling)
+        {
+            if (!g_room.settled)
+            {
+                Call sim(fm, STR("SetAllBodiesSimulatePhysics"));
+                sim.first_flag(true);
+                sim.run();
+            }
+            Call lin(fm, STR("SetAllPhysicsLinearVelocity"));
+            lin.three(STR("NewVel"), 0.0, 0.0, 0.0);
+            lin.run();
+            Call ang(fm, STR("SetAllPhysicsAngularVelocityInDegrees"));
+            ang.three(STR("NewAngVel"), 0.0, 0.0, 0.0);
+            ang.run();
+            if (since >= 1.4)
+            {
+                hsvr::Vec3 p = socket_location(fm, pelvis_bone);
+                HSVR_LOG("TestRoom: %ls settled, pelvis at (%.0f, %.0f, %.0f)", fm->GetFullName().c_str(), p.x, p.y, p.z);
+            }
+        }
+        if (!g_room.settled) HSVR_LOG("TestRoom: %d foe(s) back to physics", (int)g_room.settling.size());
+        g_room.settled = true;
+        if (since >= 1.4) g_room.settling.clear();
     }
 
     // Two weapon tables side by side, 1.1 m in front of him, long side across his view.
@@ -12602,7 +12651,15 @@ namespace
             Vec3 at = g_room.origin + g_room.forward * 110.0 + right * (t == 0 ? -89.0 : 89.0);
             at.z = floor_z + 1.0;
             UObject* table = room_spawn(STR("/Game/Assets/Props/Blueprints/BP_Container_Weapon_Table_1.BP_Container_Weapon_Table_1_C"), player, at, yaw_quat(g_room.table_yaw),
-                                        [&](UObject* a) { set_variable(a, STR("Tier"), tier < 0 ? 4.0 : (double)tier); });
+                                        [&](UObject* a) {
+                                            set_variable(a, STR("Tier"), tier < 0 ? 4.0 : (double)tier);
+                                            // None of the table's own loot: it lands on the same spots as
+                                            // the room's weapons and the overlap threw them (test 16:38).
+                                            set_variable(a, STR("Weapon Spawn Chance"), 0.0);
+                                            set_variable(a, STR("Armor Spawn Chance"), 0.0);
+                                            set_variable(a, STR("Treasure Spawn Chance"), 0.0);
+                                            set_variable(a, STR("Bolts Spawn Chance Modifier"), 0.0);
+                                        });
             HSVR_LOG("TestRoom: weapon table %ls at (%.0f, %.0f, %.0f)", table ? table->GetName().c_str() : STR("NOT spawned"), at.x, at.y, at.z);
             if (table) g_room.table_at.push_back(at);
         }
@@ -12631,22 +12688,57 @@ namespace
             int t = (i < 5 || g_room.table_at.size() < 2) ? 0 : 1;
             int row = t == 0 ? i : i - 5;
             int rows = t == 0 ? 5 : count - 5;
-            double depth = (row - (rows - 1) * 0.5) * 18.0; // along his forward, table width 101 cm
+            // Along his forward, 16 cm apart (the top is 101 cm deep, +-50; at 20 cm the outer ones
+            // rolled off). Every other one lies 30 cm further along, so neighbouring heads and guards
+            // are never side by side and don't start inside each other.
+            double depth = (row - (rows - 1) * 0.5) * 16.0;
             Vec3 base = g_room.table_at[t];
-            Vec3 at = base + g_room.forward * depth - right * 55.0;
+            Vec3 at = base + g_room.forward * depth - right * (row % 2 ? 25.0 : 55.0);
             if (kinds[i].premade == 2) at = base + g_room.forward * depth; // a shield lies in the middle
+            // The game's own weapon points are at 112 (top at 89-95 cm). Lower, a guard starts inside
+            // the top and the push-out threw the weapons and tipped the table (test 2026-11-19 16:36).
             at.z = base.z + 112.0;
             seed = seed * 1103515245u + 12345u;
-            int tier = tier_cfg < 0 ? (int)((seed >> 16) % 8u) : tier_cfg;
+            int first = tier_cfg < 0 ? (int)((seed >> 16) % 8u) : (std::min)(tier_cfg, 8);
             hsvr::Quat q = kinds[i].premade == 2 ? hsvr::quat_from_axes(right, hsvr::cross(Vec3{0, 0, 1}, right), Vec3{0, 0, 1}) : lying;
-            UObject* loot = room_spawn(STR("/Game/Blueprints/Procedural/LootPoints/BP_Loot_Weapon.BP_Loot_Weapon_C"), player, at, q, [&](UObject* a) {
-                set_variable(a, STR("Spawn Chance"), 1.0);
-                set_variable(a, STR("Tier"), (double)tier);
-                set_variable(a, STR("Premade"), kinds[i].premade >= 0 ? 1.0 : 0.0);
-                if (kinds[i].premade >= 0) set_variable(a, STR("Weapon Type (Premade)"), (double)kinds[i].premade);
-                else set_variable(a, STR("Weapon Type"), (double)kinds[i].specific);
-            });
-            HSVR_LOG("TestRoom: %s (tier %d) %s at (%.0f, %.0f, %.0f)", kinds[i].label, tier, loot ? "spawned" : "NOT spawned", at.x, at.y, at.z);
+            // The game's generator gives no weapon when a kind has none at that tier (Generate Weapon:
+            // the kind's types that the tier allows; mace 2H and secondary at tier 6 gave none in the
+            // test). Then the nearest other tiers are tried.
+            bool got = false;
+            int tier = first;
+            for (int k = 0; k < 17 && !got; ++k)
+            {
+                int d = (k + 1) / 2;
+                tier = k % 2 ? first - d : first + d;
+                if (k == 0) tier = first;
+                if (tier < 0 || tier > 8) continue;
+                UObject* loot = room_spawn(STR("/Game/Blueprints/Procedural/LootPoints/BP_Loot_Weapon.BP_Loot_Weapon_C"), player, at, q, [&](UObject* a) {
+                    set_variable(a, STR("Spawn Chance"), 1.0);
+                    set_variable(a, STR("Tier"), (double)tier);
+                    set_variable(a, STR("Premade"), kinds[i].premade >= 0 ? 1.0 : 0.0);
+                    if (kinds[i].premade >= 0) set_variable(a, STR("Weapon Type (Premade)"), (double)kinds[i].premade);
+                    else
+                    {
+                        set_variable(a, STR("Weapon Type"), (double)kinds[i].specific);
+                        // Enum_WeaponType of that kind (0 1H, 1 2H), which the generator also reads.
+                        int s = kinds[i].specific;
+                        set_variable(a, STR("Weapon Type (Premade)"), (s == 1 || s == 3 || s == 5) ? 0.0 : 1.0);
+                    }
+                });
+                // The loot point is destroyed in its BeginPlay but still readable this tick: its
+                // passport says which weapon class it spawned (none = nothing).
+                UObject* cls = nullptr;
+                if (loot)
+                    if (FProperty* pp = loot->GetPropertyByNameInChain(STR("Weapon Passport")))
+                        if (FProperty* wc = struct_member_prefix(struct_type(pp), STR("WeaponClass")))
+                            cls = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(loot) + pp->GetOffset_Internal() + wc->GetOffset_Internal());
+                got = cls != nullptr;
+                if (got)
+                    HSVR_LOG("TestRoom: %s (tier %d) spawned at (%.0f, %.0f, %.0f): %ls", kinds[i].label, tier, at.x, at.y, at.z, cls->GetName().c_str());
+                else
+                    HSVR_LOG("TestRoom: %s: the game has none at tier %d%s", kinds[i].label, tier, loot ? "" : " (no loot point)");
+            }
+            if (!got) HSVR_LOG("TestRoom: %s NOT spawned at any tier", kinds[i].label);
         }
     }
 
@@ -12694,11 +12786,41 @@ namespace
             g_room.forward = fl > 1e-3 ? f * (1.0 / fl) : hsvr::Vec3{1, 0, 0};
             room_place_foes(player);
             room_place_tables(player);
+            g_room.watch_from = now; // diagnostics: tables now, weapons at +1.5 s
         }
         if (g_room.stage == 1 && now - g_room.pawn_at >= 4.5)
         {
             g_room.stage = 2;
             room_spawn_weapons(player);
+        }
+        room_settle_foes();
+        // Diagnostics: for 5 s from the tables (weapons at +1.5 s), every table or loose weapon near the
+        // tables that moves more than 3 cm between samples (20 a second).
+        if (g_room.watch_from > 0.0 && now - g_room.watch_from < 5.0 && now >= g_room.next_watch)
+        {
+            g_room.next_watch = now + 0.05;
+            std::vector<UObject*> items;
+            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), items);
+            std::vector<UObject*> tables;
+            UObjectGlobals::FindAllOf(STR("BP_Container_Master_C"), tables);
+            for (UObject* t : tables) items.push_back(t);
+            for (UObject* o : items)
+            {
+                if (!o || o->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                UObject* c = object_property(o, STR("BaseMesh"));
+                if (!c) c = object_property(o, STR("Box"));
+                if (!c) continue;
+                hsvr::Vec3 p = component_location(c);
+                if (p.x == 0.0 && p.y == 0.0 && p.z == 0.0) continue;
+                bool close_by = false;
+                for (const hsvr::Vec3& ta : g_room.table_at) close_by = close_by || hsvr::length(p - ta) < 400.0;
+                if (!close_by) continue;
+                auto it = g_room.watch_last.find(o);
+                if (it != g_room.watch_last.end() && hsvr::length(p - it->second) > 3.0)
+                    HSVR_LOG("TestRoom: watch +%.2f s: %ls moved %.0f cm to (%.0f, %.0f, %.0f)", now - g_room.watch_from, o->GetName().c_str(), hsvr::length(p - it->second), p.x,
+                             p.y, p.z);
+                g_room.watch_last[o] = p;
+            }
         }
         // Every foe's AI is stopped as soon as it is there (they spawn ~1 s in and would start
         // fighting before the room is set up), and again if it comes back on (zombie revive).
@@ -12762,8 +12884,10 @@ namespace
             if (held) continue;
             UObject* base = object_property(w, STR("BaseMesh"));
             if (!base) continue;
-            ++loose;
             Vec3 at = component_location(base);
+            // The generator's own throwaway weapons (destroyed, waiting for clean-up) sit at 0,0,0.
+            if (at.x == 0.0 && at.y == 0.0 && at.z == 0.0) continue;
+            ++loose;
             int best = -1;
             Vec3 local{};
             double best_d = 1e9;
