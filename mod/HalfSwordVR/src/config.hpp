@@ -522,7 +522,9 @@ namespace hsvr
         // The fist's finger shape in his animation: -2 = the game's own, -1 = the animation's grab
         // shape (its 'Grabbed' switch), 0..17 = that grip type, 100 = its guard fist ('Guarding' for
         // that hand, with the swing speed its fist blend reads held at 75 in the animation only).
-        int pose_fist_shape = 100;
+        // Unattended test 2026-11-19 (fingertips to the hand bone, four-finger mean): open/-2/0 14.8 cm,
+        // -1 10.7, 1 9.0 (tightest), 5 and 9 9.1; 100 did not hold (one sample, then open).
+        int pose_fist_shape = 1;
         // The game's own fist flags: 'Fist R/L Spawned' is hidden from Willie's tick (whose removal
         // rule needs 'Hand Active', always 0 in VR) and set after it while the mod's fist exists (his
         // punch rules read it on hits), and 'R/L Fisting Rate' (the punch stamina) is fed by the

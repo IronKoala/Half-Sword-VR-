@@ -1540,6 +1540,7 @@ namespace
     }
 
     std::atomic<int> g_fake_arm_mode{0};
+    std::atomic<int> g_fake_arm_epoch{0}; // bumped by every hsvr.arm_move: timed test paths restart
     std::atomic<double> g_fake_two_up{20.0};
     // hsvr.arm_move 10 <speed cm/s> <pitch deg> <height cm>: the right hand thrusts (stab tests).
     std::atomic<double> g_fake_thrust_pitch{60.0};
@@ -1820,8 +1821,8 @@ namespace
                 static UObject* foe = nullptr;
                 static double found_at = -1.0, t0 = -1.0;
                 static int seen = -1;
-                if (seen != mode) t0 = now;
-                seen = mode;
+                if (seen != g_fake_arm_epoch.load()) t0 = now;
+                seen = g_fake_arm_epoch.load();
                 if (!foe || now - found_at > 1.0)
                 {
                     found_at = now;
@@ -12689,6 +12690,7 @@ namespace
             if (entry.command.rfind("hsvr.arm_move ", 0) == 0)
             {
                 g_fake_arm_mode.store(atoi(entry.command.c_str() + 14));
+                g_fake_arm_epoch.fetch_add(1);
                 int mode_arg = 0;
                 double a1 = 0, a2 = 0, a3 = 0;
                 int got = sscanf(entry.command.c_str() + 14, "%d %lf %lf %lf", &mode_arg, &a1, &a2, &a3);
