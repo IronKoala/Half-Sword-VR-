@@ -25,6 +25,9 @@ namespace hsvr
         double eye_up_cm = 7.0;
         // Seconds of smoothing on the head anchor (0 = none). Takes the physics jitter out.
         double anchor_smoothing = 0.06;
+        // Controllers and headset placed in the world from the view anchor as it will be this frame
+        // (where he is now), not as it was set up for the frame before (hands shook while walking).
+        bool tracking_current_anchor = true;
         double near_clip_cm = 4.0;
         // 0 = auto (decode sRGB unless the engine target is a float format), 1 = always decode, 2 = never.
         int gamma_mode = 0;
