@@ -6422,8 +6422,13 @@ namespace
                 // The first moments in the wound: no pulling out yet (stab-test11: the hold's target
                 // sits behind a blade that has just gone in, and its catch-up drew it straight out).
                 if (g_wound_since[side] < 0.0) g_wound_since[side] = now;
-                double out_most = now - g_wound_since[side] < cfg.stab_wound_settle_s ? 0.0 : cfg.stab_wound_out_cms * k;
+                bool settling = now - g_wound_since[side] < cfg.stab_wound_settle_s;
+                double out_most = settling ? 0.0 : cfg.stab_wound_out_cms * k;
                 double ax = (std::min)(cfg.stab_wound_in_cms * k, (std::max)(-out_most, need_ax));
+                // Going in: the game sticks a blade at the skin (stab-test13: its keep trace found the
+                // tip 1.2 cm inside, then outside), so for the first moments it is carried in at
+                // stab_wound_entry_cms whatever the hand does, as the arm's momentum would.
+                if (settling) ax = (std::max)(ax, cfg.stab_wound_entry_cms);
                 v_need = (v_com_now - u * now_ax) + u * ax;
                 HSVR_LOG_EVERY(0.25, "Hold: %s hand's %ls in a wound (%ls): wanted %.0f cm/s along it, slides %.0f", side == 0 ? "left" : "right",
                                weapon->GetName().c_str(), bone.c_str(), need_ax, ax);
