@@ -5497,7 +5497,11 @@ namespace
     {
         if (!weapon) return -1.0;
         double now = hsvr::now_seconds();
-        if (now - g_weapon_parts_time > 0.25)
+        // A weapon spawned straight into the hand (free play) is not in a list made before it existed:
+        // rebuild at once for it (at most every 0.05 s), not only every 0.25 s (playtest 12:19: a fresh
+        // two-handed axe measured a zero-length handle and kept it).
+        bool unknown = g_weapon_parts.find(weapon) == g_weapon_parts.end();
+        if (now - g_weapon_parts_time > 0.25 || (unknown && now - g_weapon_parts_time > 0.05))
         {
             g_weapon_parts_time = now;
             g_weapon_parts.clear();
@@ -6157,6 +6161,15 @@ namespace
                     else { m.hi = wide ? last + step * 0.5 : last; m.wide_hi = wide; }
                 }
             }
+            // A failed or zero-length measure (its parts not found yet) is not kept: asked again next time.
+            if (!m.ok || (m.lo == 0.0 && m.hi == 0.0))
+            {
+                lo = m.lo + m.at_z - pivot.z;
+                hi = m.hi + m.at_z - pivot.z;
+                wide_lo = m.wide_lo;
+                wide_hi = m.wide_hi;
+                return m.ok;
+            }
             cached = g_axis_measures.emplace(weapon, m).first;
         }
         const AxisMeasure& m = cached->second;
@@ -6212,6 +6225,13 @@ namespace
             list += one;
         }
         HSVR_LOG("Handles: %ls: %s", item->GetName().c_str(), list.empty() ? "none (held where touched)" : list.c_str());
+        // A weapon whose grip came out as a point (its parts not found yet) is measured again next time.
+        bool point_only = !hs.empty() && length(hs[0].b - hs[0].a) < 1e-3 && hs[0].name == "grip";
+        if (point_only)
+        {
+            static std::unordered_map<UObject*, std::vector<Handle>> unsure;
+            return unsure[item] = std::move(hs);
+        }
         return g_item_handles.emplace(item, std::move(hs)).first->second;
     }
 
@@ -6378,6 +6398,13 @@ namespace
         h.zone_tip = top;
         HSVR_LOG("Slide: %ls grip zone %.1f .. %.1f cm from the game's grip (pommel end %.1f, top stop %.1f from the %s, tip %.1f)", weapon->GetName().c_str(),
                  h.zone_lo, h.zone_hi, -bottom, stop < 1e8 ? stop : 0.0, how, top);
+        // No room at all (a weapon spawned into the hand before its parts were listed): look again in a
+        // moment rather than keep a zero zone for as long as it is held (playtest 12:19, two-handed axe).
+        if (h.zone_hi - h.zone_lo < 1.0)
+        {
+            static std::unordered_map<UObject*, int> tries;
+            if (++tries[weapon] <= 20) h.zone_known = false;
+        }
     }
 
     // The slide (Matthew: hold the trigger and that hand slides along the shaft, B&S-style, either
