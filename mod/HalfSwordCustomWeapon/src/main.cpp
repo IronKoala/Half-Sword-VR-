@@ -171,6 +171,7 @@ namespace
         std::vector<double> uvs;             // u, v pairs
         std::vector<int32_t> triangles;      // Unreal winding
         V3 min{1e30, 1e30, 1e30}, max{-1e30, -1e30, -1e30};
+        V3 tangent_scale{1, 1, 1};           // scale of the component the model is shown on
     };
 
     bool load_obj(const std::wstring& path, Model& m)
@@ -713,6 +714,33 @@ namespace
                 .array(STR("Normals"), m.normals.data(), (int32_t)m.normals.size())
                 .array(STR("UV0"), m.uvs.data(), (int32_t)(m.uvs.size() / 2))
                 .flag(STR("bCreateCollision"), false);
+
+        // Tangents (FProcMeshTangent: TangentX + bFlipTangentY), laid out from the reflected struct.
+        // Without them the engine gets zero tangents and normal-mapped materials shade wrongly.
+        // Tangent = the blade axis (Z) made perpendicular to the normal, worked out in world terms
+        // (normals scale by 1/s, directions by s) and handed over in the component's local units.
+        std::vector<uint8_t> tangents;
+        auto* tstruct = UObjectGlobals::StaticFindObject<UScriptStruct*>(nullptr, nullptr, STR("/Script/ProceduralMeshComponent.ProcMeshTangent"));
+        FProperty* tx = member(tstruct, STR("TangentX"));
+        FProperty* tflip = member(tstruct, STR("bFlipTangentY"));
+        if (tx && tflip)
+        {
+            int32_t stride = (tstruct->GetPropertiesSize() + 7) & ~7;
+            const V3 s = m.tangent_scale;
+            tangents.assign((size_t)stride * m.normals.size(), 0);
+            for (size_t i = 0; i < m.normals.size(); ++i)
+            {
+                V3 n = unit(V3{m.normals[i].x / s.x, m.normals[i].y / s.y, m.normals[i].z / s.z});
+                V3 a{0, 0, 1};
+                if (std::fabs(n.z) > 0.95) a = {1, 0, 0};
+                double d = n.x * a.x + n.y * a.y + n.z * a.z;
+                V3 t = unit(V3{a.x - n.x * d, a.y - n.y * d, a.z - n.z * d});
+                t = unit(V3{t.x / s.x, t.y / s.y, t.z / s.z});
+                write_three(tangents.data() + i * stride + tx->GetOffset_Internal(), tx, t.x, t.y, t.z);
+            }
+            section.array(STR("Tangents"), tangents.data(), (int32_t)m.normals.size());
+            log("  tangents: %zu (stride %d)", m.normals.size(), stride);
+        }
         if (!section.run()) return nullptr;
         Call sections(proc, STR("GetNumSections"));
         if (sections.run()) log("  procedural mesh sections: %d", sections.ret_i32());
@@ -963,31 +991,19 @@ namespace
         return true;
     }
 
-    // The component's own mass setting (BodyInstance.bOverrideMass / MassInKgOverride). Written
-    // straight into the component: SetMassOverrideInKg on a welded part would change the weapon's
-    // root body instead (PrimitiveComponentPhysics.cpp: GetBodyInstance returns the weld parent).
-    bool body_mass(UObject* component, bool write, float& kg, bool& on)
+    // The component's own mass setting (BodyInstance.MassInKgOverride), read or written straight
+    // in the component: SetMassOverrideInKg on a welded part would change the weapon's root body
+    // instead (PrimitiveComponentPhysics.cpp: GetBodyInstance returns the weld parent).
+    // bOverrideMass is not a reflected property in this game, so only the number is written; the game
+    // already turned the override on for its parts (Set Up Module calls SetMassOverrideInKg).
+    bool body_mass(UObject* component, bool write, float& kg)
     {
         FProperty* bi = component ? component->GetPropertyByNameInChain(STR("BodyInstance")) : nullptr;
-        UScriptStruct* type = struct_type(bi);
-        FProperty* mass = member(type, STR("MassInKgOverride"));
-        FProperty* flag = member(type, STR("bOverrideMass"));
-        if (!mass || !flag) return false;
-        uint8_t* base = reinterpret_cast<uint8_t*>(component) + bi->GetOffset_Internal();
-        auto* b = static_cast<FBoolProperty*>(flag);
-        uint8_t* fa = base + flag->GetOffset_Internal() + b->GetByteOffset();
-        float* ma = reinterpret_cast<float*>(base + mass->GetOffset_Internal());
-        if (write)
-        {
-            *ma = kg;
-            if (on) *fa |= b->GetFieldMask();
-            else *fa &= ~b->GetFieldMask();
-        }
-        else
-        {
-            kg = *ma;
-            on = (*fa & b->GetFieldMask()) != 0;
-        }
+        FProperty* mass = member(struct_type(bi), STR("MassInKgOverride"));
+        if (!mass) return false;
+        float* ma = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(component) + bi->GetOffset_Internal() + mass->GetOffset_Internal());
+        if (write) *ma = kg;
+        else kg = *ma;
         return true;
     }
 
@@ -1071,24 +1087,17 @@ namespace
         {
             slots[i] = object_property(weapon, slot_names[i]);
             float kg = 0;
-            bool on = false;
-            body_mass(slots[i], false, kg, on);
-            V3 w = slots[i] ? world_location(slots[i]) : V3{0, 0, 0};
-            log("  slot %s: %s, mesh %s, own mass %s %.3f kg, world (%.1f %.1f %.1f)", narrow(slot_names[i]).c_str(),
-                name_of(slots[i]).c_str(), name_of(object_property(slots[i], STR("StaticMesh"))).c_str(), on ? "override" : "computed",
-                kg, w.x, w.y, w.z);
+            body_mass(slots[i], false, kg);
+            V3 lo{}, hi{};
+            mesh_box(object_property(slots[i], STR("StaticMesh")), lo, hi);
+            log("  slot %s: mesh %s, own mass setting %.3f kg, mesh z %.1f to %.1f", narrow(slot_names[i]).c_str(),
+                name_of(object_property(slots[i], STR("StaticMesh"))).c_str(), kg, lo.z, hi.z);
         }
-        {
-            float kg = 0;
-            bool on = false;
-            body_mass(base, false, kg, on);
-            log("  BaseMesh: %s, mesh %s, own mass %s %.3f kg; whole weapon %.3f kg", name_of(base).c_str(),
-                name_of(object_property(base, STR("StaticMesh"))).c_str(), on ? "override" : "computed", kg, mass_of(base));
-        }
-        for (const TCHAR* extra : {STR("Head SubModule 1"), STR("Sub Module 1 Mesh"), STR("SubModule 2 Mesh")})
+        log("  whole weapon %.3f kg", mass_of(base));
+        for (const TCHAR* extra : {STR("Sub Module 1 Mesh"), STR("SubModule 2 Mesh")})
             if (UObject* c = object_property(weapon, extra))
-                log("  also on this weapon: %s = %s, mesh %s (left as it is)", narrow(extra).c_str(), name_of(c).c_str(),
-                    name_of(object_property(c, STR("StaticMesh"))).c_str());
+                if (UObject* m = object_property(c, STR("StaticMesh")))
+                    log("  also on this weapon: %s, mesh %s (left as it is)", narrow(extra).c_str(), name_of(m).c_str());
         UObject* head = slots[0];
         UObject* old_head_mesh = object_property(head, STR("StaticMesh"));
         if (!head || !old_head_mesh)
@@ -1100,21 +1109,38 @@ namespace
         mesh_box(old_head_mesh, olo, ohi);
         log_tips(weapon);
 
-        // Head frame: the model's guard top sits on the head's origin (where the game puts the head
-        // part on the guard), the blade along the head's +Z.
-        for (V3& p : model.positions) p.z -= guard_top;
+        // The head's scale (the forge's size sliders) must not stretch the model: model points are in
+        // true centimetres in the head's frame ("u"), and are divided by the scale for the head itself.
+        V3 hs{1, 1, 1};
         {
             Call sc(head, STR("K2_GetComponentScale"));
             FProperty* r = sc.run() ? sc.param(STR("ReturnValue")) : nullptr;
-            V3 s = r ? read_three(sc.buffer.data() + r->GetOffset_Internal(), r) : V3{1, 1, 1};
-            log("  head scale (%.3f %.3f %.3f)%s", s.x, s.y, s.z,
-                (std::fabs(s.x - 1) > 0.01 || std::fabs(s.y - 1) > 0.01 || std::fabs(s.z - 1) > 0.01) ? " - not 1, the model will be stretched by it" : "");
+            if (r) hs = read_three(sc.buffer.data() + r->GetOffset_Internal(), r);
+            log("  head scale (%.3f %.3f %.3f)", hs.x, hs.y, hs.z);
         }
         Xf head_xf = world_transform(head);
-        if (head_xf.bytes.empty())
+        if (head_xf.bytes.empty() || hs.x == 0 || hs.y == 0 || hs.z == 0)
         {
             log("  ! could not read the head's transform");
             return;
+        }
+        auto to_head_local = [&](V3 u) { return V3{u.x / hs.x, u.y / hs.y, u.z / hs.z}; };
+
+        // Where the game's own guard starts, along the head's axis: the model's guard goes there, so
+        // the hands (placed by the game's grip) stay below it.
+        double shift = -guard_top;
+        if (UObject* guard = slots[1])
+        {
+            V3 glo{}, ghi{};
+            if (mesh_box(object_property(guard, STR("StaticMesh")), glo, ghi))
+            {
+                V3 w = transform_point(world_transform(guard), V3{0, 0, glo.z}, false);
+                V3 h = transform_point(head_xf, w, true);
+                double hs_guard_bottom = h.z * hs.z;
+                shift = hs_guard_bottom - numbers["guard_bottom"];
+                log("  game guard starts at z %.1f cm on the head axis; model guard %.1f..%.1f cm -> shift %.1f cm", hs_guard_bottom,
+                    numbers["guard_bottom"], guard_top, shift);
+            }
         }
 
         Call get_mat(head, STR("GetMaterial"));
@@ -1133,16 +1159,17 @@ namespace
         for (int i = 0; i < 4; ++i)
         {
             if (!slots[i]) continue;
+            Xf slot_xf = i == 0 ? head_xf : world_transform(slots[i]);
             std::vector<std::vector<V3>> pieces;
             for (Hull& h : hulls)
             {
                 if (narrow(slot_names[i]) != h.slot) continue;
                 std::vector<V3> local;
-                Xf slot_xf = i == 0 ? head_xf : world_transform(slots[i]);
                 for (V3 p : h.points)
                 {
-                    p.z -= guard_top;
-                    local.push_back(i == 0 ? p : transform_point(slot_xf, transform_point(head_xf, p, false), true));
+                    p.z += shift;
+                    V3 hl = to_head_local(p);
+                    local.push_back(i == 0 ? hl : transform_point(slot_xf, transform_point(head_xf, hl, false), true));
                 }
                 pieces.push_back(local);
             }
@@ -1155,19 +1182,18 @@ namespace
             UObject* mesh = build_part_mesh(weapon, slots[i], pieces);
             if (!mesh) continue;
             float kg = volume_all > 0 ? (float)(mass_total * volume[i] / volume_all) : 0.0f;
-            bool on = true;
-            body_mass(slots[i], true, kg, on);
+            body_mass(slots[i], true, kg);
             Call set(slots[i], STR("SetStaticMesh"));
             set.object(STR("NewMesh"), mesh);
             set.run();
             hide(slots[i]);
-            log("  %s: new collision in place (%s), mass %.3f kg", narrow(slot_names[i]).c_str(),
+            log("  %s: new collision in place (%s), mass setting %.3f kg", narrow(slot_names[i]).c_str(),
                 set.ret_bool() ? "changed" : "NOT changed", kg);
         }
-        log("Whole weapon mass now %.3f kg (target %.3f kg)", mass_of(base), mass_total);
+        log("Whole weapon mass now %.3f kg (target %.3f kg; BaseMesh's own share is not changed)", mass_of(base), mass_total);
 
         // Damage points on the head move with the blade: same layout, stretched to the new length.
-        double old_len = ohi.z, new_len = tip - guard_top;
+        double old_len = ohi.z, new_len = (tip + shift) / hs.z; // both in the head's unscaled local units
         std::vector<UObject*> comps;
         UObjectGlobals::FindAllOf(STR("SceneComponent"), comps);
         for (UObject* c : comps)
@@ -1180,9 +1206,18 @@ namespace
             Call move(c, STR("K2_SetRelativeLocation"));
             move.three(STR("NewLocation"), r.x, r.y, r.z * new_len / old_len).flag(STR("bTeleport"), true);
             move.run();
-            log("  head damage point %s: z %.1f -> %.1f cm", narrow(c->GetName()).c_str(), r.z, r.z * new_len / old_len);
+            log("  head damage point %s: z %.1f -> %.1f (head units)", narrow(c->GetName()).c_str(), r.z, r.z * new_len / old_len);
         }
 
+        // The visible model in the head's local units; normals and tangents adjusted so that, after the
+        // engine applies the head's scale, they are right in the world.
+        for (V3& p : model.positions)
+        {
+            p.z += shift;
+            p = to_head_local(p);
+        }
+        for (V3& n : model.normals) n = unit(V3{n.x * hs.x, n.y * hs.y, n.z * hs.z});
+        model.tangent_scale = hs;
         UObject* proc = build_visual(weapon, head, model, material);
         log(proc ? "Done. Swing it at something and check the hits." : "  ! visual model failed (collision swap above still applies)");
     }

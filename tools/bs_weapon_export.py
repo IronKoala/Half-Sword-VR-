@@ -208,8 +208,9 @@ with open(f"{out_dir}/{prefab_name}.obj", "w", newline="\n") as f:
     for uv in uvs:
         f.write("vt %.5f %.5f\n" % (uv[0], uv[1]))
     for a, b, c in tris:
-        # Unity's front face is clockwise; OBJ is counter-clockwise.
-        f.write(f"f {c+1}/{c+1}/{c+1} {b+1}/{b+1}/{b+1} {a+1}/{a+1}/{a+1}\n")
+        # Unity's front face is clockwise as seen in its left-handed space, which is numerically
+        # outward = cross(b - a, c - a): the same as an OBJ counter-clockwise face. Keep the order.
+        f.write(f"f {a+1}/{a+1}/{a+1} {b+1}/{b+1}/{b+1} {c+1}/{c+1}/{c+1}\n")
 
 # ---- zones and collision pieces --------------------------------------------------------------
 z = frame_pos[:, 2]
