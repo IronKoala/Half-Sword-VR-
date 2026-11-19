@@ -325,6 +325,7 @@ namespace hsvr
         bool pose_draw = true;
         double pose_draw_touch_cm = 8.0;
         double pose_draw_settle_s = 0.15;
+        double pose_draw_step_cm = 6.0; // the most it moves along the scabbard per tick
         // Sheathing: a held (scabbarded) weapon's tip within mouth_cm of its side's empty belt scabbard
         // mouth, its blade within angle_deg of the scabbard's line, goes in; the game seats it and lets go.
         bool pose_sheathe = true;

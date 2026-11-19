@@ -2438,6 +2438,7 @@ namespace
         double t0 = 0.0;
         double last_log = -1e9;
         bool sheathing = false;      // going in rather than out
+        const char* socket = "";     // the slot's socket (where the scabbard belongs)
         double length = 80.0;        // the blade's length (cm)
         bool block_cleared = false;
     };
@@ -6201,6 +6202,8 @@ namespace
             Vec3 ax = bq.rotate(Vec3{0, 0, 1});
             Vec3 want = target_pos + target_rot.rotate(pivot), have = bp + bq.rotate(pivot);
             double d = dot(want - have, ax);
+            // At most a fast hand's travel per tick (no yank when the hand starts far from where it is held).
+            d = (std::min)(cfg.pose_draw_step_cm, (std::max)(-cfg.pose_draw_step_cm, d));
             target_rot = bq;
             target_pos = bp + ax * d;
             h.settle_until = -1.0;
@@ -6913,9 +6916,14 @@ namespace
     {
         const TCHAR* var;
         int side, slot;
+        const TCHAR* constraint;
+        const char* socket;
     };
-    const SlotDef k_slots[5] = {{STR("Weapon Slot R 1"), 1, 0}, {STR("Weapon Slot R 2"), 1, 1}, {STR("Weapon Slot L 1"), 0, 0},
-                                {STR("Weapon Slot L 2"), 0, 1}, {STR("Weapon Slot Back"), 1, 2}};
+    const SlotDef k_slots[5] = {{STR("Weapon Slot R 1"), 1, 0, STR("Slot R 1 Constraint"), "Sheath_Slot_R_1"},
+                                {STR("Weapon Slot R 2"), 1, 1, STR("Slot R 2 Constraint"), "Sheath_Slot_R_2"},
+                                {STR("Weapon Slot L 1"), 0, 0, STR("Slot L 1 Constraint"), "Sheath_Slot_L_1"},
+                                {STR("Weapon Slot L 2"), 0, 1, STR("Slot L 2 Constraint"), "Sheath_Slot_L_2"},
+                                {STR("Weapon Slot Back"), 1, 2, STR("Slot Back Constraint"), "Sheath_Slot_Back"}};
 
     bool call_one_object(UObject* owner, const TCHAR* name, UObject* arg)
     {
@@ -7000,6 +7008,18 @@ namespace
         draw.byte(STR("Side"), (uint8_t)sd.side);
         draw.byte(STR("Slot"), (uint8_t)sd.slot);
         draw.run();
+        // A hard bottom at the seat: after a seat the game leaves the slide's reference at 0 (a +-L
+        // limit, the blade could go in past the seat; draw-test2 reached -33 cm). Back to (0,0,L) as
+        // Create Sheath Constraint sets it: travel 0..2L.
+        if (UObject* slide = object_property(pawn, sd.constraint))
+        {
+            Call ref(slide, STR("SetConstraintReferencePosition"));
+            ref.byte(STR("Frame"), 1);
+            ref.three(STR("RefPos"), 0.0, 0.0, blade_length(w));
+            if (!ref.run()) HSVR_LOG("Draw: SetConstraintReferencePosition not found on %ls", sd.constraint);
+        }
+        else
+            HSVR_LOG("Draw: no %ls on the character", sd.constraint);
         UObject* base = object_property(w, STR("BaseMesh"));
         Vec3 w0_pos = component_location(base);
         Quat w0_rot = component_rotation(base);
@@ -7025,7 +7045,15 @@ namespace
         g.place = false;
         g.hold_at = false;
         g_pending_free[side] = g;
-        g_draw[side] = DrawState{true, sd.side, w, scab, now_seconds()};
+        DrawState ds;
+        ds.active = true;
+        ds.slot_side = sd.side;
+        ds.weapon = w;
+        ds.scabbard = scab;
+        ds.t0 = now_seconds();
+        ds.length = blade_length(w);
+        ds.socket = sd.socket;
+        g_draw[side] = ds;
         controllers_buzz(side, 0.3f);
         HSVR_LOG("Draw: %s hand draws %ls from %ls (grip at %.0f%%, %.1f cm from the hand; scabbard %s; sheath slot %s %.0f)", side == 0 ? "left" : "right",
                  w->GetName().c_str(), sd.var, best_t * 100.0, best_d, scab ? "yes" : "none", sd.side == 0 ? "L" : "R",
@@ -7118,6 +7146,7 @@ namespace
         d.t0 = now_seconds();
         d.sheathing = true;
         d.length = blade_length(w);
+        d.socket = slot < 0.5 ? (side == 0 ? "Sheath_Slot_L_1" : "Sheath_Slot_R_1") : (side == 0 ? "Sheath_Slot_L_2" : "Sheath_Slot_R_2");
         g_draw[side] = d;
         controllers_buzz(side, 0.3f);
         HSVR_LOG("Sheathe: %s hand puts %ls into slot %ls %.0f%s", side == 0 ? "left" : "right", w->GetName().c_str(), S, slot + 1.0, made ? "" : " (Create Sheath Constraint NOT found)");
@@ -7191,8 +7220,11 @@ namespace
             if (now - d.last_log > 0.5)
             {
                 d.last_log = now;
-                HSVR_LOG("%s: %s hand %s %ls: out %.1f cm (UnSheathing %ls %d, concrete %.0f)", d.sheathing ? "Sheathe" : "Draw", side == 0 ? "left" : "right",
-                         d.sheathing ? "sheathing" : "drawing", d.weapon->GetName().c_str(), z, S, (int)unsheathing, conc);
+                double off_belt = -1.0;
+                if (UObject* mesh = object_property(pawn, STR("Mesh")))
+                    if (d.scabbard && d.socket[0]) off_belt = length(component_location(d.scabbard) - socket_location(mesh, bone_fname(d.socket)));
+                HSVR_LOG("%s: %s hand %s %ls: out %.1f cm (UnSheathing %ls %d, concrete %.0f; scabbard %.1f cm from %s)", d.sheathing ? "Sheathe" : "Draw",
+                         side == 0 ? "left" : "right", d.sheathing ? "sheathing" : "drawing", d.weapon->GetName().c_str(), z, S, (int)unsheathing, conc, off_belt, d.socket);
             }
             if (now - d.t0 > 20.0)
             {
