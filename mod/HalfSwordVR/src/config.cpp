@@ -392,6 +392,9 @@ namespace hsvr
         flag("pose_grab_seat", c.pose_grab_seat);
         flag("pose_throw", c.pose_throw);
         num("pose_throw_speed", c.pose_throw_speed);
+        flag("pose_holster_snap", c.pose_holster_snap);
+        num("pose_holster_zone_cm", c.pose_holster_zone_cm);
+        num("pose_holster_max_speed", c.pose_holster_max_speed);
         num("pose_throw_multiplier", c.pose_throw_multiplier);
         flag("pose_draw", c.pose_draw);
         num("pose_draw_touch_cm", c.pose_draw_touch_cm);

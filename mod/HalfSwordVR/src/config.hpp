@@ -380,6 +380,13 @@ namespace hsvr
         // Throwing (B&S): a weapon let go while the hand moves at least pose_throw_speed m/s is thrown the
         // game's way (its hits count) and its velocity multiplied by pose_throw_multiplier (B&S 2.0).
         bool pose_throw = true;
+        // Holster snap (B&S Holder.cs:683-695), only for weapons with no scabbard of their own (Matthew
+        // 2026-11-19; scabbard weapons keep the physical sheathe): let go of one while your hand is within
+        // pose_holster_zone_cm of the free belt slot it goes in (the one the game's Assign picks) and moving
+        // slower than pose_holster_max_speed m/s (faster is a throw), and the game hangs it there.
+        bool pose_holster_snap = true;
+        double pose_holster_zone_cm = 15.0;
+        double pose_holster_max_speed = 3.0;
         double pose_throw_speed = 2.0;
         double pose_throw_multiplier = 2.0;
         // Drawing from a scabbard: a squeeze within this distance of a sheathed weapon's grip draws it

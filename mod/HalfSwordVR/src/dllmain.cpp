@@ -2129,6 +2129,7 @@ namespace
         else
             g_button_crouch = 0.0;
         g_crouch_drop = (std::min)(55.0 * component_scale_z(mesh), g_crouch_drop + g_button_crouch);
+        if (g_crouch_drop > 10.0) crouch_push_log(pawn, mesh);
         place.z -= g_crouch_drop;
         // Moved, not teleported: a teleport snaps his kinematic physics bodies (the hand holding a
         // weapon) to the new spot with no velocity in the first physics substep, and the held weapon
@@ -3794,6 +3795,8 @@ namespace
     // weapon and "Dropped With no Damage" (decompile: what the game's tap on grab does; it breaks the
     // hand joint, detaches the weapon and gives it its dropped damping).
     bool is_fist(UObject* weapon);
+    bool holster_snap(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg);
+    void crouch_push_log(UObject* pawn, UObject* mesh);
     void remove_fist(int side, UObject* pawn, const char* why);
     // A throw (B&S: released faster than 2 m/s): the game counts an unheld weapon's hits only while its
     // "Just Thrown" is set and "Last Parent" is the thrower (ModularWeaponBP @67055; hs_throwing.md),
@@ -4205,6 +4208,97 @@ namespace
     // with its full handling (unbreakable joints and limb/throat flags on characters, carried armour).
     // If the game has not grabbed it 0.3 s later, a plain object is given to Grab Specific Object
     // (the game's direct grab, which has no special handling); a body is left.
+    // Crouched (Matthew 2026-11-19: "it kicks stuff around"): every 0.25 s, the loose things and bodies
+    // near his legs that are moving, how fast, and how near his nearest leg bone is. Logging only.
+    void crouch_push_log(UObject* pawn, UObject* mesh)
+    {
+        using namespace hsvr;
+        static double last = 0.0;
+        double now = now_seconds();
+        if (now - last < 0.25) return;
+        last = now;
+        static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        if (!cdo || !pawn || !mesh) return;
+        const char* legs[6] = {"thigh_l", "calf_l", "foot_l", "thigh_r", "calf_r", "foot_r"};
+        Vec3 leg_at[6];
+        Vec3 mid{0, 0, 0};
+        for (int i = 0; i < 6; ++i)
+        {
+            leg_at[i] = socket_location(mesh, bone_fname(legs[i]));
+            mid = mid + leg_at[i] * (1.0 / 6.0);
+        }
+        static uint8_t types[32];
+        for (int i = 0; i < 32; ++i) types[i] = (uint8_t)i;
+        Call ov(cdo, STR("SphereOverlapComponents"));
+        FProperty* ot = ov.param(STR("ObjectTypes"));
+        FProperty* out = ov.param(STR("OutComponents"));
+        if (!ot || !out) return;
+        ov.object(STR("WorldContextObject"), pawn);
+        ov.three(STR("SpherePos"), mid.x, mid.y, mid.z);
+        ov.number(STR("SphereRadius"), 70.0);
+        RawArray* list = reinterpret_cast<RawArray*>(ov.buffer.data() + ot->GetOffset_Internal());
+        list->Data = reinterpret_cast<void**>(types);
+        list->Num = list->Max = 32;
+        ov.run();
+        RawArray* found = reinterpret_cast<RawArray*>(ov.buffer.data() + out->GetOffset_Internal());
+        std::vector<UObject*> components;
+        for (int32_t i = 0; i < found->Num && found->Data; ++i) components.push_back(reinterpret_cast<UObject*>(found->Data[i]));
+        found->Data = nullptr;
+        found->Num = found->Max = 0;
+        list->Data = nullptr;
+        list->Num = list->Max = 0;
+        std::wstring moving;
+        for (UObject* c : components)
+        {
+            if (!c) continue;
+            Call owner_call(c, STR("GetOwner"));
+            owner_call.run();
+            UObject* owner = owner_call.object_result();
+            if (!owner || owner == pawn) continue;
+            if (owner == object_property(pawn, STR("Weapon L")) || owner == object_property(pawn, STR("Weapon R"))) continue;
+            static const FName none_bone = FName(STR("None"), FNAME_Add);
+            FName bone = none_bone;
+            if (c->GetFunctionByNameInChain(STR("FindClosestBone_K2")))
+            {
+                Call fb(c, STR("FindClosestBone_K2"));
+                fb.three(STR("TestLocation"), mid.x, mid.y, mid.z);
+                fb.flag(STR("bRequirePhysicsAsset"), true);
+                fb.run();
+                if (FProperty* rp = fb.param(STR("ReturnValue"))) bone = *reinterpret_cast<FName*>(fb.buffer.data() + rp->GetOffset_Internal());
+            }
+            Call sim(c, STR("IsSimulatingPhysics"));
+            sim.name(STR("BoneName"), bone);
+            sim.run();
+            FProperty* sp = sim.param(STR("ReturnValue"));
+            if (!(sp && *(sim.buffer.data() + sp->GetOffset_Internal()))) continue;
+            Call lv(c, STR("GetPhysicsLinearVelocity"));
+            lv.name(STR("BoneName"), bone);
+            lv.run();
+            double speed = length(lv.vec()) / 100.0;
+            if (speed < 0.5) continue;
+            int near_i = -1;
+            double near_d = 1e9;
+            for (int i = 0; i < 6; ++i)
+            {
+                Call cp(c, STR("GetClosestPointOnCollision"));
+                cp.three(STR("Point"), leg_at[i].x, leg_at[i].y, leg_at[i].z);
+                cp.name(STR("BoneName"), bone);
+                cp.run();
+                double d = cp.number();
+                if (d >= 0.0 && d < near_d)
+                {
+                    near_d = d;
+                    near_i = i;
+                }
+            }
+            wchar_t buf[256];
+            std::swprintf(buf, 256, L"%ls.%ls:%ls %.1f m/s, %.0f cm from his %hs; ", owner->GetName().c_str(), c->GetName().c_str(), bone.ToString().c_str(), speed,
+                          near_d, near_i >= 0 ? legs[near_i] : "?");
+            moving += buf;
+        }
+        if (!moving.empty()) HSVR_LOG("Crouch: %.0f cm down, moving near his legs: %ls", g_crouch_drop, moving.c_str());
+    }
+
     bool grab_object(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg, const hsvr::Vec3& at)
     {
         using namespace hsvr;
@@ -5489,6 +5583,7 @@ namespace
                     if (cfg.pose_grab_release_drops && hand_over(pawn)) continue;
                     end_two_hand("the other hand let go");
                 }
+                if (mine && cfg.pose_grab_release_drops && holster_snap(side, pawn, mesh, mine, cfg)) continue;
                 if (mine && cfg.pose_grab_release_drops)
                 {
                     bool throw_it = cfg.pose_throw && g_hand_world_v[side] >= cfg.pose_throw_speed && !is_fist(mine);
@@ -8013,6 +8108,78 @@ namespace
             return true;
         }
         return false;
+    }
+
+    // ---- Holster snap (B&S), for weapons without a scabbard -------------------------------------
+    // The game's own way to hang one (hs_draw_sheathe_calls.md Addendum 2): Assign <S> Weapon Slot picks
+    // the slot from the weapon's SheathSlot (0 belt: Sheath_Slot_<S>_1/_2; 1 hafted: _3/_4, both in the
+    // Weapon Slot <S> 1/2 variables; 3 Back) and occupancy; Create Sheath Constraint <S> then puts its
+    // BaseMesh on that socket and joins it to his mesh there; Set Up <S> Hand Weapon(None) lets go.
+    // Drawing it again is the plain no-scabbard grab the draw already does.
+    bool holster_snap(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_holster_snap || !pawn || !mesh || !w || is_fist(w)) return false;
+        if (object_property(w, STR("Scabbard"))) return false; // a scabbard weapon: the physical sheathe
+        if (g_two.active && g_two.weapon == w) return false;    // held in two hands (B&S: IsTwoHanded)
+        if (g_draw[side].active) return false;
+        const char* hand = side == 0 ? "left" : "right";
+        if (g_hand_world_v[side] > cfg.pose_holster_max_speed) return false; // a throw
+        const TCHAR* S = side == 0 ? STR("L") : STR("R");
+        auto nm = [&](const wchar_t* fmt) {
+            wchar_t buf[96];
+            std::swprintf(buf, 96, fmt, S);
+            return std::wstring(buf);
+        };
+        double kind = read_number_variable(w, STR("SheathSlot"));
+        std::string socket;
+        std::string sx = side == 0 ? "L" : "R";
+        if (kind == 0.0 || kind == 1.0)
+        {
+            int first = kind == 0.0 ? 1 : 3;
+            if (!object_property(pawn, nm(L"Weapon Slot %ls 1").c_str())) socket = "Sheath_Slot_" + sx + "_" + std::to_string(first);
+            else if (!object_property(pawn, nm(L"Weapon Slot %ls 2").c_str())) socket = "Sheath_Slot_" + sx + "_" + std::to_string(first + 1);
+        }
+        else if (kind == 3.0 && side == 1 && !object_property(pawn, STR("Weapon Slot Back")))
+            socket = "Sheath_Slot_Back";
+        if (socket.empty()) return false;
+        Vec3 slot_at = socket_location(mesh, bone_fname(socket));
+        Vec3 palm = hand_grab_point(mesh, side);
+        double d = length(palm - slot_at);
+        if (d > cfg.pose_holster_zone_cm) return false;
+        double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
+        if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
+            bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
+        {
+            HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s, but the game is mid sheathe/draw (concrete R %.0f L %.0f); dropped", hand, w->GetName().c_str(), d,
+                     socket.c_str(), conc_r, conc_l);
+            return false;
+        }
+        Call assign(pawn, nm(L"Assign %ls Weapon Slot").c_str());
+        if (!assign.run())
+        {
+            HSVR_LOG("Holster: no \"Assign %ls Weapon Slot\"", S);
+            return false;
+        }
+        // Undo Sheath <S>'s reach for the socket: it hangs at once.
+        set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), false);
+        set_bool_property(pawn, nm(L"Wrist %ls Direct Control").c_str(), false);
+        set_bool_property(pawn, nm(L"Grab %ls Target Found").c_str(), false);
+        double slot = read_number_variable(pawn, nm(L"Sheath Slot %ls").c_str());
+        if (slot < 0.0 || slot > 4.0)
+        {
+            HSVR_LOG("Holster: the game gave %ls no slot (%.0f); dropped", w->GetName().c_str(), slot);
+            return false;
+        }
+        Call make(pawn, nm(L"Create Sheath Constraint %ls").c_str());
+        make.byte(STR("Slot"), (uint8_t)slot);
+        bool made = make.run();
+        drop_weapon(side, pawn, false);
+        controllers_buzz(side, 0.4f);
+        HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s at %.1f m/s: hung on the belt (SheathSlot %.0f, game slot %.0f, constraint %s; concrete R %.0f L %.0f)",
+                 hand, w->GetName().c_str(), d, socket.c_str(), g_hand_world_v[side], kind, slot, made ? "made" : "NOT made",
+                 read_number_variable(pawn, STR("R Sheath Slot Concrete")), read_number_variable(pawn, STR("L Sheath Slot Concrete")));
+        return true;
     }
 
     bool sheathe_begin(int side, UObject* pawn, UObject* w)
