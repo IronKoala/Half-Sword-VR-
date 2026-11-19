@@ -7394,7 +7394,8 @@ namespace
         hsvr::Vec3 touch;      // where the hand took it, in the scabbard's frame
         hsvr::Quat rest;       // its rotation in the pelvis's frame before it was taken
         hsvr::Vec3 rest_pos;   // and its place there (how far it moves off the belt is logged)
-        bool test = false;     // hsvr.scabbard_test: the hand's angle from hand_l, no let-go
+        bool test = false;     // hsvr.scabbard_test: a fixed angle on the belt (not a hand's), no let-go
+        hsvr::Quat test_rel;   // that angle, in the pelvis's frame
         double t0 = 0.0;
         double far_since = -1.0;
         double last_log = -1e9;
@@ -7512,6 +7513,7 @@ namespace
         Quat pelvis = socket_rotation(mesh, bone_fname("pelvis"));
         s.rest = (pelvis.inverse() * sq).normalized();
         s.rest_pos = pelvis.inverse().rotate(component_location(scab) - socket_location(mesh, bone_fname("pelvis")));
+        s.test_rel = (pelvis.inverse() * turn * sq).normalized();
         log_scabbard_pin(scab, "before");
         widen_scabbard_pin(scab, cfg.pose_scabbard_angle_deg);
         log_scabbard_pin(scab, "widened");
@@ -7613,8 +7615,7 @@ namespace
             if (s.active)
             {
                 Quat hand_rot = g_pose.hand_rot[side];
-                if (s.test) hand_rot = socket_rotation(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
-                else if (!g_pose.hand_valid[side])
+                if (!s.test && !g_pose.hand_valid[side])
                 {
                     scabbard_let_go(side, "no controller");
                     continue;
@@ -7622,7 +7623,15 @@ namespace
                 // The game's draw/sheathe calls put its locked or free limits back: widen again each tick.
                 widen_scabbard_pin(s.scab, cfg.pose_scabbard_angle_deg);
                 set_anim_grip(side, (int)cfg.pose_scabbard_grip_type);
-                want = (hand_rot * s.rel).normalized();
+                want = s.test ? (pelvis_q * s.test_rel).normalized() : (hand_rot * s.rel).normalized();
+                // No further than pose_scabbard_angle_deg from its belt angle (the pin's cone is soft,
+                // stiffness 50: driven past it, it gives; scabbard-test2 went to 35 at 30).
+                {
+                    Quat rest_w = (pelvis_q * s.rest).normalized();
+                    Vec3 v = scaled_axis((rest_w.inverse() * want).normalized());
+                    double a = cfg.pose_scabbard_angle_deg * 3.14159265358979 / 180.0, vl = length(v);
+                    if (vl > a) want = (rest_w * from_scaled_axis(v * (a / vl))).normalized();
+                }
                 Vec3 spot = component_location(s.scab) + cur.rotate(s.touch);
                 double off = length(g_pose.target[side] - spot);
                 if (!s.test && off > cfg.pose_scabbard_let_go_cm)
@@ -7650,7 +7659,7 @@ namespace
             {
                 want = (pelvis_q * s.rest).normalized();
                 double left = length(scaled_axis((want * cur.inverse()).normalized())) * 57.2958;
-                if (left < 3.0 || now - s.t0 > 0.5)
+                if (left < 2.0 || now - s.t0 > 1.0)
                 {
                     UObject* scab = s.scab;
                     s = ScabHold{};

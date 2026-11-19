@@ -342,7 +342,7 @@ namespace hsvr
         bool pose_scabbard_grab = true;
         double pose_scabbard_touch_cm = 8.0;
         double pose_scabbard_angle_deg = 30.0;
-        double pose_scabbard_follow_s = 0.05;
+        double pose_scabbard_follow_s = 0.015; // ~1 tick: it carries a sheathed sword and the soft cone (0.05 left 11-18 deg)
         double pose_scabbard_let_go_cm = 25.0;
         double pose_scabbard_grip_type = 2.0;
         bool pose_scabbard_block_auto = true;
