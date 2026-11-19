@@ -1403,6 +1403,7 @@ namespace
 
     // The mod's fist is in that hand (set each tick by grab_button), for the fist's finger shape.
     std::atomic<bool> g_fist_side[2] = {false, false};
+    std::atomic<bool> g_fist_open[2] = {false, false}; // a slap: the fist is there but the hand is open (fingers as the game's)
     std::atomic<int> g_fist_shape_test{-99}; // test: hsvr.fist_shape <n> (-99 = pose_fist_shape)
     bool set_bool_property(UObject* owner, const TCHAR* name, bool value);
     bool set_variable(UObject* owner, const TCHAR* name, double number, UObject* object, const FName* fname);
@@ -1441,7 +1442,7 @@ namespace
             int g = side == g_anim_grip_two_side ? g_anim_grip_two : (now - g_anim_grip_time[side] < 0.1 ? g_anim_grip[side] : -1);
             // A fist: the shape chosen for it (pose_fist_shape). The animation's own fist needs 'Hand
             // Active' (0 in VR), so the hand would stay open (playtest 2026-11-19 21:10).
-            if (g_fist_side[side].load())
+            if (g_fist_side[side].load() && !g_fist_open[side].load())
             {
                 int shape = fist_shape(hsvr::config());
                 if (shape >= 0 && shape <= 17) g = shape;
@@ -6584,6 +6585,7 @@ namespace
     std::atomic<float> g_fake_thumb[2] = {-1.0f, -1.0f}; // test: hsvr.thumb <0|1> <curl>, -1 = the controller
     bool g_finger_fist[2] = {false, false};
     double g_fist_retry_at[2] = {-10.0, -10.0};
+    double g_slap_until[2] = {-10.0, -10.0};
 
     void fist_finger_log(int side, UObject* pawn)
     {
@@ -6621,20 +6623,30 @@ namespace
                          hand, now ? "closed" : "opened", thumb, index, grip, (int)h.joints_valid, h.joint_deg[0], h.joint_deg[1], h.joint_deg[2], h.joint_deg[3],
                          h.joint_deg[4], h.trigger, (int)h.trigger_touch, h.squeeze, (int)h.thumb_touch);
             UObject* mine = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
-            if (!now)
+            // Slaps (Matthew 2026-11-19): the game has no open-hand weapon; an empty hand swung at Aim Swing
+            // Speed >= 30 becomes its fist (spawn rule @557803, fists_eating.md 1.1). So an open hand moving
+            // that fast gets the fist too (fingers left open), kept pose_fist_slap_keep_s after it slows.
+            double t = hsvr::now_seconds();
+            double lo = cfg.pose_swing_speed_lo, hi = (std::max)(lo + 0.1, cfg.pose_swing_speed_hi);
+            double hand_ass = g_swing_v[side] <= lo ? 0.0 : (std::min)(75.0, (g_swing_v[side] - lo) / (hi - lo) * 75.0);
+            if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass) g_slap_until[side] = t + cfg.pose_fist_slap_keep_s;
+            bool slap = !now && t < g_slap_until[side];
+            if (slap != g_fist_open[side].load() && (slap || is_fist(mine)))
+                HSVR_LOG("Fist: %s hand %s (hand swing speed %.0f)", hand, slap ? "slaps: open-hand fist" : "closed over its slap fist", hand_ass);
+            g_fist_open[side].store(slap);
+            if (!now && !slap)
             {
                 if (is_fist(mine)) remove_fist(side, pawn, "hand opened");
                 continue;
             }
             if (is_fist(mine))
             {
-                fist_finger_log(side, pawn);
+                if (now) fist_finger_log(side, pawn);
                 continue;
             }
             if (mine || menu_up || bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")) || scabbard_held(side) ||
                 (g_two.active && side == g_two.second))
                 continue;
-            double t = hsvr::now_seconds();
             if (t < g_fist_retry_at[side]) continue;
             if (!make_fist(side, pawn, cfg)) g_fist_retry_at[side] = t + 0.5;
         }

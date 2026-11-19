@@ -537,7 +537,7 @@ namespace hsvr
         // apply to it). 0 = the mod alone opens it (test switch while the first-fist loss is hunted).
         bool pose_fist_mark_spawned = false;
         // Fists from your real hand (Matthew 2026-11-19): the hand is a fist while the grip, the trigger
-        // and your thumb (resting on the stick, a face button or the thumb rest) are all closed, and opens
+        // (and the thumb, only if pose_fist_thumb_on > 0) are closed, and opens
         // when any of them opens. Finger curls (0 open .. 1 closed) come from SteamVR's hand skeleton
         // (input_hand_tracking, XR_EXT_hand_tracking) when it gives one, else from the trigger, grip and
         // touch sensors. index/grip/thumb_on: curls that close it; *_off: below these it opens.
@@ -547,8 +547,15 @@ namespace hsvr
         double pose_fist_index_off = 0.4;
         double pose_fist_grip_on = 0.65;
         double pose_fist_grip_off = 0.4;
-        double pose_fist_thumb_on = 0.5;
-        double pose_fist_thumb_off = 0.3;
+        // The thumb does not gate the fist (Matthew 2026-11-19: stick and button touch are unreliable);
+        // raise thumb_on above 0 to require it.
+        double pose_fist_thumb_on = 0.0;
+        double pose_fist_thumb_off = -1.0;
+        // Slaps: an open hand swung at the game's fist speed (Aim Swing Speed >= slap_ass, the game's own
+        // 30) carries the fist (fingers open) until keep_s after it slows.
+        bool pose_fist_slap = true;
+        double pose_fist_slap_ass = 30.0;
+        double pose_fist_slap_keep_s = 0.3;
         // The fist's finger shape in his animation: -2 = the game's own, -1 = the animation's grab
         // shape (its 'Grabbed' switch), 0..17 = that grip type, 100 = its guard fist ('Guarding' for
         // that hand, with the swing speed its fist blend reads held at 75 in the animation only).
