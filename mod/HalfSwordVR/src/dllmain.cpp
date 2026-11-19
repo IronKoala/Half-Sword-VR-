@@ -1448,6 +1448,8 @@ namespace
     std::atomic<int> g_count_letgo{0}, g_count_kicks{0};
     std::atomic<double> g_worst_lag[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
+    std::atomic<bool> g_fake_stick_click{false}; // test: hsvr.stick_click 1 holds the left stick click
+    std::string g_park_socket;                  // test: hsvr.arm_park <socket> (arm mode 13): right hand there
     std::atomic<float> g_fake_trigger[2] = {-1.0f, -1.0f}; // test: hsvr.trigger <0|1> <value>, -1 = the controller
     std::atomic<float> g_fake_squeeze[2] = {-1.0f, -1.0f}; // test: hsvr.squeeze <0|1> <value>, -1 = the controller
 
@@ -1665,6 +1667,11 @@ namespace
                 local = Vec3{35.0 + 10.0 * std::sin(t), out * 15.0, -15.0 + 20.0 * std::cos(t)};
             }
             grip = shoulder + body.rotate(local);
+            if (mode == 13 && side == 1 && g_pose.pawn && !g_park_socket.empty())
+            {
+                // Holster test: the right hand's grip point parked on a named socket of his mesh.
+                if (UObject* mesh = object_property(g_pose.pawn, STR("Mesh"))) grip = socket_location(mesh, bone_fname(g_park_socket));
+            }
             if (mode == 12 && side == 1 && g_pose.pawn)
             {
                 // Sheathe test: the right hand goes from a blade's length out along the right belt
@@ -2113,7 +2120,7 @@ namespace
         if (cfg.pose_crouch && cfg.pose_crouch_button_cm > 0.0)
         {
             static bool click_was = false;
-            bool click = state.hand[0].stick_click;
+            bool click = state.hand[0].stick_click || g_fake_stick_click.load();
             if (click && !click_was)
             {
                 g_button_crouch_on = !g_button_crouch_on;
@@ -11033,6 +11040,19 @@ namespace
                 float v = sp == std::string::npos ? -1.0f : (float)atof(entry.command.c_str() + sp + 1);
                 g_fake_squeeze[side].store(v);
                 HSVR_LOG("Script: hsvr.squeeze %d %.2f", side, v);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.stick_click ", 0) == 0)
+            {
+                g_fake_stick_click.store(atoi(entry.command.c_str() + 17) != 0);
+                HSVR_LOG("Script: hsvr.stick_click %d", (int)g_fake_stick_click.load());
+                continue;
+            }
+            if (entry.command.rfind("hsvr.arm_park ", 0) == 0)
+            {
+                g_park_socket = entry.command.substr(14);
+                g_fake_arm_mode.store(13);
+                HSVR_LOG("Script: hsvr.arm_park %s (right hand on that socket)", g_park_socket.c_str());
                 continue;
             }
             if (entry.command.rfind("hsvr.press_a ", 0) == 0)
