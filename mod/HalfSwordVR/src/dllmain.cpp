@@ -2406,6 +2406,9 @@ namespace
     UFunction* g_receive_tick = nullptr;
     bool g_hold_have = false;
     hsvr::Vec3 g_hold_location;
+    // Step Height 2 just before his tick: the leash's height uses this value (walking_floor_loss.md).
+    bool g_step_h2_have = false;
+    double g_step_h2_pre = 0.0;
 
     double number_property(UObject* owner, FProperty* p)
     {
@@ -2777,6 +2780,11 @@ namespace
         if (!is_receive_tick(context, function)) return;
         g_hold_location = actor_location(context);
         g_hold_have = true;
+        {
+            FProperty* p = context->GetPropertyByNameInChain(STR("Step Height 2"));
+            g_step_h2_have = p != nullptr;
+            g_step_h2_pre = p ? number_property(context, p) : 0.0;
+        }
         if (g_pose_active.load())
         {
             log_joint_before_tick(context);
@@ -9930,6 +9938,22 @@ namespace
         Vec3 moved{now_at.x - g_hold_location.x, now_at.y - g_hold_location.y, 0.0};
         double rise = now_at.z - g_hold_location.z;
         Vec3 keep{g_hold_location.x, g_hold_location.y, rise > 30.0 ? g_hold_location.z : now_at.z};
+        // Take the game's step term back out of the height (pose_capsule_no_step_offset): it bobbed the
+        // capsule ~3 cm down through every step and snapped it back up as each foot landed.
+        static double step_off_max = 0.0;
+        if (hsvr::config().pose_capsule_no_step_offset && g_step_h2_have && rise <= 30.0)
+        {
+            auto flag_on = [&](const TCHAR* name) {
+                FProperty* p = context->GetPropertyByNameInChain(name);
+                return p && number_property(context, p) > 0.5;
+            };
+            if (!flag_on(STR("Climbing In Air")) && !flag_on(STR("Jump Pressed")) && !flag_on(STR("Fallen")))
+            {
+                double off = (std::max)(-10.0, (std::min)(10.0, g_step_h2_pre));
+                keep.z -= off;
+                step_off_max = (std::max)(step_off_max, std::fabs(off));
+            }
+        }
         // Never sunk into the floor: when its foot traces miss (a foot posed under the floor) the
         // game drops the capsule ~77 cm (Willie @594860, crouch_ik.md). The capsule's centre is kept
         // at least its standing height above the floor under it, less 15 cm (the game's own step
@@ -9968,9 +9992,10 @@ namespace
                 std::snprintf(part, sizeof(part), ", %ls %.1f", name, p ? number_property(context, p) : -1.0);
                 values += part;
             }
-            HSVR_LOG("Capsule: the game moved it sideways up to %.1f cm in a tick (put back), height %.1f, climbs undone %d%s", moved_max, keep.z, climbs,
-                     values.c_str());
+            HSVR_LOG("Capsule: the game moved it sideways up to %.1f cm in a tick (put back), height %.1f, step offset taken out up to %.1f, climbs undone %d%s",
+                     moved_max, keep.z, step_off_max, climbs, values.c_str());
             moved_max = 0.0;
+            step_off_max = 0.0;
             climbs = 0;
         }
         if (length(moved) > 0.01 || keep.z != now_at.z)

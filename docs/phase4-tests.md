@@ -183,6 +183,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 |---|---|---|
 | `pose_crouch_keep_leg_ik` | 1 | The animation's kneel and falling leg branches (every Kneel flag and Free Fall Rate in ABP_Willie's own copy) are kept off each frame, so the legs stay on the leg IK. The log line "Crouch: kept off in the animation" lists what was found; "the animation wanted canned legs" shows when the game tried. The pawn's own values are not touched. |
 | `pose_capsule_floor_clamp` | 1 | When the game drops the capsule more than 20 cm in a tick (its foot-trace miss drop is ~77 cm), it is kept no more than 15 cm below its standing height over the floor under it. Only on such a drop, since the floor trace can land on a loose shield. Logged as "Capsule: the game put it ... into the floor". |
+| `pose_capsule_no_step_offset` | 1 | The game sets the capsule height from the lower foot plus `clamp(Step Height 2, ±10)`; that term sinks to about −4 cm during each step and snaps to 0 when a foot lands, so walking bobbed and hopped the view and his body ~2×/s. On: the step term (read before his tick) is taken back out, except while climbing, jumping or fallen. The "Capsule:" line shows "step offset taken out up to …". |
 
 Unattended: with `dev_pose_fake_tracking`, `hsvr.fake_head_drop <cm>` holds a crouch depth (-1 = the made-up path). In the headset: crouch slowly to the deepest you can and hold 10 s, a few times. Pass: feet on the floor, head where your headset is, no "into the floor" lines after the first second.
 

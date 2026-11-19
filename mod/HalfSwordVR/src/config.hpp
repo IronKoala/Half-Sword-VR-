@@ -526,6 +526,12 @@ namespace hsvr
         // traces miss).
         bool pose_crouch_keep_leg_ik = true;
         bool pose_capsule_floor_clamp = true;
+        // The game sets the capsule's height to (lower foot's step end) + half height + clamp(Step Height 2,
+        // +-10). Step Height 2 sinks to about -4 cm through each step and snaps back to 0 as a foot lands,
+        // so walking the capsule (and the view and his body on it) dropped and hopped ~2 times a second
+        // (walking_floor_loss.md). On: the mod takes that step term (read before his tick) back out, except
+        // while he climbs, jumps or is fallen.
+        bool pose_capsule_no_step_offset = true;
         // Where the wrist sits relative to the controller's grip, in the controller's frame
         // (forward, right, up, cm), and how the hand is turned relative to the controller (degrees).
         // Defaults: the wrist 8 cm from the palm centre back along the fingers and 2 cm toward the
