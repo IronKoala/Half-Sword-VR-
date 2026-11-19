@@ -2443,6 +2443,9 @@ namespace
         bool block_cleared = false;
     };
     DrawState g_draw[2];
+    // A blade just drawn still has its tip at the mouth, lined up: no sheathe until it has been taken
+    // well away first (playtest 02:44: every draw went straight back into a sheathe, 1 ms after it freed).
+    bool g_sheathe_armed[2] = {true, true};
     bool any_draw() { return g_draw[0].active || g_draw[1].active; }
     bool cfg_scabbard_free() { return hsvr::config().pose_draw_scabbard_free; }
     bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg);
@@ -4444,6 +4447,9 @@ namespace
         UObject* weapon = object_property(pawn, other == 0 ? STR("Weapon L") : STR("Weapon R"));
         HoldState& h = g_hold[other];
         if (!weapon || h.weapon != weapon || !h.have_last || is_fist(weapon) || h.forearm) return false;
+        // Not a blade on its way into or out of a scabbard (playtest 02:44: the off hand reaching for
+        // the scabbard took the sheathing sword's blade, and the two holds froze it).
+        if (g_draw[other].active && g_draw[other].weapon == weapon) return false;
         UObject* base = object_property(weapon, STR("BaseMesh"));
         if (!base) return false;
         Vec3 at = hand_grab_point(mesh, side);
@@ -7442,6 +7448,35 @@ namespace
         draw.byte(STR("Side"), (uint8_t)sd.side);
         draw.byte(STR("Slot"), (uint8_t)sd.slot);
         draw.run();
+        UObject* scab = object_property(w, STR("Scabbard"));
+        if (!scab)
+        {
+            // No scabbard (an axe or mace hung on the belt): just taken, as any grab (Matthew 2026-11-19:
+            // only weapons with a real scabbard are drawn). The game frees its belt joint on the first
+            // tick it is held (Check Scabbard Unsheath State: no "Scabbard" tag, hs_draw_sheathe_calls.md
+            // Addendum 2).
+            UObject* base0 = object_property(w, STR("BaseMesh"));
+            Vec3 p0 = component_location(base0);
+            Quat q0 = component_rotation(base0);
+            bool ok0 = give_hand_weapon(side, pawn, w);
+            if (!ok0 || object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != w)
+            {
+                HSVR_LOG("Draw: %s hand could not take %ls (no scabbard) from %ls", side == 0 ? "left" : "right", w->GetName().c_str(), sd.var);
+                return true;
+            }
+            FreeGrip g0 = handle_grip(side, mesh, p0, q0, at, *best_h, best_t);
+            g0.hold_at = cfg.pose_grab_settle_s > 0.0;
+            g0.at_pos = p0;
+            g0.at_rot = q0;
+            g0.place = !g0.hold_at;
+            g_pending_free[side] = g0;
+            g_pending_item[side] = w;
+            set_component_transform(base0, p0, q0, true);
+            controllers_buzz(side, 0.3f);
+            HSVR_LOG("Draw: %s hand takes %ls off %ls (no scabbard: a plain grab, grip at %.0f%%, %.1f cm from the hand)", side == 0 ? "left" : "right",
+                     w->GetName().c_str(), sd.var, best_t * 100.0, best_d);
+            return true;
+        }
         // A hard bottom at the seat: after a seat the game leaves the slide's reference at 0 (a +-L
         // limit, the blade could go in past the seat; draw-test2 reached -33 cm). Back to (0,0,L) as
         // Create Sheath Constraint sets it: travel 0..2L.
@@ -7466,7 +7501,6 @@ namespace
             return true;
         }
         set_component_transform(base, w0_pos, w0_rot, true); // where it sits in the scabbard
-        UObject* scab = object_property(w, STR("Scabbard"));
         set_bool_property(pawn, name(L"Weapon UnSheathing %ls").c_str(), true);
         set_bool_property(pawn, (std::wstring(sd.side == 0 ? STR("Block L") : STR("Block R")) + STR(" Weapon From Sheathing")).c_str(), true);
         if (scab)
@@ -7606,6 +7640,15 @@ namespace
         Vec3 blade = bq.rotate(Vec3{0, 0, 1});
         Vec3 tip = bp + blade * blade_length(w);
         double d = length(tip - mouth), c = dot(blade, ax);
+        if (!g_sheathe_armed[side])
+        {
+            if (d > 2.0 * cfg.pose_sheathe_mouth_cm + 10.0)
+            {
+                g_sheathe_armed[side] = true;
+                HSVR_LOG("Sheathe: %s hand's blade is clear of the scabbard (tip %.0f cm from the mouth); it can be sheathed again", side == 0 ? "left" : "right", d);
+            }
+            return;
+        }
         if (d <= cfg.pose_sheathe_mouth_cm && c >= std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0)) sheathe_begin(side, pawn, w);
     }
 
@@ -7653,6 +7696,7 @@ namespace
                 h.settle_s = (std::max)(0.02, cfg.pose_draw_settle_s);
                 h.settle_until = now + h.settle_s;
                 d = DrawState{};
+                g_sheathe_armed[side] = false;
                 continue;
             }
             if (now - d.last_log > 0.5)
@@ -7832,8 +7876,23 @@ namespace
             Quat sq = component_rotation(s);
             Vec3 local = sq.inverse().rotate(at - sp);
             double len = scabbard_length(s);
-            Vec3 on{0, 0, (std::min)(len, (std::max)(0.0, local.z))};
+            // Its own collision when it has any (playtest 02:44: squeezes on the scabbard read 12-19 cm
+            // from the line the mod guessed); else that line, either way from its origin.
+            Vec3 on{0, 0, (std::min)(len, (std::max)(-len, local.z))};
             double d = length(local - on);
+            {
+                Call cp(s, STR("GetClosestPointOnCollision"));
+                cp.three(STR("Point"), at.x, at.y, at.z);
+                if (cp.run())
+                {
+                    double dc = cp.number();
+                    if (dc >= 0.0)
+                    {
+                        d = dc;
+                        on = sq.inverse().rotate((dc > 0.0 ? cp.vec(STR("OutPointOnBody")) : at) - sp);
+                    }
+                }
+            }
             if (d < best_d)
             {
                 best_d = d;
