@@ -9634,7 +9634,10 @@ namespace
                     h += "," + p + c;
             }
             h += ",actor_x,actor_y,actor_z,pelvis_x,pelvis_y,pelvis_z,headbone_x,headbone_y,headbone_z,foot_l_x,foot_l_y,foot_l_z,foot_r_x,foot_r_y,foot_r_z,"
-                 "crouch_cm,button_crouch_cm,two_hands,stamina,aim_swing_speed,kicking_l,kicking_r,fallen,conc_r,conc_l";
+                 "crouch_cm,button_crouch_cm,two_hands,stamina,aim_swing_speed,kicking_l,kicking_r,fallen,conc_r,conc_l,"
+                 "drv_comp_x,drv_comp_y,drv_comp_z,drv_comp_qx,drv_comp_qy,drv_comp_qz,drv_comp_qw,vis_comp_x,vis_comp_y,vis_comp_z,vis_comp_qx,vis_comp_qy,"
+                 "vis_comp_qz,vis_comp_qw,drv_lowerarm_l_x,drv_lowerarm_l_y,drv_lowerarm_l_z,drv_lowerarm_r_x,drv_lowerarm_r_y,drv_lowerarm_r_z,"
+                 "vis_hand_l_x,vis_hand_l_y,vis_hand_l_z,vis_hand_r_x,vis_hand_r_y,vis_hand_r_z";
             for (FName bn : g_frame_bones)
             {
                 std::string n = narrow(bn.ToString());
@@ -9723,6 +9726,13 @@ namespace
         snprintf(b, sizeof b, ",%d,%d,%d", (int)bool_property(pawn, STR("Kicking L")), (int)bool_property(pawn, STR("Kicking R")), (int)bool_property(pawn, STR("Fallen")));
         row += b;
         num(read_number_variable(pawn, STR("R Sheath Slot Concrete"))), num(read_number_variable(pawn, STR("L Sheath Slot Concrete")));
+        // Which skeleton moves: the driver (ABP_Willie, where the arm pose is written) and the visible
+        // body that copies it, each with its component's own place (hand_* above = the driver's).
+        v3(component_location(g_pose.driver)), q4(component_rotation(g_pose.driver));
+        if (g_pose.mesh) v3(component_location(g_pose.mesh)), q4(component_rotation(g_pose.mesh));
+        else row += ",,,,,,,";
+        v3(socket_location(g_pose.driver, bone_fname("lowerarm_l"))), v3(socket_location(g_pose.driver, bone_fname("lowerarm_r")));
+        v3(socket_location(mesh, bone_fname("hand_l"))), v3(socket_location(mesh, bone_fname("hand_r")));
         for (FName bn : g_frame_bones) v3(socket_location(mesh, bn));
         row += "\n";
         fputs(row.c_str(), g_frames);
