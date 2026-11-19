@@ -6051,6 +6051,21 @@ namespace
                     Call v(b.victim, STR("GetVelocity"));
                     if (v.run()) vs = length(v.vec());
                 }
+                // His grip strength as the game's slip rule computes it (grab_and_mass.md, UG @361596-362128;
+                // the gauntlet/Mordhau/zombie/lawnmower factors left out): T = Arm Tonus x All Body Tonus x
+                // Consciousness/100 x MRC(Pain, 5..10 -> 1..2) x max(MRU(Muscle Rate, 0..1 -> 1..1.5), 0.5),
+                // then max(T, Arm Health). It slips while the joint force is above T.
+                double tonus = read_number_variable(pawn, L ? STR("Arm L Tonus") : STR("Arm R Tonus"));
+                double body_tonus = read_number_variable(pawn, STR("All Body Tonus"));
+                double my_conscious = read_number_variable(pawn, STR("Consciousness"));
+                double pain = read_number_variable(pawn, STR("Pain"));
+                double muscle = read_number_variable(pawn, STR("Muscle Rate"));
+                double arm_health = read_number_variable(pawn, L ? STR("Arm_L Health") : STR("Arm_R Health"));
+                double pain_k = 1.0 + (std::max)(0.0, (std::min)(1.0, (pain - 5.0) / 5.0));
+                double t_est = tonus * body_tonus * my_conscious * 0.01 * pain_k * (std::max)(1.0 + 0.5 * muscle, 0.5);
+                t_est = (std::max)(t_est, arm_health);
+                HSVR_LOG("Body grab: %s %.2f s: his grip T~%.0f (arm tonus %.2f, body tonus %.2f, consciousness %.0f, pain %.1f, muscle %.2f, arm health %.0f)", hand, now - b.since,
+                         t_est, tonus, body_tonus, my_conscious, pain, muscle, arm_health);
                 HSVR_LOG("Body grab: %s %.2f s: joint force %.0f / torque %.0f, release rate %.2f, stretch %.1f cm; victim strangle %.2f, choke %.3f, consciousness %.0f, throat force %.0f, being grabbed %d, moving %.0f cm/s",
                          hand, now - b.since, b.force, b.torque, b.release_rate, b.stretch, b.strangle, b.choke, b.conscious,
                          b.victim ? read_number_variable(b.victim, L ? STR("Grabbed Throat Constraint Force L") : STR("Grabbed Throat Constraint Force R")) : -1.0,
