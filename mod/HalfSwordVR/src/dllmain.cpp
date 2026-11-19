@@ -6705,7 +6705,9 @@ namespace
             if (l > 0.5) into = (to.x * tip_fwd.x + to.y * tip_fwd.y + to.z * tip_fwd.z) / l;
         }
         bool soft = victim_comp && has_tag(victim_comp, STR("ComponentTags"), STR("Soft"));
-        bool piercing = bool_property(weapon, STR("Piercing")) && !bool_property(weapon, STR("NoStab"));
+        // From the tip's own tags (the game reads them from the closest tip during the hit, so its
+        // "Piercing" variable still holds the previous hit's part here, stab-test5).
+        bool piercing = tip && has_tag(tip, STR("ComponentTags"), STR("Piercing")) && !has_tag(tip, STR("ComponentTags"), STR("NoStab"));
         bool stuck = bool_property(weapon, STR("Stuck In Body")) || stab_array_num(weapon, STR("Stuck Constraints Array")) > 0;
 
         StabWatch& w = g_stab_watch[side];
