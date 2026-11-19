@@ -195,6 +195,7 @@ namespace
     double g_turn_yaw = 0.0, g_body_rel = 0.0, g_last_written_yaw = 0.0, g_turn_time = 0.0;
 
     // Called by the stereo device while the frame's views are being set up (game thread).
+    double g_button_crouch = 0.0; // button crouch depth (cm), see g_button_crouch_on
     bool provide_anchor(hsvr::PlayerAnchor& out)
     {
         if (!g_engine) return false;
@@ -864,7 +865,7 @@ namespace
     double g_crouch_drop = 0.0;
     // Button crouch (B&S: the stick crouches as well as bending down): left stick click toggles it; the
     // view and his body go down together by this much (cm, eased), on top of your own crouch.
-    double g_button_crouch = 0.0;
+    // (g_button_crouch is defined near the top: provide_anchor uses it)
     bool g_button_crouch_on = false;
     std::atomic<double> g_fake_head_drop{-1.0}; // test: hsvr.fake_head_drop <cm> (fake tracking only)
     bool g_pose_cfg_turn = true, g_pose_cfg_crouch = true, g_pose_fake = false;
