@@ -379,6 +379,7 @@ namespace hsvr
         num("pose_draw_touch_cm", c.pose_draw_touch_cm);
         num("pose_draw_settle_s", c.pose_draw_settle_s);
         num("pose_draw_step_cm", c.pose_draw_step_cm);
+        num("pose_hold_stuck_force_scale", c.pose_hold_stuck_force_scale);
         flag("pose_sheathe", c.pose_sheathe);
         num("pose_sheathe_mouth_cm", c.pose_sheathe_mouth_cm);
         num("pose_sheathe_angle_deg", c.pose_sheathe_angle_deg);

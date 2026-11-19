@@ -6241,6 +6241,16 @@ namespace
         double ka = cfg.pose_hold_turn_spring * strength * 1e4;
         double ca = cfg.pose_hold_turn_damper * damp_strength * 1e4;
         double max_torque = cfg.pose_hold_max_torque * strength * body.total * 1e4;
+        // Stuck in someone (a stab or an edge lodged): the hand pulls with only part of its strength, so
+        // the hold's own catch-up does not tear the blade out at once (stab-test8: the game released
+        // every lodge 10-20 ms later while the hold pulled 356-2860 N); pulling it out is your doing.
+        if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body")))
+        {
+            max_force *= (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
+            max_torque *= (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
+            HSVR_LOG_EVERY(0.5, "Hold: %s hand's %ls is stuck in a body: pulling at %.0f%% strength", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                           cfg.pose_hold_stuck_force_scale * 100.0);
+        }
 
         // The weapon as it is.
         Vec3 pos = component_location(base);

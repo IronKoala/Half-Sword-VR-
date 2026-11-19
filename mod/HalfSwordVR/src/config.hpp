@@ -214,6 +214,8 @@ namespace hsvr
         double pose_hold_spring = 5000.0;
         double pose_hold_damper = 100.0;
         double pose_hold_max_force = 3000.0;
+        // While the held weapon is stuck in a body, the hold's force and torque caps are scaled by this.
+        double pose_hold_stuck_force_scale = 0.15;
         double pose_hold_turn_spring = 1100.0;
         double pose_hold_turn_damper = 45.0;
         double pose_hold_max_torque = 250.0;
