@@ -415,6 +415,10 @@ namespace hsvr
         bool dev_pose_fake_tracking = false;
         // Log the right-hand grip every tick (hand bone, hand physics body, weapon anchor, wrist target).
         bool dev_grip_trace = false;
+        // Log every hit of a held weapon on a person ("Stab:" lines): the game's own impulse, tip
+        // alignment, cutting rate, rubber-band and stick state, and the controller's speed along the
+        // blade. Read only; changes nothing in the game.
+        bool stab_log = true;
         // 1 = your character's head (and hair) is not drawn in your own view while you look out of
         // it; it still casts its shadow and is there for the game (hits, other characters). Helmets
         // and other headwear stay visible.
