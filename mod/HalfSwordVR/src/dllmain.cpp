@@ -4731,7 +4731,19 @@ namespace
         set_up_hand(side, pawn, nullptr, false, true, true);
         // The game destroys a fist on any set-up but leaves "Fist Spawned" set (fists_eating.md).
         set_bool_property(pawn, fist_spawned_name(side), false);
-        HSVR_LOG("Fist: %s hand opens (%s)", side == 0 ? "left" : "right", why);
+        // Playtest 02:44: after an opened fist the hand still carried a 0.05 kg weapon for minutes (and
+        // the second hand of a two-hand hold later sat it inside the handle). Make sure it is gone.
+        UObject* after = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+        bool still = after == mine;
+        {
+            // Same tick as the set-up, so the actor is still in memory even if it was destroyed
+            // (destroying a destroyed actor does nothing).
+            Call kill(mine, STR("K2_DestroyActor"));
+            kill.run();
+        }
+        if (still) set_variable(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"), 0.0, nullptr, nullptr);
+        HSVR_LOG("Fist: %s hand opens (%s); hand now holds %ls%s", side == 0 ? "left" : "right", why, after ? after->GetName().c_str() : STR("nothing"),
+                 still ? " (the set-up left the fist: destroyed and cleared by the mod)" : "");
     }
 
     // ---- Eating and drinking -------------------------------------------------------------------
