@@ -224,8 +224,11 @@ namespace hsvr
         // the hand is drawn at the end of this frame's physics, limited only by the hand's strength
         // (pose_hold_max_force / max_torque). 0 = the spring below.
         bool pose_hold_exact = true;
-        double pose_hold_spring = 5000.0;
-        double pose_hold_damper = 100.0;
+        // Tuned in the headset 2026-11-19 (flat_hs_weight_vs_hold.md): half B&S's spring so a weapon trails
+        // the hand ~0.04-0.06 s (flat Half Sword's arm trails its aim by 0.1 s), and the dampers raised so a
+        // heavy, long weapon (war staff 2.38 kg, balance 108 cm up) settles without bouncing (damping ratio ~1).
+        double pose_hold_spring = 2500.0;
+        double pose_hold_damper = 150.0;
         double pose_hold_max_force = 3000.0;
         // While the held weapon is stuck in a body, the hold's force and torque caps are scaled by this.
         double pose_hold_stuck_force_scale = 0.15;
@@ -255,8 +258,10 @@ namespace hsvr
         double stab_wound_out_cms = 40.0;
         double stab_wound_head_factor = 0.35;
         double pose_hold_turn_spring = 1100.0;
-        double pose_hold_turn_damper = 45.0;
-        double pose_hold_max_torque = 250.0;
+        double pose_hold_turn_damper = 75.0;
+        // One hand's most turning force at the grip (N m, x his strength): a real wrist, not B&S's 250. A war
+        // staff held by its end (29 N m of weight) droops; one-handed swords (2-4 N m, hard swings ~20) stay free.
+        double pose_hold_max_torque = 30.0;
         // Weight: the hold's turn is limited by torque about the grip, not the centre of mass (heavy and
         // long weapons trail fast turns, B&S-style). torque_scale multiplies pose_hold_max_torque for it.
         bool pose_hold_weight = true;
@@ -271,8 +276,8 @@ namespace hsvr
         // the first hand turns it (2200/90/500), the second has no turning. Solved per frame as soft
         // constraints (pose_bs_iterations), all hands together.
         bool pose_hold_bs = true;
-        double pose_bs_two_pos_k = 10000.0, pose_bs_two_pos_c = 150.0, pose_bs_two_pos_max = 6000.0;
-        double pose_bs_two_rot_k = 2200.0, pose_bs_two_rot_c = 90.0, pose_bs_two_rot_max = 500.0;
+        double pose_bs_two_pos_k = 4000.0, pose_bs_two_pos_c = 200.0, pose_bs_two_pos_max = 6000.0;
+        double pose_bs_two_rot_k = 2200.0, pose_bs_two_rot_c = 120.0, pose_bs_two_rot_max = 500.0;
         int pose_bs_iterations = 8;
         double pose_bs_two_let_go_cm = 45.0; // B&S gaps reach 18 cm (p95) on fast two-hand swings
         bool pose_hold_ignore_body = true;   // the held weapon never collides with his own body (B&S)

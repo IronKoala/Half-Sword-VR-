@@ -6563,11 +6563,15 @@ namespace
     {
         BodyStrength b;
         if (!cfg.pose_body_strength || !pawn) return b;
-        b.muscle_rate = read_number_variable(pawn, STR("Muscle Rate"));
+        // Muscle Rate can be negative (the creator's lowest weight is -1), so "not found" is asked of the
+        // property itself, not read off a -1 value (playtest 14:14: a weight -1 Willie got full grip strength).
+        FProperty* muscle = pawn->GetPropertyByNameInChain(STR("Muscle Rate"));
+        bool muscle_found = muscle != nullptr;
+        b.muscle_rate = muscle ? number_property(pawn, muscle) : 0.0;
         b.tonus = read_number_variable(pawn, side == 0 ? STR("Arm L Tonus") : STR("Arm R Tonus"));
         b.consciousness = read_number_variable(pawn, STR("Consciousness"));
         b.stamina_value = read_number_variable(pawn, STR("Stamina"));
-        if (b.muscle_rate >= 0.0) b.strength = (std::max)(0.5, 1.0 + 0.5 * b.muscle_rate) / 1.25;
+        if (muscle_found) b.strength = (std::max)(0.5, 1.0 + 0.5 * b.muscle_rate) / 1.25;
         if (b.tonus >= 0.0) b.injury = (std::min)(1.0, b.tonus);
         if (b.consciousness >= 0.0) b.injury *= (std::min)(1.0, b.consciousness / 100.0);
         if (b.stamina_value >= 0.0)
@@ -6584,8 +6588,9 @@ namespace
         if (!reported)
         {
             reported = true;
-            HSVR_LOG("Strength: Muscle Rate %.2f, Arm %s Tonus %.3f, Consciousness %.0f, Stamina %.1f (-1 = not found) -> strength %.2f x size %.2f x injury %.2f x stamina %.2f = %.2f",
-                     b.muscle_rate, side == 0 ? "L" : "R", b.tonus, b.consciousness, b.stamina_value, b.strength, b.size, b.injury, b.stamina, b.total);
+            HSVR_LOG("Strength: Muscle Rate %.2f, Arm %s Tonus %.3f, Consciousness %.0f, Stamina %.1f (tonus, consciousness, stamina -1 = not found; Muscle Rate %s) -> strength %.2f x size %.2f x injury %.2f x stamina %.2f = %.2f",
+                     b.muscle_rate, side == 0 ? "L" : "R", b.tonus, b.consciousness, b.stamina_value, muscle_found ? "found" : "not found", b.strength, b.size,
+                     b.injury, b.stamina, b.total);
         }
         return b;
     }
