@@ -1082,7 +1082,6 @@ namespace
         log("After: Head mass %.3f kg, BaseMesh (whole welded weapon) mass %.3f kg", mass_of(head), mass_of(base));
 
         UObject* proc = build_visual(weapon, head, model, material);
-        fit_hands(player_pawn(), weapon, head_xf, hs, shift, numbers);
         log(proc ? "Done. Swing it at something and check the hits." : "  ! visual model failed (collision swap above still applies)");
     }
 
@@ -1543,6 +1542,7 @@ namespace
         for (V3& n : model.normals) n = unit(V3{n.x * hs.x, n.y * hs.y, n.z * hs.z});
         UObject* proc = build_visual(weapon, head, model, material);
         if (proc) apply_own_textures(weapon, proc, material, g_dir + base_name);
+        fit_hands(player_pawn(), weapon, head_xf, hs, shift, numbers);
         log(proc ? "Done. Swing it at something and check the hits." : "  ! visual model failed (collision swap above still applies)");
     }
 
