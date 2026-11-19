@@ -1410,6 +1410,9 @@ namespace
 
     std::atomic<int> g_fake_arm_mode{0};
     std::atomic<double> g_fake_two_up{20.0};
+    // hsvr.arm_move 10 <speed cm/s> <pitch deg> <height cm>: the right hand thrusts (stab tests).
+    std::atomic<double> g_fake_thrust_pitch{60.0};
+    std::atomic<double> g_fake_thrust_up{-5.0};
     bool mouth_point(UObject* pawn, hsvr::Vec3& out); // hsvr.arm_move 7 <cm>: the left hand this far above the right
     std::atomic<bool> g_contact_log{true};
 
@@ -1593,6 +1596,23 @@ namespace
             else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
             else if (mode == 5) local = Vec3{45.0, out * 15.0, -175.0}; // under the floor: the weapon is stopped by the ground
             else if (mode == 6) local = Vec3{62.0 + 8.0 * std::sin(now * 1.0), out * 10.0, 5.0}; // reaching out past his arm: the shoulder reaches
+            else if (mode == 10)
+            {
+                // Stab test: the left hand still; the right thrusts straight ahead from 20 to 62 cm
+                // at hsvr.arm_move 10 <speed> cm/s, holds 0.4 s, draws back over 0.8 s, waits; every 2.5 s.
+                local = Vec3{40.0, out * 15.0, -10.0};
+                if (side == 1)
+                {
+                    double v = (std::max)(20.0, g_fake_two_up.load());
+                    double t_in = 42.0 / v;
+                    double t = std::fmod(now, 2.5);
+                    double x = 20.0;
+                    if (t < t_in) x = 20.0 + v * t;
+                    else if (t < t_in + 0.4) x = 62.0;
+                    else if (t < t_in + 1.2) x = 62.0 - 42.0 * (t - t_in - 0.4) / 0.8;
+                    local = Vec3{x, out * 5.0, g_fake_thrust_up.load()};
+                }
+            }
             else if ((mode == 8 || mode == 9) && g_pose.pawn && mouth_point(g_pose.pawn, grip))
             {
                 // At his mouth (eating and drinking tests): the hand a little in front of and below it.
@@ -1622,6 +1642,7 @@ namespace
             grip_rot = (body * rot_to_quat(60.0, 0.0, 0.0)).normalized(); // controller handle tilted forward, as held
             // Mode 9: at the mouth, the hand turning over (a full turn about his right in 6 s), so a
             // held bottle tips its neck down at some point (drinking tests).
+            if (mode == 10 && side == 1) grip_rot = (body * rot_to_quat(g_fake_thrust_pitch.load(), 0.0, 0.0)).normalized();
             if (mode == 9) grip_rot = (body * quat_axis_angle(Vec3{0, 1, 0}, std::fmod(now, 6.0) / 6.0 * 2.0 * 3.14159265358979) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
         }
         Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
@@ -5146,7 +5167,9 @@ namespace
         // reach from the shoulder, or your hand pulled more than an arm's length from it, is let go
         // rather than dragged through or snapped back. Held for pose_hold_let_go_s first, so a glancing knock
         // never drops it.
-        if (cfg.pose_hold_let_go && t >= 0.99 && g_pose.driver)
+        // Not while the blade is stuck in someone: the game's wound holds it, and pulling out is
+        // yours to do (stab assist).
+        if (cfg.pose_hold_let_go && t >= 0.99 && g_pose.driver && !bool_property(h.weapon, STR("Stuck In Body")))
         {
             const ArmCalibration& a = g_pose.arm[side];
             double reach = a.upper_length + a.lower_length;
@@ -6371,6 +6394,8 @@ namespace
         int id = 0;
         double hit_at = -1.0;
         bool logged_next = true, logged_late = true;
+        UObject* push_comp = nullptr; // the slow push: same body part hit again and again
+        double push_since = -1.0, push_last = -1.0;
     };
     StabWatch g_stab_watch[2];
     hsvr::Vec3 g_stab_ctrl_last[2];
@@ -6442,7 +6467,10 @@ namespace
 
     void stab_hit_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
-        if (!hsvr::config().stab_log) return;
+        {
+            hsvr::Config c = hsvr::config();
+            if (!c.stab_log && !c.stab_assist) return;
+        }
         UObject* weapon = context.Context;
         UObject* pawn = g_pose.pawn;
         if (!weapon || !pawn) return;
@@ -6451,37 +6479,142 @@ namespace
         UFunction* fn = static_cast<UFunction*>(custom_data);
         uint8_t* locals = context.TheStack.Locals();
         if (!fn || !locals) return;
+        using namespace hsvr;
+        Config cfg = config();
         UObject* other = nullptr;
-        UObject* comp = nullptr;
+        UObject* part = nullptr; // the weapon's own part that hit
+        FProperty* ni_prop = nullptr;
+        FProperty* hit_prop = nullptr;
         double ni[3] = {0, 0, 0};
         for (FProperty* p : fn->ForEachProperty())
         {
             std::wstring n = p->GetName();
             uint8_t* at = locals + p->GetOffset_Internal();
             if (n == STR("OtherActor") || n == STR("Other Actor")) other = *reinterpret_cast<UObject**>(at);
-            else if (n == STR("HitComp") || n == STR("Hit Comp")) comp = *reinterpret_cast<UObject**>(at);
-            else if (n == STR("NormalImpulse") || n == STR("Normal Impulse")) read_three(at, p, ni);
+            else if (n == STR("HitComp") || n == STR("Hit Comp") || n == STR("Hit Component")) part = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("NormalImpulse") || n == STR("Normal Impulse")) read_three(at, p, ni), ni_prop = p;
+            else if (n == STR("Hit")) hit_prop = p;
         }
         // People only (the game itself drops hits on the wielder).
         if (!other || other == pawn || !is_a(other, STR("Willie_BP_C"))) return;
         // At most 30 hits a second.
         static double window = 0.0;
         static int in_window = 0;
-        double now = hsvr::now_seconds();
+        double now = now_seconds();
         if (now - window >= 1.0) window = now, in_window = 0;
         if (++in_window > 30) return;
-        double ctrl_along, weapon_along, ctrl_speed, mass;
+
+        // What was hit: his component, bone and the impact point (the game's BreakHitResult).
+        UObject* victim_comp = nullptr;
+        std::wstring bone_s = STR("?");
+        FName bone;
+        Vec3 impact;
+        if (hit_prop)
+        {
+            static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+            Call b(gs, STR("BreakHitResult"));
+            if (FProperty* hp = b.param(STR("Hit")))
+            {
+                // "Hit" is passed by reference: called from script, its value lives at the caller's
+                // address (the out-parameter list), not in this frame's locals.
+                const uint8_t* src = locals + hit_prop->GetOffset_Internal();
+                for (FOutParmRec* o = context.TheStack.OutParms(); o; o = o->NextOutParm)
+                    if (o->Property == hit_prop && o->PropAddr)
+                    {
+                        src = o->PropAddr;
+                        break;
+                    }
+                std::memcpy(b.buffer.data() + hp->GetOffset_Internal(), src, (std::min)(hp->GetSize(), hit_prop->GetSize()));
+                b.run();
+                if (FProperty* c = b.param(STR("HitComponent"))) victim_comp = *reinterpret_cast<UObject**>(b.buffer.data() + c->GetOffset_Internal());
+                if (FProperty* c = b.param(STR("BoneName"))) bone = *reinterpret_cast<FName*>(b.buffer.data() + c->GetOffset_Internal()), bone_s = bone.ToString();
+                impact = b.vec(STR("ImpactPoint"));
+            }
+        }
+
+        // The tip nearest the impact (the game's own "Tip" markers, the weapon's Tips list) and its
+        // forward, the direction a thrust goes in (ModularWeaponBP @36603).
+        UObject* tip = nullptr;
+        double tip_d = 1e9;
+        if (RawArray* tips = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")); tips && tips->Data)
+            for (int32_t i = 0; i < tips->Num; ++i)
+                if (UObject* t = static_cast<UObject*>(tips->Data[i]))
+                {
+                    double d = length(component_location(t) - impact);
+                    if (d < tip_d) tip_d = d, tip = t;
+                }
+        Vec3 tip_fwd;
+        if (tip)
+        {
+            Call f(tip, STR("GetForwardVector"));
+            f.run();
+            tip_fwd = f.vec();
+        }
+        double ctrl_along = 0, weapon_along = 0, ctrl_speed = 0, mass = 0;
         stab_speeds(side, weapon, ctrl_along, weapon_along, ctrl_speed, mass);
+        if (tip)
+        {
+            // Speeds along the thrust direction (the tip's forward), not the grip's axis.
+            UObject* base = object_property(weapon, STR("BaseMesh"));
+            Vec3 cv = g_stab_ctrl_vel[side];
+            ctrl_along = cv.x * tip_fwd.x + cv.y * tip_fwd.y + cv.z * tip_fwd.z;
+            if (base)
+            {
+                Call lv(base, STR("GetPhysicsLinearVelocity"));
+                lv.run();
+                Vec3 wv = lv.vec();
+                weapon_along = wv.x * tip_fwd.x + wv.y * tip_fwd.y + wv.z * tip_fwd.z;
+            }
+        }
+        // Does the tip point into him: its forward against the hit body's centre.
+        double into = -2.0;
+        if (tip && victim_comp && bone_s != STR("None") && bone_s != STR("?"))
+        {
+            Call cm(victim_comp, STR("GetCenterOfMass"));
+            cm.name(STR("BoneName"), bone);
+            cm.run();
+            Vec3 c = cm.vec();
+            Vec3 to = c - impact;
+            double l = length(to);
+            if (l > 0.5) into = (to.x * tip_fwd.x + to.y * tip_fwd.y + to.z * tip_fwd.z) / l;
+        }
+        bool soft = victim_comp && has_tag(victim_comp, STR("ComponentTags"), STR("Soft"));
+        bool piercing = bool_property(weapon, STR("Piercing")) && !bool_property(weapon, STR("NoStab"));
+        bool stuck = bool_property(weapon, STR("Stuck In Body")) || stab_array_num(weapon, STR("Stuck Constraints Array")) > 0;
+
         StabWatch& w = g_stab_watch[side];
+        // Slow push (B&S's pressure rule): the hold keeps pushing the tip into the same place.
+        HoldState& h = g_hold[side];
+        if (w.push_comp != victim_comp || now - w.push_last > 0.12) w.push_since = now;
+        w.push_comp = victim_comp;
+        w.push_last = now;
+        bool pushing = ctrl_along > 10.0 && h.weapon == weapon && h.force_n >= cfg.stab_push_force_n && now - w.push_since >= cfg.stab_push_time_s;
+
+        double ni_len = length(Vec3{ni[0], ni[1], ni[2]});
+        double speed = (std::max)(ctrl_along, weapon_along);
+        bool fast = speed >= cfg.stab_min_speed_cms;
+        bool aimed = tip && tip_d <= 15.0 && into >= cfg.stab_min_into_cos;
+        bool assist = cfg.stab_assist && piercing && soft && !stuck && aimed && (fast || pushing) && ni_prop;
+        double boosted = ni_len;
+        if (assist)
+        {
+            // The impulse his arm and body would have put behind the tip: the arm's mass at the
+            // controller's speed along the thrust (a slow push counts as stab_min_speed), along the
+            // thrust (the game's impulse on the weapon points back out of the wound, @36787).
+            double v = fast ? speed : cfg.stab_min_speed_cms;
+            boosted = (std::max)(ni_len, cfg.stab_arm_mass_kg * v);
+            write_three(locals + ni_prop->GetOffset_Internal(), ni_prop, -tip_fwd.x * boosted, -tip_fwd.y * boosted, -tip_fwd.z * boosted);
+        }
+
         w.weapon = weapon;
         w.id = ++g_stab_count;
         w.hit_at = now;
         w.logged_next = w.logged_late = false;
-        double ni_len = hsvr::length(hsvr::Vec3{ni[0], ni[1], ni[2]});
-        HSVR_LOG("Stab: #%d %s %ls hit %ls (%ls): impulse %.0f kg cm/s, weapon along blade %.0f cm/s, controller along blade %.0f cm/s "
-                 "(controller speed %.0f), weapon mass %.2f kg",
-                 w.id, side == 0 ? "left" : "right", weapon->GetName().c_str(), other->GetName().c_str(), comp ? comp->GetName().c_str() : STR("?"), ni_len,
-                 weapon_along, ctrl_along, ctrl_speed, mass);
+        HSVR_LOG("Stab: #%d %s %ls hit %ls %ls bone %ls (part %ls): impulse %.0f kg cm/s%s%.0f, weapon along thrust %.0f cm/s, controller along "
+                 "thrust %.0f cm/s (speed %.0f), mass %.2f kg; tip %.1f cm from impact, points into him %.2f, soft %d, piercing %d, stuck %d, push %d",
+                 w.id, side == 0 ? "left" : "right", weapon->GetName().c_str(), other->GetName().c_str(), victim_comp ? victim_comp->GetName().c_str() : STR("?"),
+                 bone_s.c_str(), part ? part->GetName().c_str() : STR("?"), ni_len, assist ? " -> assisted " : " ", assist ? boosted : 0.0, weapon_along,
+                 ctrl_along, ctrl_speed, mass, tip ? tip_d : -1.0, into, (int)soft, (int)piercing, (int)stuck, (int)pushing);
         stab_log_state("before", w);
     }
 
@@ -8218,6 +8351,41 @@ namespace
                 HSVR_LOG("Script: hsvr.passive_foe: %d foe(s) made passive (%d AI controllers)", stopped, (int)ais.size());
                 continue;
             }
+            if (entry.command.rfind("hsvr.foe_front ", 0) == 0)
+            {
+                // Stab tests: every foe stood this many cm in front of him, facing him.
+                using hsvr::Vec3;
+                using hsvr::length;
+                double cm = atof(entry.command.c_str() + 15);
+                UObject* player = nullptr;
+                find_pawn_mesh(&player);
+                if (!player) continue;
+                Call fw(player, STR("GetActorForwardVector"));
+                fw.run();
+                Vec3 f = fw.vec();
+                f.z = 0.0;
+                double fl = length(f);
+                if (fl < 1e-3) continue;
+                f = f * (1.0 / fl);
+                Vec3 at = actor_location(player) + f * cm;
+                double yaw = std::atan2(-f.y, -f.x) * 57.29577951308232;
+                std::vector<UObject*> foes;
+                UObjectGlobals::FindAllOf(STR("Willie_BP_C"), foes);
+                int moved = 0;
+                for (UObject* foe : foes)
+                {
+                    if (!foe || foe == player || foe->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                    Call mv(foe, STR("K2_SetActorLocationAndRotation"));
+                    mv.three(STR("NewLocation"), at.x, at.y, at.z);
+                    mv.three(STR("NewRotation"), 0.0, yaw, 0.0);
+                    mv.flag(STR("bTeleport"), true);
+                    mv.run();
+                    ++moved;
+                    HSVR_LOG("Script: hsvr.foe_front: %ls put %.0f cm in front of him, at (%.0f, %.0f, %.0f), yaw %.0f", foe->GetName().c_str(), cm, at.x, at.y, at.z, yaw);
+                }
+                if (!moved) HSVR_LOG("Script: hsvr.foe_front: no foe found");
+                continue;
+            }
             if (entry.command.rfind("hsvr.force_watch ", 0) == 0)
             {
                 install_force_watch();
@@ -8612,8 +8780,12 @@ namespace
             if (entry.command.rfind("hsvr.arm_move ", 0) == 0)
             {
                 g_fake_arm_mode.store(atoi(entry.command.c_str() + 14));
-                size_t sp = entry.command.find(' ', 14);
-                if (sp != std::string::npos) g_fake_two_up.store(atof(entry.command.c_str() + sp + 1));
+                int mode_arg = 0;
+                double a1 = 0, a2 = 0, a3 = 0;
+                int got = sscanf(entry.command.c_str() + 14, "%d %lf %lf %lf", &mode_arg, &a1, &a2, &a3);
+                if (got >= 2) g_fake_two_up.store(a1);
+                if (got >= 3) g_fake_thrust_pitch.store(a2);
+                if (got >= 4) g_fake_thrust_up.store(a3);
                 continue;
             }
             if (entry.command.rfind("hsvr.weapon_channel ", 0) == 0)

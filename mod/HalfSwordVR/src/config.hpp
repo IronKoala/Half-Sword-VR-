@@ -423,6 +423,20 @@ namespace hsvr
         // alignment, cutting rate, rubber-band and stick state, and the controller's speed along the
         // blade. Read only; changes nothing in the game.
         bool stab_log = true;
+        // Stab assist: the VR hold moves the weapon on its own (the game's hand joint is free), so a
+        // tip meets flesh with only the weapon's mass behind it and the game's stick rule
+        // (cutting rate x impulse >= 10000) rarely passes. On a hit of a piercing tip on a person's
+        // flesh that points into him (cosine >= stab_min_into_cos, tip within 15 cm of the impact)
+        // and moves along the thrust at stab_min_speed_cms or more, or keeps being pushed in with
+        // at least stab_push_force_n for stab_push_time_s, the impulse the game is given is raised
+        // to stab_arm_mass_kg x that speed, along the thrust. The game then judges the stab itself
+        // (alignment, armour, sticking, damage).
+        bool stab_assist = true;
+        double stab_min_speed_cms = 120.0;
+        double stab_min_into_cos = 0.5;
+        double stab_arm_mass_kg = 4.0;
+        double stab_push_force_n = 150.0;
+        double stab_push_time_s = 0.15;
         // 1 = your character's head (and hair) is not drawn in your own view while you look out of
         // it; it still casts its shadow and is there for the game (hits, other characters). Helmets
         // and other headwear stay visible.

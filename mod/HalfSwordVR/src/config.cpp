@@ -441,6 +441,12 @@ namespace hsvr
         flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
         flag("dev_grip_trace", c.dev_grip_trace);
         flag("stab_log", c.stab_log);
+        flag("stab_assist", c.stab_assist);
+        num("stab_min_speed_cms", c.stab_min_speed_cms);
+        num("stab_min_into_cos", c.stab_min_into_cos);
+        num("stab_arm_mass_kg", c.stab_arm_mass_kg);
+        num("stab_push_force_n", c.stab_push_force_n);
+        num("stab_push_time_s", c.stab_push_time_s);
         flag("hide_own_head", c.hide_own_head);
         text("hide_own_gore_from", c.hide_own_gore_from);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
