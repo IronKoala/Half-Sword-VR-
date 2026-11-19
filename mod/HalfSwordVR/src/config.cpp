@@ -288,6 +288,11 @@ namespace hsvr
         num("dev_fake_pitch", c.dev_fake_pitch);
         num("dev_fake_scale", c.dev_fake_scale);
         text("dev_script", c.dev_script);
+        flag("test_room", c.test_room);
+        text("test_room_map", c.test_room_map);
+        integer("test_room_foes", c.test_room_foes);
+        integer("test_room_tier", c.test_room_tier);
+        integer("test_room_weapon_tier", c.test_room_weapon_tier);
         flag("log_controllers", c.log_controllers);
         text("hand_bone_left", c.hand_bone_left);
         text("hand_bone_right", c.hand_bone_right);
