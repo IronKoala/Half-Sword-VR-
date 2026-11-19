@@ -384,6 +384,7 @@ namespace hsvr
         num("pose_hold_stuck_force_scale", c.pose_hold_stuck_force_scale);
         flag("stab_wound_hold", c.stab_wound_hold);
         num("stab_wound_settle_s", c.stab_wound_settle_s);
+        num("stab_wound_settle_max_s", c.stab_wound_settle_max_s);
         num("stab_wound_entry_cms", c.stab_wound_entry_cms);
         num("stab_start_depth_cm", c.stab_start_depth_cm);
         num("stab_start_depth_per_ms", c.stab_start_depth_per_ms);

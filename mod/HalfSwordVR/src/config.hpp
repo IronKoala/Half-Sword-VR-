@@ -221,6 +221,7 @@ namespace hsvr
         // head and neck; sideways and in turn it goes with the body.
         bool stab_wound_hold = true;
         double stab_wound_settle_s = 0.2; // no pulling out for this long after it goes in
+        double stab_wound_settle_max_s = 0.8; // a young stick is held open until the game's own keep trace passes, at most this long
         double stab_wound_entry_cms = 40.0; // ...and it is carried in at this speed meanwhile (8 cm over 0.2 s)
         // A blade the game has just stuck is set this far into the wound along its tip (cm), plus
         // stab_start_depth_per_ms cm for each cm/s of the controller along it, at most _max_cm

@@ -5883,6 +5883,9 @@ namespace
     // weapon the hand holds it and how the weapon sits in the hand); `base` the weapon's BaseMesh.
     std::wstring stab_name_var(UObject* owner, const TCHAR* name);
     double g_wound_since[2] = {-1.0, -1.0}; // when each hand's weapon went into a wound
+    UObject* g_young_joint[2] = {nullptr, nullptr}; // a stick still held open (stab_hold_keep)
+    double g_young_since[2] = {-1.0, -1.0};
+    int g_young_trace_ok[2] = {0, 0}; // ticks in a row the normal 3 cm keep trace found the stuck bone
 
     void hold_weapon(int side, UObject* pawn, UObject* joint, UObject* base, UObject* weapon, double mass, const hsvr::Config& cfg)
     {
@@ -6422,7 +6425,7 @@ namespace
                 // The first moments in the wound: no pulling out yet (stab-test11: the hold's target
                 // sits behind a blade that has just gone in, and its catch-up drew it straight out).
                 if (g_wound_since[side] < 0.0) g_wound_since[side] = now;
-                bool settling = now - g_wound_since[side] < cfg.stab_wound_settle_s;
+                bool settling = now - g_wound_since[side] < cfg.stab_wound_settle_s || g_young_joint[side] != nullptr;
                 double out_most = settling ? 0.0 : cfg.stab_wound_out_cms * k;
                 double ax = (std::min)(cfg.stab_wound_in_cms * k, (std::max)(-out_most, need_ax));
                 // Going in: the game sticks a blade at the skin (stab-test13: its keep trace found the
@@ -6916,8 +6919,6 @@ namespace
     // stab_wound_settle_s its "Spikes (temp)" is set, the game's own way to keep spiked weapons
     // (the keep test then takes any bone, with a 15 cm trace); the wound hold carries the blade in
     // meanwhile, and afterwards the normal test decides (pulling out lets go).
-    UObject* g_young_joint[2] = {nullptr, nullptr};
-    double g_young_since[2] = {-1.0, -1.0};
     void stab_hold_keep(int side, UObject* weapon, bool on)
     {
         hsvr::Config cfg = hsvr::config();
@@ -6927,7 +6928,9 @@ namespace
             RawArray* joints = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
             UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[joints->Num - 1]) : nullptr;
             if (!cs) return;
+            if (g_young_joint[side] == cs) return;
             set_variable(cs, STR("Spikes (temp)"), 1.0);
+            g_young_trace_ok[side] = 0;
             g_young_joint[side] = cs;
             g_young_since[side] = hsvr::now_seconds();
             HSVR_LOG("Stab: %s stick %ls held open for %.2f s", side == 0 ? "left" : "right", cs->GetName().c_str(), cfg.stab_wound_settle_s);
@@ -7023,6 +7026,10 @@ namespace
         UObject* weapon = is_joint ? object_property(self, STR("My Weapon")) : self;
         if (!weapon || (weapon != wr && weapon != wl)) return;
         int side = weapon == wr ? 1 : 0;
+        // The game calls Temporary Disable Damage right after it sticks a blade (@47985), before the
+        // new stuck joint's first tick: the moment to hold a young stick open.
+        if (!is_joint && hooked->GetName() == STR("Temporary Disable Damage") && bool_property(weapon, STR("Stuck In Body")))
+            stab_hold_keep(side, weapon, true);
         UFunction* caller = context.TheStack.Node();
         // At most one line per function and caller offset each 0.25 s (some are called every tick).
         {
@@ -7155,6 +7162,8 @@ namespace
                             trace_hit = (tr.buffer[rp->GetOffset_Internal() + bp2->GetByteOffset()] & bp2->GetFieldMask()) ? 1 : 0;
                         }
                         if (FProperty* np = tr.param(STR("BoneName"))) trace_bone = reinterpret_cast<FName*>(tr.buffer.data() + np->GetOffset_Internal())->ToString();
+                        bool ok = trace_hit == 1 && trace_bone == stab_name_var(cs, STR("Dismember Bone Name"));
+                        g_young_trace_ok[side] = ok ? g_young_trace_ok[side] + 1 : 0;
                         HSVR_LOG("Stab: stuck trace: blade %.1f cm, start shifted %.1f, trace hit %d bone %ls, stuck bone %ls",
                                  len, shift, trace_hit, trace_bone.c_str(), stab_name_var(cs, STR("Dismember Bone Name")).c_str());
                     }
@@ -7175,7 +7184,12 @@ namespace
                     stab_hold_keep(side, held, true);
                     stab_set_depth(side, held, "tick");
                 }
-                if (g_young_joint[side] && now - g_young_since[side] >= config().stab_wound_settle_s) stab_hold_keep(side, held, false);
+                if (g_young_joint[side])
+                {
+                    double age = now - g_young_since[side];
+                    if ((age >= config().stab_wound_settle_s && g_young_trace_ok[side] >= 3) || age >= config().stab_wound_settle_max_s)
+                        stab_hold_keep(side, held, false);
+                }
                 w.was_stuck = stuck;
             }
             if (!w.weapon || w.hit_at < 0.0) continue;
