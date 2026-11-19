@@ -52,7 +52,7 @@ def find_guard(pos, handle_bottom, search_lo=-5.0, search_hi=20.0):
     return guard_bottom, guard_top, grip_width
 
 
-def section_widths(pos, tris, lo, hi, step):
+def section_widths(pos, tris, lo, hi, step, both=False):
     """Width across X of the model's cross-section at each z = s from lo to hi, from where its edges
     cross that plane (works on low-poly models whose vertices are far apart)."""
     edges = _edges(tris)
@@ -67,7 +67,10 @@ def section_widths(pos, tris, lo, hi, step):
         pa, pb = pos[edges[cross, 0]], pos[edges[cross, 1]]
         t = ((c - za[cross]) / (zb[cross] - za[cross]))[:, None]
         pts = pa + (pb - pa) * t
-        out.append((float(c), float(np.ptp(pts[:, 0]))))
+        w = float(np.ptp(pts[:, 0]))
+        if both:
+            w = max(w, float(np.ptp(pts[:, 1])))
+        out.append((float(c), w))
     return out
 
 
