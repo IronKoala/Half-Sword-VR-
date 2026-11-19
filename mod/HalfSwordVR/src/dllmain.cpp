@@ -3102,6 +3102,11 @@ namespace
         double t = 0.0;
         std::string handle;
         int grip_type = -1;
+        // B&S: on a grab the item stays where it was (kept there while the game sets it up) and the
+        // hold then pulls it into the hand over pose_grab_settle_s.
+        bool hold_at = false;
+        hsvr::Vec3 at_pos;
+        hsvr::Quat at_rot;
     };
     FreeGrip g_pending_free[2]; // applied when that hand's next hold starts
     UObject* g_pending_item[2] = {nullptr, nullptr}; // the item it is for (kept in the hand until the hold starts)
@@ -3114,6 +3119,11 @@ namespace
         hsvr::Vec3 handle_axis;        // that handle's line, world
         double handle_keep = 0.0;      // how much of its own motion along the line it keeps (0..1)
         bool handle_sliding_logged = false;
+        double handle_damp = 0.0;      // the slide's damper along the handle (N s/m), from the trigger
+        double settle_until = -1.0;    // pulled from settle_from into the hand until then
+        double settle_s = 0.0;
+        hsvr::Vec3 settle_from_pos;
+        hsvr::Quat settle_from_rot;
         hsvr::Vec3 last_target_pos;
         hsvr::Quat last_target_rot;
         double last_time = 0.0;
@@ -3969,6 +3979,9 @@ namespace
             keep.t = g_two.t;
             keep.handle = g_two.handle;
             keep.grip_type = g_two.grip_type_before >= 0.0 ? (int)read_number_variable(pawn, grip_type_name(to)) : -1;
+            keep.hold_at = true;
+            keep.at_pos = pos;
+            keep.at_rot = rot;
         }
         g_two = TwoHand{};
         drop_weapon(from, pawn);
@@ -4628,6 +4641,10 @@ namespace
         using namespace hsvr;
         g_pending_free[side] = make_free_grip(side, mesh, w0_pos, w0_rot, palm, point, axis, what);
         g_pending_item[side] = weapon;
+        g_pending_free[side].hold_at = hsvr::config().pose_grab_settle_s > 0.0;
+        g_pending_free[side].at_pos = w0_pos;
+        g_pending_free[side].at_rot = w0_rot;
+        g_pending_free[side].place = !g_pending_free[side].hold_at;
         g_pending_free[side].fingers = fingers;
         set_component_transform(base, w0_pos, w0_rot, true);
         HSVR_LOG("Grab: %s hand took %ls by the %s (%.1f cm from the hand), held in the hand there", side == 0 ? "left" : "right", weapon->GetName().c_str(), what,
@@ -4893,6 +4910,10 @@ namespace
                         {
                             g_pending_free[side] = handle_grip(side, mesh, w0_pos, w0_rot, at, hs[hi], t);
                             g_pending_item[side] = best;
+                            g_pending_free[side].hold_at = cfg.pose_grab_settle_s > 0.0;
+                            g_pending_free[side].at_pos = w0_pos;
+                            g_pending_free[side].at_rot = w0_rot;
+                            g_pending_free[side].place = !g_pending_free[side].hold_at;
                             set_component_transform(hb, w0_pos, w0_rot, true);
                             HSVR_LOG("Grab: %s hand took %ls by its %s at %.0f%% along it (%.1f cm from the hand, touched at %.1f cm)", hand, best->GetName().c_str(),
                                      hs[hi].name.c_str(), t * 100.0, hd, best_d);
@@ -5476,6 +5497,14 @@ namespace
             {
                 h.free = g_pending_free[side];
                 g_pending_free[side] = FreeGrip{};
+                if (h.free.hold_at)
+                {
+                    h.free.place = false;
+                    h.settle_from_pos = h.free.at_pos;
+                    h.settle_from_rot = h.free.at_rot;
+                    h.settle_s = (std::max)(0.02, cfg.pose_grab_settle_s);
+                    h.settle_until = now + h.settle_s;
+                }
                 HSVR_LOG("Hold: %s hand holds %ls by the %s at (%.1f, %.1f, %.1f) on it%s", side == 0 ? "left" : "right", weapon->GetName().c_str(), h.free.what.c_str(),
                          h.free.pivot.x, h.free.pivot.y, h.free.pivot.z, h.free.forearm ? ", on the forearm" : "");
             }
@@ -5628,6 +5657,8 @@ namespace
                     h.handle_axis = bq.rotate(normalized(ab));
                     double squeeze = (std::min)(1.0, (std::max)(0.0, (trig - 0.15) / 0.85));
                     h.handle_keep = cfg.pose_slide_keep_light + (cfg.pose_slide_keep_full - cfg.pose_slide_keep_light) * squeeze;
+                    // B&S (Handle.cs:1053-1087): the axis drive's damper goes 300 -> 20 N s/m as the trigger goes in.
+                    h.handle_damp = cfg.pose_slide_damper_light + (cfg.pose_slide_damper_full - cfg.pose_slide_damper_light) * squeeze;
                 }
             }
         }
@@ -5898,6 +5929,16 @@ namespace
             if (!(DT > 1e-4 && DT < 0.1)) DT = dt;
             DT = (std::min)(0.08, DT);
             Vec3 com_t = target_pos + target_rot.rotate(local_com);
+            Quat rot_t = target_rot;
+            if (h.settle_until > now)
+            {
+                // Pulled into the hand from where it lay (B&S: the springs bring it in over 50-100 ms).
+                double u = 1.0 - (h.settle_until - now) / h.settle_s;
+                u = u * u * (3.0 - 2.0 * u);
+                Vec3 from_com = h.settle_from_pos + h.settle_from_rot.rotate(local_com);
+                com_t = from_com + (com_t - from_com) * u;
+                rot_t = (from_scaled_axis(scaled_axis((target_rot * h.settle_from_rot.inverse()).normalized()) * u) * h.settle_from_rot).normalized();
+            }
             Vec3 g{0.0, 0.0, gz};
             Vec3 v_com_now = lv.vec();
             Vec3 v_need = (com_t - com) * (1.0 / DT) - g * (DT * 0.5);
@@ -5905,6 +5946,7 @@ namespace
             {
                 // Sliding: along the handle it keeps (most of) its own motion; across it, in the hand.
                 Vec3 u = h.handle_axis;
+                if (cfg.pose_slide_damper_light > 0.0) h.handle_keep = std::exp(-h.handle_damp * DT / (std::max)(0.05, mass));
                 double now_ax = dot(v_com_now, u), need_ax = dot(v_need, u);
                 v_need = v_need + u * ((now_ax * h.handle_keep + need_ax * (1.0 - h.handle_keep)) - need_ax);
             }
@@ -5912,7 +5954,7 @@ namespace
             double dv_most = (max_force / (std::max)(0.05, mass)) * DT + std::fabs(gz) * DT;
             bool f_capped = length(dv) > dv_most;
             dv = clamp_length(dv, dv_most);
-            Vec3 w_need = scaled_axis((target_rot * rot.inverse()).normalized()) * (1.0 / DT);
+            Vec3 w_need = scaled_axis((rot_t * rot.inverse()).normalized()) * (1.0 / DT);
             Vec3 dL = about_com * (w_need - w_now);
             bool t_capped = length(dL) > max_torque * DT;
             dL = clamp_length(dL, max_torque * DT);
@@ -6148,6 +6190,11 @@ namespace
             }
             UObject* base = object_property(item, STR("BaseMesh"));
             if (!base || !g_pose.hand_valid[side]) continue;
+            if (g.hold_at)
+            {
+                set_component_transform(base, g.at_pos, g.at_rot, true);
+                continue;
+            }
             Vec3 hp = g_pose.target[side];
             Quat hr = g_pose.hand_rot[side];
             Quat rot = (hr * g.rel).normalized();

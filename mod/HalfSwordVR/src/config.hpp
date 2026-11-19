@@ -266,6 +266,13 @@ namespace hsvr
         double pose_grab_handle_cm = 6.0;
         double pose_slide_keep_light = 0.6;
         double pose_slide_keep_full = 0.97;
+        // B&S slide damper along the handle (N s/m) at a light .. full trigger: the item keeps
+        // exp(-c dt / mass) of its motion along it each frame (replaces keep_light/full; 0 = use those).
+        double pose_slide_damper_light = 300.0;
+        double pose_slide_damper_full = 20.0;
+        // A grab leaves the item where it was and the hold pulls it into the hand over this long (B&S);
+        // also a hand-over. 0 = put it in the hand at once.
+        double pose_grab_settle_s = 0.08;
         // Shields: every measured strap and handle is a grab point; anywhere else (the rim, an edge)
         // the hand holds it where it touched (pose_shield_free_grip; 0 = always the game's grip).
         bool pose_shield_free_grip = true;
