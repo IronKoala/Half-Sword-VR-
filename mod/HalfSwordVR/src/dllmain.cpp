@@ -5358,14 +5358,6 @@ namespace
         h.blocked_cm = 0.0;
         h.on_weapon = 0.0;
         if (!cfg.pose_hold_hand_on_weapon || !h.weapon || !h.have_last || !g_pose.pawn || h.forearm) return false;
-        // Not while it glides into a new grip (a grab settling, a reverse-grip flip) or just after: the
-        // weapon trails its moving target on purpose, and moving the hand onto it moves the target back
-        // with it (flip-test2: the arming sword's flip unwound from 165 to 139 deg).
-        if (h.settle_until > 0.0 && hsvr::now_seconds() < h.settle_until + cfg.pose_hold_hand_on_weapon_after_glide_s)
-        {
-            h.last_blocked_cm = -1.0;
-            return false;
-        }
         if (object_property(g_pose.pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != h.weapon) return false;
         UObject* base = object_property(h.weapon, STR("BaseMesh"));
         if (!base) return false;
