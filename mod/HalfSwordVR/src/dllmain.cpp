@@ -3279,6 +3279,7 @@ namespace
         }
         pawn->ProcessEvent(fn, parameters);
         g_hold[side] = HoldState{}; // a new hold (and slide) when anything is next held
+        g_grip_log[side] = GripLog{}; // its 0.5 s "Grip:" line stops with the hold
         HSVR_LOG("Hold: dropped with %ls(%ls)", name, names.c_str());
     }
 
