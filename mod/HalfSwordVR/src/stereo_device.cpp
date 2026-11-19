@@ -17,6 +17,7 @@ namespace hsvr
     namespace
     {
         AnchorProvider g_anchor_provider = nullptr;
+        LatchCallback g_latch_callback = nullptr;
         std::atomic<uint64_t> g_game_frame{1};
         double g_delta_seconds = 1.0 / 90.0;
 
@@ -234,8 +235,10 @@ namespace hsvr
 
             void CalculateStereoViewOffset(const int32_t ViewIndex, ue::FRotator& ViewRotation, const float WorldToMeters, ue::FVector& ViewLocation) override
             {
+                uint64_t latched_before = g_view.game_frame;
                 latch_frame(ViewRotation, ViewLocation);
                 if (!g_view.valid) return;
+                if (g_view.game_frame != latched_before && g_latch_callback) g_latch_callback();
                 Config cfg = config();
                 const XrEyeRaw eye = eye_for_view(ViewIndex);
                 double cm_per_metre = (WorldToMeters > 1.0f ? (double)WorldToMeters : 100.0) * cfg.world_scale;
@@ -332,6 +335,11 @@ namespace hsvr
     void stereo_set_anchor_provider(AnchorProvider provider)
     {
         g_anchor_provider = provider;
+    }
+
+    void stereo_set_latch_callback(LatchCallback callback)
+    {
+        g_latch_callback = callback;
     }
 
     void stereo_begin_game_frame(double delta_seconds)

@@ -19,6 +19,10 @@ namespace hsvr
     };
     using AnchorProvider = bool (*)(PlayerAnchor& out);
     void stereo_set_anchor_provider(AnchorProvider provider);
+    // Called on the game thread right after this frame's headset pose is latched for the views (once
+    // per frame, before the frame is drawn): the game glue can still move things to match it.
+    using LatchCallback = void (*)();
+    void stereo_set_latch_callback(LatchCallback callback);
 
     // Called once per engine tick on the game thread, before the frame is drawn.
     void stereo_begin_game_frame(double delta_seconds);
