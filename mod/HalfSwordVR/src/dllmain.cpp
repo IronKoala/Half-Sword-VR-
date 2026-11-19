@@ -1414,6 +1414,7 @@ namespace
     // hsvr.arm_move 10 <speed cm/s> <pitch deg> <height cm>: the right hand thrusts (stab tests).
     std::atomic<double> g_fake_thrust_pitch{60.0};
     std::atomic<double> g_fake_thrust_up{-5.0};
+    double blade_length(UObject* w);
     bool mouth_point(UObject* pawn, hsvr::Vec3& out); // hsvr.arm_move 7 <cm>: the left hand this far above the right
     std::atomic<bool> g_contact_log{true};
 
@@ -1641,6 +1642,28 @@ namespace
                 local = Vec3{35.0 + 10.0 * std::sin(t), out * 15.0, -15.0 + 20.0 * std::cos(t)};
             }
             grip = shoulder + body.rotate(local);
+            if (mode == 12 && side == 1 && g_pose.pawn)
+            {
+                // Sheathe test: the right hand goes from a blade's length out along the right belt
+                // scabbard's line in to its mouth over 2.5 s (the weapon in the hand goes in).
+                static double t0 = -1.0;
+                static int seen12 = -1;
+                if (seen12 != 12) t0 = now;
+                seen12 = mode;
+                UObject* wr = object_property(g_pose.pawn, STR("Weapon R"));
+                UObject* mesh = object_property(g_pose.pawn, STR("Mesh"));
+                if (mesh)
+                {
+                    // The slot it is going into, else the first right slot.
+                    const char* sock = object_property(g_pose.pawn, STR("Weapon Slot R 1")) && !(wr && object_property(g_pose.pawn, STR("Weapon Slot R 1")) == wr)
+                                           ? "Sheath_Slot_R_2" : "Sheath_Slot_R_1";
+                    Vec3 m = socket_location(mesh, bone_fname(sock));
+                    Vec3 ax = socket_rotation(mesh, bone_fname(sock)).rotate(Vec3{0, 0, 1});
+                    double len = wr ? blade_length(wr) : 80.0;
+                    double u = (std::min)(1.0, (now - t0) / 2.5);
+                    grip = m - ax * ((len + 3.0) * (1.0 - u) - 8.0 * u);
+                }
+            }
             if (mode == 11 && side == 1 && g_pose.pawn)
             {
                 // Draw test: the right hand goes to the first sheathed weapon's grip, holds 1.5 s, then
@@ -2414,6 +2437,9 @@ namespace
         UObject* scabbard = nullptr;
         double t0 = 0.0;
         double last_log = -1e9;
+        bool sheathing = false;      // going in rather than out
+        double length = 80.0;        // the blade's length (cm)
+        bool block_cleared = false;
     };
     DrawState g_draw[2];
     bool any_draw() { return g_draw[0].active || g_draw[1].active; }
@@ -7007,6 +7033,115 @@ namespace
         return true;
     }
 
+    // ---- Sheathing (the reverse of a draw): the blade's tip at an empty belt scabbard's mouth, lined
+    // up with it, goes in along its line; the game lets go of it seated (hs_draw_sheathe_calls.md §3) --
+    // The mouth is the slot socket (the scabbard sits on it, its +Z down toward the chape). The game's
+    // own sheathe (Assign R Weapon Slot -> Sheath R) would send the arm reaching for the socket; the mod
+    // calls Assign for its bookkeeping, undoes Sheath R's reach and makes the slide joint at once.
+    struct BeltSlot
+    {
+        const TCHAR* var;
+        const char* socket;
+    };
+    const BeltSlot k_belt[2][2] = {{{STR("Weapon Slot L 1"), "Sheath_Slot_L_1"}, {STR("Weapon Slot L 2"), "Sheath_Slot_L_2"}},
+                                   {{STR("Weapon Slot R 1"), "Sheath_Slot_R_1"}, {STR("Weapon Slot R 2"), "Sheath_Slot_R_2"}}};
+
+    double blade_length(UObject* w)
+    {
+        FProperty* lp = w ? w->GetPropertyByNameInChain(STR("Length to Top R Default")) : nullptr;
+        return lp ? (std::max)(10.0, number_property(w, lp)) : 80.0;
+    }
+
+    // The empty belt slot (the one the game's Assign picks: 1, else 2) for that hand: its mouth and line.
+    bool belt_mouth(int side, UObject* pawn, hsvr::Vec3& mouth, hsvr::Vec3& axis, const char** socket_out = nullptr)
+    {
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        if (!mesh) return false;
+        for (const BeltSlot& b : k_belt[side])
+        {
+            if (object_property(pawn, b.var)) continue;
+            mouth = socket_location(mesh, bone_fname(b.socket));
+            axis = socket_rotation(mesh, bone_fname(b.socket)).rotate(hsvr::Vec3{0, 0, 1});
+            if (socket_out) *socket_out = b.socket;
+            return true;
+        }
+        return false;
+    }
+
+    bool sheathe_begin(int side, UObject* pawn, UObject* w)
+    {
+        using namespace hsvr;
+        const TCHAR* S = side == 0 ? STR("L") : STR("R");
+        auto nm = [&](const wchar_t* fmt) {
+            wchar_t buf[96];
+            std::swprintf(buf, 96, fmt, S);
+            return std::wstring(buf);
+        };
+        if (!object_property(w, STR("Scabbard")))
+        {
+            HSVR_LOG("Sheathe: %ls has no scabbard of its own; not sheathed (only scabbarded weapons for now)", w->GetName().c_str());
+            return false;
+        }
+        double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
+        if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
+            bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
+            return false;
+        Call assign(pawn, nm(L"Assign %ls Weapon Slot").c_str());
+        if (!assign.run())
+        {
+            HSVR_LOG("Sheathe: no \"Assign %ls Weapon Slot\"", S);
+            return false;
+        }
+        // Undo Sheath R's reach for the socket (the mod does the going in).
+        set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), false);
+        set_bool_property(pawn, nm(L"Wrist %ls Direct Control").c_str(), false);
+        set_bool_property(pawn, nm(L"Grab %ls Target Found").c_str(), false);
+        UObject* scab = object_property(pawn, nm(L"Current Scabbard %ls").c_str());
+        double slot = read_number_variable(pawn, nm(L"Sheath Slot %ls").c_str());
+        if (!scab || slot < 0.0 || slot > 1.0)
+        {
+            HSVR_LOG("Sheathe: the game picked slot %.0f, scabbard %s: not one the mod sheathes into; left to the game", slot, scab ? "yes" : "none");
+            return false;
+        }
+        set_bool_property(pawn, nm(L"Block %ls Weapon From Sheathing").c_str(), true);
+        set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), true);
+        Call make(pawn, nm(L"Create Sheath Constraint %ls").c_str());
+        make.byte(STR("Slot"), (uint8_t)slot);
+        bool made = make.run();
+        call_one_object(pawn, STR("Set Scabbard Constraint Free"), scab);
+        set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), true);
+        DrawState d;
+        d.active = true;
+        d.slot_side = side;
+        d.weapon = w;
+        d.scabbard = scab;
+        d.t0 = now_seconds();
+        d.sheathing = true;
+        d.length = blade_length(w);
+        g_draw[side] = d;
+        controllers_buzz(side, 0.3f);
+        HSVR_LOG("Sheathe: %s hand puts %ls into slot %ls %.0f%s", side == 0 ? "left" : "right", w->GetName().c_str(), S, slot + 1.0, made ? "" : " (Create Sheath Constraint NOT found)");
+        return true;
+    }
+
+    // Each tick, for a hand holding a weapon: its tip at its side's empty belt scabbard mouth, lined up.
+    void sheathe_check(int side, UObject* pawn, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_sheathe || g_draw[side].active || g_two.active) return;
+        UObject* w = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+        if (!w || is_fist(w) || g_hold[side].weapon != w || !object_property(w, STR("Scabbard"))) return;
+        UObject* base = object_property(w, STR("BaseMesh"));
+        Vec3 mouth, ax;
+        if (!base || !belt_mouth(side, pawn, mouth, ax)) return;
+        Vec3 bp = component_location(base);
+        Quat bq = component_rotation(base);
+        Vec3 blade = bq.rotate(Vec3{0, 0, 1});
+        Vec3 tip = bp + blade * blade_length(w);
+        double d = length(tip - mouth), c = dot(blade, ax);
+        if (d <= cfg.pose_sheathe_mouth_cm && c >= std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0)) sheathe_begin(side, pawn, w);
+    }
+
     void draw_tick(UObject* pawn)
     {
         using namespace hsvr;
@@ -7020,7 +7155,11 @@ namespace
             UObject* base = d.weapon ? object_property(d.weapon, STR("BaseMesh")) : nullptr;
             if (object_property(pawn, hand) != d.weapon || !base)
             {
-                HSVR_LOG("Draw: %s hand let go mid-draw after %.2f s (the game seats it again)", side == 0 ? "left" : "right", now - d.t0);
+                if (d.sheathing)
+                    HSVR_LOG("Sheathe: %s hand's weapon %s after %.2f s", side == 0 ? "left" : "right",
+                             base && bool_property(d.weapon, STR("Sheathed")) ? "is sheathed" : "was let go (the game seats it)", now - d.t0);
+                else
+                    HSVR_LOG("Draw: %s hand let go mid-draw after %.2f s (the game seats it again)", side == 0 ? "left" : "right", now - d.t0);
                 d = DrawState{};
                 continue;
             }
@@ -7030,9 +7169,17 @@ namespace
             Vec3 bp = component_location(base);
             Quat bq = component_rotation(base);
             double z = d.scabbard ? bq.inverse().rotate(component_location(d.scabbard) - bp).z : 0.0;
+            if (d.sheathing && !d.block_cleared && z < 0.9 * d.length)
+            {
+                // In past the mouth: the game may now seat it (and let the hand go) at 20 cm.
+                set_bool_property(pawn, d.slot_side == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
+                d.block_cleared = true;
+                HSVR_LOG("Sheathe: in past the mouth (%.1f cm out)", z);
+            }
             if (!unsheathing && conc == 11.0)
             {
-                HSVR_LOG("Draw: %s hand drew %ls free after %.2f s (out %.1f cm)", side == 0 ? "left" : "right", d.weapon->GetName().c_str(), now - d.t0, z);
+                HSVR_LOG("Draw: %s hand drew %ls free after %.2f s (out %.1f cm)%s", side == 0 ? "left" : "right", d.weapon->GetName().c_str(), now - d.t0, z,
+                         d.sheathing ? " (pulled back out of a sheathe)" : "");
                 HoldState& h = g_hold[side];
                 h.settle_from_pos = bp;
                 h.settle_from_rot = bq;
@@ -7044,8 +7191,8 @@ namespace
             if (now - d.last_log > 0.5)
             {
                 d.last_log = now;
-                HSVR_LOG("Draw: %s hand drawing %ls: out %.1f cm (UnSheathing %ls %d, concrete %.0f)", side == 0 ? "left" : "right", d.weapon->GetName().c_str(), z, S,
-                         (int)unsheathing, conc);
+                HSVR_LOG("%s: %s hand %s %ls: out %.1f cm (UnSheathing %ls %d, concrete %.0f)", d.sheathing ? "Sheathe" : "Draw", side == 0 ? "left" : "right",
+                         d.sheathing ? "sheathing" : "drawing", d.weapon->GetName().c_str(), z, S, (int)unsheathing, conc);
             }
             if (now - d.t0 > 20.0)
             {
@@ -7053,6 +7200,7 @@ namespace
                 d = DrawState{};
             }
         }
+        for (int side = 0; side < 2; ++side) sheathe_check(side, pawn, cfg);
     }
 
     void keep_pending_in_hand(UObject* pawn)
@@ -8749,6 +8897,32 @@ namespace
                     hsvr::Vec3 p = socket_location(fm, pelvis_bone);
                     HSVR_LOG("Script: hsvr.foe_freeze %d: %ls, pelvis (%.0f, %.0f, %.0f)", (int)freeze, foe->GetName().c_str(), p.x, p.y, p.z);
                 }
+                continue;
+            }
+            if (entry.command == "hsvr.sheathe_test")
+            {
+                // Sheathe test: the right hand's weapon is put with its tip at the right belt scabbard's
+                // mouth, lined up, and the sheathe starts (then hsvr.arm_move 12 pushes it in).
+                UObject* player = nullptr;
+                find_pawn_mesh(&player);
+                UObject* wr = player ? object_property(player, STR("Weapon R")) : nullptr;
+                UObject* b = wr ? object_property(wr, STR("BaseMesh")) : nullptr;
+                hsvr::Vec3 mouth, ax;
+                const char* sock = "";
+                if (b && belt_mouth(1, player, mouth, ax, &sock))
+                {
+                    // BaseMesh +Z along the slot's +Z.
+                    hsvr::Vec3 z = hsvr::normalized(ax), xh = std::fabs(z.z) < 0.9 ? hsvr::Vec3{0, 0, 1} : hsvr::Vec3{1, 0, 0};
+                    hsvr::Vec3 x = hsvr::normalized(xh - z * hsvr::dot(xh, z));
+                    hsvr::Quat q = hsvr::quat_from_axes(x, hsvr::cross(z, x), z);
+                    double len = blade_length(wr);
+                    set_component_transform(b, mouth - z * (len + 3.0), q, true);
+                    g_hold[1].settle_until = -1.0;
+                    bool ok = sheathe_begin(1, player, wr);
+                    HSVR_LOG("Script: hsvr.sheathe_test: %ls at the mouth of %s (blade %.0f cm): %s", wr->GetName().c_str(), sock, len, ok ? "sheathing" : "NOT started");
+                }
+                else
+                    HSVR_LOG("Script: hsvr.sheathe_test: %s", wr ? "no empty right belt slot" : "nothing in the right hand");
                 continue;
             }
             if (entry.command == "hsvr.unstick")

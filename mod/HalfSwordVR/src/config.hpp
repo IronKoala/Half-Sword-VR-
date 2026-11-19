@@ -325,6 +325,11 @@ namespace hsvr
         bool pose_draw = true;
         double pose_draw_touch_cm = 8.0;
         double pose_draw_settle_s = 0.15;
+        // Sheathing: a held (scabbarded) weapon's tip within mouth_cm of its side's empty belt scabbard
+        // mouth, its blade within angle_deg of the scabbard's line, goes in; the game seats it and lets go.
+        bool pose_sheathe = true;
+        double pose_sheathe_mouth_cm = 10.0;
+        double pose_sheathe_angle_deg = 30.0;
         double pose_grab_seat_reverse_bias_deg = 45.0; // a reversed seat must be this much nearer to win
         double pose_swing_speed_lo = 1.5;
         double pose_swing_speed_hi = 7.0;
