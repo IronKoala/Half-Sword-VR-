@@ -5757,7 +5757,10 @@ namespace
         double amount = (std::max)(h.blocked_cm, turn_cm);
         double t = (std::min)(1.0, (std::max)(0.0, (amount - from) / (full - from)));
         t = t * t * (3.0 - 2.0 * t);
-        if (cfg.pose_hold_hand_follows) t = 1.0; // B&S: the drawn hand is always on the item
+        // Not while drawing or sheathing: there the game's hand joint helps pull the blade along the
+        // scabbard toward your hand (test b3: with the hand on the weapon a draw took 6.5 s, not 2.4).
+        bool follows = cfg.pose_hold_hand_follows && !g_draw[side].active;
+        if (follows) t = 1.0; // B&S: the drawn hand is always on the item
         h.on_weapon = t;
         if (t <= 0.0) return false;
         // The stuck rule (Matthew's framework, hold_melee): a weapon stopped with its grip out of his
@@ -5836,7 +5839,7 @@ namespace
         }
         else
             h.stuck_since = -1.0;
-        if (cfg.pose_hold_hand_follows)
+        if (follows)
         {
             // Where the item will be once this frame's physics has moved it (its velocity now, about its
             // centre of mass), and the hand at its grip there: hand = item x (the grip's place in the hand)^-1.
@@ -8127,11 +8130,15 @@ namespace
     {
         using namespace hsvr;
         if (!cfg.pose_holster_snap || !pawn || !mesh || !w || is_fist(w)) return false;
-        if (object_property(w, STR("Scabbard"))) return false; // a scabbard weapon: the physical sheathe
-        if (g_two.active && g_two.weapon == w) return false;    // held in two hands (B&S: IsTwoHanded)
-        if (g_draw[side].active) return false;
         const char* hand = side == 0 ? "left" : "right";
-        if (g_hand_world_v[side] > cfg.pose_holster_max_speed) return false; // a throw
+        auto no = [&](const char* why) {
+            HSVR_LOG("Holster: %s hand let go of %ls: no holster (%s)", hand, w->GetName().c_str(), why);
+            return false;
+        };
+        if (object_property(w, STR("Scabbard"))) return no("it has its own scabbard: the physical sheathe");
+        if (g_two.active && g_two.weapon == w) return no("held in two hands");
+        if (g_draw[side].active) return no("mid draw or sheathe");
+        if (g_hand_world_v[side] > cfg.pose_holster_max_speed) return no("hand too fast: a throw");
         const TCHAR* S = side == 0 ? STR("L") : STR("R");
         auto nm = [&](const wchar_t* fmt) {
             wchar_t buf[96];
@@ -8149,11 +8156,19 @@ namespace
         }
         else if (kind == 3.0 && side == 1 && !object_property(pawn, STR("Weapon Slot Back")))
             socket = "Sheath_Slot_Back";
-        if (socket.empty()) return false;
+        if (socket.empty())
+        {
+            HSVR_LOG("Holster: %s hand let go of %ls: no holster (SheathSlot %.0f: no free slot of that kind on this side)", hand, w->GetName().c_str(), kind);
+            return false;
+        }
         Vec3 slot_at = socket_location(mesh, bone_fname(socket));
         Vec3 palm = hand_grab_point(mesh, side);
         double d = length(palm - slot_at);
-        if (d > cfg.pose_holster_zone_cm) return false;
+        if (d > cfg.pose_holster_zone_cm)
+        {
+            HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s (needs %.0f): dropped", hand, w->GetName().c_str(), d, socket.c_str(), cfg.pose_holster_zone_cm);
+            return false;
+        }
         double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
         if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
             bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
