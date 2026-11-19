@@ -113,7 +113,11 @@ namespace
         int hide_original = 1;    // hide the box (the old head is replaced either way)
         // Material texture parameters that get the model's own maps (<model>_BaseColor.png,
         // _Normal.png, _ORM.png next to it). Empty = leave that parameter alone.
-        std::wstring tex_base, tex_normal, tex_orm;
+        // Defaults: the game's plain (not layered) lit material M_ORM_Base_Material through one of its
+        // cooked instances (a metal pot), whose texture parameters are D (colour), N (normal) and
+        // ORM (R occlusion, G roughness, B metallic), the same packing the exporter writes.
+        std::wstring own_material = L"/Game/Assets/Props/Cooking_Utencils/Materials/MI_Prop_Cooking_Utencil_Pot_002.MI_Prop_Cooking_Utencil_Pot_002";
+        std::wstring tex_base = L"D", tex_normal = L"N", tex_orm = L"ORM";
         int own_textures = 1;     // 0: keep the game's material untouched
     };
     Settings g_settings;
@@ -149,6 +153,7 @@ namespace
             else if (k == "tex_base") g_settings.tex_base = std::wstring(v.begin(), v.end());
             else if (k == "tex_normal") g_settings.tex_normal = std::wstring(v.begin(), v.end());
             else if (k == "tex_orm") g_settings.tex_orm = std::wstring(v.begin(), v.end());
+            else if (k == "own_material") g_settings.own_material = std::wstring(v.begin(), v.end());
             else if (k == "own_textures") g_settings.own_textures = atoi(v.c_str());
         }
         fclose(f);
@@ -817,36 +822,96 @@ namespace
         return t;
     }
 
-    // Puts the model's own maps into a dynamic copy of the material on the visual.
-    void apply_own_textures(UObject* weapon, UObject* proc, UObject* material, const std::wstring& base_path)
+    // An asset by path: found if already loaded, otherwise loaded (KismetSystemLibrary
+    // MakeSoftObjectPath -> Conv_SoftObjPathToSoftObjRef -> LoadAsset_Blocking).
+    UObject* load_asset(const std::wstring& path)
     {
-        log_material_params(material);
+        if (UObject* o = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, path.c_str())) return o;
+        static UObject* ksl = find(STR("/Script/Engine.Default__KismetSystemLibrary"));
+        Call make(ksl, STR("MakeSoftObjectPath"));
+        if (uint8_t* a = make.at(STR("PathString")))
+            *reinterpret_cast<RawArray*>(a) = RawArray{path.c_str(), (int32_t)path.size() + 1, (int32_t)path.size() + 1};
+        if (!make.run()) return nullptr;
+        Call conv(ksl, STR("Conv_SoftObjPathToSoftObjRef"));
+        FProperty* made = make.param(STR("ReturnValue"));
+        FProperty* in = conv.param(STR("SoftObjectPath"));
+        if (!made || !in || made->GetSize() != in->GetSize()) return nullptr;
+        memcpy(conv.buffer.data() + in->GetOffset_Internal(), make.buffer.data() + made->GetOffset_Internal(), made->GetSize());
+        if (!conv.run()) return nullptr;
+        Call load(ksl, STR("LoadAsset_Blocking"));
+        FProperty* ref = conv.param(STR("ReturnValue"));
+        FProperty* asset = load.param(STR("Asset"));
+        if (!ref || !asset || ref->GetSize() != asset->GetSize()) return nullptr;
+        memcpy(load.buffer.data() + asset->GetOffset_Internal(), conv.buffer.data() + ref->GetOffset_Internal(), ref->GetSize());
+        UObject* o = load.run() ? load.ret_object() : nullptr;
+        log("  loaded %s -> %s", narrow(path).c_str(), name_of(o).c_str());
+        return o;
+    }
+
+    void set_param_name(Call& c, const TCHAR* name)
+    {
+        if (FProperty* p = c.param(STR("ParameterName"))) *reinterpret_cast<FName*>(c.buffer.data() + p->GetOffset_Internal()) = FName(name, FNAME_Add);
+    }
+
+    // Puts the model's own maps into a dynamic copy of a plain game material on the visual.
+    void apply_own_textures(UObject* weapon, UObject* proc, UObject* fallback, const std::wstring& base_path)
+    {
         if (!g_settings.own_textures) return;
+        if (FILE* f = _wfopen((base_path + L"_BaseColor.png").c_str(), L"rb")) fclose(f);
+        else
+        {
+            log("  no %s_BaseColor.png: keeping the game's material", narrow(base_path).c_str());
+            return;
+        }
+        UObject* material = g_settings.own_material.empty() ? fallback : load_asset(g_settings.own_material);
+        if (!material)
+        {
+            log("  ! material %s not found; keeping the game's material", narrow(g_settings.own_material).c_str());
+            return;
+        }
+        log_material_params(material);
+        Call mid_call(proc, STR("CreateDynamicMaterialInstance"));
+        mid_call.i32(STR("ElementIndex"), 0).object(STR("SourceMaterial"), material);
+        UObject* mid = mid_call.run() ? mid_call.ret_object() : nullptr;
+        log("  dynamic material %s", name_of(mid).c_str());
+        if (!mid) return;
         struct Map
         {
             const std::wstring& param;
             const wchar_t* file;
         };
         const Map maps[] = {{g_settings.tex_base, L"_BaseColor.png"}, {g_settings.tex_normal, L"_Normal.png"}, {g_settings.tex_orm, L"_ORM.png"}};
-        Call mid_call(proc, STR("CreateDynamicMaterialInstance"));
-        mid_call.i32(STR("ElementIndex"), 0).object(STR("SourceMaterial"), material);
-        UObject* mid = mid_call.run() ? mid_call.ret_object() : nullptr;
-        log("  dynamic material %s", name_of(mid).c_str());
-        if (!mid) return;
         for (const Map& m : maps)
         {
             if (m.param.empty()) continue;
             UObject* tex = load_texture(weapon, base_path + m.file);
             if (!tex) continue;
-            FName name(m.param.c_str(), FNAME_Add);
             Call set(mid, STR("SetTextureParameterValue"));
-            if (FProperty* p = set.param(STR("ParameterName"))) *reinterpret_cast<FName*>(set.buffer.data() + p->GetOffset_Internal()) = name;
+            set_param_name(set, m.param.c_str());
             set.object(STR("Value"), tex);
             set.run();
             Call get(mid, STR("K2_GetTextureParameterValue"));
-            if (FProperty* p = get.param(STR("ParameterName"))) *reinterpret_cast<FName*>(get.buffer.data() + p->GetOffset_Internal()) = name;
+            set_param_name(get, m.param.c_str());
             log("  %s <- %s (reads back %s)", narrow(m.param).c_str(), name_of(tex).c_str(), get.run() ? name_of(get.ret_object()).c_str() : "?");
         }
+        // The pot's own tiling and tint would not fit this model's UVs and colours. (Intensity and
+        // contrast values are left as the pot has them; they are logged above.)
+        for (const TCHAR* tile : {STR("U Tile"), STR("V Tile")})
+        {
+            Call set(mid, STR("SetScalarParameterValue"));
+            set_param_name(set, tile);
+            set.f32(STR("Value"), 1.0f);
+            set.run();
+        }
+        Call tint(mid, STR("SetVectorParameterValue"));
+        set_param_name(tint, STR("Color Tint"));
+        if (uint8_t* a = tint.at(STR("Value")))
+        {
+            float white[4] = {1, 1, 1, 1};
+            memcpy(a, white, sizeof white);
+        }
+        tint.run();
+        log("  U/V Tile = 1, Color Tint = white");
     }
 
     void apply_test_blade(UObject* weapon);
