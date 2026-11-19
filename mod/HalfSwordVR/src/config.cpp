@@ -358,6 +358,7 @@ namespace hsvr
         }
         flag("pose_fists", c.pose_fists);
         text("pose_fist_class", c.pose_fist_class);
+        flag("pose_fist_mark_spawned", c.pose_fist_mark_spawned);
         flag("pose_eat", c.pose_eat);
         num("pose_eat_cm", c.pose_eat_cm);
         num("pose_drink_tip", c.pose_drink_tip);

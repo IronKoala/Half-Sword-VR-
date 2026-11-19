@@ -3485,20 +3485,33 @@ namespace
     UObject* g_bring = nullptr;
     double g_bring_until = -1.0;
     int g_bring_side = 1;
+    bool g_bring_weapon = false;   // a shield brought (hsvr.bring_object shield): kept until that hand holds it
+    bool g_bring_at_point = false; // kept with g_bring_point (its own frame) at the hand: a rim test
+    hsvr::Vec3 g_bring_point;
 
     void keep_brought_object(UObject* pawn, UObject* mesh)
     {
         if (!g_bring) return;
         const TCHAR* grabbed = g_bring_side == 0 ? STR("Grabbed L") : STR("Grabbed R");
-        if (hsvr::now_seconds() > g_bring_until || bool_property(pawn, grabbed))
+        bool held = bool_property(pawn, grabbed);
+        if (g_bring_weapon)
+        {
+            Call owner_call(g_bring, STR("GetOwner"));
+            owner_call.run();
+            UObject* owner = owner_call.object_result();
+            held = owner && object_property(pawn, g_bring_side == 0 ? STR("Weapon L") : STR("Weapon R")) == owner;
+        }
+        if (hsvr::now_seconds() > g_bring_until || held)
         {
             HSVR_LOG("Script: hsvr.bring_object: no longer kept at the %s hand (grabbed %d)", g_bring_side == 0 ? "left" : "right", (int)bool_property(pawn, grabbed));
             g_bring = nullptr;
             return;
         }
         hsvr::Vec3 hand = hand_grab_point(mesh, g_bring_side);
+        hsvr::Vec3 put = hand + hsvr::Vec3{0, 0, 4.0};
+        if (g_bring_at_point) put = hand - component_rotation(g_bring).rotate(g_bring_point);
         Call move(g_bring, STR("K2_SetWorldLocation"));
-        move.three(STR("NewLocation"), hand.x, hand.y, hand.z + 4.0);
+        move.three(STR("NewLocation"), put.x, put.y, put.z);
         move.flag(STR("bTeleport"), true);
         move.run();
         Call stop(g_bring, STR("SetPhysicsLinearVelocity"));
@@ -4043,6 +4056,25 @@ namespace
     }
 
     const TCHAR* fist_spawned_name(int side) { return side == 0 ? STR("Fist L Spawned") : STR("Fist R Spawned"); }
+    double g_fist_made_at[2] = {-10.0, -10.0};
+
+    // For half a second after a fist is made, what the game's fist rules read, each tick (the first
+    // fist of a run went within one tick, fist test 5).
+    void fist_trace(UObject* pawn)
+    {
+        for (int side = 0; side < 2; ++side)
+        {
+            double age = hsvr::now_seconds() - g_fist_made_at[side];
+            if (age < 0.0 || age > 0.5) continue;
+            bool r = side == 1;
+            UObject* w = object_property(pawn, r ? STR("Weapon R") : STR("Weapon L"));
+            HSVR_LOG("Fist trace %.3f s: %s weapon %ls, Fist Spawned %d, Grabbed %d, Grab Target Found %d, Hand Active %d, GripType_Current %.0f, Free Fall Rate %.2f, Consciousness %.0f",
+                     age, r ? "right" : "left", w ? w->GetName().c_str() : STR("none"), (int)bool_property(pawn, fist_spawned_name(side)),
+                     (int)bool_property(pawn, r ? STR("Grabbed R") : STR("Grabbed L")), (int)bool_property(pawn, r ? STR("Grab R Target Found") : STR("Grab L Target Found")),
+                     (int)bool_property(pawn, r ? STR("R Hand Active") : STR("L Hand Active")), read_number_variable(pawn, r ? STR("R_GripType_Current") : STR("L_GripType_Current")),
+                     read_number_variable(pawn, STR("Free Fall Rate")), read_number_variable(pawn, STR("Consciousness")));
+        }
+    }
 
     bool make_fist(int side, UObject* pawn, const hsvr::Config& cfg)
     {
@@ -4053,8 +4085,9 @@ namespace
         set_up_hand(side, pawn, cls, false, false, true);
         UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
         bool ok = is_fist(now);
-        set_bool_property(pawn, fist_spawned_name(side), ok);
+        if (cfg.pose_fist_mark_spawned) set_bool_property(pawn, fist_spawned_name(side), ok);
         HSVR_LOG("Fist: %s hand %s", side == 0 ? "left" : "right", ok ? "is a fist" : "could not be made a fist");
+        if (ok) g_fist_made_at[side] = hsvr::now_seconds();
         return ok;
     }
 
@@ -4185,6 +4218,8 @@ namespace
                 {
                     last_drink = now;
                     double in_mouth = read_number_variable(pawn, STR("Liquid In Mouth"));
+                    double bottle_before = read_number_variable(bottle, STR("Liquid Amount In Bottle"));
+                    double body_before = read_number_variable(pawn, STR("Body Liquid"));
                     bool ok;
                     const char* what;
                     if (in_mouth >= 0.5)
@@ -4196,18 +4231,33 @@ namespace
                     else
                     {
                         Call drink(pawn, STR("Drink From Bottle"));
+                        // The bottle goes in the parameter named for it: a function's property list
+                        // also holds its locals, so "the first object" was not the parameter (drink
+                        // test 2: the call did nothing).
+                        static bool listed = false;
                         if (drink.fn)
+                        {
+                            FProperty* target = nullptr;
+                            std::wstring names;
                             for (FProperty* p : drink.fn->ForEachProperty())
-                                if (p->GetClass().GetName() == STR("ObjectProperty"))
-                                {
-                                    *reinterpret_cast<UObject**>(drink.buffer.data() + p->GetOffset_Internal()) = bottle;
-                                    break;
-                                }
+                            {
+                                names += p->GetName() + STR(" (") + p->GetClass().GetName() + STR("), ");
+                                if (!target && p->GetClass().GetName() == STR("ObjectProperty") && p->GetName().find(STR("Bottle")) != std::wstring::npos) target = p;
+                            }
+                            if (!listed)
+                            {
+                                listed = true;
+                                HSVR_LOG("Drink: Drink From Bottle has %ls; the bottle goes in %ls", names.c_str(), target ? target->GetName().c_str() : STR("NOTHING (no object named Bottle)"));
+                            }
+                            if (target) *reinterpret_cast<UObject**>(drink.buffer.data() + target->GetOffset_Internal()) = bottle;
+                        }
                         ok = drink.run();
                         what = "Drink From Bottle";
                     }
-                    HSVR_LOG("Drink: %s hand's %ls at your mouth (%.0f cm, neck %.2f): %s %s (liquid in mouth %.2f)", side == 0 ? "left" : "right",
-                             bottle->GetName().c_str(), d, tip, what, ok ? "called" : "MISSING", in_mouth);
+                    HSVR_LOG("Drink: %s hand's %ls at your mouth (%.0f cm, neck %.2f): %s %s (liquid in mouth %.3f -> %.3f, in the bottle %.2f -> %.2f, body liquid %.4f -> %.4f)",
+                             side == 0 ? "left" : "right", bottle->GetName().c_str(), d, tip, what, ok ? "called" : "MISSING", in_mouth,
+                             read_number_variable(pawn, STR("Liquid In Mouth")), bottle_before, read_number_variable(bottle, STR("Liquid Amount In Bottle")), body_before,
+                             read_number_variable(pawn, STR("Body Liquid")));
                 }
             }
             // A bottle taken from the mouth with liquid in it: he swallows (the game's own Gulp
@@ -4283,6 +4333,7 @@ namespace
             return;
         }
         keep_brought_object(pawn, mesh);
+        fist_trace(pawn);
         for (int side = 0; side < 2; ++side) check_object_grab(side, pawn);
         eat_and_drink(pawn, cfg);
         for (int side = 0; side < 2; ++side)
@@ -6469,6 +6520,7 @@ namespace
     };
     std::vector<std::wstring> g_watch_words;
     std::vector<WatchedVar> g_watched;
+    std::vector<WatchedVar> g_watch_previous; // the list before a re-collect
     UObject* g_watch_owners[3] = {nullptr, nullptr, nullptr};
 
     double watch_read(UObject* owner, FProperty* p)
@@ -6498,8 +6550,9 @@ namespace
                 if (kind != STR("DoubleProperty") && kind != STR("FloatProperty") && kind != STR("IntProperty") && kind != STR("ByteProperty") &&
                     kind != STR("EnumProperty") && kind != STR("BoolProperty"))
                     continue;
-                std::wstring name = p->GetName(), lower = name;
-                for (auto& ch : lower) ch = (wchar_t)towlower(ch);
+                std::wstring name = p->GetName(), lower;
+                for (wchar_t ch : name)
+                    if (ch != L' ' && ch != L'_') lower += (wchar_t)towlower(ch); // words match with or without spaces
                 bool match = false;
                 for (auto& w : g_watch_words)
                     if (lower.find(w) != std::wstring::npos) match = true;
@@ -6507,7 +6560,19 @@ namespace
                 std::string label = who;
                 label += ".";
                 for (wchar_t ch : name) label += (char)(ch < 128 ? ch : '?');
-                g_watched.push_back({owner, p, label, watch_read(owner, p)});
+                double value = watch_read(owner, p);
+                // A re-collect (a weapon changed hands) keeps what was already being watched, so a
+                // change on that same tick is still logged; anything new logs where it starts.
+                double before = value;
+                bool known = false;
+                for (auto& old : g_watch_previous)
+                    if (old.owner == owner && old.property == p)
+                    {
+                        before = old.value;
+                        known = true;
+                    }
+                if (!known) HSVR_LOG("Watch: %s starts at %g", label.c_str(), value);
+                g_watched.push_back({owner, p, label, before});
                 ++found;
             }
         HSVR_LOG("Watch: %d variables on %s (%ls)", found, who, owner->GetName().c_str());
@@ -6520,6 +6585,7 @@ namespace
         UObject* owners[3] = {pawn, pawn ? object_property(pawn, STR("Weapon L")) : nullptr, pawn ? object_property(pawn, STR("Weapon R")) : nullptr};
         if (owners[0] != g_watch_owners[0] || owners[1] != g_watch_owners[1] || owners[2] != g_watch_owners[2])
         {
+            g_watch_previous.swap(g_watched);
             g_watched.clear();
             for (int i = 0; i < 3; ++i) g_watch_owners[i] = owners[i];
             watch_collect(owners[0], "pawn");
@@ -6738,7 +6804,7 @@ namespace
                     if (end == std::string::npos) end = rest.size();
                     std::wstring word;
                     for (size_t i = start; i < end; ++i)
-                        if (rest[i] != ' ') word += (wchar_t)tolower((unsigned char)rest[i]);
+                        if (rest[i] != ' ' && rest[i] != '_') word += (wchar_t)tolower((unsigned char)rest[i]);
                     if (!word.empty()) g_watch_words.push_back(word);
                     start = end + 1;
                 }
@@ -6888,6 +6954,10 @@ namespace
                 // "hsvr.bring_object left" = to the left hand.
                 int bring_side = entry.command.find("left", 17) != std::string::npos ? 0 : 1;
                 bool want_food = entry.command.find("food", 17) != std::string::npos; // "hsvr.bring_object [left] food": food only
+                // "hsvr.bring_object [left] shield [rim]": the nearest loose shield, its middle at the
+                // hand, or with "rim" the edge of it (found from its collision) at the hand.
+                bool want_shield = entry.command.find("shield", 17) != std::string::npos;
+                bool want_rim = entry.command.find("rim", 17) != std::string::npos;
                 hsvr::Vec3 hand = hand_grab_point(mesh, bring_side);
                 std::vector<UObject*> comps;
                 UObjectGlobals::FindAllOf(STR("StaticMeshComponent"), comps);
@@ -6900,12 +6970,19 @@ namespace
                     Call owner_call(c, STR("GetOwner"));
                     owner_call.run();
                     UObject* owner = owner_call.object_result();
-                    if (!owner || owner == pawn || is_a(owner, STR("ModularWeaponBP_C")) || is_a(owner, STR("Willie_BP_C"))) continue;
+                    if (!owner || owner == pawn || is_a(owner, STR("Willie_BP_C"))) continue;
+                    if (want_shield)
+                    {
+                        if (!class_name_starts(owner, STR("Shield")) || object_property(owner, STR("BaseMesh")) != c) continue;
+                        if (object_property(pawn, STR("Weapon L")) == owner || object_property(pawn, STR("Weapon R")) == owner) continue;
+                    }
+                    else if (is_a(owner, STR("ModularWeaponBP_C")))
+                        continue;
                     if (want_food && !is_a(owner, STR("BP_Food_Master_C"))) continue;
                     Call sim(c, STR("IsSimulatingPhysics"));
                     sim.run();
                     FProperty* sp = sim.param(STR("ReturnValue"));
-                    if (!sp || !*(sim.buffer.data() + sp->GetOffset_Internal())) continue;
+                    if (!want_shield && (!sp || !*(sim.buffer.data() + sp->GetOffset_Internal()))) continue; // a shield just spawned may not simulate yet
                     ++loose;
                     double d = hsvr::length(component_location(c) - hand);
                     if (d < best_d)
@@ -6927,7 +7004,46 @@ namespace
                     stop.run();
                     g_bring = best;
                     g_bring_side = bring_side;
-                    g_bring_until = hsvr::now_seconds() + 4.0;
+                    g_bring_until = hsvr::now_seconds() + (want_shield ? 8.0 : 4.0);
+                    g_bring_weapon = want_shield;
+                    g_bring_at_point = false;
+                    if (want_shield && want_rim)
+                    {
+                        // Its thin axis: the local axis with the least collision across it (asked
+                        // from 200 cm out each way). The rim point is the farthest edge along the
+                        // longer of the other two.
+                        hsvr::Vec3 centre = component_location(best);
+                        hsvr::Quat rot = component_rotation(best);
+                        const hsvr::Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+                        double across[3];
+                        hsvr::Vec3 edge[3];
+                        for (int a = 0; a < 3; ++a)
+                        {
+                            across[a] = 0.0;
+                            for (double sgn : {1.0, -1.0})
+                            {
+                                hsvr::Vec3 dir = rot.rotate(axes[a] * sgn);
+                                hsvr::Vec3 from = centre + dir * 200.0;
+                                Call cl(best, STR("GetClosestPointOnCollision"));
+                                cl.three(STR("Point"), from.x, from.y, from.z);
+                                cl.run();
+                                hsvr::Vec3 p = cl.number() > 0.0 ? cl.vec(STR("ClosestPointOnCollision")) : centre;
+                                double e = hsvr::dot(p - centre, dir);
+                                across[a] += e;
+                                if (sgn > 0) edge[a] = p;
+                            }
+                        }
+                        int thin = 0;
+                        for (int a = 1; a < 3; ++a)
+                            if (across[a] < across[thin]) thin = a;
+                        int rim = -1;
+                        for (int a = 0; a < 3; ++a)
+                            if (a != thin && (rim < 0 || across[a] > across[rim])) rim = a;
+                        g_bring_point = rot.inverse().rotate(edge[rim] - centre);
+                        g_bring_at_point = true;
+                        HSVR_LOG("Script: hsvr.bring_object: shield across its local X %.1f, Y %.1f, Z %.1f cm; thin axis %c; rim point (%.1f, %.1f, %.1f) at the hand",
+                                 across[0], across[1], across[2], "XYZ"[thin], g_bring_point.x, g_bring_point.y, g_bring_point.z);
+                    }
                 }
                 HSVR_LOG("Script: hsvr.bring_object: %d loose objects; moved %ls (was %.0f cm away) to the %s hand", loose,
                          best ? best->GetFullName().c_str() : STR("nothing"), best_d, bring_side == 0 ? "left" : "right");
