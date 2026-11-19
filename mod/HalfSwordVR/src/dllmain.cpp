@@ -7255,6 +7255,9 @@ namespace
                 }
         for (int side = 0; side < 2; ++side)
             g_fist_side[side].store(pawn && is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))));
+        // Fingers every tick the body is posed, even with the controllers idle (test 10: behind the grab
+        // gate below, an unfaked fake headset never reached it).
+        if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
         {
             if (held[0] || held[1])
@@ -7473,7 +7476,6 @@ namespace
                      ok ? "set up" : "set-up call missing", now ? now->GetName().c_str() : STR("nothing"));
         }
         fists_from_fingers(cfg, state, pawn, menu_up);
-        fingers_track_tick(cfg, state, pawn);
     }
 
     // Where his hand goes while it holds a weapon. The hold sent the weapon (last tick) to where the
