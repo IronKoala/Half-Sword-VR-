@@ -6490,8 +6490,9 @@ namespace
     }
 
     // Limb strikes (elbows, forearms, open hands): the struck Willie's body-hit block (UG 791446, from
-    // his armour proxies' OnComponentHit -> NewFunction) damages himself when the impulse passes ~300 (a
-    // hand or forearm) or 1000. log_body_hits: every other Willie's 'Last Hit Impulse', Health and
+    // his armour proxies' OnComponentHit -> NewFunction) damages himself (impulse capped at 1500 while
+    // standing, x the hitter's surface rigidity). Test 9: the posed arm's contacts do reach it.
+    // log_body_hits: every other Willie's 'Last Hit Impulse (Other Body)', Health and
     // Consciousness, logged when they change, with what hit him ('Other Comp').
     void body_hit_watch(UObject* pawn)
     {
@@ -6516,7 +6517,9 @@ namespace
         for (UObject* w : foes)
         {
             Seen& was = seen[w];
-            double impulse = read_number_variable(w, STR("Last Hit Impulse"));
+            // Willie-on-Willie contacts go through branch H of the block, which writes 'Last Hit Impulse
+            // (Other Body)' (reset after 1 s), not 'Last Hit Impulse' (ground hits only).
+            double impulse = read_number_variable(w, STR("Last Hit Impulse (Other Body)"));
             double health = read_number_variable(w, STR("Health"));
             double conscious = read_number_variable(w, STR("Consciousness"));
             bool hit = was.impulse >= 0.0 && impulse != was.impulse && impulse > 0.0;
