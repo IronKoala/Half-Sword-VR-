@@ -2444,6 +2444,7 @@ namespace
     };
     DrawState g_draw[2];
     bool any_draw() { return g_draw[0].active || g_draw[1].active; }
+    bool cfg_scabbard_free() { return hsvr::config().pose_draw_scabbard_free; }
     bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg);
     double g_swing_want = 0.0, g_swing_written = 0.0, g_swing_keep = 0.89, g_swing_last_t = -1.0;
     hsvr::Vec3 g_swing_rel[2];
@@ -6244,6 +6245,13 @@ namespace
         // Stuck in someone (a stab or an edge lodged): the hand pulls with only part of its strength, so
         // the hold's own catch-up does not tear the blade out at once (stab-test8: the game released
         // every lodge 10-20 ms later while the hold pulled 356-2860 N); pulling it out is your doing.
+        if (g_draw[side].active && g_draw[side].weapon == weapon && cfg.pose_draw_force_scale < 1.0)
+        {
+            // Drawing or sheathing: the hand slides it along the scabbard with part of its strength,
+            // so it never drags the scabbard (and the belt) along with it.
+            max_force *= (std::max)(0.0, cfg.pose_draw_force_scale);
+            max_torque *= (std::max)(0.0, cfg.pose_draw_force_scale);
+        }
         if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body")))
         {
             max_force *= (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
@@ -7122,7 +7130,9 @@ namespace
         if (scab)
         {
             set_variable(pawn, name(L"Current Scabbard %ls").c_str(), 0.0, scab, nullptr);
-            call_one_object(pawn, STR("Set Scabbard Constraint Free"), scab);
+            // Locked to the belt (2 cm / 5 deg), not the game's Free (15 cm / 30 deg, for its off hand to
+            // take it): draw-test3 dragged a free scabbard 34-71 cm off the belt.
+            call_one_object(pawn, cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
         }
         set_bool_property(pawn, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
         FreeGrip g = handle_grip(side, mesh, w0_pos, w0_rot, at, *best_h, best_t);
@@ -7220,7 +7230,9 @@ namespace
         Call make(pawn, nm(L"Create Sheath Constraint %ls").c_str());
         make.byte(STR("Slot"), (uint8_t)slot);
         bool made = make.run();
-        call_one_object(pawn, STR("Set Scabbard Constraint Free"), scab);
+        // Locked to the belt (2 cm / 5 deg), not the game's Free (15 cm / 30 deg, for its off hand to
+            // take it): draw-test3 dragged a free scabbard 34-71 cm off the belt.
+            call_one_object(pawn, cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
         set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), true);
         DrawState d;
         d.active = true;
