@@ -244,6 +244,10 @@ namespace hsvr
         double pose_hold_turn_spring = 1100.0;
         double pose_hold_turn_damper = 45.0;
         double pose_hold_max_torque = 250.0;
+        // Weight: the hold's turn is limited by torque about the grip, not the centre of mass (heavy and
+        // long weapons trail fast turns, B&S-style). torque_scale multiplies pose_hold_max_torque for it.
+        bool pose_hold_weight = true;
+        double pose_hold_weight_torque_scale = 1.0;
         // While held, his visible hand sits on the weapon (1): when the weapon is stopped by something,
         // the hand stays on it instead of going on with your controller. It eases from following the
         // controller to sitting on the weapon as the weapon falls 1 to pose_hold_blocked_from_cm behind.

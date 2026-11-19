@@ -6494,6 +6494,42 @@ namespace
             h.torque_capped = t_capped;
             h.force_n = length(dv) * mass / DT / 100.0;
             h.torque_nm = length(dL) / DT / 1e4;
+            // Weight (Matthew 2026-11-19, B&S-style): the hand keeps the grip where it holds it, but its
+            // wrist turns the weapon about the grip with no more than max_torque. So the torque the turn
+            // needs is about the GRIP (the inertia there, plus the weapon's mass carried round by the
+            // grip's own acceleration and gravity): tau = I_grip alpha + m (C - P) x a_P. A dagger turns
+            // 1:1; a polearm (5 kg m^2 about its grip) trails a fast flick and droops under its own lever.
+            // (The plain exact hold above split it into the centre of mass's push plus a turn about it,
+            // so the lever was free and every weapon followed 1:1.)
+            if (cfg.pose_hold_weight && !in_wound && !h.handle_slide && !(g_draw[side].active && g_draw[side].weapon == weapon))
+            {
+                Vec3 r = com - pivot_now; // grip -> centre of mass
+                Vec3 P_t = com_t - rot_t.rotate(local_com - pivot);
+                Vec3 vP_need = (P_t - pivot_now) * (1.0 / DT) - g * (DT * 0.5);
+                Vec3 dvP = vP_need - v;
+                double dvP_most = (max_force / (std::max)(0.05, mass)) * DT + std::fabs(gz) * DT;
+                bool fcap = length(dvP) > dvP_most;
+                dvP = clamp_length(dvP, dvP_most);
+                Vec3 aP = dvP * (1.0 / DT);
+                Vec3 wn = scaled_axis((rot_t * rot.inverse()).normalized()) * (1.0 / DT);
+                Vec3 alpha_need = (wn - w_now) * (1.0 / DT);
+                Vec3 lever = cross(r, aP) * mass;
+                Vec3 tau_need = inertia * alpha_need + lever;
+                double tcap = max_torque * (std::max)(0.0, cfg.pose_hold_weight_torque_scale);
+                bool tc = length(tau_need) > tcap;
+                Vec3 tau = clamp_length(tau_need, tcap);
+                Vec3 alpha = inertia.inverse() * (tau - lever);
+                w_next = clamp_length(w_now + alpha * DT, 60.0);
+                Vec3 vP_next = v + dvP;
+                exact_v = clamp_length(vP_next + cross(w_next, r), 2000.0);
+                h.force_capped = fcap;
+                h.torque_capped = tc;
+                h.force_n = length(dvP) * mass / DT / 100.0;
+                h.torque_nm = length(tau) / 1e4;
+                if (tc)
+                    HSVR_LOG_EVERY(0.5, "Hold: %s weight: %ls needs %.0f N m at the grip to turn as you do, the hand has %.0f", side == 0 ? "left" : "right",
+                                   weapon->GetName().c_str(), length(tau_need) / 1e4, tcap / 1e4);
+            }
             com_next = com + exact_v * DT + g * (DT * DT * 0.5);
             exact_set = true;
             HSVR_LOG_EVERY(1.0, "Hold: %s exact hold, frame %.1f ms (measured %.1f), %.1f cm and %.1f deg to go, force %.0f N%s, torque %.1f N m%s",
