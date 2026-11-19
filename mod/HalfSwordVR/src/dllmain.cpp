@@ -2660,6 +2660,38 @@ namespace
         HSVR_LOG("Grip: %s weapon no longer collides with: %ls", side == 0 ? "left" : "right", names.empty() ? STR("(no forearm bodies found)") : names.c_str());
     }
 
+    // His own body against a held weapon: the closest of his physics bodies to the weapon's axis
+    // (pommel end to tip, 12 points), if within `within` cm. Vanilla weapons collide with his own
+    // body too (self_collision.md), so a weapon stopped by it is not stuck in something else.
+    double own_body_contact(UObject* pawn, UObject* weapon, double within, std::wstring* bone_out = nullptr)
+    {
+        using namespace hsvr;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        UObject* pommel = object_property(weapon, STR("PommelSk"));
+        UObject* tip = object_property(weapon, STR("TippyTipScene"));
+        if (!mesh || !pommel || !tip) return -1.0;
+        Vec3 a = component_location(pommel), b = component_location(tip);
+        double best = -1.0;
+        for (FName bone : physics_body_bones(mesh))
+        {
+            for (int i = 0; i <= 11; ++i)
+            {
+                Vec3 pt = a + (b - a) * (i / 11.0);
+                Call c(mesh, STR("GetClosestPointOnCollision"));
+                c.three(STR("Point"), pt.x, pt.y, pt.z);
+                c.name(STR("BoneName"), bone);
+                if (!c.run()) break;
+                double d = c.number();
+                if (d >= 0.0 && d <= within && (best < 0.0 || d < best))
+                {
+                    best = d;
+                    if (bone_out) *bone_out = bone.ToString();
+                }
+            }
+        }
+        return best;
+    }
+
     // ---- what the held weapon is touching (test tool) ----------------------------------------------
     // For each of his physics bodies, the closest distance from the weapon's axis (pommel end to tip,
     // 12 points) to that body's collision. Bodies within 4 cm of the axis are touching or nearly
@@ -3001,6 +3033,7 @@ namespace
         std::string bone;
         std::string what; // for the log: "rim", a strap's name...
         bool place = false; // put the weapon there on the hold's first tick
+        bool fingers = false; // curl that hand's fingers (pose_shield_hand_grip_type) while held
     };
     FreeGrip g_pending_free[2]; // applied when that hand's next hold starts
 
@@ -3034,6 +3067,8 @@ namespace
         hsvr::Vec3 last_set_v, last_set_w;
         std::string last_responses;
         double miss_cm = 0.0, last_contact = -100.0;
+        double self_checked_at = -1.0; // the stop the own-body check last looked at
+        bool self_blocked = false;
         double last_blocked_cm = -1.0; // last tick's blocked_cm (a weapon still coming is not stuck)
         // The slide: how far the hand has moved along the weapon (cm along its +Z from the game's grip
         // point), and the grip zone it may move in (found once per weapon).
@@ -3042,6 +3077,7 @@ namespace
         double zone_lo = 0.0, zone_hi = 0.0;
         double zone_stop = 0.0, zone_tip = 0.0; // the guard (top stop) and the tip, from the game's grip point
         double body_strength = 1.0; // the game's stats on this hand's hold (strength x injury x stamina)
+        bool into_hand_tried = false; // pose_shield_in_hand looked once
         bool forearm = false;       // held on the forearm (strap shields: the game's joint is to the lower arm)
         std::string anchor_bone;    // the bone the game's joint holds it to
         bool sliding = false;
@@ -4356,10 +4392,14 @@ namespace
         {L"Shield_BossGrip", "handle", -0.00, -0.39, 0.70, -0.001, 0.000, 1.000, 50.1, true, true},
     };
 
-    // The mod's free grip on a weapon just set up in that hand: held in the hand (the hand bone) by
-    // `point` (world, on the weapon), turned as it was, from the pose it had before the game's set-up.
-    void hold_where_touched(int side, UObject* mesh, UObject* weapon, UObject* base, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm,
-                            const hsvr::Vec3& point, const char* what)
+    // The hand's grip line in the hand bone's frame (right: the game's sword grip, measured; left mirrored across X).
+    hsvr::Vec3 hand_grip_axis(int side) { return hsvr::normalized(hsvr::Vec3{side == 0 ? 0.50 : -0.50, 0.86, 0.11}); }
+
+    // The mod's free grip: held in the hand (the hand bone) by `point` (world, on the weapon), turned
+    // as it was in pose (w0), or, given `axis` (world, a strap's or handle's line), turned the least
+    // that lays that line along the hand's grip line.
+    FreeGrip make_free_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const hsvr::Vec3& point,
+                            const hsvr::Vec3* axis, const char* what)
     {
         using namespace hsvr;
         Vec3 a_pos = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
@@ -4370,47 +4410,92 @@ namespace
         g.pivot = w0_rot.inverse().rotate(point - w0_pos);
         g.in_anchor = a_rot.inverse().rotate(palm - a_pos);
         g.rel = (a_rot.inverse() * w0_rot).normalized();
+        if (axis)
+        {
+            Vec3 f = normalized(a_rot.inverse().rotate(*axis)), want = hand_grip_axis(side);
+            if (dot(f, want) < 0.0) want = want * -1.0;
+            Vec3 n = cross(f, want);
+            double sn = length(n), c = dot(f, want);
+            if (sn > 1e-6)
+            {
+                Quat turn = quat_axis_angle(n * (1.0 / sn), std::atan2(sn, c));
+                g.rel = (turn * g.rel).normalized();
+                HSVR_LOG("Grab: %s hand turns the %s %.0f deg to lie along the hand's grip line", side == 0 ? "left" : "right", what, std::atan2(sn, c) * 180.0 / 3.14159265358979);
+            }
+        }
         g.what = what;
-        g_pending_free[side] = g;
+        return g;
+    }
+
+    // The same, for a weapon just set up in that hand: applied when its hold starts.
+    void hold_where_touched(int side, UObject* mesh, UObject* weapon, UObject* base, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm,
+                            const hsvr::Vec3& point, const char* what, const hsvr::Vec3* axis = nullptr, bool fingers = false)
+    {
+        using namespace hsvr;
+        g_pending_free[side] = make_free_grip(side, mesh, w0_pos, w0_rot, palm, point, axis, what);
+        g_pending_free[side].fingers = fingers;
         set_component_transform(base, w0_pos, w0_rot, true);
         HSVR_LOG("Grab: %s hand took %ls by the %s (%.1f cm from the hand), held in the hand there", side == 0 ? "left" : "right", weapon->GetName().c_str(), what,
                  length(point - palm));
     }
 
+    // The fitting of a shield nearest a point (shield BaseMesh frame): its name, the point on it and
+    // its line. `within` limits the distance (cm); game_only takes only the game's own for that hand.
+    const ShieldFitting* nearest_fitting(const std::wstring& cls, const hsvr::Vec3& local, double within, int side, bool game_only, hsvr::Vec3& on, double& dist,
+                                         int* known = nullptr);
+
+    const ShieldFitting* nearest_fitting(const std::wstring& cls, const hsvr::Vec3& local, double within, int side, bool game_only, hsvr::Vec3& on, double& dist,
+                                         int* known)
+    {
+        using namespace hsvr;
+        const ShieldFitting* best = nullptr;
+        dist = within;
+        if (known) *known = 0;
+        for (const ShieldFitting& f : k_shield_fittings)
+        {
+            if (cls != f.shield) continue;
+            if (known) ++*known;
+            if (game_only && !(side == 1 ? f.game_r : f.game_l)) continue;
+            Vec3 c{f.cx, f.cy, f.cz}, a = normalized(Vec3{f.ax, f.ay, f.az});
+            double t = (std::max)(-f.length * 0.5, (std::min)(f.length * 0.5, dot(local - c, a)));
+            Vec3 p = c + a * t;
+            double d = length(local - p);
+            if (d <= dist)
+            {
+                dist = d;
+                best = &f;
+                on = p;
+            }
+        }
+        return best;
+    }
+
+    std::wstring shield_class(UObject* shield)
+    {
+        std::wstring cls = shield && shield->GetClassPrivate() ? shield->GetClassPrivate()->GetName() : std::wstring();
+        if (cls.size() > 2 && cls.substr(cls.size() - 2) == STR("_C")) cls.resize(cls.size() - 2);
+        return cls;
+    }
+
     // A shield taken with the grip button. The hand point, in the shield's frame from before the
     // game's set-up moves it, is matched against its fittings: the nearest within
-    // pose_shield_point_cm wins. One of the game's own for that hand keeps the game's grip (a strap
-    // shield then sits on the forearm as the game has it). Any other fitting is held in the hand where
-    // the hand closed on it, and anywhere else on the shield (the rim, an edge, the face) the hand
-    // holds it where it touched; both keep the shield turned as it was in the hand. The hold places
+    // pose_shield_point_cm wins. One of the game's own for that hand keeps the game's grip (bucklers
+    // and the heater's boss grip are held in the hand by it; a strap shield the game puts on the
+    // forearm is moved into the hand when its hold starts, pose_shield_in_hand). Any other fitting is
+    // held in the hand, its line along the hand's grip line, and anywhere else on the shield (the
+    // rim, an edge, the face) the hand holds it where it touched, turned as it was. The hold places
     // it there on its first tick (the game's set-up snaps it to its own grip a tick later).
     void shield_grip(int side, UObject* mesh, UObject* shield, UObject* base, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm,
                      const hsvr::Vec3& touch, const hsvr::Config& cfg)
     {
         using namespace hsvr;
         const char* hand = side == 0 ? "left" : "right";
-        std::wstring cls = shield->GetClassPrivate() ? shield->GetClassPrivate()->GetName() : std::wstring();
-        if (cls.size() > 2 && cls.substr(cls.size() - 2) == STR("_C")) cls.resize(cls.size() - 2);
+        std::wstring cls = shield_class(shield);
         Vec3 local = w0_rot.inverse().rotate(palm - w0_pos);
-        const ShieldFitting* best = nullptr;
-        double best_d = cfg.pose_shield_point_cm;
         Vec3 best_on;
+        double best_d = 0.0;
         int known = 0;
-        for (const ShieldFitting& f : k_shield_fittings)
-        {
-            if (cls != f.shield) continue;
-            ++known;
-            Vec3 c{f.cx, f.cy, f.cz}, a = normalized(Vec3{f.ax, f.ay, f.az});
-            double t = (std::max)(-f.length * 0.5, (std::min)(f.length * 0.5, dot(local - c, a)));
-            Vec3 on = c + a * t;
-            double d = length(local - on);
-            if (d <= best_d)
-            {
-                best_d = d;
-                best = &f;
-                best_on = on;
-            }
-        }
+        const ShieldFitting* best = nearest_fitting(cls, local, cfg.pose_shield_point_cm, side, false, best_on, best_d, &known);
         if (best && (side == 1 ? best->game_r : best->game_l))
         {
             HSVR_LOG("Shield: %s hand took %ls by its %s (%.1f cm), the game's own grip", hand, shield->GetName().c_str(), best->name, best_d);
@@ -4421,8 +4506,41 @@ namespace
             HSVR_LOG("Shield: %s hand took %ls, a shield with no measured grab points: the game's own grip", hand, cls.c_str());
             return;
         }
-        Vec3 at_point = best ? w0_pos + w0_rot.rotate(best_on) : touch;
-        hold_where_touched(side, mesh, shield, base, w0_pos, w0_rot, palm, at_point, best ? best->name : "edge where the hand touched it");
+        if (best)
+        {
+            Vec3 axis = w0_rot.rotate(normalized(Vec3{best->ax, best->ay, best->az}));
+            hold_where_touched(side, mesh, shield, base, w0_pos, w0_rot, palm, w0_pos + w0_rot.rotate(best_on), best->name, &axis, true);
+        }
+        else
+            hold_where_touched(side, mesh, shield, base, w0_pos, w0_rot, palm, touch, "edge where the hand touched it", nullptr, true);
+    }
+
+    // A strap shield the game holds on the forearm, moved into the hand (pose_shield_in_hand): by the
+    // fitting nearest the hand, the game's own for that hand first (within 15 cm), else any.
+    bool shield_into_hand(int side, UObject* pawn, UObject* shield, UObject* base, FreeGrip& out)
+    {
+        using namespace hsvr;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        if (!mesh || !base) return false;
+        std::wstring cls = shield_class(shield);
+        Vec3 palm = hand_grab_point(mesh, side);
+        Vec3 w0_pos = component_location(base);
+        Quat w0_rot = component_rotation(base);
+        Vec3 local = w0_rot.inverse().rotate(palm - w0_pos), on;
+        double d = 0.0;
+        const ShieldFitting* f = nearest_fitting(cls, local, 15.0, side, true, on, d);
+        if (!f) f = nearest_fitting(cls, local, 1e9, side, false, on, d);
+        if (!f)
+        {
+            HSVR_LOG("Shield: %ls has no measured fittings: left on the forearm", cls.c_str());
+            return false;
+        }
+        Vec3 axis = w0_rot.rotate(normalized(Vec3{f->ax, f->ay, f->az}));
+        out = make_free_grip(side, mesh, w0_pos, w0_rot, palm, w0_pos + w0_rot.rotate(on), &axis, f->name);
+        out.fingers = true;
+        HSVR_LOG("Shield: %s hand holds %ls in the hand by its %s (was on the forearm; the hand was %.1f cm from it)", side == 0 ? "left" : "right",
+                 shield->GetName().c_str(), f->name, d);
+        return true;
     }
 
     void grab_button(const hsvr::Config& cfg, const hsvr::ControllerState& state, bool menu_up)
@@ -4649,6 +4767,19 @@ namespace
             {
                 double now = now_seconds();
                 if (h.stuck_since < 0.0) h.stuck_since = now;
+                else if (now - h.stuck_since >= cfg.pose_hold_let_go_s && cfg.pose_hold_let_go_ignore_self && h.self_checked_at != h.stuck_since)
+                {
+                    // Stopped by his own body (playtest 2026-11-18: 2 of 5 let-goes): not stuck in
+                    // anything; it stays in the hand. Looked at once per stop.
+                    h.self_checked_at = h.stuck_since;
+                    std::wstring bone;
+                    double d = own_body_contact(g_pose.pawn, h.weapon, 3.0, &bone);
+                    h.self_blocked = d >= 0.0;
+                    if (h.self_blocked)
+                        HSVR_LOG("Hold: %s hand keeps %ls: it is stopped by his own %ls (%.1f cm), not stuck in anything", side == 0 ? "left" : "right",
+                                 h.weapon->GetName().c_str(), bone.c_str(), d);
+                }
+                if (h.self_blocked && h.self_checked_at == h.stuck_since) {}
                 else if (now - h.stuck_since >= cfg.pose_hold_let_go_s)
                 {
                     HSVR_LOG("Hold: %s hand lets go of %ls: stopped %.0f cm from where you hold it, its grip %.0f cm from the shoulder (reach %.0f), "
@@ -4669,6 +4800,76 @@ namespace
         hand_rot = (dr * hand_rot).normalized();
         target = point - hand_rot.rotate(h.in_hand);
         return true;
+    }
+
+    // Walks a weapon's axis (BaseMesh +Z through the grip point) both ways from the grip, in 2 cm
+    // steps, asking its real parts (closest_on_weapon): a step is on the weapon while the axis point
+    // is inside (or within 1.5 cm of) a part, and wide when, seen from 12 cm out on any of four sides,
+    // a part level with the step reaches out further than wide_cm from the axis. lo/hi = the last step on the weapon and not wide, each
+    // way; wide_lo/hi say whether it stopped at a wide part (else at the weapon's end). False when
+    // the grip itself is not inside the parts. Cached per weapon.
+    struct AxisMeasure { bool ok; double lo, hi; bool wide_lo, wide_hi; };
+    std::unordered_map<UObject*, AxisMeasure> g_axis_measures;
+    bool measure_weapon_axis(UObject* weapon, UObject* base, const hsvr::Vec3& pivot, double wide_cm, double tip, double& lo, double& hi, bool& wide_lo,
+                             bool& wide_hi)
+    {
+        using namespace hsvr;
+        auto cached = g_axis_measures.find(weapon);
+        if (cached == g_axis_measures.end())
+        {
+            AxisMeasure m{false, 0.0, 0.0, false, false};
+            Vec3 bp = component_location(base);
+            Quat br = component_rotation(base);
+            Vec3 side[4] = {br.rotate({1, 0, 0}), br.rotate({-1, 0, 0}), br.rotate({0, 1, 0}), br.rotate({0, -1, 0})};
+            const double out = 12.0, step = 2.0;
+            // 0 = on the weapon and narrow, 1 = wide, 2 = off the weapon
+            auto probe = [&](double z) {
+                Vec3 a = bp + br.rotate({pivot.x, pivot.y, pivot.z + z});
+                double d = closest_on_weapon(weapon, a);
+                if (d < 0.0 || d > 1.5) return 2;
+                // The nearest point of the parts seen from 12 cm out: wide only when that point is level
+                // with this step (a guard a few cm further along would otherwise read as wide here).
+                for (const Vec3& dir : side)
+                {
+                    Vec3 q;
+                    double e = closest_on_weapon(weapon, a + dir * out, &q);
+                    if (e < 0.0) continue;
+                    Vec3 l = br.inverse().rotate(q - a);
+                    if (std::fabs(l.z) <= step * 0.75 && std::sqrt(l.x * l.x + l.y * l.y) > wide_cm) return 1;
+                }
+                return 0;
+            };
+            if (probe(0.0) != 2)
+            {
+                m.ok = true;
+                double limit = (std::max)(300.0, tip + 20.0);
+                for (int dirn = -1; dirn <= 1; dirn += 2)
+                {
+                    double last = 0.0;
+                    bool wide = false;
+                    for (double z = step; z <= limit; z += step)
+                    {
+                        int r = probe(dirn * z);
+                        if (r != 0)
+                        {
+                            wide = r == 1;
+                            break;
+                        }
+                        last = z;
+                    }
+                    // A wide part stops the hand at the part itself (its near edge, a step past the last narrow one).
+                    if (dirn < 0) { m.lo = -(wide ? last + step * 0.5 : last); m.wide_lo = wide; }
+                    else { m.hi = wide ? last + step * 0.5 : last; m.wide_hi = wide; }
+                }
+            }
+            cached = g_axis_measures.emplace(weapon, m).first;
+        }
+        const AxisMeasure& m = cached->second;
+        lo = m.lo;
+        hi = m.hi;
+        wide_lo = m.wide_lo;
+        wide_hi = m.wide_hi;
+        return m.ok;
     }
 
     // The grip zone of a weapon along its blade axis (BaseMesh +Z, cm from the game's grip point
@@ -4723,6 +4924,32 @@ namespace
                     how = "base-tagged scene";
                 }
             }
+        }
+        // Measured from the real parts (billhook, playtest 2026-11-18: its Head module starts 10 cm
+        // above the hand and "Length to Bottom" is 20 cm, but the haft runs 56+ cm below the grip).
+        if (cfg.pose_slide_zone_measured)
+        {
+            double m_lo = 0.0, m_hi = 0.0;
+            bool wide_lo = false, wide_hi = false;
+            if (measure_weapon_axis(weapon, base, h.pivot, cfg.pose_slide_wide_cm, top, m_lo, m_hi, wide_lo, wide_hi))
+            {
+                HSVR_LOG("Slide: %ls measured along its axis: %s %.1f cm below the grip, %s %.1f cm above (game's data: pommel end %.1f, %s at %.1f)",
+                         weapon->GetName().c_str(), wide_lo ? "wide part" : "end", -m_lo, wide_hi ? "wide part" : "end", m_hi, bottom,
+                         how, stop < 1e8 ? stop : 0.0);
+                bottom = -m_lo;
+                if (wide_hi)
+                {
+                    stop = m_hi;
+                    how = "measured wide part";
+                }
+                else if (stop < 1e8 && stop > m_hi)
+                {
+                    stop = m_hi;
+                    how = "measured end";
+                }
+            }
+            else
+                HSVR_LOG("Slide: %ls could not be measured along its axis (the grip is not inside its parts); the game's data is used", weapon->GetName().c_str());
         }
         double half = cfg.pose_slide_hand_half_cm;
         h.zone_lo = bottom > 0.0 ? (std::min)(0.0, -bottom + half) : 0.0;
@@ -4915,7 +5142,16 @@ namespace
                                     : (forearm ? " (on the forearm: strap shield)" : ""));
             }
             h.forearm = forearm;
+            if (forearm && !h.free.set && !h.into_hand_tried && cfg.pose_shield_in_hand)
+            {
+                h.into_hand_tried = true;
+                FreeGrip g;
+                if (shield_into_hand(side, pawn, weapon, base, g)) h.free = g;
+            }
         }
+        if (h.free.set && h.free.fingers && cfg.pose_shield_hand_grip_type >= 0.0 &&
+            read_number_variable(pawn, grip_type_name(side)) != cfg.pose_shield_hand_grip_type)
+            set_variable(pawn, grip_type_name(side), cfg.pose_shield_hand_grip_type);
         if (h.free.set)
         {
             // The mod's own grip: anchored on the hand (as the controller has it) or a strap's bone.

@@ -28,6 +28,7 @@ The game holds a weapon with a physics joint between the weapon and the hand bon
 | `pose_hold_turn_spring`, `pose_hold_turn_damper`, `pose_hold_max_torque` | 1100, 45, 250 | Its turning spring (N m/rad), damper and most torque (N m), the framework's values with its handle multipliers (x1.1, x0.9). |
 | `pose_hold_hand_on_weapon`, `pose_hold_blocked_from_cm` | 1, 3 | While held, his visible hand sits on the weapon when something stops it, instead of going on with your controller (Matthew's framework). It eases in as the weapon falls 1 to 3 cm behind where the hold sent it. |
 | `pose_hold_let_go`, `pose_hold_let_go_s` | 1, 0.15 | The stuck rule: a stopped weapon whose grip is out of his reach from the shoulder, or more than an arm's length from your hand, for 0.15 s, is let go with the game's own drop (Set Up Right/Left Hand Weapon with no weapon, dropped with no damage). |
+| `pose_hold_let_go_ignore_self` | 1 | A weapon stopped by his own body (any of his physics bodies within 3 cm of its axis) is kept in the hand, not let go. Vanilla weapons collide with his body too, so the collision stays. |
 | `pose_ghost_hand`, `pose_ghost_from_cm` | 0, 4 | The ghost hand: while his hand stays on a stopped weapon more than 4 cm from your real hand, a see-through glove shows where your hand is. |
 | `pose_ghost_mesh`, `pose_ghost_material` | a game glove, the engine's unlit translucent | Object paths in the cooked game (see HalfSwordDecomp ghost_hand_assets.md for others). |
 | `pose_ghost_x_cm/y_cm/z_cm`, `pose_ghost_pitch/yaw/roll`, `pose_ghost_scale` | 0, pitch 180, scale 0.8 | Fitting the glove onto the hand bone. |
@@ -59,6 +60,7 @@ Next: your strength from the game's stats instead of a fixed number, the hand st
 |---|---|---|
 | `pose_slide` | 1 | The slide. |
 | `pose_slide_hand_half_cm` | 4.5 | How far inside each end of the zone the hand's centre stops. |
+| `pose_slide_zone_measured`, `pose_slide_wide_cm` | 1, 4 | The grip zone comes from the weapon's real parts: walking its axis from the grip, it ends where the weapon ends or gets wider than 4 cm from the axis (a guard, a polearm's hook or head, a wide pommel). The log line "measured along its axis" gives both ends next to the game's own lengths. 0 = the game's lengths and its Head module (wrong on polearms: the billhook's zone was 21 cm of a 231 cm weapon). |
 | `pose_slide_rate_min`, `pose_slide_rate_max` | 3, 40 | How fast (1/s) the hand catches up along the weapon at a light and a full trigger squeeze. |
 | `pose_slide_max_cm_s` | 250 | Fastest the hand runs along a weapon (a game hitch is not a slide). No slide in the first second a weapon is in the hand. |
 | `pose_hold_let_go_grace_s` | 1.0 | No stuck let-go this long after a weapon comes into the hand, or while it is still closing in (long weapons swing into place). |
@@ -94,8 +96,9 @@ Next: your strength from the game's stats instead of a fixed number, the hand st
 |---|---|---|
 | `pose_grab_button` | 1 | The grab button. |
 | `pose_grab_radius_cm` | 18 | How near the weapon's body (its real shape) your hand must be. Was 10: in the headset 8 floor pickups missed by 10-17 cm (playtest 2026-11-18). |
-| `pose_shield_free_grip` | 1 | Shields: every strap and handle measured on the shield's mesh is a grab point. The hand closing within `pose_shield_point_cm` of one the game itself uses for that hand takes the game's grip (strap shields on the forearm); any other fitting is held in the hand where it closed, and anywhere else (the rim, an edge) the hand holds it where it touched. 0 = always the game's grip. |
+| `pose_shield_free_grip` | 1 | Shields: every strap and handle measured on the shield's mesh is a grab point. The hand closing within `pose_shield_point_cm` of one the game itself uses for that hand takes the game's grip; any other fitting is held in the hand, turned so the strap or handle lies along the hand's grip line, and anywhere else (the rim, an edge) the hand holds it where it touched. 0 = always the game's grip. |
 | `pose_shield_point_cm` | 8 | How near a strap or handle the hand must close to take the shield by it. |
+| `pose_shield_in_hand`, `pose_shield_hand_grip_type` | 1, 2 | Strap shields the game puts on the forearm (the round's own, or taken by its forearm strap) are held in the hand instead, by the fitting nearest the hand (its line along the hand's grip line). Fingers of a hand holding a shield by the mod's grip take grip type 2 (the game's curled sword grip); -1 leaves the game's. |
 | `pose_weapon_free_grip` | 1 | A loose weapon taken more than `pose_weapon_free_cm` (6) from its grip (by the blade, the haft, the tip) is held where the hand closed, turned as it was, instead of snapped onto its grip. The other hand cannot join it two-handed yet. |
 | `pose_weapon_free_cm` | 6 | How far from the weapon's grip point counts as taking it elsewhere. |
 | `pose_grab_release_drops` | 1 | Letting go of the grip drops the weapon. |

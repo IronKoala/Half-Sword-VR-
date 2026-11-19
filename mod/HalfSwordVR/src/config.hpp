@@ -216,6 +216,8 @@ namespace hsvr
         double pose_hold_blocked_from_cm = 3.0;
         // The stuck rule: a stopped weapon whose grip is out of his reach from the shoulder, or more
         // than an arm's length from your hand, for pose_hold_let_go_s, is let go (the game's own drop).
+        // A weapon stopped by his own body is never let go by the stuck rule (vanilla weapons collide with him too).
+        bool pose_hold_let_go_ignore_self = true;
         bool pose_hold_let_go = true;
         double pose_hold_let_go_s = 0.15;
         // No let-go for this long after a weapon comes into the hand (long weapons swing into place).
@@ -233,6 +235,11 @@ namespace hsvr
         // a full trigger squeeze.
         bool pose_slide = true;
         double pose_slide_hand_half_cm = 4.5;
+        // The zone is measured from the weapon's real parts: walking along its axis from the grip, it
+        // ends where the weapon ends or gets wider (radius) than a hand slides past (a guard, a
+        // polearm's hook or head, a wide pommel). 0 = the game's lengths and its Head module only.
+        bool pose_slide_zone_measured = true;
+        double pose_slide_wide_cm = 4.0;
         double pose_slide_rate_min = 3.0;
         double pose_slide_rate_max = 40.0;
         double pose_slide_max_cm_s = 250.0; // fastest the hand runs along a weapon
@@ -249,6 +256,13 @@ namespace hsvr
         double pose_weapon_free_cm = 6.0;
         // How near a strap or handle the hand must close to take the shield by it (cm).
         double pose_shield_point_cm = 8.0;
+        // A strap shield the game puts on the forearm (the round's own, or taken by its forearm strap)
+        // is held in the hand instead, by the fitting nearest the hand (Matthew 2026-11-19: "In the
+        // hand, like ones you pick up"). Fittings held in the hand are turned so the strap or handle
+        // runs along the hand's grip line, and that hand's fingers take this grip type (2 = the
+        // game's sword grip, curled; -1 = leave the game's).
+        bool pose_shield_in_hand = true;
+        double pose_shield_hand_grip_type = 2.0;
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;

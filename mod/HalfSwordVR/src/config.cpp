@@ -331,12 +331,15 @@ namespace hsvr
         num("pose_hold_blocked_from_cm", c.pose_hold_blocked_from_cm);
         flag("pose_hold_let_go", c.pose_hold_let_go);
         num("pose_hold_let_go_s", c.pose_hold_let_go_s);
+        flag("pose_hold_let_go_ignore_self", c.pose_hold_let_go_ignore_self);
         num("pose_hold_let_go_grace_s", c.pose_hold_let_go_grace_s);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
         flag("pose_hold_ignore_hand", c.pose_hold_ignore_hand);
         flag("pose_hold_block_offhand_search", c.pose_hold_block_offhand_search);
         flag("pose_slide", c.pose_slide);
         num("pose_slide_hand_half_cm", c.pose_slide_hand_half_cm);
+        flag("pose_slide_zone_measured", c.pose_slide_zone_measured);
+        num("pose_slide_wide_cm", c.pose_slide_wide_cm);
         num("pose_slide_rate_min", c.pose_slide_rate_min);
         num("pose_slide_rate_max", c.pose_slide_rate_max);
         num("pose_slide_max_cm_s", c.pose_slide_max_cm_s);
@@ -346,6 +349,8 @@ namespace hsvr
         flag("pose_weapon_free_grip", c.pose_weapon_free_grip);
         num("pose_weapon_free_cm", c.pose_weapon_free_cm);
         num("pose_shield_point_cm", c.pose_shield_point_cm);
+        flag("pose_shield_in_hand", c.pose_shield_in_hand);
+        num("pose_shield_hand_grip_type", c.pose_shield_hand_grip_type);
         flag("pose_two_hand", c.pose_two_hand);
         num("pose_two_hand_strength", c.pose_two_hand_strength);
         num("pose_two_hand_blade_gap_cm", c.pose_two_hand_blade_gap_cm);
