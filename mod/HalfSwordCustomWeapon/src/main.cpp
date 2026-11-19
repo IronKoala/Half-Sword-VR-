@@ -119,9 +119,6 @@ namespace
         std::wstring own_material = L"/Game/Assets/Props/Cooking_Utencils/Materials/MI_Prop_Cooking_Utencil_Pot_002.MI_Prop_Cooking_Utencil_Pot_002";
         std::wstring tex_base = L"D", tex_normal = L"N", tex_orm = L"ORM";
         int own_textures = 1;     // 0: keep the game's material untouched
-        // Automatic swap: every weapon (anyone's) whose Head mesh name contains this text becomes the
-        // model, without pressing the key. Empty = off.
-        std::wstring auto_head_mesh;
     };
     Settings g_settings;
 
@@ -156,7 +153,6 @@ namespace
             else if (k == "tex_base") g_settings.tex_base = std::wstring(v.begin(), v.end());
             else if (k == "tex_normal") g_settings.tex_normal = std::wstring(v.begin(), v.end());
             else if (k == "tex_orm") g_settings.tex_orm = std::wstring(v.begin(), v.end());
-            else if (k == "auto_head_mesh") g_settings.auto_head_mesh = std::wstring(v.begin(), v.end());
             else if (k == "own_material") g_settings.own_material = std::wstring(v.begin(), v.end());
             else if (k == "own_textures") g_settings.own_textures = atoi(v.c_str());
         }
@@ -1413,47 +1409,12 @@ namespace
 
     bool g_key_was_down = false;
 
-    // Automatic swap, checked once a second. A weapon is swapped once its Head has shown the
-    // wanted mesh on two checks in a row (so the forge has finished setting it up); after the
-    // swap its Head holds our runtime mesh, so it is not matched again.
-    std::map<UObject*, int> g_auto_seen;
-    ULONGLONG g_auto_next = 0;
-
-    void auto_swap()
-    {
-        if (g_settings.auto_head_mesh.empty()) return;
-        ULONGLONG now = GetTickCount64();
-        if (now < g_auto_next) return;
-        g_auto_next = now + 1000;
-        std::wstring base_name = model_base_name();
-        if (!has_collision_file(base_name)) return;
-        std::vector<UObject*> weapons;
-        UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
-        std::map<UObject*, int> seen;
-        for (UObject* w : weapons)
-        {
-            if (w->GetName().rfind(STR("Default__"), 0) == 0) continue;
-            UObject* mesh = object_property(object_property(w, STR("Head")), STR("StaticMesh"));
-            if (!mesh || mesh->GetName().find(g_settings.auto_head_mesh) == std::wstring::npos) continue;
-            int count = g_auto_seen.count(w) ? g_auto_seen[w] + 1 : 1;
-            if (count < 2)
-            {
-                seen[w] = count;
-                continue;
-            }
-            log("---- automatic swap: %s (head mesh %s) ----", name_of(w).c_str(), name_of(mesh).c_str());
-            if (vector_sizes_ok()) apply_full_weapon(w, base_name);
-        }
-        g_auto_seen.swap(seen);
-    }
-
     void tick(UObject* engine)
     {
         g_engine = engine;
         bool down = (GetAsyncKeyState(g_settings.key) & 0x8000) != 0;
         if (down && !g_key_was_down) apply();
         g_key_was_down = down;
-        auto_swap();
     }
 } // namespace
 
