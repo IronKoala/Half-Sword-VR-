@@ -11834,6 +11834,88 @@ namespace
         (void)cfg;
     }
 
+    // hsvr.test_room_report: where everything in the room is (unattended checks): him, every weapon
+    // table (and whether it still stands), every loose weapon (on which table, and where on its top
+    // in the table's own frame) and every foe (standing or down, AI off, what he holds).
+    void room_report()
+    {
+        using hsvr::Vec3;
+        UObject* player = nullptr;
+        find_pawn_mesh(&player);
+        if (!player)
+        {
+            HSVR_LOG("TestRoom: check: no player pawn");
+            return;
+        }
+        Vec3 me = actor_location(player);
+        HSVR_LOG("TestRoom: check: you at (%.0f, %.0f, %.0f), %s", me.x, me.y, me.z, bool_property(player, STR("DED")) ? "DEAD" : "alive");
+        struct Table { Vec3 at; hsvr::Quat q; };
+        std::vector<Table> tables;
+        std::vector<UObject*> containers;
+        UObjectGlobals::FindAllOf(STR("BP_Container_Master_C"), containers);
+        for (UObject* c : containers)
+        {
+            if (!c || c->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            UObject* box = object_property(c, STR("Box"));
+            if (!box) continue;
+            Table t{component_location(box), component_rotation(box)};
+            Vec3 up = t.q.rotate(Vec3{0, 0, 1});
+            HSVR_LOG("TestRoom: check: table %ls at (%.0f, %.0f, %.0f), its up (%.2f, %.2f, %.2f) - %s", c->GetName().c_str(), t.at.x, t.at.y, t.at.z, up.x, up.y, up.z,
+                     up.z > 0.95 ? "standing" : "TIPPED");
+            tables.push_back(t);
+        }
+        std::vector<UObject*> weapons, willies;
+        UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        int loose = 0, on_table = 0;
+        for (UObject* w : weapons)
+        {
+            if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || is_fist(w) || bool_property(w, STR("Is Sheathed"))) continue;
+            bool held = false;
+            for (UObject* c : willies)
+                if (c && (object_property(c, STR("Weapon R")) == w || object_property(c, STR("Weapon L")) == w)) held = true;
+            if (held) continue;
+            UObject* base = object_property(w, STR("BaseMesh"));
+            if (!base) continue;
+            ++loose;
+            Vec3 at = component_location(base);
+            int best = -1;
+            Vec3 local{};
+            double best_d = 1e9;
+            for (size_t i = 0; i < tables.size(); ++i)
+            {
+                Vec3 l = tables[i].q.inverse().rotate(at - tables[i].at);
+                double d = std::sqrt(l.x * l.x + l.y * l.y);
+                if (d < best_d) { best_d = d; best = (int)i; local = l; }
+            }
+            bool on = best >= 0 && std::fabs(local.x) < 55.0 && std::fabs(local.y) < 90.0 && local.z > 80.0 && local.z < 130.0;
+            if (on) ++on_table;
+            HSVR_LOG("TestRoom: check: weapon %ls at (%.0f, %.0f, %.0f); table %d frame (%.0f, %.0f, %.0f) - %s", w->GetName().c_str(), at.x, at.y, at.z, best, local.x,
+                     local.y, local.z, on ? "on the table" : (best >= 0 && local.z <= 80.0 ? "OFF the table (low)" : "OFF the table"));
+        }
+        int foes = 0, standing = 0, ai_on = 0;
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        for (UObject* f : willies)
+        {
+            if (!f || f == player || f->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            ++foes;
+            Vec3 at = actor_location(f);
+            UObject* m = object_property(f, STR("Mesh"));
+            Vec3 pe = m ? socket_location(m, pelvis_bone) : at;
+            UObject* ai = object_property(f, STR("Controller"));
+            bool ai_off = ai && bool_property(ai, STR("DED"));
+            if (ai && !ai_off) ++ai_on;
+            bool up = pe.z - me.z > -40.0;
+            if (up) ++standing;
+            UObject* wr = object_property(f, STR("Weapon R"));
+            HSVR_LOG("TestRoom: check: foe %ls at (%.0f, %.0f, %.0f) %.0f cm from you, pelvis %.0f cm above your capsule centre (%s), %s, AI %s, AI In Combat %d, holds %ls",
+                     f->GetName().c_str(), at.x, at.y, at.z, hsvr::length(at - me), pe.z - me.z, up ? "standing" : "down", bool_property(f, STR("DED")) ? "DEAD" : "alive",
+                     ai ? (ai_off ? "off" : "ON") : "none", (int)bool_property(f, STR("AI In Combat")), wr ? wr->GetName().c_str() : STR("nothing"));
+        }
+        HSVR_LOG("TestRoom: check: %d table(s), %d loose weapon(s) of which %d on a table, %d foe(s) of which %d standing and %d with AI on", (int)tables.size(), loose,
+                 on_table, foes, standing, ai_on);
+    }
+
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -11936,6 +12018,11 @@ namespace
             if (entry.command == "hsvr.test_room_boot")
             {
                 room_boot(cfg);
+                continue;
+            }
+            if (entry.command == "hsvr.test_room_report")
+            {
+                room_report();
                 continue;
             }
             if (entry.command == "hsvr.test_room_open")
