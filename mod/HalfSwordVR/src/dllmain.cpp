@@ -4647,6 +4647,16 @@ namespace
         int grip_r = -1, grip_l = -1; // finger shape for that hand (-1 = the game's own)
     };
     const std::vector<Handle>& item_handles(UObject* item, UObject* base);
+    // Weapons and tools are taken only by a handle; shields and bottles anywhere.
+    bool grab_needs_handle(UObject* item)
+    {
+        if (!item) return false;
+        std::wstring cls = item->GetClassPrivate() ? item->GetClassPrivate()->GetName() : std::wstring();
+        if (cls.rfind(STR("Shield"), 0) == 0) return false;
+        if (cls.find(STR("Consumable")) != std::wstring::npos || cls.find(STR("Bottle")) != std::wstring::npos) return false;
+        if (cls.find(STR("Fists")) != std::wstring::npos) return false;
+        return true;
+    }
     int nearest_handle(const std::vector<Handle>& hs, const hsvr::Vec3& local, double& t, double& dist);
     FreeGrip make_free_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const hsvr::Vec3& point,
                             const hsvr::Vec3* axis, const char* what);
@@ -4944,6 +4954,12 @@ namespace
         double t = 0.0, hd = 1e9;
         int hi = nearest_handle(hs, local, t, hd);
         bool on_handle = hi >= 0 && hd <= cfg.pose_grab_handle_cm;
+        if (!on_handle && cfg.pose_grab_weapon_handles_only && grab_needs_handle(weapon))
+        {
+            HSVR_LOG("Two hands: %s grip squeezed on %ls off its handles (nearest %s %.1f cm away): not taken", side == 0 ? "left" : "right",
+                     weapon->GetName().c_str(), hi >= 0 ? hs[hi].name.c_str() : "none", hd);
+            return false;
+        }
         Vec3 spot = local;
         if (!on_handle)
         {
@@ -5896,6 +5912,14 @@ namespace
                     const std::vector<Handle>& hs = item_handles(best, hb);
                     double t = 0.0, hd = 1e9;
                     int hi = nearest_handle(hs, w0_rot.inverse().rotate(at - w0_pos), t, hd);
+                    // B&S: a weapon is taken only by a handle (its grip, a haft stretch, a sword's blade);
+                    // shields (straps or anywhere on the rim) and bottles still go where the hand touched.
+                    if (cfg.pose_grab_weapon_handles_only && !(hi >= 0 && hd <= cfg.pose_grab_handle_cm) && grab_needs_handle(best))
+                    {
+                        HSVR_LOG("Grab: %s hand touched %ls off its handles (nearest %s %.1f cm away, needs %.0f): not taken", hand, best->GetName().c_str(),
+                                 hi >= 0 ? hs[hi].name.c_str() : "none", hd, cfg.pose_grab_handle_cm);
+                        continue;
+                    }
                     bool ok = give_hand_weapon(side, pawn, best);
                     UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
                     if (ok && now == best)
@@ -6108,10 +6132,17 @@ namespace
     // a part level with the step reaches out further than wide_cm from the axis. lo/hi = the last step on the weapon and not wide, each
     // way; wide_lo/hi say whether it stopped at a wide part (else at the weapon's end). False when
     // the grip itself is not inside the parts. Cached per weapon.
-    struct AxisMeasure { bool ok; double lo, hi; bool wide_lo, wide_hi; double at_z; };
+    struct AxisMeasure
+    {
+        bool ok;
+        double lo, hi;
+        bool wide_lo, wide_hi;
+        double at_z;
+        std::vector<std::pair<double, double>> extra; // further haft stretches above the first stop (hafted weapons)
+    };
     std::unordered_map<UObject*, AxisMeasure> g_axis_measures;
     bool measure_weapon_axis(UObject* weapon, UObject* base, const hsvr::Vec3& pivot, double wide_cm, double tip, double& lo, double& hi, bool& wide_lo,
-                             bool& wide_hi)
+                             bool& wide_hi, std::vector<std::pair<double, double>>* extra = nullptr)
     {
         using namespace hsvr;
         auto cached = g_axis_measures.find(weapon);
@@ -6207,6 +6238,29 @@ namespace
                     if (dirn < 0) { m.lo = -(wide ? last + step * 0.5 : last); m.wide_lo = wide; }
                     else { m.hi = wide ? last + step * 0.5 : last; m.wide_hi = wide; }
                 }
+                // A hafted weapon (a grip stretch of 30 cm or more) goes on past its first stop: every further
+                // narrow stretch of 10 cm or more on its axis is haft too (a pollaxe above its rondel, a war
+                // staff above its fitting); the stops between them stay stops (B&S: grab only on a handle).
+                if (m.hi - m.lo >= 30.0)
+                {
+                    double z = m.hi + step;
+                    while (z <= limit)
+                    {
+                        while (z <= limit && probe(z).state != 0) z += step;
+                        if (z > limit) break;
+                        double s0 = z, last = z;
+                        while (z <= limit && probe(z).state == 0)
+                        {
+                            last = z;
+                            z += step;
+                        }
+                        if (last - s0 >= 10.0)
+                        {
+                            m.extra.push_back({s0 - step * 0.5, last + step * 0.5});
+                            HSVR_LOG("Haft: %ls more haft at %.0f .. %.0f cm", weapon->GetName().c_str(), s0 - step * 0.5, last + step * 0.5);
+                        }
+                    }
+                }
             }
             // A failed or zero-length measure (its parts not found yet) is not kept: asked again next time.
             if (!m.ok || (m.lo == 0.0 && m.hi == 0.0))
@@ -6225,6 +6279,11 @@ namespace
         hi = m.hi + m.at_z - pivot.z;
         wide_lo = m.wide_lo;
         wide_hi = m.wide_hi;
+        if (extra)
+        {
+            extra->clear();
+            for (const auto& e : m.extra) extra->push_back({e.first + m.at_z - pivot.z, e.second + m.at_z - pivot.z});
+        }
         return m.ok;
     }
 
@@ -6255,14 +6314,25 @@ namespace
             double lo = 0.0, hi = 0.0, top = 0.0;
             bool wide_lo = false, wide_hi = false;
             if (FProperty* p = item->GetPropertyByNameInChain(STR("Length to Top R Default"))) top = number_property(item, p);
-            bool ok = measure_weapon_axis(item, base, Vec3{}, cfg.pose_slide_wide_cm, top, lo, hi, wide_lo, wide_hi);
+            std::vector<std::pair<double, double>> extra;
+            bool ok = measure_weapon_axis(item, base, Vec3{}, cfg.pose_slide_wide_cm, top, lo, hi, wide_lo, wide_hi, &extra);
             measured = ok && !(lo == 0.0 && hi == 0.0);
             if (ok)
             {
                 double g0 = (std::min)(0.0, lo + half), g1 = (std::max)(0.0, hi - half);
                 hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, g1}, "grip", -1, 2});
-                double b0 = hi + half + cfg.pose_two_hand_blade_gap_cm, b1 = top - half;
-                if (wide_hi && top > 0.0 && b1 > b0 + 2.0) hs.push_back(Handle{Vec3{0, 0, b0}, Vec3{0, 0, b1}, "blade", 5, 5});
+                bool hafted = hi - lo >= 30.0;
+                if (hafted)
+                {
+                    // Every further haft stretch is a handle of its own; the head is not (B&S).
+                    for (const auto& e : extra)
+                        if (e.second - e.first > 2.0 * half + 1.0) hs.push_back(Handle{Vec3{0, 0, e.first + half}, Vec3{0, 0, e.second - half}, "haft", 2, 2});
+                }
+                else
+                {
+                    double b0 = hi + half + cfg.pose_two_hand_blade_gap_cm, b1 = top - half;
+                    if (wide_hi && top > 0.0 && b1 > b0 + 2.0) hs.push_back(Handle{Vec3{0, 0, b0}, Vec3{0, 0, b1}, "blade", 5, 5});
+                }
             }
             else
                 hs.push_back(Handle{Vec3{}, Vec3{}, "grip", -1, 2});

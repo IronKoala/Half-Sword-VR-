@@ -339,6 +339,9 @@ namespace hsvr
         // polearm's hook or head, a wide pommel). 0 = the game's lengths and its Head module only.
         bool pose_slide_zone_measured = true;
         double pose_slide_wide_cm = 4.0;
+        // B&S: a weapon or tool is taken only by a handle (its grip, any haft stretch, a sword's blade), not
+        // anywhere the hand touched it (shields and bottles still are). 0 = anywhere, as before.
+        bool pose_grab_weapon_handles_only = true;
         // The hold's force and torque caps x his arm mass against a default creator body's (height and
         // weight/muscle; 0.78 smallest .. 1.27 biggest), as flat Half Sword's weapon-to-arm mass ratio.
         bool pose_body_size_strength = true;
