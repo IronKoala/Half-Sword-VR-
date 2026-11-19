@@ -216,6 +216,22 @@ namespace hsvr
         double pose_hold_max_force = 3000.0;
         // While the held weapon is stuck in a body, the hold's force and torque caps are scaled by this.
         double pose_hold_stuck_force_scale = 0.15;
+        // In a wound (the weapon Stuck In Body): the blade slides along it at most this fast in and
+        // out (cm/s; B&S's held dampers with the hand's strength), x stab_wound_head_factor in the
+        // head and neck; sideways and in turn it goes with the body.
+        bool stab_wound_hold = true;
+        double stab_wound_settle_s = 0.2; // no pulling out for this long after it goes in
+        double stab_wound_settle_max_s = 0.8; // a young stick is held open until the game's own keep trace passes, at most this long
+        double stab_wound_entry_cms = 40.0; // ...and it is carried in at this speed meanwhile (8 cm over 0.2 s)
+        // A blade the game has just stuck is set this far into the wound along its tip (cm), plus
+        // stab_start_depth_per_ms cm for each cm/s of the controller along it, at most _max_cm
+        // (the game's stuck joint lets the blade slide 5 cm along a thrust).
+        double stab_start_depth_cm = 0.0; // 0 = off (stab-test11: a teleport into the wound made it let go)
+        double stab_start_depth_per_ms = 0.01;
+        double stab_start_depth_max_cm = 4.5;
+        double stab_wound_in_cms = 50.0;
+        double stab_wound_out_cms = 40.0;
+        double stab_wound_head_factor = 0.35;
         double pose_hold_turn_spring = 1100.0;
         double pose_hold_turn_damper = 45.0;
         double pose_hold_max_torque = 250.0;

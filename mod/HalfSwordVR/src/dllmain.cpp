@@ -5894,6 +5894,12 @@ namespace
 
     // One tick of the hold for one hand. `joint` is the game's hand joint (its frames say where on the
     // weapon the hand holds it and how the weapon sits in the hand); `base` the weapon's BaseMesh.
+    std::wstring stab_name_var(UObject* owner, const TCHAR* name);
+    double g_wound_since[2] = {-1.0, -1.0}; // when each hand's weapon went into a wound
+    UObject* g_young_joint[2] = {nullptr, nullptr}; // a stick still held open (stab_hold_keep)
+    double g_young_since[2] = {-1.0, -1.0};
+    int g_young_trace_ok[2] = {0, 0}; // ticks in a row the normal 3 cm keep trace found the stuck bone
+
     void hold_weapon(int side, UObject* pawn, UObject* joint, UObject* base, UObject* weapon, double mass, const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -6404,11 +6410,51 @@ namespace
                 double now_ax = dot(v_com_now, u), need_ax = dot(v_need, u);
                 v_need = v_need + u * ((now_ax * h.handle_keep + need_ax * (1.0 - h.handle_keep)) - need_ax);
             }
+            // In a wound (Stuck In Body): the blade only slides along the wound, slowed by it as in
+            // B&S (held penetration dampers 800 in / 1000 N s/m out: with the hand's ~400 N that is
+            // ~0.5 m/s in, ~0.4 m/s out), harder in the head (S&S: pull-out needs about 3x more);
+            // sideways and in turn it goes with him (the game's stuck joint holds it in a 15 deg
+            // cone). Pulling back far enough draws it out; the game lets go once the tip box leaves
+            // the body (stab-test9).
+            bool in_wound = cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body"));
+            static bool was_in_wound[2] = {false, false};
+            if (!in_wound && was_in_wound[side]) HSVR_LOG("Hold: %s hand's weapon is out of the wound", side == 0 ? "left" : "right");
+            was_in_wound[side] = in_wound;
+            if (!in_wound) g_wound_since[side] = -1.0;
+            if (in_wound)
+            {
+                Vec3 u = rot.rotate({0.0, 0.0, 1.0});
+                if (UObject* jt = object_property(weapon, STR("Jammed Tip")))
+                {
+                    Call f(jt, STR("GetForwardVector"));
+                    f.run();
+                    Vec3 fw = f.vec();
+                    if (length(fw) > 0.5) u = fw * (1.0 / length(fw));
+                }
+                std::wstring bone = stab_name_var(weapon, STR("Hit Bone Name"));
+                bool head = bone == STR("Head") || bone == STR("head") || bone.rfind(STR("neck"), 0) == 0;
+                double k = head ? cfg.stab_wound_head_factor : 1.0;
+                double need_ax = dot(v_need, u), now_ax = dot(v_com_now, u);
+                // The first moments in the wound: no pulling out yet (stab-test11: the hold's target
+                // sits behind a blade that has just gone in, and its catch-up drew it straight out).
+                if (g_wound_since[side] < 0.0) g_wound_since[side] = now;
+                bool settling = now - g_wound_since[side] < cfg.stab_wound_settle_s || g_young_joint[side] != nullptr;
+                double out_most = settling ? 0.0 : cfg.stab_wound_out_cms * k;
+                double ax = (std::min)(cfg.stab_wound_in_cms * k, (std::max)(-out_most, need_ax));
+                // Going in: the game sticks a blade at the skin (stab-test13: its keep trace found the
+                // tip 1.2 cm inside, then outside), so for the first moments it is carried in at
+                // stab_wound_entry_cms whatever the hand does, as the arm's momentum would.
+                if (settling) ax = (std::max)(ax, cfg.stab_wound_entry_cms);
+                v_need = (v_com_now - u * now_ax) + u * ax;
+                HSVR_LOG_EVERY(0.25, "Hold: %s hand's %ls in a wound (%ls): wanted %.0f cm/s along it, slides %.0f", side == 0 ? "left" : "right",
+                               weapon->GetName().c_str(), bone.c_str(), need_ax, ax);
+            }
             Vec3 dv = v_need - v_com_now;
             double dv_most = (max_force / (std::max)(0.05, mass)) * DT + std::fabs(gz) * DT;
             bool f_capped = length(dv) > dv_most;
             dv = clamp_length(dv, dv_most);
             Vec3 w_need = scaled_axis((rot_t * rot.inverse()).normalized()) * (1.0 / DT);
+            if (in_wound) w_need = w_now;
             Vec3 dL = about_com * (w_need - w_now);
             bool t_capped = length(dL) > max_torque * DT;
             dL = clamp_length(dL, max_torque * DT);
@@ -6638,6 +6684,7 @@ namespace
         int id = 0;
         double hit_at = -1.0;
         bool logged_next = true, logged_late = true;
+        bool was_stuck = false;
         UObject* push_comp = nullptr; // the slow push: same body part hit again and again
         double push_since = -1.0, push_last = -1.0;
     };
@@ -6873,6 +6920,92 @@ namespace
         stab_log_state("before", w);
     }
 
+    // After the game handled the hit: a blade it has just stuck in a body is set into the wound by
+    // stab_start_depth_cm along the jammed tip (S&S starts every stab 2 cm in). Without it the tip
+    // sits on the skin, the stuck joint's first trace along the blade misses the body and the game
+    // lets go on the next tick (stab-test10: 4 of 5 sticks, "hitting body 0" on their first tick).
+    void stab_set_depth(int side, UObject* weapon, const char* when);
+
+    // A young stick: the game's stuck joint keeps a blade only while a 3 cm trace along it finds the
+    // stuck bone first, from its very first tick, and the game sticks a VR blade at the skin
+    // (stab-test13/14: head sticks all let go on that first tick, trace "hit 0"). For the first
+    // stab_wound_settle_s its "Spikes (temp)" is set, the game's own way to keep spiked weapons
+    // (the keep test then takes any bone, with a 15 cm trace); the wound hold carries the blade in
+    // meanwhile, and afterwards the normal test decides (pulling out lets go).
+    void stab_hold_keep(int side, UObject* weapon, bool on)
+    {
+        hsvr::Config cfg = hsvr::config();
+        if (!cfg.stab_wound_hold || cfg.stab_wound_settle_s <= 0.0) return;
+        if (on)
+        {
+            RawArray* joints = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
+            UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[joints->Num - 1]) : nullptr;
+            if (!cs) return;
+            if (g_young_joint[side] == cs) return;
+            set_variable(cs, STR("Spikes (temp)"), 1.0);
+            g_young_trace_ok[side] = 0;
+            g_young_joint[side] = cs;
+            g_young_since[side] = hsvr::now_seconds();
+            HSVR_LOG("Stab: %s stick %ls held open for %.2f s", side == 0 ? "left" : "right", cs->GetName().c_str(), cfg.stab_wound_settle_s);
+        }
+        else if (UObject* cs = g_young_joint[side])
+        {
+            g_young_joint[side] = nullptr;
+            g_young_since[side] = -1.0;
+            RawArray* joints = weapon ? weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array")) : nullptr;
+            bool alive = false;
+            if (joints && joints->Data)
+                for (int32_t i = 0; i < joints->Num; ++i) alive = alive || joints->Data[i] == cs;
+            if (alive) set_variable(cs, STR("Spikes (temp)"), 0.0);
+            HSVR_LOG("Stab: %s stick %s: normal keep test again", side == 0 ? "left" : "right", alive ? "settled" : "already gone");
+        }
+    }
+
+    void stab_hit_post(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        if (cfg.stab_start_depth_cm <= 0.0) return;
+        UObject* weapon = context.Context;
+        UObject* pawn = g_pose.pawn;
+        if (!weapon || !pawn) return;
+        int side = weapon == object_property(pawn, STR("Weapon R")) ? 1 : weapon == object_property(pawn, STR("Weapon L")) ? 0 : -1;
+        if (side < 0) return;
+        StabWatch& w = g_stab_watch[side];
+        bool stuck = bool_property(weapon, STR("Stuck In Body"));
+        bool fresh = stuck && !w.was_stuck;
+        w.was_stuck = stuck;
+        if (fresh)
+        {
+            stab_hold_keep(side, weapon, true);
+            stab_set_depth(side, weapon, "hit");
+        }
+    }
+
+    void stab_set_depth(int side, UObject* weapon, const char* when)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        if (cfg.stab_start_depth_cm <= 0.0) return;
+        UObject* jt = object_property(weapon, STR("Jammed Tip"));
+        UObject* base = object_property(weapon, STR("BaseMesh"));
+        if (!jt || !base) return;
+        Call f(jt, STR("GetForwardVector"));
+        f.run();
+        Vec3 u = f.vec();
+        double ul = length(u);
+        if (ul < 0.5) return;
+        u = u * (1.0 / ul);
+        double speed = (std::max)(0.0, dot(g_stab_ctrl_vel[side], u));
+        double depth = (std::min)(cfg.stab_start_depth_max_cm, cfg.stab_start_depth_cm + speed * cfg.stab_start_depth_per_ms);
+        Call off(base, STR("K2_AddWorldOffset"));
+        off.three(STR("DeltaLocation"), u.x * depth, u.y * depth, u.z * depth);
+        off.flag(STR("bTeleport"), true);
+        off.run();
+        HSVR_LOG("Stab: %s %ls stuck in %ls (%s): set %.1f cm into the wound (controller %.0f cm/s along it)", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                 stab_name_var(weapon, STR("Hit Bone Name")).c_str(), when, depth, speed);
+    }
+
     void install_stab_log()
     {
         static bool installed = false;
@@ -6884,7 +7017,7 @@ namespace
         UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C:Collision Hit"));
         if (!fn) return; // not loaded yet
         installed = true;
-        UObjectGlobals::RegisterHook(fn, &stab_hit_hook, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+        UObjectGlobals::RegisterHook(fn, &stab_hit_hook, &stab_hit_post, fn);
         std::wstring params;
         for (FProperty* p : fn->ForEachProperty()) params += p->GetName() + STR(", ");
         HSVR_LOG("Stab: watching the weapons' Collision Hit (parameters %ls)", params.c_str());
@@ -6906,6 +7039,10 @@ namespace
         UObject* weapon = is_joint ? object_property(self, STR("My Weapon")) : self;
         if (!weapon || (weapon != wr && weapon != wl)) return;
         int side = weapon == wr ? 1 : 0;
+        // The game calls Temporary Disable Damage right after it sticks a blade (@47985), before the
+        // new stuck joint's first tick: the moment to hold a young stick open.
+        if (!is_joint && hooked->GetName() == STR("Temporary Disable Damage") && bool_property(weapon, STR("Stuck In Body")))
+            stab_hold_keep(side, weapon, true);
         UFunction* caller = context.TheStack.Node();
         // At most one line per function and caller offset each 0.25 s (some are called every tick).
         {
@@ -7010,6 +7147,39 @@ namespace
                         }
                     }
                     double bm = stab_var(cs, STR("Bone Mass"));
+                    // The joint's own keep test, redone here (@35540-@37600): a sphere (3 cm, 15 with
+                    // spikes) from the blade's Base, moved toward the Tip by 50 - length for a thrust,
+                    // to the Tip, against his body; kept when the first bone hit is the stuck bone.
+                    std::wstring trace_bone = STR("-");
+                    int trace_hit = -1;
+                    UObject* tipc = object_property(cs, STR("Tip"));
+                    UObject* basec = object_property(cs, STR("Base"));
+                    UObject* bodyc = object_property(cs, STR("Component 2 (Body)"));
+                    if (tipc && basec && bodyc)
+                    {
+                        Vec3 tp = component_location(tipc), bp = component_location(basec);
+                        Vec3 d = tp - bp;
+                        double len = length(d);
+                        Vec3 dir = len > 1e-3 ? d * (1.0 / len) : Vec3{};
+                        double shift = bool_property(cs, STR("Thrust?")) ? (std::max)(0.0, 50.0 - len) : 0.0;
+                        if (len >= 50.0) shift = 0.0;
+                        Vec3 start = bp + dir * shift;
+                        Call tr(bodyc, STR("K2_SphereTraceComponent"));
+                        tr.three(STR("TraceStart"), start.x, start.y, start.z);
+                        tr.three(STR("TraceEnd"), tp.x, tp.y, tp.z);
+                        tr.number(STR("SphereRadius"), bool_property(cs, STR("Spikes (temp)")) ? 15.0 : 3.0);
+                        tr.run();
+                        if (FProperty* rp = tr.param(STR("ReturnValue")))
+                        {
+                            auto* bp2 = static_cast<FBoolProperty*>(rp);
+                            trace_hit = (tr.buffer[rp->GetOffset_Internal() + bp2->GetByteOffset()] & bp2->GetFieldMask()) ? 1 : 0;
+                        }
+                        if (FProperty* np = tr.param(STR("BoneName"))) trace_bone = reinterpret_cast<FName*>(tr.buffer.data() + np->GetOffset_Internal())->ToString();
+                        bool ok = trace_hit == 1 && trace_bone == stab_name_var(cs, STR("Dismember Bone Name"));
+                        g_young_trace_ok[side] = ok ? g_young_trace_ok[side] + 1 : 0;
+                        HSVR_LOG("Stab: stuck trace: blade %.1f cm, start shifted %.1f, trace hit %d bone %ls, stuck bone %ls",
+                                 len, shift, trace_hit, trace_bone.c_str(), stab_name_var(cs, STR("Dismember Bone Name")).c_str());
+                    }
                     const HoldState& h = g_hold[side];
                     HSVR_LOG("Stab: stuck tick: joint %ls hitting body %.0f, activate %.0f, distance %.1f, force lin %.0f + ang %.0f vs keep limit %.0f "
                              "(bone mass %.2f); hold lag %.1f cm, force %.0f N, torque %.1f N m",
@@ -7018,6 +7188,23 @@ namespace
                 }
             }
             StabWatch& w = g_stab_watch[side];
+            // A stick the post-hook did not see (the game stuck it later than the hit): set it in now.
+            if (UObject* held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
+            {
+                bool stuck = bool_property(held, STR("Stuck In Body"));
+                if (stuck && !w.was_stuck)
+                {
+                    stab_hold_keep(side, held, true);
+                    stab_set_depth(side, held, "tick");
+                }
+                if (g_young_joint[side])
+                {
+                    double age = now - g_young_since[side];
+                    if ((age >= config().stab_wound_settle_s && g_young_trace_ok[side] >= 3) || age >= config().stab_wound_settle_max_s)
+                        stab_hold_keep(side, held, false);
+                }
+                w.was_stuck = stuck;
+            }
             if (!w.weapon || w.hit_at < 0.0) continue;
             if (w.weapon != object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
             {
