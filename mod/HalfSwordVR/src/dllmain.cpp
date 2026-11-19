@@ -4271,6 +4271,7 @@ namespace
                      ok ? "" : ": NOT SET", read_number_variable(g_pose.pawn, grip_type_name(g_two.main)));
         }
         HSVR_LOG("Two hands: %s hand lets go of %ls (%s)", g_two.second == 0 ? "left" : "right", g_two.weapon ? g_two.weapon->GetName().c_str() : STR("?"), why);
+        if (g_two.weapon && g_arm_ignore[g_two.second].weapon == g_two.weapon) clear_arm_ignore(g_two.second);
         g_two = TwoHand{};
         g_anim_grip_two_side = -1;
     }
@@ -4446,6 +4447,11 @@ namespace
             HSVR_LOG("Two hands: %s hand's grip type %.0f -> 2 (sword grip fingers)%s", side == 0 ? "left" : "right", g_two.grip_type_before, ok ? "" : ": NOT SET");
             if (!ok) g_two.grip_type_before = -1.0;
         }
+        // The second hand's own forearm must not collide with the weapon either (playtest 10:35: two-handed,
+        // the sword stood still while the hands moved up to 28 cm away, then caught up, over and over,
+        // "contact miss" = "stopped" at 16-50 N: the left hand body sat on the grip. The game switches
+        // that pair's collision off only for grips that list hand_l (self_collision.md).)
+        if (UObject* m = object_property(pawn, STR("Mesh"))) ignore_arm_collision(pawn, m, weapon, object_property(weapon, STR("BaseMesh")), side);
         controllers_buzz(side, 0.4f);
         HSVR_LOG("Two hands: %s hand takes %ls on the %s at %.1f cm (squeezed at %.1f, %.1f cm off the axis; first hand at %.1f)", side == 0 ? "left" : "right",
                  weapon->GetName().c_str(), g_two.on_blade ? "blade" : "grip", z, want, radial, h.slide);
@@ -4531,6 +4537,11 @@ namespace
             g_two.grip_type_before = read_number_variable(pawn, grip_type_name(side));
             if (!set_variable(pawn, grip_type_name(side), gt)) g_two.grip_type_before = -1.0;
         }
+        // The second hand's own forearm must not collide with the weapon either (playtest 10:35: two-handed,
+        // the sword stood still while the hands moved up to 28 cm away, then caught up, over and over,
+        // "contact miss" = "stopped" at 16-50 N: the left hand body sat on the grip. The game switches
+        // that pair's collision off only for grips that list hand_l (self_collision.md).)
+        if (UObject* m = object_property(pawn, STR("Mesh"))) ignore_arm_collision(pawn, m, weapon, object_property(weapon, STR("BaseMesh")), side);
         controllers_buzz(side, 0.4f);
         HSVR_LOG("Two hands: %s hand takes %ls by its %s (%.1f cm from the handle, touched at %.1f cm), at (%.1f, %.1f, %.1f) on it, fingers %d",
                  side == 0 ? "left" : "right", weapon->GetName().c_str(), g_two.handle.c_str(), on_handle ? hd : 0.0, touch_d, spot.x, spot.y, spot.z, gt);
@@ -8276,7 +8287,9 @@ namespace
             if ((spring_on || hold_on) && joint) sprung[side] = joint;
             // With the spring off the game's own locked grip holds the weapon; it is still measured and logged.
             UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
-            if (g_arm_ignore[side].weapon && g_arm_ignore[side].weapon != weapon) clear_arm_ignore(side);
+            // (Not the second hand's: it holds no weapon of its own, but must not collide with the one it holds too.)
+            if (g_arm_ignore[side].weapon && g_arm_ignore[side].weapon != weapon && !(g_two.active && g_two.second == side && g_arm_ignore[side].weapon == g_two.weapon))
+                clear_arm_ignore(side);
             if (!joint || !weapon) continue;
             // Only a seated weapon (the game first pulls a new weapon into the hand over a short distance).
             if (side == 1)
