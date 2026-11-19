@@ -169,6 +169,29 @@ namespace hsvr
         // has his neck reach (beyond that the neck would stretch visibly).
         bool pose_head_lock = true;
         double pose_head_lock_max_cm = 12.0;
+        // ---- Torso lean (Matthew 2026-11-19: armour blocked a third of the view looking down) ----
+        // The torso hangs from your neck and bends like Half Sword's own lean (LeftAlt + mouse,
+        // Anim_Add_Bob_AO): spine_02..spine_05 take equal shares, neck_01/neck_02 bend back 3/8 each
+        // (torso_lean_and_helmet.md). Your hips go back by as much as the bend carries the head
+        // forward, so your head stays at the headset and the chest moves in, out of view.
+        // Forward bend = (head pitch below the horizon - pose_lean_pitch_dead_deg) x pose_lean_pitch_gain,
+        // at most pose_lean_max_deg (the game's own lean reaches 60). Sideways = head roll likewise.
+        bool pose_lean = true;
+        double pose_lean_pitch_dead_deg = 10.0;
+        double pose_lean_pitch_gain = 0.7;
+        double pose_lean_max_deg = 60.0;
+        double pose_lean_roll_dead_deg = 5.0;
+        double pose_lean_roll_gain = 0.8;
+        double pose_lean_side_max_deg = 25.0;
+        double pose_lean_smooth_s = 0.08;
+        // A bend lowers his head; his hips can't rise above standing, so the bend is held to what your
+        // headset's drop (plus this much neck slack) allows.
+        double pose_lean_slack_cm = 4.0;
+        // 1 = the game's own forward bend from crouching (Root Height) and reaching for grabs (Lean
+        // Forward (Grabbing)) is taken out of his animation, so only your lean bends him.
+        bool pose_lean_cancel_game_bend = true;
+        // 1 = his body, head and worn armour animate every frame (no update-rate skipping).
+        bool pose_no_uro = true;
         bool pose_arms = true;
         bool pose_follow_room = true;
         // 1 = while posed, your character's capsule only moves when you walk: the game's own pull

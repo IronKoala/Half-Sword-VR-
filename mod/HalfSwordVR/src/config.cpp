@@ -302,6 +302,17 @@ namespace hsvr
         flag("pose_head", c.pose_head);
         flag("pose_head_lock", c.pose_head_lock);
         num("pose_head_lock_max_cm", c.pose_head_lock_max_cm);
+        flag("pose_lean", c.pose_lean);
+        num("pose_lean_pitch_dead_deg", c.pose_lean_pitch_dead_deg);
+        num("pose_lean_pitch_gain", c.pose_lean_pitch_gain);
+        num("pose_lean_max_deg", c.pose_lean_max_deg);
+        num("pose_lean_roll_dead_deg", c.pose_lean_roll_dead_deg);
+        num("pose_lean_roll_gain", c.pose_lean_roll_gain);
+        num("pose_lean_side_max_deg", c.pose_lean_side_max_deg);
+        num("pose_lean_smooth_s", c.pose_lean_smooth_s);
+        num("pose_lean_slack_cm", c.pose_lean_slack_cm);
+        flag("pose_lean_cancel_game_bend", c.pose_lean_cancel_game_bend);
+        flag("pose_no_uro", c.pose_no_uro);
         flag("pose_arms", c.pose_arms);
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);
