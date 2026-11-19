@@ -3840,7 +3840,7 @@ namespace
         int other = 1 - side;
         UObject* weapon = object_property(pawn, other == 0 ? STR("Weapon L") : STR("Weapon R"));
         HoldState& h = g_hold[other];
-        if (!weapon || h.weapon != weapon || !h.have_last || is_fist(weapon) || h.forearm) return false;
+        if (!weapon || h.weapon != weapon || !h.have_last || is_fist(weapon) || h.forearm || h.free.set) return false; // the mod's free grip has no grip zones yet
         UObject* base = object_property(weapon, STR("BaseMesh"));
         if (!base) return false;
         double game_z = h.pivot.z - h.slide;
@@ -4355,6 +4355,27 @@ namespace
         {L"Shield_BossGrip", "handle", -0.00, -0.39, 0.70, -0.001, 0.000, 1.000, 50.1, true, true},
     };
 
+    // The mod's free grip on a weapon just set up in that hand: held in the hand (the hand bone) by
+    // `point` (world, on the weapon), turned as it was, from the pose it had before the game's set-up.
+    void hold_where_touched(int side, UObject* mesh, UObject* weapon, UObject* base, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm,
+                            const hsvr::Vec3& point, const char* what)
+    {
+        using namespace hsvr;
+        Vec3 a_pos = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+        Quat a_rot = socket_rotation(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+        FreeGrip g;
+        g.set = true;
+        g.place = true;
+        g.pivot = w0_rot.inverse().rotate(point - w0_pos);
+        g.in_anchor = a_rot.inverse().rotate(palm - a_pos);
+        g.rel = (a_rot.inverse() * w0_rot).normalized();
+        g.what = what;
+        g_pending_free[side] = g;
+        set_component_transform(base, w0_pos, w0_rot, true);
+        HSVR_LOG("Grab: %s hand took %ls by the %s (%.1f cm from the hand), held in the hand there", side == 0 ? "left" : "right", weapon->GetName().c_str(), what,
+                 length(point - palm));
+    }
+
     // A shield taken with the grip button. The hand point, in the shield's frame from before the
     // game's set-up moves it, is matched against its fittings: the nearest within
     // pose_shield_point_cm wins. One of the game's own for that hand keeps the game's grip (a strap
@@ -4399,19 +4420,8 @@ namespace
             HSVR_LOG("Shield: %s hand took %ls, a shield with no measured grab points: the game's own grip", hand, cls.c_str());
             return;
         }
-        Vec3 a_pos = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
-        Quat a_rot = socket_rotation(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
-        FreeGrip g;
-        g.set = true;
-        g.place = true;
-        g.pivot = best ? best_on : w0_rot.inverse().rotate(touch - w0_pos);
-        g.in_anchor = a_rot.inverse().rotate(palm - a_pos);
-        g.rel = (a_rot.inverse() * w0_rot).normalized();
-        g.what = best ? best->name : "edge where the hand touched it";
-        g_pending_free[side] = g;
-        set_component_transform(base, w0_pos, w0_rot, true);
-        HSVR_LOG("Shield: %s hand took %ls by the %s (%.1f cm from the hand)", hand, shield->GetName().c_str(), g.what.c_str(),
-                 best ? best_d : length(touch - palm));
+        Vec3 at_point = best ? w0_pos + w0_rot.rotate(best_on) : touch;
+        hold_where_touched(side, mesh, shield, base, w0_pos, w0_rot, palm, at_point, best ? best->name : "edge where the hand touched it");
     }
 
     void grab_button(const hsvr::Config& cfg, const hsvr::ControllerState& state, bool menu_up)
@@ -4549,11 +4559,13 @@ namespace
                 continue;
             }
             // Shields: where the hand touched it, before the game's set-up snaps it to its own grip.
-            bool shield = cfg.pose_shield_free_grip && class_name_starts(best, STR("Shield"));
+            bool is_shield = class_name_starts(best, STR("Shield"));
+            bool shield = cfg.pose_shield_free_grip && is_shield;
+            bool loose_free = !is_shield && cfg.pose_weapon_free_grip;
             UObject* best_base = object_property(best, STR("BaseMesh"));
             Vec3 w0_pos, touch;
             Quat w0_rot;
-            if (shield && best_base)
+            if ((shield || loose_free) && best_base)
             {
                 w0_pos = component_location(best_base);
                 w0_rot = component_rotation(best_base);
@@ -4563,6 +4575,18 @@ namespace
             UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             if (shield && best_base && ok && now == best)
                 shield_grip(side, mesh, best, best_base, w0_pos, w0_rot, at, touch, cfg);
+            if (loose_free && best_base && ok && now == best)
+            {
+                // A weapon's BaseMesh is its grip dummy, at the game's grip point (collision dump):
+                // taken farther than pose_weapon_free_cm from it (by the blade, the haft, the tip),
+                // it is held where the hand closed, not snapped onto its grip (test 7de-J: an 80 cm
+                // jump and a quarter turn when taken by the tip).
+                double off = length(w0_rot.inverse().rotate(at - w0_pos));
+                if (off > cfg.pose_weapon_free_cm)
+                    hold_where_touched(side, mesh, best, best_base, w0_pos, w0_rot, at, touch, "spot where the hand closed on it");
+                else
+                    HSVR_LOG("Grab: %s hand took %ls by its grip (%.1f cm from the game's grip point)", hand, best->GetName().c_str(), off);
+            }
             controllers_buzz(side, 0.4f);
             HSVR_LOG("Grab: %s grip took %ls (%.1f cm from the hand): %s, hand now holds %ls", hand, best->GetName().c_str(), best_d,
                      ok ? "set up" : "set-up call missing", now ? now->GetName().c_str() : STR("nothing"));
@@ -4885,8 +4909,9 @@ namespace
             if (bone2 != h.anchor_bone)
             {
                 h.anchor_bone = bone2;
-                HSVR_LOG("Hold: %s hand's %ls is held to %s%s", side == 0 ? "left" : "right", weapon->GetName().c_str(), bone2.empty() ? "(no bone name)" : bone2.c_str(),
-                         forearm ? " (on the forearm: strap shield)" : "");
+                HSVR_LOG("Hold: %s hand's %ls is held to %s by the game%s", side == 0 ? "left" : "right", weapon->GetName().c_str(), bone2.empty() ? "(no bone name)" : bone2.c_str(),
+                         h.free.set ? (h.free.forearm ? "; the mod's grip holds it on the forearm" : "; the mod's grip holds it in the hand")
+                                    : (forearm ? " (on the forearm: strap shield)" : ""));
             }
             h.forearm = forearm;
         }

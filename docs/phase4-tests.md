@@ -96,6 +96,8 @@ Next: your strength from the game's stats instead of a fixed number, the hand st
 | `pose_grab_radius_cm` | 10 | How near the weapon's body your hand must be. |
 | `pose_shield_free_grip` | 1 | Shields: every strap and handle measured on the shield's mesh is a grab point. The hand closing within `pose_shield_point_cm` of one the game itself uses for that hand takes the game's grip (strap shields on the forearm); any other fitting is held in the hand where it closed, and anywhere else (the rim, an edge) the hand holds it where it touched. 0 = always the game's grip. |
 | `pose_shield_point_cm` | 8 | How near a strap or handle the hand must close to take the shield by it. |
+| `pose_weapon_free_grip` | 1 | A loose weapon taken more than `pose_weapon_free_cm` (6) from its grip (by the blade, the haft, the tip) is held where the hand closed, turned as it was, instead of snapped onto its grip. The other hand cannot join it two-handed yet. |
+| `pose_weapon_free_cm` | 6 | How far from the weapon's grip point counts as taking it elsewhere. |
 | `pose_grab_release_drops` | 1 | Letting go of the grip drops the weapon. |
 | `pose_grab_objects` | 1 | Objects and bodies can be grabbed too. |
 

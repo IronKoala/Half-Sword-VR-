@@ -343,6 +343,8 @@ namespace hsvr
         flag("pose_grab_button", c.pose_grab_button);
         num("pose_grab_radius_cm", c.pose_grab_radius_cm);
         flag("pose_shield_free_grip", c.pose_shield_free_grip);
+        flag("pose_weapon_free_grip", c.pose_weapon_free_grip);
+        num("pose_weapon_free_cm", c.pose_weapon_free_cm);
         num("pose_shield_point_cm", c.pose_shield_point_cm);
         flag("pose_two_hand", c.pose_two_hand);
         num("pose_two_hand_strength", c.pose_two_hand_strength);

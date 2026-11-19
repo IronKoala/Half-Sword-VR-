@@ -243,6 +243,10 @@ namespace hsvr
         // Shields: every measured strap and handle is a grab point; anywhere else (the rim, an edge)
         // the hand holds it where it touched (pose_shield_free_grip; 0 = always the game's grip).
         bool pose_shield_free_grip = true;
+        // Weapons: taken farther than pose_weapon_free_cm from their grip, held where the hand closed
+        // (pose_weapon_free_grip; 0 = snapped onto the grip, the game's way).
+        bool pose_weapon_free_grip = true;
+        double pose_weapon_free_cm = 6.0;
         // How near a strap or handle the hand must close to take the shield by it (cm).
         double pose_shield_point_cm = 8.0;
         bool pose_grab_release_drops = true;
