@@ -1430,6 +1430,7 @@ namespace
     std::atomic<float> g_fake_squeeze[2] = {-1.0f, -1.0f}; // test: hsvr.squeeze <0|1> <value>, -1 = the controller
 
     // Sets a yes/no property that the engine packs into a single bit (tests only).
+    const char* sheathing_socket(int side); // the slot socket a hand is sheathing into, or null
     bool set_bool_property(UObject* owner, const TCHAR* name, bool value)
     {
         if (!owner) return false;
@@ -1657,7 +1658,7 @@ namespace
                     // The slot it is going into, else the first right slot.
                     const char* sock = object_property(g_pose.pawn, STR("Weapon Slot R 1")) && !(wr && object_property(g_pose.pawn, STR("Weapon Slot R 1")) == wr)
                                            ? "Sheath_Slot_R_2" : "Sheath_Slot_R_1";
-                    if (g_draw[1].active && g_draw[1].sheathing && g_draw[1].socket && g_draw[1].socket[0]) sock = g_draw[1].socket; // across too
+                    if (const char* now_into = sheathing_socket(1)) sock = now_into; // across too
                     Vec3 m = socket_location(mesh, bone_fname(sock));
                     Vec3 ax = socket_rotation(mesh, bone_fname(sock)).rotate(Vec3{0, 0, 1});
                     double len = wr ? blade_length(wr) : 80.0;
@@ -2444,6 +2445,11 @@ namespace
         bool block_cleared = false;
     };
     DrawState g_draw[2];
+    const char* sheathing_socket(int side)
+    {
+        const DrawState& d = g_draw[side];
+        return d.active && d.sheathing && d.socket && d.socket[0] ? d.socket : nullptr;
+    }
     // A blade just drawn still has its tip at the mouth, lined up: no sheathe until it has been taken
     // well away first (playtest 02:44: every draw went straight back into a sheathe, 1 ms after it freed).
     bool g_sheathe_armed[2] = {true, true};
