@@ -46,4 +46,7 @@ namespace hsvr
 
     // Latest state (copy).
     ControllerState controllers_state();
+    // Asks for a buzz on a hand (0 left, 1 right), strength 0..1, sent with the next input update.
+    // The strongest request since the last update wins.
+    void controllers_buzz(int hand, float amplitude);
 } // namespace hsvr

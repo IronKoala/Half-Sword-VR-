@@ -112,11 +112,45 @@ namespace hsvr
                 "hand_bone_left=%s\n"
                 "hand_bone_right=%s\n"
                 "; 1 = short buzz when a trigger is pulled all the way (vibration check).\n"
-                "haptics_test=%d\n"
-                "; TEST ONLY: 1 = physics off on your own character's body. Restart the fight after switching back.\n"
-                "dev_player_physics_off=%d\n",
-                d.log_controllers, d.hand_bone_left.c_str(), d.hand_bone_right.c_str(), d.haptics_test, d.dev_player_physics_off);
+                "haptics_test=%d\n",
+                d.log_controllers, d.hand_bone_left.c_str(), d.hand_bone_right.c_str(), d.haptics_test);
         fclose(f);
+    }
+
+    // Writes one setting into the ini (replacing its line, or adding it), for values the mod measures
+    // itself (your arm length). The 1 s reload then picks it up.
+    void config_set(const std::string& key, const std::string& value)
+    {
+        std::vector<std::string> lines;
+        bool found = false;
+        if (FILE* f = _wfopen(ini_path().c_str(), L"r"))
+        {
+            char chunk[512];
+            std::string line;
+            while (fgets(chunk, sizeof(chunk), f))
+            {
+                line += chunk;
+                if (line.back() != '\n') continue;
+                std::string t = trim(line);
+                size_t eq = t.find('=');
+                if (!found && eq != std::string::npos && trim(t.substr(0, eq)) == key)
+                {
+                    line = key + "=" + value + "\n";
+                    found = true;
+                }
+                lines.push_back(line);
+                line.clear();
+            }
+            if (!line.empty()) lines.push_back(line + "\n");
+            fclose(f);
+        }
+        if (!found) lines.push_back(key + "=" + value + "\n");
+        if (FILE* out = _wfopen(ini_path().c_str(), L"w"))
+        {
+            for (const std::string& l : lines) std::fputs(l.c_str(), out);
+            fclose(out);
+        }
+        HSVR_LOG("Settings: %s set to %s", key.c_str(), value.c_str());
     }
 
     Config config()
@@ -212,10 +246,14 @@ namespace hsvr
         num("eye_forward_cm", c.eye_forward_cm);
         num("eye_up_cm", c.eye_up_cm);
         num("anchor_smoothing", c.anchor_smoothing);
+        flag("tracking_current_anchor", c.tracking_current_anchor);
         num("near_clip_cm", c.near_clip_cm);
         integer("gamma_mode", c.gamma_mode);
         flag("ui_panel", c.ui_panel);
         flag("ui_panel_auto", c.ui_panel_auto);
+        flag("ui_pointer", c.ui_pointer);
+        flag("menu_buttons", c.menu_buttons);
+        num("menu_continue_hold_s", c.menu_continue_hold_s);
         num("ui_distance_m", c.ui_distance_m);
         num("ui_width_m", c.ui_width_m);
         num("ui_height_offset_m", c.ui_height_offset_m);
@@ -254,11 +292,7 @@ namespace hsvr
         text("hand_bone_left", c.hand_bone_left);
         text("hand_bone_right", c.hand_bone_right);
         flag("haptics_test", c.haptics_test);
-        flag("dev_player_physics_off", c.dev_player_physics_off);
         flag("log_body", c.log_body);
-        flag("dev_player_arm_physics", c.dev_player_arm_physics);
-        text("arm_bone_left", c.arm_bone_left);
-        text("arm_bone_right", c.arm_bone_right);
         flag("dev_pose_probe", c.dev_pose_probe);
         text("dev_pose_bone", c.dev_pose_bone);
         num("dev_pose_pitch", c.dev_pose_pitch);
@@ -266,6 +300,8 @@ namespace hsvr
         num("dev_pose_roll", c.dev_pose_roll);
         flag("pose_body", c.pose_body);
         flag("pose_head", c.pose_head);
+        flag("pose_head_lock", c.pose_head_lock);
+        num("pose_head_lock_max_cm", c.pose_head_lock_max_cm);
         flag("pose_arms", c.pose_arms);
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);
@@ -273,8 +309,191 @@ namespace hsvr
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);
+        flag("pose_stick_walk", c.pose_stick_walk);
+        text("pose_move_relative", c.pose_move_relative);
+        text("pose_stick_turn", c.pose_stick_turn);
+        num("pose_stick_turn_dps", c.pose_stick_turn_dps);
+        num("pose_snap_turn_deg", c.pose_snap_turn_deg);
+        num("pose_stick_dead_zone", c.pose_stick_dead_zone);
+        flag("pose_grip_spring", c.pose_grip_spring);
+        flag("pose_grip_hold", c.pose_grip_hold);
+        num("pose_hold_strength", c.pose_hold_strength);
+        flag("pose_body_strength", c.pose_body_strength);
+        num("pose_body_stamina_floor", c.pose_body_stamina_floor);
+        num("pose_body_strength_min", c.pose_body_strength_min);
+        num("pose_stamina_scale", c.pose_stamina_scale);
+        num("pose_stamina_swing_lo_cm_s", c.pose_stamina_swing_lo_cm_s);
+        num("pose_stamina_swing_hi_cm_s", c.pose_stamina_swing_hi_cm_s);
+        num("pose_stamina_speed_smooth_s", c.pose_stamina_speed_smooth_s);
+        num("pose_stamina_force_cap_n", c.pose_stamina_force_cap_n);
+        num("pose_stamina_torque_cap_nm", c.pose_stamina_torque_cap_nm);
+        flag("pose_hold_exact", c.pose_hold_exact);
+        num("pose_hold_spring", c.pose_hold_spring);
+        num("pose_hold_damper", c.pose_hold_damper);
+        num("pose_hold_max_force", c.pose_hold_max_force);
+        num("pose_hold_turn_spring", c.pose_hold_turn_spring);
+        num("pose_hold_turn_damper", c.pose_hold_turn_damper);
+        num("pose_hold_max_torque", c.pose_hold_max_torque);
+        flag("pose_hold_weight", c.pose_hold_weight);
+        num("pose_hold_weight_torque_scale", c.pose_hold_weight_torque_scale);
+        flag("pose_hold_weight_two_hand_couple", c.pose_hold_weight_two_hand_couple);
+        flag("pose_hold_bs", c.pose_hold_bs);
+        num("pose_bs_two_pos_k", c.pose_bs_two_pos_k);
+        num("pose_bs_two_pos_c", c.pose_bs_two_pos_c);
+        num("pose_bs_two_pos_max", c.pose_bs_two_pos_max);
+        num("pose_bs_two_rot_k", c.pose_bs_two_rot_k);
+        num("pose_bs_two_rot_c", c.pose_bs_two_rot_c);
+        num("pose_bs_two_rot_max", c.pose_bs_two_rot_max);
+        num("pose_bs_max_spin", c.pose_bs_max_spin);
+        integer("pose_bs_iterations", c.pose_bs_iterations);
+        num("pose_bs_two_let_go_cm", c.pose_bs_two_let_go_cm);
+        flag("pose_hold_ignore_body", c.pose_hold_ignore_body);
+        num("pose_hold_weight_spin_extra", c.pose_hold_weight_spin_extra);
+        flag("pose_hold_hand_on_weapon", c.pose_hold_hand_on_weapon);
+        num("pose_hold_blocked_from_cm", c.pose_hold_blocked_from_cm);
+        flag("pose_hold_hand_follows", c.pose_hold_hand_follows);
+        integer("pose_hold_hand_follows_predict", c.pose_hold_hand_follows_predict);
+        num("pose_hold_follow_predict_max_cm", c.pose_hold_follow_predict_max_cm);
+        num("pose_hold_follow_predict_smooth_s", c.pose_hold_follow_predict_smooth_s);
+        flag("pose_hold_hand_follows_draw", c.pose_hold_hand_follows_draw);
+        num("pose_draw_force_scale_follows", c.pose_draw_force_scale_follows);
+        flag("pose_hold_let_go", c.pose_hold_let_go);
+        num("pose_hold_let_go_s", c.pose_hold_let_go_s);
+        flag("pose_hold_let_go_ignore_self", c.pose_hold_let_go_ignore_self);
+        num("pose_hold_let_go_grace_s", c.pose_hold_let_go_grace_s);
+        num("pose_hold_contact_cm", c.pose_hold_contact_cm);
+        flag("pose_hold_ignore_hand", c.pose_hold_ignore_hand);
+        flag("pose_hold_block_offhand_search", c.pose_hold_block_offhand_search);
+        flag("pose_slide", c.pose_slide);
+        num("pose_slide_hand_half_cm", c.pose_slide_hand_half_cm);
+        flag("pose_slide_zone_measured", c.pose_slide_zone_measured);
+        num("pose_slide_wide_cm", c.pose_slide_wide_cm);
+        num("pose_slide_rate_min", c.pose_slide_rate_min);
+        num("pose_slide_rate_max", c.pose_slide_rate_max);
+        num("pose_slide_max_cm_s", c.pose_slide_max_cm_s);
+        flag("pose_grab_button", c.pose_grab_button);
+        num("pose_grab_radius_cm", c.pose_grab_radius_cm);
+        flag("pose_grab_handles", c.pose_grab_handles);
+        num("pose_grab_touch_cm", c.pose_grab_touch_cm);
+        num("pose_grab_handle_cm", c.pose_grab_handle_cm);
+        num("pose_slide_keep_light", c.pose_slide_keep_light);
+        num("pose_slide_keep_full", c.pose_slide_keep_full);
+        num("pose_slide_damper_light", c.pose_slide_damper_light);
+        num("pose_slide_damper_full", c.pose_slide_damper_full);
+        num("pose_grab_settle_s", c.pose_grab_settle_s);
+        flag("pose_shield_free_grip", c.pose_shield_free_grip);
+        flag("pose_weapon_free_grip", c.pose_weapon_free_grip);
+        num("pose_weapon_free_cm", c.pose_weapon_free_cm);
+        num("pose_shield_point_cm", c.pose_shield_point_cm);
+        flag("pose_shield_in_hand", c.pose_shield_in_hand);
+        num("pose_shield_hand_grip_type", c.pose_shield_hand_grip_type);
+        flag("pose_two_hand", c.pose_two_hand);
+        num("pose_two_hand_strength", c.pose_two_hand_strength);
+        num("pose_two_hand_blade_gap_cm", c.pose_two_hand_blade_gap_cm);
+        num("pose_two_hand_reach_cm", c.pose_two_hand_reach_cm);
+        num("pose_two_hand_let_go_cm", c.pose_two_hand_let_go_cm);
+        flag("pose_two_hand_curl", c.pose_two_hand_curl);
+        flag("pose_fingers_anim_only", c.pose_fingers_anim_only);
+        flag("pose_in_anim_update", c.pose_in_anim_update);
+        flag("pose_post_physics", c.pose_post_physics);
+        num("pose_actor_z_smooth_s", c.pose_actor_z_smooth_s);
+        flag("pose_feed_swing_speed", c.pose_feed_swing_speed);
+        flag("pose_grab_seat", c.pose_grab_seat);
+        flag("pose_throw", c.pose_throw);
+        num("pose_throw_speed", c.pose_throw_speed);
+        flag("pose_holster_snap", c.pose_holster_snap);
+        flag("log_frames", c.log_frames);
+        flag("pose_keep_scabbard_on_drop", c.pose_keep_scabbard_on_drop);
+        num("pose_holster_zone_cm", c.pose_holster_zone_cm);
+        num("pose_holster_max_speed", c.pose_holster_max_speed);
+        num("pose_throw_multiplier", c.pose_throw_multiplier);
+        flag("pose_draw", c.pose_draw);
+        num("pose_draw_touch_cm", c.pose_draw_touch_cm);
+        num("pose_draw_settle_s", c.pose_draw_settle_s);
+        num("pose_draw_step_cm", c.pose_draw_step_cm);
+        num("pose_draw_force_scale", c.pose_draw_force_scale);
+        flag("pose_draw_scabbard_free", c.pose_draw_scabbard_free);
+        num("pose_hold_stuck_force_scale", c.pose_hold_stuck_force_scale);
+        flag("stab_wound_hold", c.stab_wound_hold);
+        flag("grip_flip", c.grip_flip);
+        num("stab_yank_cm", c.stab_yank_cm);
+        num("stab_yank_s", c.stab_yank_s);
+        num("grip_flip_s", c.grip_flip_s);
+        num("grip_flip_tap_s", c.grip_flip_tap_s);
+        num("stab_wound_settle_s", c.stab_wound_settle_s);
+        num("stab_wound_settle_max_s", c.stab_wound_settle_max_s);
+        num("stab_wound_entry_cms", c.stab_wound_entry_cms);
+        num("stab_start_depth_cm", c.stab_start_depth_cm);
+        num("stab_start_depth_per_ms", c.stab_start_depth_per_ms);
+        num("stab_start_depth_max_cm", c.stab_start_depth_max_cm);
+        num("stab_wound_in_cms", c.stab_wound_in_cms);
+        num("stab_wound_out_cms", c.stab_wound_out_cms);
+        num("stab_wound_head_factor", c.stab_wound_head_factor);
+        flag("pose_sheathe", c.pose_sheathe);
+        num("pose_sheathe_mouth_cm", c.pose_sheathe_mouth_cm);
+        num("pose_sheathe_angle_deg", c.pose_sheathe_angle_deg);
+        flag("pose_sheathe_cross", c.pose_sheathe_cross);
+        flag("pose_scabbard_grab", c.pose_scabbard_grab);
+        num("pose_scabbard_touch_cm", c.pose_scabbard_touch_cm);
+        num("pose_scabbard_angle_deg", c.pose_scabbard_angle_deg);
+        num("pose_scabbard_follow_s", c.pose_scabbard_follow_s);
+        num("pose_scabbard_let_go_cm", c.pose_scabbard_let_go_cm);
+        num("pose_scabbard_grip_type", c.pose_scabbard_grip_type);
+        flag("pose_scabbard_block_auto", c.pose_scabbard_block_auto);
+        num("pose_grab_seat_reverse_bias_deg", c.pose_grab_seat_reverse_bias_deg);
+        num("pose_swing_speed_lo", c.pose_swing_speed_lo);
+        num("pose_swing_speed_hi", c.pose_swing_speed_hi);
+        num("pose_swing_speed_fall_s", c.pose_swing_speed_fall_s);
+        flag("pose_two_hand_lock_rotation", c.pose_two_hand_lock_rotation);
+        {
+            double m = c.pose_two_hand_mirror;
+            num("pose_two_hand_mirror", m);
+            c.pose_two_hand_mirror = (int)m;
+        }
+        flag("pose_fists", c.pose_fists);
+        text("pose_fist_class", c.pose_fist_class);
+        flag("pose_fist_mark_spawned", c.pose_fist_mark_spawned);
+        flag("pose_eat", c.pose_eat);
+        num("pose_eat_cm", c.pose_eat_cm);
+        num("pose_drink_tip", c.pose_drink_tip);
+        num("pose_drink_sip_s", c.pose_drink_sip_s);
+        flag("pose_grab_release_drops", c.pose_grab_release_drops);
+        flag("pose_grab_objects", c.pose_grab_objects);
+        flag("pose_ghost_hand", c.pose_ghost_hand);
+        num("pose_ghost_from_cm", c.pose_ghost_from_cm);
+        text("pose_ghost_mesh", c.pose_ghost_mesh);
+        text("pose_ghost_material", c.pose_ghost_material);
+        num("pose_ghost_x_cm", c.pose_ghost_x_cm);
+        num("pose_ghost_y_cm", c.pose_ghost_y_cm);
+        num("pose_ghost_z_cm", c.pose_ghost_z_cm);
+        num("pose_ghost_pitch", c.pose_ghost_pitch);
+        num("pose_ghost_yaw", c.pose_ghost_yaw);
+        num("pose_ghost_roll", c.pose_ghost_roll);
+        num("pose_ghost_scale", c.pose_ghost_scale);
+        num("pose_user_arm_cm", c.pose_user_arm_cm);
+        num("pose_shoulder_reach_cm", c.pose_shoulder_reach_cm);
+        num("pose_shoulder_reach_start_cm", c.pose_shoulder_reach_start_cm);
+        num("pose_shoulder_reach_max_deg", c.pose_shoulder_reach_max_deg);
+        num("pose_grip_strength_kg", c.pose_grip_strength_kg);
+        num("pose_grip_hz", c.pose_grip_hz);
+        num("pose_grip_damping", c.pose_grip_damping);
+        num("pose_grip_radius_cm", c.pose_grip_radius_cm);
+        num("pose_grip_buzz", c.pose_grip_buzz);
+        num("pose_grip_buzz_from_cm", c.pose_grip_buzz_from_cm);
+        num("pose_grip_turn_scale", c.pose_grip_turn_scale);
+        num("pose_grip_turn_damping", c.pose_grip_turn_damping);
+        num("pose_grip_turn_max_scale", c.pose_grip_turn_max_scale);
+        flag("pose_grip_anchor_marker", c.pose_grip_anchor_marker);
+        flag("pose_move_bodies", c.pose_move_bodies);
+        num("pose_teleport_above_cm", c.pose_teleport_above_cm);
         flag("pose_crouch", c.pose_crouch);
         num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
+        num("pose_crouch_button_cm", c.pose_crouch_button_cm);
+        num("pose_crouch_button_cms", c.pose_crouch_button_cms);
+        flag("kick_on_a", c.kick_on_a);
+        num("kick_tap_s", c.kick_tap_s);
+        flag("pose_crouch_keep_leg_ik", c.pose_crouch_keep_leg_ik);
+        flag("pose_capsule_floor_clamp", c.pose_capsule_floor_clamp);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);
         num("pose_wrist_right_cm", c.pose_wrist_right_cm);
         num("pose_wrist_up_cm", c.pose_wrist_up_cm);
@@ -292,6 +511,14 @@ namespace hsvr
         num("pose_step_lift_cm", c.pose_step_lift_cm);
         num("pose_step_lead_s", c.pose_step_lead_s);
         flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
+        flag("dev_grip_trace", c.dev_grip_trace);
+        flag("stab_log", c.stab_log);
+        flag("stab_assist", c.stab_assist);
+        num("stab_min_speed_cms", c.stab_min_speed_cms);
+        num("stab_min_into_cos", c.stab_min_into_cos);
+        num("stab_arm_mass_kg", c.stab_arm_mass_kg);
+        num("stab_push_force_n", c.stab_push_force_n);
+        num("stab_push_time_s", c.stab_push_time_s);
         flag("hide_own_head", c.hide_own_head);
         text("hide_own_gore_from", c.hide_own_gore_from);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
