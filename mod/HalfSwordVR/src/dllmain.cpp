@@ -10239,6 +10239,31 @@ namespace
                     HSVR_LOG("Script: hsvr.scabbard_test: no belt scabbard with a pin");
                 continue;
             }
+            if (entry.command.rfind("hsvr.sheathe_spawn ", 0) == 0)
+            {
+                // Test: the right hand's weapon goes onto the belt as the game puts a spawned weapon there
+                // (Willie "Sheathe on Spawn"(Weapon, Slot): its own scabbard hangs at that slot).
+                UObject* player = nullptr;
+                find_pawn_mesh(&player);
+                UObject* wr = player ? object_property(player, STR("Weapon R")) : nullptr;
+                int slot = std::atoi(entry.command.c_str() + std::strlen("hsvr.sheathe_spawn "));
+                if (wr)
+                {
+                    drop_weapon(1, player);
+                    Call c(player, STR("Sheathe on Spawn"));
+                    c.object(STR("Weapon"), wr);
+                    c.byte(STR("Slot"), (uint8_t)slot);
+                    bool ran = c.run();
+                    std::wstring where;
+                    for (const SlotDef& sd : k_slots)
+                        if (object_property(player, sd.var) == wr) where = sd.var;
+                    HSVR_LOG("Script: hsvr.sheathe_spawn %d: %ls %s; now in %ls", slot, wr->GetName().c_str(), ran ? "sheathed on spawn" : "(Sheathe on Spawn NOT found)",
+                             where.empty() ? STR("no slot") : where.c_str());
+                }
+                else
+                    HSVR_LOG("Script: hsvr.sheathe_spawn: nothing in the right hand");
+                continue;
+            }
             if (entry.command == "hsvr.sheathe_test L1" || entry.command == "hsvr.sheathe_test L2")
             {
                 // Across: the right hand's weapon at the left belt slot's mouth, into the game's cross path.
