@@ -965,94 +965,6 @@ namespace
     }
 
     void apply_test_blade(UObject* weapon);
-    // One-byte enum/byte property (GripType_Enum fields), read or written in place.
-    bool byte_property(UObject* owner, const TCHAR* name, bool write, uint8_t& value)
-    {
-        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
-        if (!p || p->GetSize() != 1) return false;
-        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
-        if (write) *at = value;
-        else value = *at;
-        return true;
-    }
-
-    // Puts Willie's hands on the model's handle (decompile: grip_type_flow.md, grab_and_mass.md):
-    // - The grip type decides one or two hands. Willie copies the weapon's "Grip R Hand Default" into
-    //   R_GripType_Default when it is equipped (Set Up Right Hand Weapon @16075) and derives the current
-    //   type from it every tick (UG @493002); two hands need type 11 (the game's 15/20 cm longsword
-    //   grips), its 12 cm arming-sword grip is type 2. Both the weapon and the pawn get the new value,
-    //   so it holds now and on the next pick-up.
-    // - The off hand goes to the weapon's "Grip L Hand Off Hand" scene each time it attaches
-    //   (Attach L Hand To Offhand Position via Current Offhand Position Scene). The scene is moved
-    //   along the head's axis onto the model's handle; a hand already attached is let go (Break L
-    //   Constraint, what the game itself does) so it re-attaches at the new place.
-    // Positions along the model: model cm, guard bottom 0, handle down to numbers["handle_bottom"].
-    void fit_hands(UObject* pawn, UObject* weapon, const Xf& head_xf, V3 hs, double shift, std::map<std::string, double>& numbers)
-    {
-        if (!g_settings.fit_hands) return;
-        const double half_hand = 4.5; // cm, half a hand's width
-        double handle_bottom = numbers["handle_bottom"];
-        double grip_len = -handle_bottom;
-        bool hafted = numbers["guard_top"] - numbers["guard_bottom"] < 0.01;
-        auto model_z = [&](UObject* c, V3& hl) {
-            hl = transform_point(head_xf, world_location(c), true);
-            return hl.z * hs.z - shift;
-        };
-        UObject* r_mark = object_property(weapon, STR("Grip R Hand Default Pos"));
-        UObject* off_mark = object_property(weapon, STR("Grip L Hand Off Hand"));
-        V3 rhl{}, ohl{};
-        double rz = r_mark ? model_z(r_mark, rhl) : 0.0;
-        double oz = off_mark ? model_z(off_mark, ohl) : 0.0;
-        log("Hands: model handle %.1f cm long (guard bottom 0 to %.1f); main hand marker at %.1f cm, off hand marker at %.1f cm",
-            grip_len, handle_bottom, rz, oz);
-
-        if (!hafted)
-        {
-            uint8_t want = grip_len >= g_settings.two_hand_grip_cm ? 11 : 2, was = 0, l = 2;
-            byte_property(weapon, STR("Grip R Hand Default"), false, was);
-            byte_property(weapon, STR("Grip R Hand Default"), true, want);
-            byte_property(weapon, STR("Grip L Hand Default"), true, l);
-            uint8_t pawn_was = 0;
-            byte_property(pawn, STR("R_GripType_Default"), false, pawn_was);
-            bool pawn_ok = byte_property(pawn, STR("R_GripType_Default"), true, want);
-            log("  grip type %u -> %u (%s; handle %.1f cm, two hands from %.1f cm); pawn R_GripType_Default %u -> %u%s", was, want,
-                want == 11 ? "two-handed" : "one-handed", grip_len, g_settings.two_hand_grip_cm, pawn_was, want,
-                pawn_ok ? "" : " (NOT written)");
-        }
-        else
-            log("  hafted model: the held weapon's grip type is kept");
-
-        if (off_mark && r_mark)
-        {
-            double lo = handle_bottom + half_hand;
-            double target = g_settings.offhand == L"pommel" ? lo : oz;
-            target = (std::max)(target, lo);
-            target = (std::min)(target, rz - 5.0); // never on top of the main hand
-            if (target < lo) target = lo; // handle shorter than two hands: as low as it goes
-            V3 w = transform_point(head_xf, V3{ohl.x, ohl.y, (target + shift) / hs.z}, false);
-            Call move(off_mark, STR("K2_SetWorldLocation"));
-            move.three(STR("NewLocation"), w.x, w.y, w.z).flag(STR("bTeleport"), true);
-            move.run();
-            V3 dummy{};
-            log("  off hand marker %.1f -> %.1f cm (%s); now reads %.1f cm", oz, target, narrow(g_settings.offhand).c_str(),
-                model_z(off_mark, dummy));
-            bool attached = false;
-            if (FProperty* p = pawn->GetPropertyByNameInChain(STR("L Hand In Offhand Attached")))
-            {
-                auto* b = static_cast<FBoolProperty*>(p);
-                attached = (*(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal() + b->GetByteOffset()) & b->GetFieldMask()) != 0;
-            }
-            if (attached)
-            {
-                Call brk(pawn, STR("Break L Constraint"));
-                brk.flag(STR("Destroy Constraint"), true);
-                log("  off hand was attached: let go so it re-attaches at the new place (%s)", brk.run() ? "ok" : "FAILED");
-            }
-        }
-        else
-            log("  ! weapon has no %s marker", r_mark ? "off hand" : "main hand");
-    }
-
     void apply_full_weapon(UObject* weapon, const std::wstring& base_name);
 
     bool vector_sizes_ok()
@@ -1328,6 +1240,94 @@ namespace
     // at runtime (ProceduralMeshComponent.cpp UpdateCollision -> BodySetup CreatePhysicsMeshes ->
     // RuntimeCookPhysics_Chaos), then that BodySetup is given to a runtime UStaticMesh, which goes
     // into the part's slot. The slot keeps the game's hit binding and damage points.
+    // One-byte enum/byte property (GripType_Enum fields), read or written in place.
+    bool byte_property(UObject* owner, const TCHAR* name, bool write, uint8_t& value)
+    {
+        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        if (!p || p->GetSize() != 1) return false;
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
+        if (write) *at = value;
+        else value = *at;
+        return true;
+    }
+
+    // Puts Willie's hands on the model's handle (decompile: grip_type_flow.md, grab_and_mass.md):
+    // - The grip type decides one or two hands. Willie copies the weapon's "Grip R Hand Default" into
+    //   R_GripType_Default when it is equipped (Set Up Right Hand Weapon @16075) and derives the current
+    //   type from it every tick (UG @493002); two hands need type 11 (the game's 15/20 cm longsword
+    //   grips), its 12 cm arming-sword grip is type 2. Both the weapon and the pawn get the new value,
+    //   so it holds now and on the next pick-up.
+    // - The off hand goes to the weapon's "Grip L Hand Off Hand" scene each time it attaches
+    //   (Attach L Hand To Offhand Position via Current Offhand Position Scene). The scene is moved
+    //   along the head's axis onto the model's handle; a hand already attached is let go (Break L
+    //   Constraint, what the game itself does) so it re-attaches at the new place.
+    // Positions along the model: model cm, guard bottom 0, handle down to numbers["handle_bottom"].
+    void fit_hands(UObject* pawn, UObject* weapon, const Xf& head_xf, V3 hs, double shift, std::map<std::string, double>& numbers)
+    {
+        if (!g_settings.fit_hands) return;
+        const double half_hand = 4.5; // cm, half a hand's width
+        double handle_bottom = numbers["handle_bottom"];
+        double grip_len = -handle_bottom;
+        bool hafted = numbers["guard_top"] - numbers["guard_bottom"] < 0.01;
+        auto model_z = [&](UObject* c, V3& hl) {
+            hl = transform_point(head_xf, world_location(c), true);
+            return hl.z * hs.z - shift;
+        };
+        UObject* r_mark = object_property(weapon, STR("Grip R Hand Default Pos"));
+        UObject* off_mark = object_property(weapon, STR("Grip L Hand Off Hand"));
+        V3 rhl{}, ohl{};
+        double rz = r_mark ? model_z(r_mark, rhl) : 0.0;
+        double oz = off_mark ? model_z(off_mark, ohl) : 0.0;
+        log("Hands: model handle %.1f cm long (guard bottom 0 to %.1f); main hand marker at %.1f cm, off hand marker at %.1f cm",
+            grip_len, handle_bottom, rz, oz);
+
+        if (!hafted)
+        {
+            uint8_t want = grip_len >= g_settings.two_hand_grip_cm ? 11 : 2, was = 0, l = 2;
+            byte_property(weapon, STR("Grip R Hand Default"), false, was);
+            byte_property(weapon, STR("Grip R Hand Default"), true, want);
+            byte_property(weapon, STR("Grip L Hand Default"), true, l);
+            uint8_t pawn_was = 0;
+            byte_property(pawn, STR("R_GripType_Default"), false, pawn_was);
+            bool pawn_ok = byte_property(pawn, STR("R_GripType_Default"), true, want);
+            log("  grip type %u -> %u (%s; handle %.1f cm, two hands from %.1f cm); pawn R_GripType_Default %u -> %u%s", was, want,
+                want == 11 ? "two-handed" : "one-handed", grip_len, g_settings.two_hand_grip_cm, pawn_was, want,
+                pawn_ok ? "" : " (NOT written)");
+        }
+        else
+            log("  hafted model: the held weapon's grip type is kept");
+
+        if (off_mark && r_mark)
+        {
+            double lo = handle_bottom + half_hand;
+            double target = g_settings.offhand == L"pommel" ? lo : oz;
+            target = (std::max)(target, lo);
+            target = (std::min)(target, rz - 5.0); // never on top of the main hand
+            if (target < lo) target = lo; // handle shorter than two hands: as low as it goes
+            V3 w = transform_point(head_xf, V3{ohl.x, ohl.y, (target + shift) / hs.z}, false);
+            Call move(off_mark, STR("K2_SetWorldLocation"));
+            move.three(STR("NewLocation"), w.x, w.y, w.z).flag(STR("bTeleport"), true);
+            move.run();
+            V3 dummy{};
+            log("  off hand marker %.1f -> %.1f cm (%s); now reads %.1f cm", oz, target, narrow(g_settings.offhand).c_str(),
+                model_z(off_mark, dummy));
+            bool attached = false;
+            if (FProperty* p = pawn->GetPropertyByNameInChain(STR("L Hand In Offhand Attached")))
+            {
+                auto* b = static_cast<FBoolProperty*>(p);
+                attached = (*(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal() + b->GetByteOffset()) & b->GetFieldMask()) != 0;
+            }
+            if (attached)
+            {
+                Call brk(pawn, STR("Break L Constraint"));
+                brk.flag(STR("Destroy Constraint"), true);
+                log("  off hand was attached: let go so it re-attaches at the new place (%s)", brk.run() ? "ok" : "FAILED");
+            }
+        }
+        else
+            log("  ! weapon has no %s marker", r_mark ? "off hand" : "main hand");
+    }
+
     UObject* build_part_mesh(UObject* weapon, UObject* slot, const std::vector<std::vector<V3>>& pieces)
     {
         V3 lo{1e30, 1e30, 1e30}, hi{-1e30, -1e30, -1e30};
