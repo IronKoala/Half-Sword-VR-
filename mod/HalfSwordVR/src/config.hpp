@@ -159,6 +159,8 @@ namespace hsvr
         std::string hand_bone_left = "hand_l";
         std::string hand_bone_right = "hand_r";
         // 1 = a short buzz on a controller each time its trigger is pulled all the way (checks vibration).
+        // Read SteamVR's hand skeleton (XR_EXT_hand_tracking) for finger curls when it offers one.
+        bool input_hand_tracking = true;
         bool haptics_test = false;
         // 1 = once a second, where your character's body, head and hands are.
         bool log_body = false;
@@ -517,6 +519,48 @@ namespace hsvr
         // Set the game's "Fist R/L Spawned" on a fist the mod makes (so the game's own removal rules
         // apply to it). 0 = the mod alone opens it (test switch while the first-fist loss is hunted).
         bool pose_fist_mark_spawned = false;
+        // Fists from your real hand (Matthew 2026-11-19): the hand is a fist while the grip, the trigger
+        // and your thumb (resting on the stick, a face button or the thumb rest) are all closed, and opens
+        // when any of them opens. Finger curls (0 open .. 1 closed) come from SteamVR's hand skeleton
+        // (input_hand_tracking, XR_EXT_hand_tracking) when it gives one, else from the trigger, grip and
+        // touch sensors. index/grip/thumb_on: curls that close it; *_off: below these it opens.
+        // 0 = the old way (a squeeze with nothing in reach).
+        bool pose_fist_from_fingers = true;
+        double pose_fist_index_on = 0.65;
+        double pose_fist_index_off = 0.4;
+        double pose_fist_grip_on = 0.65;
+        double pose_fist_grip_off = 0.4;
+        double pose_fist_thumb_on = 0.5;
+        double pose_fist_thumb_off = 0.3;
+        // The fist's finger shape in his animation: -2 = the game's own, -1 = the animation's grab
+        // shape (its 'Grabbed' switch), 0..17 = that grip type, 100 = its guard fist ('Guarding' for
+        // that hand, with the swing speed its fist blend reads held at 75 in the animation only).
+        // Unattended test 2026-11-19 (fingertips to the hand bone, four-finger mean): open/-2/0 14.8 cm,
+        // -1 10.7, 1 9.0 (tightest), 5 and 9 9.1; 100 did not hold (one sample, then open).
+        int pose_fist_shape = 1;
+        // The game's own fist flags: 'Fist R/L Spawned' is hidden from Willie's tick (whose removal
+        // rule needs 'Hand Active', always 0 in VR) and set after it while the mod's fist exists (his
+        // punch rules read it on hits), and 'R/L Fisting Rate' (the punch stamina) is fed by the
+        // game's own formula from the swing speed.
+        bool pose_fist_game_flags = true;
+        // Body grabs (a Willie's throat, arm...): what the game's grab joint feels, logged every 0.1 s.
+        bool log_body_grab = true;
+        // 1 = the game's grab joint is made soft (a capped spring, B&S-like) 0.25 s after it latches, so
+        // the tracked hand no longer pulls on it without limit (the game lets go when the pull beats
+        // his grip strength). 0 = the game's own joint.
+        // Test 4 (2026-11-19): 2000/100 let a standing Willie go in 2.8 s; 20000/400 held like the game's
+        // joint. cap_per_t: the drive cap is this x his grip strength T (the game's slip threshold), so
+        // the force stays just under T (it levels off at about cap/500): his strength sets how hard he
+        // can drag a body, and the stretch rule lets go when it gets away. 0 = the fixed pose_grab_body_max.
+        // Test 5: the game's own joint (0) held an active Willie 15 s and choked him out; the capped spring
+        // let a standing one drift off (its force levels at ~cap/400 whatever the stretch). Every grab the
+        // game broke had HIS arm at tonus 0 / health 0 after hits (T = 0: the game's broken-arm rule).
+        int pose_grab_body_hold = 0;
+        double pose_grab_body_spring = 20000.0; // drive stiffness (acceleration mode)
+        double pose_grab_body_damper = 400.0;
+        double pose_grab_body_cap_per_t = 450.0;
+        double pose_grab_body_max = 250000.0;    // drive cap when cap_per_t is 0
+        double pose_grab_body_let_go_cm = 30.0; // hand this far from the grab point for 0.3 s lets go
         // Eating and drinking: grabbed food within pose_eat_cm of your mouth is bitten (the game's
         // Bite Event); a held bottle at your mouth with its neck below pose_drink_tip (the dot of its
         // axis with up) is drunk from, at most once a second.

@@ -2362,6 +2362,7 @@ float4 PSMain(VSOut i) : SV_Target
         }
         if (!xr_load_runtime(xr)) return false;
 
+        std::vector<std::string> offered_extensions;
         if (xr.EnumerateInstanceExtensionProperties)
         {
             uint32_t count = 0;
@@ -2372,6 +2373,7 @@ float4 PSMain(VSOut i) : SV_Target
             for (auto& e : exts)
             {
                 if (strcmp(e.extensionName, XR_KHR_D3D12_ENABLE_EXTENSION_NAME) == 0) has_d3d12 = true;
+                offered_extensions.push_back(e.extensionName);
             }
             if (!has_d3d12)
             {
@@ -2380,14 +2382,15 @@ float4 PSMain(VSOut i) : SV_Target
             }
         }
 
-        const char* extensions[] = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
+        std::vector<const char*> extensions = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
+        for (const char* e : controllers_wanted_extensions(offered_extensions)) extensions.push_back(e);
         XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
         strncpy(ici.applicationInfo.applicationName, "Half Sword VR", XR_MAX_APPLICATION_NAME_SIZE - 1);
         ici.applicationInfo.applicationVersion = 1;
         strncpy(ici.applicationInfo.engineName, "HalfSwordVR mod", XR_MAX_ENGINE_NAME_SIZE - 1);
         ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
-        ici.enabledExtensionCount = 1;
-        ici.enabledExtensionNames = extensions;
+        ici.enabledExtensionCount = (uint32_t)extensions.size();
+        ici.enabledExtensionNames = extensions.data();
         XrResult r = xr.CreateInstance(&ici, &g_instance);
         if (XR_FAILED(r))
         {
@@ -2411,7 +2414,10 @@ float4 PSMain(VSOut i) : SV_Target
             return false;
         }
         XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
+        XrSystemHandTrackingPropertiesEXT hand_props{XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT};
+        if (extensions.size() > 1) sp.next = &hand_props;
         if (XR_SUCCEEDED(xr.GetSystemProperties(g_instance, g_system, &sp))) HSVR_LOG("OpenXR: headset %s", sp.systemName);
+        controllers_system_hand_tracking(extensions.size() > 1 && hand_props.supportsHandTracking);
         controllers_create(xr, g_instance);
 
         uint32_t view_count = 0;

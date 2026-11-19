@@ -4,6 +4,7 @@
 #include "log.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -26,6 +27,18 @@ namespace hsvr
         XrAction g_secondary = XR_NULL_HANDLE;
         XrAction g_menu = XR_NULL_HANDLE;
         XrAction g_haptic = XR_NULL_HANDLE;
+        XrAction g_trigger_touch = XR_NULL_HANDLE;
+        XrAction g_thumb_touch = XR_NULL_HANDLE;
+
+        // SteamVR's hand skeleton (XR_EXT_hand_tracking): its estimate of each finger from the
+        // controller's sensors (or real finger tracking where the controller has it).
+        bool g_ext_hand_tracking = false;
+        bool g_ext_motion_range = false;
+        bool g_system_hand_tracking = false;
+        PFN_xrCreateHandTrackerEXT g_create_hand_tracker = nullptr;
+        PFN_xrDestroyHandTrackerEXT g_destroy_hand_tracker = nullptr;
+        PFN_xrLocateHandJointsEXT g_locate_hand_joints = nullptr;
+        XrHandTrackerEXT g_hand_tracker[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
         XrSpace g_grip_space[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
         XrSpace g_aim_space[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
         XrSession g_attached_session = XR_NULL_HANDLE;
@@ -151,6 +164,65 @@ namespace hsvr
             return true;
         }
 
+        float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+        // One finger's bend: the angles between its consecutive bones, summed (degrees).
+        float finger_bend(const XrHandJointLocationEXT* j, const int* chain, int n)
+        {
+            float total = 0.0f;
+            for (int k = 0; k + 2 < n; ++k)
+            {
+                const XrVector3f& a = j[chain[k]].pose.position;
+                const XrVector3f& b = j[chain[k + 1]].pose.position;
+                const XrVector3f& c = j[chain[k + 2]].pose.position;
+                float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+                float vx = c.x - b.x, vy = c.y - b.y, vz = c.z - b.z;
+                float lu = std::sqrt(ux * ux + uy * uy + uz * uz), lv = std::sqrt(vx * vx + vy * vy + vz * vz);
+                if (lu < 1e-5f || lv < 1e-5f) continue;
+                float d = (ux * vx + uy * vy + uz * vz) / (lu * lv);
+                d = d < -1.0f ? -1.0f : (d > 1.0f ? 1.0f : d);
+                total += std::acos(d) * 57.29578f;
+            }
+            return total;
+        }
+
+        // The skeleton's finger curls. Full bend (a fist): about 250 deg over a finger's three joints,
+        // about 110 over the thumb's two (normal human ranges; logged in degrees to calibrate).
+        bool read_joints(XrSpace space, XrTime time, int h, HandState& hand)
+        {
+            if (g_hand_tracker[h] == XR_NULL_HANDLE || !g_locate_hand_joints) return false;
+            XrHandJointLocationEXT joints[XR_HAND_JOINT_COUNT_EXT];
+            XrHandJointLocationsEXT locations{XR_TYPE_HAND_JOINT_LOCATIONS_EXT};
+            locations.jointCount = XR_HAND_JOINT_COUNT_EXT;
+            locations.jointLocations = joints;
+            XrHandJointsLocateInfoEXT info{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT};
+            info.baseSpace = space;
+            info.time = time;
+            XrHandJointsMotionRangeInfoEXT range{XR_TYPE_HAND_JOINTS_MOTION_RANGE_INFO_EXT};
+            range.handJointsMotionRange = XR_HAND_JOINTS_MOTION_RANGE_UNOBSTRUCTED_EXT; // a closed hand reads as a fist, not wrapped on the controller
+            if (g_ext_motion_range) info.next = &range;
+            if (XR_FAILED(g_locate_hand_joints(g_hand_tracker[h], &info, &locations)) || !locations.isActive) return false;
+            for (int k = 0; k < XR_HAND_JOINT_COUNT_EXT; ++k)
+                if (!(joints[k].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) return false;
+            static const int thumb[] = {XR_HAND_JOINT_THUMB_METACARPAL_EXT, XR_HAND_JOINT_THUMB_PROXIMAL_EXT, XR_HAND_JOINT_THUMB_DISTAL_EXT, XR_HAND_JOINT_THUMB_TIP_EXT};
+            static const int index[] = {XR_HAND_JOINT_INDEX_METACARPAL_EXT, XR_HAND_JOINT_INDEX_PROXIMAL_EXT, XR_HAND_JOINT_INDEX_INTERMEDIATE_EXT,
+                                        XR_HAND_JOINT_INDEX_DISTAL_EXT, XR_HAND_JOINT_INDEX_TIP_EXT};
+            static const int middle[] = {XR_HAND_JOINT_MIDDLE_METACARPAL_EXT, XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT, XR_HAND_JOINT_MIDDLE_INTERMEDIATE_EXT,
+                                         XR_HAND_JOINT_MIDDLE_DISTAL_EXT, XR_HAND_JOINT_MIDDLE_TIP_EXT};
+            static const int ring[] = {XR_HAND_JOINT_RING_METACARPAL_EXT, XR_HAND_JOINT_RING_PROXIMAL_EXT, XR_HAND_JOINT_RING_INTERMEDIATE_EXT,
+                                       XR_HAND_JOINT_RING_DISTAL_EXT, XR_HAND_JOINT_RING_TIP_EXT};
+            static const int little[] = {XR_HAND_JOINT_LITTLE_METACARPAL_EXT, XR_HAND_JOINT_LITTLE_PROXIMAL_EXT, XR_HAND_JOINT_LITTLE_INTERMEDIATE_EXT,
+                                         XR_HAND_JOINT_LITTLE_DISTAL_EXT, XR_HAND_JOINT_LITTLE_TIP_EXT};
+            hand.joint_deg[0] = finger_bend(joints, thumb, 4);
+            hand.joint_deg[1] = finger_bend(joints, index, 5);
+            hand.joint_deg[2] = finger_bend(joints, middle, 5);
+            hand.joint_deg[3] = finger_bend(joints, ring, 5);
+            hand.joint_deg[4] = finger_bend(joints, little, 5);
+            hand.joint_curl[0] = clamp01(hand.joint_deg[0] / 110.0f);
+            for (int f = 1; f < 5; ++f) hand.joint_curl[f] = clamp01(hand.joint_deg[f] / 250.0f);
+            return true;
+        }
+
         void pulse(const XrApi& xr, XrSession session, int hand, float amplitude, double seconds)
         {
             if (g_haptic == XR_NULL_HANDLE) return;
@@ -191,6 +263,9 @@ namespace hsvr
                   make_action(xr, XR_ACTION_TYPE_BOOLEAN_INPUT, "menu", "Menu", g_menu) &&
                   make_action(xr, XR_ACTION_TYPE_VIBRATION_OUTPUT, "vibrate", "Vibration", g_haptic);
         if (!ok) return false;
+        // Touch sensors (finger curls for fists); not fatal if a runtime refuses them.
+        make_action(xr, XR_ACTION_TYPE_BOOLEAN_INPUT, "trigger_touch", "Finger on trigger", g_trigger_touch);
+        make_action(xr, XR_ACTION_TYPE_BOOLEAN_INPUT, "thumb_touch", "Thumb resting", g_thumb_touch);
 
         const char* grip = "/input/grip/pose";
         const char* aim = "/input/aim/pose";
@@ -205,6 +280,11 @@ namespace hsvr
                  {&g_stick_click, "/input/thumbstick/click", "/input/thumbstick/click"},
                  {&g_primary, "/input/a/click", "/input/a/click"},
                  {&g_secondary, "/input/b/click", "/input/b/click"},
+                 {&g_trigger_touch, "/input/trigger/touch", "/input/trigger/touch"},
+                 {&g_thumb_touch, "/input/thumbstick/touch", "/input/thumbstick/touch"},
+                 {&g_thumb_touch, "/input/a/touch", "/input/a/touch"},
+                 {&g_thumb_touch, "/input/b/touch", "/input/b/touch"},
+                 {&g_thumb_touch, "/input/trackpad/touch", "/input/trackpad/touch"},
                  {&g_haptic, haptic, haptic}});
         // Oculus / Meta Touch layout (also what many other controllers are offered as).
         suggest(xr, "/interaction_profiles/oculus/touch_controller",
@@ -217,6 +297,11 @@ namespace hsvr
                  {&g_primary, "/input/x/click", "/input/a/click"},
                  {&g_secondary, "/input/y/click", "/input/b/click"},
                  {&g_menu, "/input/menu/click", nullptr},
+                 {&g_trigger_touch, "/input/trigger/touch", "/input/trigger/touch"},
+                 {&g_thumb_touch, "/input/thumbstick/touch", "/input/thumbstick/touch"},
+                 {&g_thumb_touch, "/input/x/touch", "/input/a/touch"},
+                 {&g_thumb_touch, "/input/y/touch", "/input/b/touch"},
+                 {&g_thumb_touch, "/input/thumbrest/touch", "/input/thumbrest/touch"},
                  {&g_haptic, haptic, haptic}});
         // HTC Vive wands.
         suggest(xr, "/interaction_profiles/htc/vive_controller",
@@ -263,6 +348,24 @@ namespace hsvr
         }
         g_attached_session = session;
         HSVR_LOG("Controllers: action set attached");
+        if (g_ext_hand_tracking && g_system_hand_tracking && config().input_hand_tracking && xr.GetInstanceProcAddr)
+        {
+            xr.GetInstanceProcAddr(g_instance, "xrCreateHandTrackerEXT", reinterpret_cast<PFN_xrVoidFunction*>(&g_create_hand_tracker));
+            xr.GetInstanceProcAddr(g_instance, "xrDestroyHandTrackerEXT", reinterpret_cast<PFN_xrVoidFunction*>(&g_destroy_hand_tracker));
+            xr.GetInstanceProcAddr(g_instance, "xrLocateHandJointsEXT", reinterpret_cast<PFN_xrVoidFunction*>(&g_locate_hand_joints));
+            for (int h = 0; h < 2 && g_create_hand_tracker && g_locate_hand_joints; ++h)
+            {
+                XrHandTrackerCreateInfoEXT info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+                info.hand = h == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+                info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+                XrResult hr = g_create_hand_tracker(session, &info, &g_hand_tracker[h]);
+                HSVR_LOG("Controllers: %s hand skeleton %s", kHandName[h], XR_SUCCEEDED(hr) ? "tracked (XR_EXT_hand_tracking)" : result_name(xr, g_instance, hr));
+                if (XR_FAILED(hr)) g_hand_tracker[h] = XR_NULL_HANDLE;
+            }
+        }
+        else
+            HSVR_LOG("Controllers: no hand skeleton (extension %d, system %d, input_hand_tracking %d): finger curls from the trigger, grip and touch sensors",
+                     (int)g_ext_hand_tracking, (int)g_system_hand_tracking, (int)config().input_hand_tracking);
         return true;
     }
 
@@ -300,6 +403,17 @@ namespace hsvr
             hand.primary = read_bool(xr, session, g_primary, h);
             hand.secondary = read_bool(xr, session, g_secondary, h);
             hand.menu = read_bool(xr, session, g_menu, h);
+            hand.trigger_touch = read_bool(xr, session, g_trigger_touch, h);
+            hand.thumb_touch = read_bool(xr, session, g_thumb_touch, h);
+            // Sensor curls (as Matthew's framework, ik/fingers.rs): the thumb resting on a control is
+            // closed, pressing one is fully closed; the index follows the trigger (a finger resting on
+            // it is a little curled); the other three follow the grip.
+            bool thumb_press = hand.stick_click || hand.primary || hand.secondary;
+            hand.sensor_curl[0] = thumb_press ? 1.0f : (hand.thumb_touch ? 0.8f : 0.1f);
+            hand.sensor_curl[1] = (std::max)(hand.trigger, hand.trigger_touch ? 0.25f : 0.0f);
+            hand.sensor_curl[2] = hand.sensor_curl[3] = hand.sensor_curl[4] = hand.squeeze;
+            hand.joints_valid = read_joints(space, (XrTime)time, h, hand);
+            for (int f = 0; f < 5; ++f) hand.curl[f] = hand.joints_valid ? (std::max)(hand.joint_curl[f], hand.sensor_curl[f]) : hand.sensor_curl[f];
 
             // Vibration check: a short buzz each time the trigger is pulled all the way.
             bool down = hand.trigger > 0.9f;
@@ -338,6 +452,29 @@ namespace hsvr
             xr.PathToString(instance, state.interactionProfile, XR_MAX_PATH_LENGTH, &length, text);
             HSVR_LOG("Controllers: %s hand uses layout %s", kHandName[h], text);
         }
+    }
+
+    std::vector<const char*> controllers_wanted_extensions(const std::vector<std::string>& offered)
+    {
+        std::vector<const char*> want;
+        g_ext_hand_tracking = g_ext_motion_range = false;
+        if (!config().input_hand_tracking) return want;
+        for (const std::string& e : offered)
+        {
+            if (e == XR_EXT_HAND_TRACKING_EXTENSION_NAME) g_ext_hand_tracking = true;
+            if (e == XR_EXT_HAND_JOINTS_MOTION_RANGE_EXTENSION_NAME) g_ext_motion_range = true;
+        }
+        if (g_ext_hand_tracking) want.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+        if (g_ext_hand_tracking && g_ext_motion_range) want.push_back(XR_EXT_HAND_JOINTS_MOTION_RANGE_EXTENSION_NAME);
+        else g_ext_motion_range = false;
+        HSVR_LOG("Controllers: runtime offers hand skeleton %d, motion range %d", (int)g_ext_hand_tracking, (int)g_ext_motion_range);
+        return want;
+    }
+
+    void controllers_system_hand_tracking(bool supported)
+    {
+        g_system_hand_tracking = supported;
+        HSVR_LOG("Controllers: headset system %s hand tracking", supported ? "supports" : "does not support");
     }
 
     ControllerState controllers_state()
