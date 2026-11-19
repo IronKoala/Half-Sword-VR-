@@ -106,7 +106,11 @@ def main():
     print(f"Model:      {model}")
     print(f"Mod folder: {mod_dir}\n")
 
-    argv = [model, mod_dir]
+    # Converted into a scratch folder first; files reach the mod folder only after the user's yes.
+    import shutil
+    import tempfile
+    work = tempfile.mkdtemp(prefix="hs_weapon_")
+    argv = [model, work]
     ext = os.path.splitext(model)[1].lower()
     if ext not in (".glb", ".gltf"):
         # The file's numbers carry no unit: show the length each unit would give and let the user pick.
@@ -135,8 +139,15 @@ def main():
         if a == "y":
             break
         if a == "q":
+            shutil.rmtree(work, ignore_errors=True)
+            print("Nothing was changed.")
             return
+        for f in os.listdir(work):
+            os.remove(os.path.join(work, f))
         argv = [x for x in argv if x != "--flip"] + (["--flip"] if "--flip" not in argv else [])
+    for f in os.listdir(work):
+        shutil.copy2(os.path.join(work, f), os.path.join(mod_dir, f))
+    shutil.rmtree(work, ignore_errors=True)
     set_model_in_ini(mod_dir, name + ".obj")
     print(f"\nDone. CustomWeapon.ini now uses {name}.obj.")
     print("In Half Sword: pick up a sword in your right hand and press F9.")
