@@ -299,6 +299,8 @@ namespace hsvr
         num("dev_pose_roll", c.dev_pose_roll);
         flag("pose_body", c.pose_body);
         flag("pose_head", c.pose_head);
+        flag("pose_head_lock", c.pose_head_lock);
+        num("pose_head_lock_max_cm", c.pose_head_lock_max_cm);
         flag("pose_arms", c.pose_arms);
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);
@@ -348,6 +350,7 @@ namespace hsvr
         num("pose_hold_weight_spin_extra", c.pose_hold_weight_spin_extra);
         flag("pose_hold_hand_on_weapon", c.pose_hold_hand_on_weapon);
         num("pose_hold_blocked_from_cm", c.pose_hold_blocked_from_cm);
+        flag("pose_hold_hand_follows", c.pose_hold_hand_follows);
         flag("pose_hold_let_go", c.pose_hold_let_go);
         num("pose_hold_let_go_s", c.pose_hold_let_go_s);
         flag("pose_hold_let_go_ignore_self", c.pose_hold_let_go_ignore_self);

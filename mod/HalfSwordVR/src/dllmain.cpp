@@ -813,6 +813,21 @@ namespace
         *(n.node + n.rotation_mode->GetOffset_Internal()) = 0;
     }
 
+    // Puts the bone at this spot (component space), replacing the animation's.
+    bool node_set_translation(ModifyBoneNode& n, const hsvr::Vec3& component_space)
+    {
+        if (!n.translation || !n.translation_mode || !n.translation_space) return false;
+        *(n.node + n.translation_space->GetOffset_Internal()) = 1; // component space
+        if (!write_three(n.node + n.translation->GetOffset_Internal(), n.translation, component_space.x, component_space.y, component_space.z)) return false;
+        *(n.node + n.translation_mode->GetOffset_Internal()) = 1; // replace
+        return true;
+    }
+
+    void node_release_translation(ModifyBoneNode& n)
+    {
+        if (n.translation_mode) *(n.node + n.translation_mode->GetOffset_Internal()) = 0;
+    }
+
     struct ArmCalibration
     {
         bool valid = false;
@@ -2151,6 +2166,30 @@ namespace
             {
                 if (have) node_set_rotation(*n, component_inv * (head_rot * g_pose.head_offset));
                 else node_release(*n);
+                // The head where the headset is: the eyes sit eye_forward/eye_up from the head bone (as
+                // the view anchor was measured), so the bone is that far back and down from them.
+                bool placed = false;
+                if (have && cfg.pose_head_lock && g_pose_anchor_fixed && !cfg.dev_pose_fake_tracking)
+                {
+                    Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
+                    Vec3 want = head_world - head_rot.rotate(eye_offset);
+                    // Never farther than the animation's neck reaches, plus pose_head_lock_max_cm.
+                    Vec3 neck = socket_location(driver, bone_fname("neck_02"));
+                    static double neck_len = -1.0;
+                    if (neck_len < 0.0 && !*(n->node + n->translation_mode->GetOffset_Internal()))
+                        neck_len = length(socket_location(driver, bone_fname("head")) - neck);
+                    if (neck_len > 0.0)
+                    {
+                        Vec3 d = want - neck;
+                        double dl = length(d), cap = neck_len + (std::max)(0.0, cfg.pose_head_lock_max_cm);
+                        if (dl > cap) want = neck + d * (cap / dl);
+                        double scale = (std::max)(1e-3, component_scale_z(driver));
+                        placed = node_set_translation(*n, component_inv.rotate(want - component_location(driver)) * (1.0 / scale));
+                        HSVR_LOG_EVERY(2.0, "Pose: head bone put at the headset (%.1f cm from the neck, its own neck %.1f cm%s)", dl, neck_len,
+                                       dl > cap ? ", held at the limit" : "");
+                    }
+                }
+                if (!placed) node_release_translation(*n);
             }
             have_look = have;
             look_rot = head_rot;
@@ -4703,6 +4742,27 @@ namespace
     // it twisted and clipped through the handle). Willie's hands mirror across the hand bone's X and
     // the weapon's Y (kick test 15: a weapon in the left hand has X and Z mirrored in the hand frame,
     // so Y flips), so the second hand's weapon frame is M_hand * R_first * M_weapon.
+    double world_delta_seconds(UObject* context);
+    // Where an item will be once this frame's physics has moved it: its velocity now, about its centre
+    // of mass, over this frame's delta time (pos/rot in: as it is now).
+    void predicted_item_pose(UObject* base, hsvr::Vec3& pos, hsvr::Quat& rot)
+    {
+        using namespace hsvr;
+        double DT = world_delta_seconds(g_pose.pawn);
+        if (!(DT > 1e-4 && DT < 0.1)) DT = 1.0 / 90.0;
+        Call cm(base, STR("GetCenterOfMass"));
+        cm.run();
+        Call lv(base, STR("GetPhysicsLinearVelocity"));
+        lv.run();
+        Call av(base, STR("GetPhysicsAngularVelocityInRadians"));
+        av.run();
+        Vec3 com = cm.vec(), v = lv.vec(), w = av.vec();
+        Quat dq = from_scaled_axis(w * DT);
+        Vec3 com2 = com + v * DT + Vec3{0.0, 0.0, -980.0 * DT * DT};
+        pos = com2 + dq.rotate(pos - com);
+        rot = (dq * rot).normalized();
+    }
+
     bool two_hand_pose(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot)
     {
         using namespace hsvr;
@@ -4717,8 +4777,10 @@ namespace
             UObject* b = object_property(g_two.weapon, STR("BaseMesh"));
             if (!b) return false;
             Quat wr = component_rotation(b);
+            Vec3 wp = component_location(b);
+            if (hsvr::config().pose_hold_hand_follows) predicted_item_pose(b, wp, wr);
             hand_rot = (wr * (h.f2 * h.f1.inverse()).normalized().inverse()).normalized();
-            target = component_location(b) + wr.rotate(h.pivot) - hand_rot.rotate(h.in_hand);
+            target = wp + wr.rotate(h.pivot) - hand_rot.rotate(h.in_hand);
             return true;
         }
         if (side != g_two.second) return false;
@@ -4731,6 +4793,8 @@ namespace
         UObject* base = object_property(g_two.weapon, STR("BaseMesh"));
         if (!base) return false;
         Quat weapon_rot = component_rotation(base);
+        Vec3 weapon_pos = component_location(base);
+        if (hsvr::config().pose_hold_hand_follows) predicted_item_pose(base, weapon_pos, weapon_rot);
         const HoldState& first = g_hold[g_two.main];
         if (g_two.use_rel)
             hand_rot = (weapon_rot * g_two.rel.inverse()).normalized();
@@ -4748,7 +4812,7 @@ namespace
             Quat mirrored = quat_from_axes(mx, my, mz).normalized();
             hand_rot = (weapon_rot * mirrored.inverse()).normalized();
         }
-        Vec3 spot = component_location(base) + weapon_rot.rotate(g_two.local);
+        Vec3 spot = weapon_pos + weapon_rot.rotate(g_two.local);
         target = spot - hand_rot.rotate(g_two.in_hand);
         return true;
     }
@@ -5591,6 +5655,7 @@ namespace
         double amount = (std::max)(h.blocked_cm, turn_cm);
         double t = (std::min)(1.0, (std::max)(0.0, (amount - from) / (full - from)));
         t = t * t * (3.0 - 2.0 * t);
+        if (cfg.pose_hold_hand_follows) t = 1.0; // B&S: the drawn hand is always on the item
         h.on_weapon = t;
         if (t <= 0.0) return false;
         // The stuck rule (Matthew's framework, hold_melee): a weapon stopped with its grip out of his
@@ -5669,6 +5734,30 @@ namespace
         }
         else
             h.stuck_since = -1.0;
+        if (cfg.pose_hold_hand_follows)
+        {
+            // Where the item will be once this frame's physics has moved it (its velocity now, about its
+            // centre of mass), and the hand at its grip there: hand = item x (the grip's place in the hand)^-1.
+            Vec3 pos2 = pos;
+            Quat rot2 = rot;
+            predicted_item_pose(base, pos2, rot2);
+            Vec3 controller_point = target + hand_rot.rotate(h.in_hand);
+            hand_rot = (rot2 * (h.f2 * h.f1.inverse()).normalized().inverse()).normalized();
+            target = pos2 + rot2.rotate(h.pivot) - hand_rot.rotate(h.in_hand);
+            // What you saw last frame: his drawn hand bone against the item's grip as it was drawn.
+            if (g_pose.driver)
+            {
+                Quat seen_rot = (rot * (h.f2 * h.f1.inverse()).normalized().inverse()).normalized();
+                Vec3 seen_at = pos + rot.rotate(h.pivot) - seen_rot.rotate(h.in_hand);
+                FName bn = bone_fname(side == 0 ? "hand_l" : "hand_r");
+                Vec3 drawn = socket_location(g_pose.driver, bn);
+                Quat drawn_rot = socket_rotation(g_pose.driver, bn);
+                HSVR_LOG_EVERY(0.5, "Hold: %s drawn hand %.1f cm / %.0f deg from its grip on %ls; item %.1f cm from your controller", side == 0 ? "left" : "right",
+                               length(drawn - seen_at), length(scaled_axis((drawn_rot * seen_rot.inverse()).normalized())) * 57.2958, h.weapon->GetName().c_str(),
+                               length((pos + rot.rotate(h.pivot)) - controller_point));
+            }
+            return true;
+        }
         // The hand where it holds the weapon, moved and turned as the weapon was kept from following.
         Quat dr = from_scaled_axis(turn * t);
         Vec3 point = target + hand_rot.rotate(h.in_hand) + off * t;

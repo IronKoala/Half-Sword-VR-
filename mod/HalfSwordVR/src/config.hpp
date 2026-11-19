@@ -156,6 +156,12 @@ namespace hsvr
         // playing; switching back restarts nothing, so restart the fight afterwards.
         bool pose_body = false;
         bool pose_head = true;
+        // His head bone is put where your headset says it is (not only turned), so the helmet keeps
+        // still in front of your eyes: the animation's breathing and crouch lean no longer move it in
+        // and out of view (Matthew 2026-11-19). At most pose_head_lock_max_cm from where the animation
+        // has his neck reach (beyond that the neck would stretch visibly).
+        bool pose_head_lock = true;
+        double pose_head_lock_max_cm = 12.0;
         bool pose_arms = true;
         bool pose_follow_room = true;
         // 1 = while posed, your character's capsule only moves when you walk: the game's own pull
@@ -272,6 +278,12 @@ namespace hsvr
         // controller to sitting on the weapon as the weapon falls 1 to pose_hold_blocked_from_cm behind.
         bool pose_hold_hand_on_weapon = true;
         double pose_hold_blocked_from_cm = 3.0;
+        // B&S (bs_hold_measured.md section 5): while a hand holds something, his drawn hand always rides
+        // the item at its grip (where the item will be after this frame's physics), never your controller;
+        // the hold's springs pull the item toward the controller. So the item never slips, sits to the
+        // side of the hand or jitters in it (Matthew 2026-11-19). 0 = the hand follows the controller
+        // and only goes onto a stopped weapon (pose_hold_blocked_from_cm).
+        bool pose_hold_hand_follows = true;
         // The stuck rule: a stopped weapon whose grip is out of his reach from the shoulder, or more
         // than an arm's length from your hand, for pose_hold_let_go_s, is let go (the game's own drop).
         // A weapon stopped by his own body is never let go by the stuck rule (vanilla weapons collide with him too).
