@@ -306,6 +306,9 @@ namespace hsvr
         // the game then drops the first hand's two-handed grip type (11 -> 2) and with it its two-handed
         // rules (Master Stroke, the two-hand stamina factor, ...; fists_eating.md).
         bool pose_two_hand_curl = false;
+        // Finger shapes go only to the animation's copy of each hand's grip type (written right after
+        // ABP_Willie's update), never to the pawn's, so the game's two-handed rules and Set Up never see them.
+        bool pose_fingers_anim_only = true;
         // The second hand turns with the weapon (locked onto it as the first hand holds it, mirrored)
         // instead of with your controller.
         bool pose_two_hand_lock_rotation = true;

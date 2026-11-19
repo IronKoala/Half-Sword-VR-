@@ -1217,6 +1217,61 @@ namespace
 
     // Right after ABP_Willie's animation update (which copies the game's foot targets in): our feet.
     UFunction* g_anim_update = nullptr;
+    // ---- Finger shapes, shown to the animation only ---------------------------------------------
+    // ABP_Willie copies each hand's finger shape from the pawn's R/L_GripType_Current into its own
+    // 'R/L Grip Type' inside BlueprintUpdateAnimation (@152268 / @153084), and the AnimGraph reads only
+    // that copy (grip_type_flow.md). Willie's own tick reads the pawn's values for its rules (a non-zero
+    // L_GripType_Current drops the right hand's two-handed grip 11 -> 2 every tick, @493002-496128), and
+    // Set Up Hand Weapon rewrites them. So the mod never writes the pawn's values: it writes the
+    // animation's copy right after that update, for the player only (pose_fingers_anim_only).
+    int g_anim_grip[2] = {-1, -1};          // the finger shape the mod wants for that hand (-1 = the game's)
+    double g_anim_grip_time[2] = {-1e9, -1e9};
+    int g_anim_grip_two = -1;               // the second hand's, while two hands hold (g_two.second)
+    int g_anim_grip_two_side = -1;
+    void set_anim_grip(int side, int g)
+    {
+        g_anim_grip[side] = g;
+        g_anim_grip_time[side] = hsvr::now_seconds();
+    }
+    void fingers_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        if (!g_pose_active.load() || !context || context != g_pose.instance || !function) return;
+        if (g_anim_update) { if (function != g_anim_update) return; }
+        else
+        {
+            if (function->GetName() != STR("BlueprintUpdateAnimation")) return;
+            g_anim_update = function;
+        }
+        if (!hsvr::config().pose_fingers_anim_only) return;
+        static FProperty* prop[2] = {nullptr, nullptr};
+        static bool looked = false;
+        if (!looked)
+        {
+            looked = true;
+            prop[0] = context->GetPropertyByNameInChain(STR("L Grip Type"));
+            prop[1] = context->GetPropertyByNameInChain(STR("R Grip Type"));
+            HSVR_LOG("Fingers: the animation's grip types L %s, R %s (%ls / %ls)", prop[0] ? "found" : "MISSING", prop[1] ? "found" : "MISSING",
+                     prop[0] ? prop[0]->GetClass().GetName().c_str() : STR("-"), prop[1] ? prop[1]->GetClass().GetName().c_str() : STR("-"));
+        }
+        double now = hsvr::now_seconds();
+        static int last[2] = {-2, -2};
+        for (int side = 0; side < 2; ++side)
+        {
+            if (!prop[side]) continue;
+            int g = side == g_anim_grip_two_side ? g_anim_grip_two : (now - g_anim_grip_time[side] < 0.25 ? g_anim_grip[side] : -1);
+            if (g != last[side])
+            {
+                HSVR_LOG("Fingers: %s hand shows %d%s", side == 0 ? "left" : "right", g, g < 0 ? " (the game's own)" : "");
+                last[side] = g;
+            }
+            if (g < 0) continue;
+            uint8_t* at = reinterpret_cast<uint8_t*>(context) + prop[side]->GetOffset_Internal();
+            auto kind = prop[side]->GetClass().GetName();
+            if (kind == STR("ByteProperty") || kind == STR("EnumProperty")) *at = (uint8_t)g;
+            else if (kind == STR("IntProperty")) *reinterpret_cast<int32_t*>(at) = g;
+        }
+    }
+
     void feet_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         using namespace hsvr;
@@ -3859,6 +3914,7 @@ namespace
         double far_since = -1.0;
         bool sliding = false;
         double grip_type_before = -1.0; // the second hand's grip type before it took hold (its finger pose)
+        int anim_grip = -1;              // the second hand's finger shape (handle system)
         // The handle system (pose_grab_handles): the second hand's own grip on the weapon.
         bool use_rel = false;
         hsvr::Quat rel;              // weapon rotation in the second hand's frame
@@ -3899,6 +3955,7 @@ namespace
         }
         HSVR_LOG("Two hands: %s hand lets go of %ls (%s)", g_two.second == 0 ? "left" : "right", g_two.weapon ? g_two.weapon->GetName().c_str() : STR("?"), why);
         g_two = TwoHand{};
+        g_anim_grip_two_side = -1;
     }
 
     // The zones the second hand may hold, cm from the game's grip point: the grip (the first hand's
@@ -3978,12 +4035,14 @@ namespace
             keep.hb = g_two.hb;
             keep.t = g_two.t;
             keep.handle = g_two.handle;
-            keep.grip_type = g_two.grip_type_before >= 0.0 ? (int)read_number_variable(pawn, grip_type_name(to)) : -1;
+            keep.grip_type = hsvr::config().pose_fingers_anim_only ? g_two.anim_grip
+                             : g_two.grip_type_before >= 0.0 ? (int)read_number_variable(pawn, grip_type_name(to)) : -1;
             keep.hold_at = true;
             keep.at_pos = pos;
             keep.at_rot = rot;
         }
         g_two = TwoHand{};
+        g_anim_grip_two_side = -1;
         drop_weapon(from, pawn);
         bool ok = give_hand_weapon(to, pawn, weapon);
         UObject* now = object_property(pawn, to == 0 ? STR("Weapon L") : STR("Weapon R"));
@@ -4054,7 +4113,12 @@ namespace
         // Willie's hands mirror across the hand bone's X (kick test 15: a weapon in the left hand sits
         // at the right's place with X negated).
         g_two.in_hand = Vec3{-h.in_hand.x, h.in_hand.y, h.in_hand.z};
-        if (cfg.pose_two_hand_curl)
+        if (cfg.pose_fingers_anim_only)
+        {
+            g_anim_grip_two = clamp_grip_type(side, 2);
+            g_anim_grip_two_side = side;
+        }
+        else if (cfg.pose_two_hand_curl)
         {
             g_two.grip_type_before = read_number_variable(pawn, grip_type_name(side));
             bool ok = set_variable(pawn, grip_type_name(side), 2.0);
@@ -4128,7 +4192,13 @@ namespace
         g_two.on_blade = on_handle && hs[hi].name == "blade";
         int gt = on_handle ? clamp_grip_type(side, side == 1 ? hs[hi].grip_r : hs[hi].grip_l) : 5;
         if (gt < 0) gt = 2;
-        if (cfg.pose_two_hand_curl)
+        g_two.anim_grip = gt;
+        if (cfg.pose_fingers_anim_only)
+        {
+            g_anim_grip_two = gt;
+            g_anim_grip_two_side = side;
+        }
+        else if (cfg.pose_two_hand_curl)
         {
             g_two.grip_type_before = read_number_variable(pawn, grip_type_name(side));
             if (!set_variable(pawn, grip_type_name(side), gt)) g_two.grip_type_before = -1.0;
@@ -5555,7 +5625,12 @@ namespace
                 if (shield_into_hand(side, pawn, weapon, base, g)) h.free = g;
             }
         }
-        if (h.free.set && h.free.grip_type >= 0)
+        if (cfg.pose_fingers_anim_only)
+        {
+            if (h.free.set && h.free.grip_type >= 0) set_anim_grip(side, h.free.grip_type);
+            else if (h.free.set && h.free.fingers && cfg.pose_shield_hand_grip_type >= 0.0) set_anim_grip(side, (int)cfg.pose_shield_hand_grip_type);
+        }
+        else if (h.free.set && h.free.grip_type >= 0)
         {
             if (read_number_variable(pawn, grip_type_name(side)) != h.free.grip_type) set_variable(pawn, grip_type_name(side), h.free.grip_type);
         }
@@ -8812,6 +8887,7 @@ class HalfSwordVR : public CppUserModBase
         Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});
         Hook::RegisterProcessEventPostCallback(&capsule_after_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleAfter")});
         Hook::RegisterProcessEventPostCallback(&feet_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FeetAfterAnim")});
+        Hook::RegisterProcessEventPostCallback(&fingers_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FingersAfterAnim")});
         Hook::RegisterEngineTickPreCallback(
                 [](auto&, UEngine* engine, float delta_seconds, bool) {
                     game_tick(reinterpret_cast<UObject*>(engine), delta_seconds);

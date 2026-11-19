@@ -369,6 +369,7 @@ namespace hsvr
         num("pose_two_hand_reach_cm", c.pose_two_hand_reach_cm);
         num("pose_two_hand_let_go_cm", c.pose_two_hand_let_go_cm);
         flag("pose_two_hand_curl", c.pose_two_hand_curl);
+        flag("pose_fingers_anim_only", c.pose_fingers_anim_only);
         flag("pose_two_hand_lock_rotation", c.pose_two_hand_lock_rotation);
         {
             double m = c.pose_two_hand_mirror;
