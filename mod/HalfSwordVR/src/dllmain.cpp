@@ -3104,6 +3104,7 @@ namespace
         int grip_type = -1;
     };
     FreeGrip g_pending_free[2]; // applied when that hand's next hold starts
+    UObject* g_pending_item[2] = {nullptr, nullptr}; // the item it is for (kept in the hand until the hold starts)
 
     struct HoldState
     {
@@ -3976,7 +3977,11 @@ namespace
         if (now == weapon)
         {
             set_component_transform(base, pos, rot, true);
-            if (keep.set) g_pending_free[to] = keep;
+            if (keep.set)
+            {
+                g_pending_free[to] = keep;
+                g_pending_item[to] = weapon;
+            }
             else g_pending_slide[to] = z;
         }
         HSVR_LOG("Two hands: %s hand lets go, %ls handed to the %s hand at %.1f cm (%s, %s hand now holds %ls)", from == 0 ? "left" : "right", weapon->GetName().c_str(),
@@ -4622,6 +4627,7 @@ namespace
     {
         using namespace hsvr;
         g_pending_free[side] = make_free_grip(side, mesh, w0_pos, w0_rot, palm, point, axis, what);
+        g_pending_item[side] = weapon;
         g_pending_free[side].fingers = fingers;
         set_component_transform(base, w0_pos, w0_rot, true);
         HSVR_LOG("Grab: %s hand took %ls by the %s (%.1f cm from the hand), held in the hand there", side == 0 ? "left" : "right", weapon->GetName().c_str(), what,
@@ -4886,6 +4892,7 @@ namespace
                         if (hi >= 0 && hd <= cfg.pose_grab_handle_cm)
                         {
                             g_pending_free[side] = handle_grip(side, mesh, w0_pos, w0_rot, at, hs[hi], t);
+                            g_pending_item[side] = best;
                             set_component_transform(hb, w0_pos, w0_rot, true);
                             HSVR_LOG("Grab: %s hand took %ls by its %s at %.0f%% along it (%.1f cm from the hand, touched at %.1f cm)", hand, best->GetName().c_str(),
                                      hs[hi].name.c_str(), t * 100.0, hd, best_d);
@@ -5742,7 +5749,8 @@ namespace
                 else
                     g_two.far_since = -1.0;
                 HSVR_LOG_EVERY(1.0, "Two hands: %ls on the %s at %.1f cm, first hand at %.1f; hands %.1f cm apart for %.1f cm on the weapon; second hand %.1f cm off its spot",
-                               weapon->GetName().c_str(), g_two.on_blade ? "blade" : "grip", g_two.z, h.slide, length(between), std::fabs(dz), off);
+                               weapon->GetName().c_str(), g_two.use_rel ? g_two.handle.c_str() : (g_two.on_blade ? "blade" : "grip"),
+                               g_two.use_rel ? g_two.local.z : g_two.z, g_two.use_rel ? pivot.z : h.slide, length(between), std::fabs(dz), off);
             }
         }
 
@@ -6121,10 +6129,38 @@ namespace
         HSVR_LOG("Force: watching %d engine physics functions for calls on his weapons and his body", hooked);
     }
 
+    // Between a grab and the start of its hold (the game's set-up snaps the item to its own grip and
+    // takes several frames to make the hand joint; playtest 3: a sword taken by the blade showed in
+    // the hand by its grip for 0.15 s, then jumped 30 cm), the item is kept exactly where the mod's
+    // grip has it in the hand, every tick after the game's.
+    void keep_pending_in_hand(UObject* pawn)
+    {
+        using namespace hsvr;
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* item = g_pending_item[side];
+            const FreeGrip& g = g_pending_free[side];
+            if (!item || !g.set) continue;
+            if (object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != item || g_hold[side].weapon == item)
+            {
+                if (g_hold[side].weapon == item || !g.set) g_pending_item[side] = nullptr;
+                continue;
+            }
+            UObject* base = object_property(item, STR("BaseMesh"));
+            if (!base || !g_pose.hand_valid[side]) continue;
+            Vec3 hp = g_pose.target[side];
+            Quat hr = g_pose.hand_rot[side];
+            Quat rot = (hr * g.rel).normalized();
+            Vec3 pos = hp + hr.rotate(g.in_anchor) - rot.rotate(g.pivot);
+            set_component_transform(base, pos, rot, true);
+        }
+    }
+
     void weapon_spring_after_tick(UObject* pawn)
     {
         using namespace hsvr;
         Config cfg = config();
+        keep_pending_in_hand(pawn);
         for (int side = 0; side < 2; ++side)
         {
             GripLog& log = g_grip_log[side];
