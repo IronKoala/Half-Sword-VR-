@@ -196,6 +196,7 @@ namespace
 
     // Called by the stereo device while the frame's views are being set up (game thread).
     double g_button_crouch = 0.0; // button crouch depth (cm), see g_button_crouch_on
+    void crouch_push_log(UObject* pawn, UObject* mesh);
     bool provide_anchor(hsvr::PlayerAnchor& out)
     {
         if (!g_engine) return false;
@@ -3796,7 +3797,6 @@ namespace
     // hand joint, detaches the weapon and gives it its dropped damping).
     bool is_fist(UObject* weapon);
     bool holster_snap(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg);
-    void crouch_push_log(UObject* pawn, UObject* mesh);
     void remove_fist(int side, UObject* pawn, const char* why);
     // A throw (B&S: released faster than 2 m/s): the game counts an unheld weapon's hits only while its
     // "Just Thrown" is set and "Last Parent" is the thrower (ModularWeaponBP @67055; hs_throwing.md),
