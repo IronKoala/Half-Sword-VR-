@@ -262,6 +262,7 @@ LAYOUT = [
         ("pose_slide_gap_max_cm", ""),
         ("pose_slide_rondel_stops", ""),
         ("pose_slide_butt_is_haft", ""),
+        ("pose_slide_fixed_1h_sword", ""),
         ("pose_two_hand", ""),
         ("pose_two_hand_blade_gap_cm", ""),
         ("pose_two_hand_reach_cm", ""),
