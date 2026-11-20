@@ -9778,14 +9778,24 @@ namespace
                 // Within pose_hold_wrist_free_deg of the hand the turn is limited to the wrist's strength (a
                 // long weapon held at its end droops); past it the limit rises to pose_hold_wrist_stop_torque
                 // by pose_hold_wrist_stop_deg, as a real wrist bottoms out and the forearm takes the load.
-                double tcap = rf * st * body.total * 1e4 * draw_scale;
+                double tpow = cfg.pose_hold_torque_strength_power > 0.0 ? cfg.pose_hold_torque_strength_power : 1.0;
+                double tbody = std::pow((std::max)(0.0, body.total), tpow);
+                if (two) tbody = 0.5 * (tbody + std::pow((std::max)(0.0, s2b.total), tpow));
+                double tcap = rf * st * tbody * 1e4 * draw_scale;
                 {
                     double bend = length(err_rot) * 57.2958;
                     double f0 = cfg.pose_hold_wrist_free_deg, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_wrist_stop_deg);
-                    double hard = cfg.pose_hold_wrist_stop_torque * st * body.total * 1e4 * draw_scale;
-                    if (cfg.pose_hold_wrist_stop_torque > 0.0 && bend > f0 && hard > tcap)
+                    double hard = cfg.pose_hold_wrist_stop_torque * st * tbody * 1e4 * draw_scale;
+                    double away = 1.0;
+                    if (cfg.pose_hold_wrist_stop_spin > 0.0 && bend > 0.01)
                     {
-                        double u = (std::min)(1.0, (bend - f0) / (f1 - f0));
+                        // err_rot is the turn from the hand to the weapon: spinning further along it is going on past.
+                        double sp = dot(w_now - target_ang, err_rot * (1.0 / length(err_rot)));
+                        away = (std::min)(1.0, (std::max)(0.0, sp / cfg.pose_hold_wrist_stop_spin));
+                    }
+                    if (cfg.pose_hold_wrist_stop_torque > 0.0 && bend > f0 && hard > tcap && away > 0.0)
+                    {
+                        double u = (std::min)(1.0, (bend - f0) / (f1 - f0)) * away;
                         tcap = tcap + (hard - tcap) * u;
                         HSVR_LOG_EVERY(0.5, "Hold: %s wrist bent %.0f deg from the hand: turning limit %.0f N m (wrist stop)", side == 0 ? "left" : "right", bend,
                                        tcap / 1e4);

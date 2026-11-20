@@ -330,6 +330,14 @@ namespace hsvr
         double pose_hold_wrist_free_deg = 25.0;
         double pose_hold_wrist_stop_deg = 50.0;
         double pose_hold_wrist_stop_torque = 250.0;
+        // The wrist stop pushes back only against the weapon turning on past the hand, fully from this spin
+        // (rad/s) away, so it stops a swing's overshoot but a held weapon's own weight still sags it slowly
+        // down to where the wrist's turning limit carries it (Matthew 2026-11-20: a pole hammer held out by
+        // its end barely sagged for a weak Willie). 0 = it also holds still weight, as before.
+        double pose_hold_wrist_stop_spin = 2.0;
+        // His strength on the turning limits (wrist and stop) is raised to this power: a wrist is weaker in
+        // proportion than the whole arm (min/min Willie x0.58 -> x0.34, biggest x1.27 -> x1.6). 1 = as the force.
+        double pose_hold_torque_strength_power = 2.0;
         // B&S hold dampers computed per weapon for this damping ratio (1 = critical: settles without
         // bouncing, the least lag that does): from its mass and its inertia about the grip. 0 = the fixed
         // pose_hold_damper / turn_damper / pose_bs_two_*_c values.

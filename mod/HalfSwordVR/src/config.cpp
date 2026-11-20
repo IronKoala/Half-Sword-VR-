@@ -404,6 +404,8 @@ namespace hsvr
         num("pose_hold_arm_lag_s", c.pose_hold_arm_lag_s);
         num("pose_hold_arm_lag_max_s", c.pose_hold_arm_lag_max_s);
         num("pose_hold_arm_reach_cm", c.pose_hold_arm_reach_cm);
+        num("pose_hold_wrist_stop_spin", c.pose_hold_wrist_stop_spin);
+        num("pose_hold_torque_strength_power", c.pose_hold_torque_strength_power);
         num("pose_slide_ring_max_len_cm", c.pose_slide_ring_max_len_cm);
         num("pose_slide_ring_max_width_cm", c.pose_slide_ring_max_width_cm);
         num("pose_slide_gap_max_cm", c.pose_slide_gap_max_cm);
