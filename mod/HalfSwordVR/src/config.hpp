@@ -8,7 +8,14 @@ namespace hsvr
     struct Config
     {
         bool enabled = true;
-        // Only start VR when SteamVR is already running, so the game still starts flat without it.
+        // vr_auto=1: VR (and everything else the mod does, test room included) only when SteamVR is
+        // already running as the game starts (one of vr_auto_processes). Without it the mod stays out
+        // of the way: no OpenXR (so SteamVR is never opened), no hooks, the game plays flat as if the
+        // mod weren't installed. vr_auto=0: always start VR (OpenXR opens SteamVR if it is closed).
+        int vr_auto = 1;
+        // Comma-separated process names that count as "SteamVR is running".
+        std::string vr_auto_processes = "vrserver.exe,vrmonitor.exe";
+        // Older name of the same switch: require_steamvr_running=0 is the same as vr_auto=0.
         bool require_steamvr_running = true;
         // Fraction of the headset's recommended per-eye resolution the engine renders at.
         double render_scale = 0.75;
@@ -296,7 +303,18 @@ namespace hsvr
         // strength. A yank (pull-out) counts only the hand's distance out along the wound.
         bool stab_drag = true;
         double stab_drag_force_scale = 1.0;
-        double stab_drag_grip_s = 2.0;
+        double stab_drag_grip_s = 2.0; // (unused since the arm's-length pull-out)
+        double stab_drag_reach_slack_cm = 8.0; // a stuck thrust past arm's length by this much ...
+        double stab_drag_reach_s = 0.15;       // ... this long comes out of the body (stays in the hand)
+        // Every other hit of a held weapon on a person gets his arm's mass behind it (kg, times his
+        // strength), at the speed the struck point closes on the surface (from hit_assist_min_cms).
+        bool hit_assist = true;
+        double hit_arm_mass_kg = 3.0;
+        double hit_assist_min_cms = 150.0;
+        // A lodged cut (not a thrust) is let go once the hand is cut_release_cm past it.
+        bool cut_follow_through = true;
+        double cut_release_cm = 10.0;
+        double cut_release_after_s = 0.03;
         // Reverse grip flip (S&S): a tap (shorter than grip_flip_tap_s) of the holding hand's B / Y
         // turns a one-handed weapon end for end at the same spot on its handle, gliding over grip_flip_s.
         bool grip_flip = true;
@@ -308,14 +326,15 @@ namespace hsvr
         double grip_flip_tap_s = 0.4;
         double stab_wound_settle_s = 0.2; // no pulling out for this long after it goes in
         double stab_wound_settle_max_s = 0.8; // a young stick is held open until the game's own keep trace passes, at most this long
-        double stab_wound_entry_cms = 40.0; // ...and it is carried in at this speed meanwhile (8 cm over 0.2 s)
+        double stab_wound_entry_cms = 70.0; // ...and it is carried in at this speed meanwhile (8 cm over 0.2 s)
         // A blade the game has just stuck is set this far into the wound along its tip (cm), plus
         // stab_start_depth_per_ms cm for each cm/s of the controller along it, at most _max_cm
         // (the game's stuck joint lets the blade slide 5 cm along a thrust).
         double stab_start_depth_cm = 0.0; // 0 = off (stab-test11: a teleport into the wound made it let go)
         double stab_start_depth_per_ms = 0.01;
         double stab_start_depth_max_cm = 4.5;
-        double stab_wound_in_cms = 50.0;
+        double stab_wound_in_cms = 120.0; // (was 50: daggers needed pushing and pushing, playtest 2026-11-20)
+        double stab_wound_head_in_factor = 0.6;
         double stab_wound_out_cms = 40.0;
         double stab_wound_head_factor = 0.35;
         double pose_hold_turn_spring = 1100.0;
@@ -330,6 +349,14 @@ namespace hsvr
         double pose_hold_wrist_free_deg = 25.0;
         double pose_hold_wrist_stop_deg = 50.0;
         double pose_hold_wrist_stop_torque = 250.0;
+        // The wrist stop pushes back only against the weapon turning on past the hand, fully from this spin
+        // (rad/s) away, so it stops a swing's overshoot but a held weapon's own weight still sags it slowly
+        // down to where the wrist's turning limit carries it (Matthew 2026-11-20: a pole hammer held out by
+        // its end barely sagged for a weak Willie). 0 = it also holds still weight, as before.
+        double pose_hold_wrist_stop_spin = 2.0;
+        // His strength on the turning limits (wrist and stop) is raised to this power: a wrist is weaker in
+        // proportion than the whole arm (min/min Willie x0.58 -> x0.34, biggest x1.27 -> x1.6). 1 = as the force.
+        double pose_hold_torque_strength_power = 2.0; // below a default body only: above it, x strength as the force
         // B&S hold dampers computed per weapon for this damping ratio (1 = critical: settles without
         // bouncing, the least lag that does): from its mass and its inertia about the grip. 0 = the fixed
         // pose_hold_damper / turn_damper / pose_bs_two_*_c values.
@@ -417,6 +444,28 @@ namespace hsvr
         // The hold's force and torque caps x his arm mass against a default creator body's (height and
         // weight/muscle; 0.78 smallest .. 1.27 biggest), as flat Half Sword's weapon-to-arm mass ratio.
         bool pose_body_size_strength = true;
+        // Arm-inertia lag, like flat Half Sword's arm (Matthew 2026-11-20, option A: a weak Willie should
+        // feel weight and lag): the hold drives his arm and the weapon together, as flat Half Sword's arm
+        // motors do (same pull for every body, so the weapon's share of arm + weapon inertia about the
+        // shoulder sets how much it slows him). Empty-arm follow delay pose_hold_arm_lag_s (flat: 0.1 s),
+        // x sqrt((arm + weapon) / arm), x 1/sqrt(the weaker of injury and stamina), never past
+        // pose_hold_arm_lag_max_s. The weapon's weight at the grip is carried (no sag of the hand), its
+        // lever is not. Replaces the B&S springs and dampers; the caps stay. pose_hold_arm_reach_cm: the
+        // grip's distance from the shoulder for a default body (scaled with his size).
+        bool pose_hold_arm_lag = true;
+        double pose_hold_arm_lag_s = 0.04;
+        double pose_hold_arm_lag_max_s = 0.25;
+        double pose_hold_arm_reach_cm = 55.0;
+        // His shoulder's strength (N m, for a default fresh body; x his strength, injury and stamina; both arms
+        // add): the arm-lag hold can't speed arm + weapon about the shoulder faster than this allows, so the
+        // grip's pull on the weapon is capped at its mass x this torque x reach / (arm + weapon inertia).
+        // A two-hander in one hand trails and won't whip round like a one-hander (Matthew 2026-11-20). 0 = off.
+        double pose_hold_shoulder_torque = 150.0;
+        // The shoulder limit fades out as the grip trails the hand from shoulder_fade_from_cm to shoulder_fade_to_cm
+        // (the hand is on the weapon: it can't trail far), so a big jump or a hard swing never trails it far
+        // enough for the stuck rule to let go (unattended test: a longsword 53 cm behind was dropped).
+        double pose_hold_shoulder_fade_from_cm = 15.0;
+        double pose_hold_shoulder_fade_to_cm = 35.0;
         // Thin bits on a haft the hand slides over: a wide stretch no longer than ring_max_len_cm along the
         // haft and reaching no more than ring_max_width_cm from its axis, or a gap between parts no longer
         // than gap_max_cm, with narrow haft past it (ring_max_len_cm 0 = every wide bit stops the hand).
@@ -716,6 +765,13 @@ namespace hsvr
         // than 15 cm below its standing height over the floor (the game drops it ~77 cm when its foot
         // traces miss).
         bool pose_crouch_keep_leg_ik = true;
+        // No knockdowns for your player: the game's kneel never takes his legs. While the body is posed,
+        // his own R/L Kneel and R/L Kneel Falling are kept off and Legs Tonus Far Step kept at 1, just
+        // before and just after his tick. In VR the game read a bent, leaning pose as kneel-falling, fired
+        // its Kneel Event, and while kneeling it cuts leg tonus to 0 once the feet are 1 m from its last
+        // step spot (always, with the feet posed): the pelvis drive went to 0 and the body sank 60 cm for
+        // good (playtest 2026-11-20 11:20Z). Enemies are not touched; leg injuries still cut leg tonus.
+        bool pose_player_no_kneel = true;
         bool pose_capsule_floor_clamp = true;
         // The game sets the capsule's height to (lower foot's step end) + half height + clamp(Step Height 2,
         // +-10). Step Height 2 sinks to about -4 cm through each step and snaps back to 0 as a foot lands,

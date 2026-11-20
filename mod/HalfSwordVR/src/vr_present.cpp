@@ -2355,10 +2355,38 @@ float4 PSMain(VSOut i) : SV_Target
             HSVR_LOG("TEST MODE: pretend headset (dev_fake_headset=1). No SteamVR is used; both eye views show in the game window.");
             return true;
         }
-        if (cfg.require_steamvr_running && !process_running(L"vrserver.exe") && !process_running(L"vrmonitor.exe"))
+        // Decided once, here, before anything of OpenXR is loaded: opening an OpenXR instance is what
+        // starts SteamVR when it is closed (the game itself has no XR plugin).
+        if (cfg.vr_auto != 0 && cfg.require_steamvr_running)
         {
-            HSVR_LOG("SteamVR is not running, so the game starts flat. Start SteamVR first to play in VR.");
-            return false;
+            std::string found;
+            const std::string& list = cfg.vr_auto_processes;
+            size_t start = 0;
+            while (found.empty())
+            {
+                size_t comma = list.find(',', start);
+                std::string name = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                size_t a = name.find_first_not_of(" \t"), b = name.find_last_not_of(" \t");
+                if (a != std::string::npos)
+                {
+                    name = name.substr(a, b - a + 1);
+                    std::wstring wide(name.begin(), name.end());
+                    if (process_running(wide.c_str())) found = name;
+                }
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+            if (found.empty())
+            {
+                HSVR_LOG("SteamVR is not running (none of %s), so the game starts flat and the mod stays off this session "
+                         "(vr_auto=1). Start SteamVR before the game to play in VR.", list.c_str());
+                return false;
+            }
+            HSVR_LOG("SteamVR is running (%s), so the game starts in VR (vr_auto=1)", found.c_str());
+        }
+        else
+        {
+            HSVR_LOG("vr_auto=0: starting VR whether or not SteamVR is running (OpenXR opens SteamVR if it is closed)");
         }
         if (!xr_load_runtime(xr)) return false;
 

@@ -1798,6 +1798,7 @@ namespace
     std::atomic<bool> g_contact_log{true};
 
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
+    bool stuck_is_thrust(UObject* weapon);
     bool two_hand_pose(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool hand_on_scabbard(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     std::atomic<bool> g_hold_reach_clamp{true};
@@ -3447,6 +3448,7 @@ namespace
     void log_joint_before_tick(UObject* pawn);
 
     void block_offhand_search_before_tick(UObject* pawn);
+    void keep_player_off_knees(UObject* pawn, bool after);
     // Test: hsvr.pawn_pin <variable> <value> holds a number variable of his pawn at a value every tick,
     // after his tick and before the hold reads it (e.g. Stamina 10, Arm R Tonus 0.25); "off" clears all.
     std::vector<std::pair<std::wstring, double>> g_pawn_pins;
@@ -3673,6 +3675,7 @@ namespace
         {
             log_joint_before_tick(context);
             block_offhand_search_before_tick(context);
+            keep_player_off_knees(context, false);
             turn_body_before_tick();
             stick_walk_before_tick(context);
             swing_speed_before_tick(context);
@@ -4686,6 +4689,79 @@ namespace
     }
 
     double hand_on_weapon_amount(int side) { return g_hold[side].on_weapon; }
+
+    // ---- No knockdowns for the player ------------------------------------------------------------
+    // The game's kneel (Willie_BP UG @616819/@618028 Kneel Falling: a knee within ~6 cm of the floor
+    // once Consciousness + All Body Tonus drops under 200 and he leans forward; UG @620739 fires Kneel
+    // Event from it, from a crouch under 60 cm, or from a weak pelvis drive) is a fall for an AI body.
+    // For a posed player it is a trap: while R/L Kneel is on, Legs Tonus Far Step goes to 0 when the
+    // nearer foot is 1 m from Last Step Location (UG @397262), which leg tonus and Root Linear
+    // Constraint Power (UG @427425) are multiplied by, and the body sinks with nothing to get it up.
+    // So for the player the flags are kept off and Far Step at 1, before and after his tick. The
+    // properties are found once per class; the cost is a few byte writes a tick.
+    void keep_player_off_knees(UObject* pawn, bool after)
+    {
+        if (!pawn || !hsvr::config().pose_player_no_kneel) return;
+        static UClass* looked_for = nullptr;
+        static FProperty* flags[4] = {};
+        static FProperty* far_step = nullptr;
+        static const TCHAR* flag_names[4] = {STR("R Kneel"), STR("L Kneel"), STR("R Kneel Falling"), STR("L Kneel Falling")};
+        UClass* cls = pawn->GetClassPrivate();
+        if (cls != looked_for)
+        {
+            looked_for = cls;
+            std::string missing;
+            for (int i = 0; i < 4; ++i)
+            {
+                FProperty* p = pawn->GetPropertyByNameInChain(flag_names[i]);
+                flags[i] = p && p->GetClass().GetName() == STR("BoolProperty") ? p : nullptr;
+                if (!flags[i]) { missing += " "; for (const TCHAR* c = flag_names[i]; *c; ++c) missing += (char)*c; }
+            }
+            FProperty* p = pawn->GetPropertyByNameInChain(STR("Legs Tonus Far Step"));
+            far_step = p && p->GetClass().GetName() == STR("DoubleProperty") ? p : nullptr;
+            if (!far_step) missing += " Legs Tonus Far Step";
+            HSVR_LOG("Knees: your player's kneel and kneel-fall kept off, leg tonus far-step kept at 1 (pose_player_no_kneel)%s%s",
+                     missing.empty() ? "" : "; NOT FOUND:", missing.c_str());
+        }
+        uint8_t* base = reinterpret_cast<uint8_t*>(pawn);
+        unsigned was = 0;
+        for (int i = 0; i < 4; ++i)
+        {
+            if (!flags[i]) continue;
+            auto* flag = static_cast<FBoolProperty*>(flags[i]);
+            uint8_t* byte = base + flags[i]->GetOffset_Internal() + flag->GetByteOffset();
+            if (*byte & flag->GetFieldMask()) was |= 1u << i;
+            *byte &= (uint8_t)~flag->GetFieldMask();
+        }
+        double far_now = 1.0; // ("far" is a Windows macro)
+        if (far_step)
+        {
+            double* v = reinterpret_cast<double*>(base + far_step->GetOffset_Internal());
+            far_now = *v;
+            *v = 1.0;
+        }
+        if (was || far_now < 0.999)
+        {
+            static double last_line = -10.0;
+            static unsigned seen = 0;
+            static double far_low = 1.0;
+            seen |= was;
+            far_low = (std::min)(far_low, far_now);
+            double now = hsvr::now_seconds();
+            if (now - last_line >= 1.0)
+            {
+                std::string names;
+                for (int i = 0; i < 4; ++i)
+                    if (seen & (1u << i)) { names += " "; for (const TCHAR* c = flag_names[i]; *c; ++c) names += (char)*c; }
+                HSVR_LOG("Knees: the game wanted your player down (found %s his tick):%s; far-step low %.2f; kept up (Leg R Tonus %.2f, Root Linear Constraint Power %.2f)",
+                         after ? "after" : "before", names.empty() ? " -" : names.c_str(), far_low, read_number_variable(pawn, STR("Leg R Tonus")),
+                         read_number_variable(pawn, STR("Root Linear Constraint Power")));
+                last_line = now;
+                seen = 0;
+                far_low = 1.0;
+            }
+        }
+    }
 
     // ---- The ghost hand ------------------------------------------------------------------------
     // While his hand stays on a stopped weapon, a see-through hand shows where your real hand is
@@ -8198,24 +8274,26 @@ namespace
             double from_shoulder = length(grip_at - shoulder) - length(h.in_hand);
             double from_hand = length(grip_at - hand_point);
             bool out = from_shoulder > reach + 2.0 || (!in_body && from_hand > reach);
-            if (in_body && cfg.stab_drag)
+            if (in_body && !stuck_is_thrust(h.weapon)) out = false; // a lodged cut: cut_through_tick decides
+            if (in_body && cfg.stab_drag && stuck_is_thrust(h.weapon))
             {
                 // Dragging a body: the weapon stays in the hand; it slips out only when the hand has
                 // pulled with all its strength, the grip still past arm's length, for longer than the
                 // grip holds (stab_drag_grip_s x his strength: tired, hurt or weak hands let go sooner).
                 out = false;
                 double tn = now_seconds();
-                if (h.drag_capped && from_shoulder > reach + 2.0)
+                // Past what his arm can follow: the blade comes out of the body and stays in the hand
+                // (Matthew 2026-11-20: a stuck weapon must never fly off away from his hand).
+                if (from_shoulder > reach + cfg.stab_drag_reach_slack_cm)
                 {
                     if (h.drag_slip_since < 0.0) h.drag_slip_since = tn;
-                    double hold_s = cfg.stab_drag_grip_s * (std::max)(0.05, h.body_strength);
-                    if (tn - h.drag_slip_since >= hold_s)
+                    if (tn - h.drag_slip_since >= cfg.stab_drag_reach_s)
                     {
-                        HSVR_LOG("Hold: %s hand's grip gives: %ls dragged out of it after %.1f s at full strength (strength %.0f%%, grip past reach by %.0f cm)",
-                                 side == 0 ? "left" : "right", h.weapon->GetName().c_str(), tn - h.drag_slip_since, h.body_strength * 100.0, from_shoulder - reach);
+                        HSVR_LOG("Hold: %s hand pulls %ls out at arm's length (grip %.0f cm past reach, strength %.0f%%)", side == 0 ? "left" : "right",
+                                 h.weapon->GetName().c_str(), from_shoulder - reach, h.body_strength * 100.0);
                         h.drag_slip_since = -1.0;
-                        drop_weapon(side, g_pose.pawn);
-                        return false;
+                        Call r(h.weapon, STR("Release All Jammed Bones"));
+                        r.run();
                     }
                 }
                 else
@@ -8816,6 +8894,20 @@ namespace
     // lowerarm 1.22 kg, from their volume, so x scale^3) + hand 1 kg (a fixed override), all x Mass Scale
     // (willie_physics_assets.md; Set Character Height: scale = MapRange(Height 0..1 -> 0.875..1);
     // Mass Scale (Set in BP) = MapRange(Muscle Rate 0..1 -> 1..1.25)). Range 0.78 (min/min) .. 1.27 (max/max).
+    struct BodyDims
+    {
+        double scale = 0.9375, mass_scale = 1.125; // a default creator body until read
+    };
+    BodyDims g_body_dims;
+    // His arm's inertia about the shoulder (kg m^2): upper arm 1.39 kg and forearm 1.22 kg (x scale^3) and
+    // the 1 kg hand, all x Mass Scale, their centres at 0.15 / 0.40 / reach m from the shoulder for a default
+    // body, x his size. Default body about 0.55, the smallest weakest about 0.30.
+    double arm_inertia_shoulder(const BodyDims& d, double reach_m)
+    {
+        double k = d.scale / 0.9375, s3 = d.scale * d.scale * d.scale;
+        double a = 0.15 * k, b = 0.40 * k, c = reach_m * k;
+        return d.mass_scale * (1.39 * s3 * a * a + 1.22 * s3 * b * b + 1.0 * c * c);
+    }
     double body_size_factor(UObject* pawn)
     {
         static UObject* last_pawn = nullptr;
@@ -8837,6 +8929,8 @@ namespace
         if (!(scale > 0.3 && scale < 3.0) || !(mass_scale > 0.1 && mass_scale < 5.0)) return 1.0;
         auto arm = [](double sc, double ms) { return (2.61 * sc * sc * sc + 1.0) * ms; };
         double f = arm(scale, mass_scale) / arm(0.9375, 1.125);
+        g_body_dims.scale = scale;
+        g_body_dims.mass_scale = mass_scale;
         last_pawn = pawn;
         last = f;
         HSVR_LOG("Strength: body size: Character Scale %.4f, Mass Scale %.3f -> arm mass %.2f kg vs %.2f kg for a default body -> hold x%.2f", scale, mass_scale,
@@ -8967,6 +9061,14 @@ namespace
     // weapon the hand holds it and how the weapon sits in the hand); `base` the weapon's BaseMesh.
     std::wstring stab_name_var(UObject* owner, const TCHAR* name);
     double g_wound_since[2] = {-1.0, -1.0}; // when each hand's weapon went into a wound
+    // Is the weapon stuck by a thrust (the game's stuck joint "Thrust?"), not a lodged cut?
+    bool stuck_is_thrust(UObject* weapon)
+    {
+        if (!weapon) return false;
+        RawArray* joints = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
+        UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[joints->Num - 1]) : nullptr;
+        return cs && bool_property(cs, STR("Thrust?"));
+    }
     UObject* g_young_joint[2] = {nullptr, nullptr}; // a stick still held open (stab_hold_keep)
     double g_young_since[2] = {-1.0, -1.0};
     int g_young_trace_ok[2] = {0, 0}; // ticks in a row the normal 3 cm keep trace found the stuck bone
@@ -9400,7 +9502,7 @@ namespace
             max_torque *= (std::max)(0.0, draw_scale_cfg);
         }
         double max_force_unstuck = max_force; // the hand's whole strength (drag, below)
-        if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body")))
+        if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon))
         {
             max_force *= (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
             max_torque *= (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
@@ -9546,7 +9648,7 @@ namespace
             // sideways and in turn it goes with him (the game's stuck joint holds it in a 15 deg
             // cone). Pulling back far enough draws it out; the game lets go once the tip box leaves
             // the body (stab-test9).
-            bool in_wound = cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body"));
+            bool in_wound = cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon);
             bool drag = false;
             Vec3 wound_axis;
             static bool was_in_wound[2] = {false, false};
@@ -9572,7 +9674,10 @@ namespace
                 if (g_wound_since[side] < 0.0) g_wound_since[side] = now;
                 bool settling = now - g_wound_since[side] < cfg.stab_wound_settle_s || g_young_joint[side] != nullptr;
                 double out_most = settling ? 0.0 : cfg.stab_wound_out_cms * k;
-                double ax = (std::min)(cfg.stab_wound_in_cms * k, (std::max)(-out_most, need_ax));
+                // Going deeper is easier than coming out (S&S: a plunge follows the hand; pulling out
+                // of a skull takes ~3x the effort): the head factor slows only the way out fully.
+                double k_in = head ? cfg.stab_wound_head_in_factor : 1.0;
+                double ax = (std::min)(cfg.stab_wound_in_cms * k_in, (std::max)(-out_most, need_ax));
                 // Going in: the game sticks a blade at the skin (stab-test13: its keep trace found the
                 // tip 1.2 cm inside, then outside), so for the first moments it is carried in at
                 // stab_wound_entry_cms whatever the hand does, as the arm's momentum would.
@@ -9679,11 +9784,49 @@ namespace
                        rf = two ? cfg.pose_bs_two_rot_max : cfg.pose_hold_max_torque;
                 double st = (std::max)(0.0, cfg.pose_hold_strength);
                 double dst = (std::max)(1.0, st * 0.5);
+                bool arm_lag = cfg.pose_hold_arm_lag && cfg.pose_hold_arm_lag_s > 0.0;
+                double arm_fcap = -1.0; // N per held point, from the shoulder's strength (-1 = none)
+                if (arm_lag)
+                {
+                    // Flat Half Sword's arm (flat_hs_weight_vs_hold.md, weak_willie_weight.md): the same pull for
+                    // every body on arm + weapon, so the follow slows by sqrt((arm + weapon) / arm) about the
+                    // shoulder. Critically damped spring: steady-swing lag = 2 / omega.
+                    if (cfg.pose_body_size_strength) body_size_factor(pawn);
+                    Vec3 rp = pivot_now - com;
+                    double ig = (std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp); // kg cm^2 about the grip
+                    double reach = cfg.pose_hold_arm_reach_cm * 0.01;
+                    double A = arm_inertia_shoulder(g_body_dims, reach) * (two ? 2.0 : 1.0);
+                    double L = reach * g_body_dims.scale / 0.9375;
+                    double W = ig / 1e4 + mass * L * L;
+                    double fit = (std::min)(body.injury, body.stamina);
+                    if (two) fit = 0.5 * (fit + (std::min)(s2b.injury, s2b.stamina));
+                    fit = (std::max)(0.05, fit);
+                    double lag = cfg.pose_hold_arm_lag_s * std::sqrt((A + W) / (std::max)(0.01, A)) / std::sqrt(fit);
+                    lag = (std::min)((std::max)(cfg.pose_hold_arm_lag_s, cfg.pose_hold_arm_lag_max_s), lag);
+                    double om = 2.0 / lag;
+                    double z = cfg.pose_hold_damping_ratio > 0.0 ? cfg.pose_hold_damping_ratio : 1.0;
+                    double per_point = two ? mass * 0.5 : mass;
+                    pk = per_point * om * om / (std::max)(1e-3, st);
+                    pc = 2.0 * z * per_point * om / dst;
+                    rk = (ig / 1e4) * om * om / (std::max)(1e-3, st);
+                    rc = 2.0 * z * (ig / 1e4) * om / dst;
+                    if (cfg.pose_hold_shoulder_torque > 0.0)
+                    {
+                        double tau = cfg.pose_hold_shoulder_torque * (std::max)(0.0, body.total) + (two ? cfg.pose_hold_shoulder_torque * (std::max)(0.0, s2b.total) : 0.0);
+                        double a_max = tau * L / (std::max)(0.01, A + W); // m/s^2 at the grip
+                        arm_fcap = per_point * a_max;
+                        HSVR_LOG_EVERY(2.0, "Hold: %s shoulder %.0f N m for %ls%s: at most %.0f m/s^2 at the grip (%.0f N a hand)", side == 0 ? "left" : "right", tau,
+                                       weapon->GetName().c_str(), two ? " (two hands)" : "", a_max, arm_fcap);
+                    }
+                    HSVR_LOG_EVERY(2.0, "Hold: %s arm lag for %ls (%.2f kg, %.3f kg m^2 about the grip%s): arm %.2f + weapon %.2f kg m^2 about the shoulder, fit %.2f -> lag %.3f s "
+                                   "(spring %.0f N/m, turn %.1f N m/rad)", side == 0 ? "left" : "right", weapon->GetName().c_str(), mass, ig / 1e4,
+                                   two ? ", two hands" : "", A, W, fit, lag, pk * st, rk * st);
+                }
                 // Dampers per weapon (pose_hold_damping_ratio): critical damping for this weapon's own mass and
                 // its inertia about the grip, so a long heavy one (war staff, 1.9 kg m^2 about a low grip) settles
                 // without bouncing and a short sword (0.04 kg m^2) doesn't trail the wrist and swing on past a stop
                 // (playtest 14:19 with fixed dampers tuned for the staff). 0 = the fixed dampers above.
-                if (cfg.pose_hold_damping_ratio > 0.0)
+                if (cfg.pose_hold_damping_ratio > 0.0 && !arm_lag)
                 {
                     Vec3 rp = pivot_now - com;
                     double ig = (std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp); // kg cm^2
@@ -9695,7 +9838,7 @@ namespace
                                    weapon->GetName().c_str(), mass, ig / 1e4, pc * dst, rc * dst);
                 }
                 double draw_scale = 1.0;
-                if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body"))) draw_scale = (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
+                if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon)) draw_scale = (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
                 SoftPoint pts[2];
                 int n = 0;
                 {
@@ -9720,8 +9863,27 @@ namespace
                     p.c = pc * dst;
                     p.fmax = pf * st * s2b.total * 100.0 * draw_scale;
                 }
+                if (arm_fcap >= 0.0)
+                    for (int i = 0; i < n; ++i)
+                    {
+                        double f0 = cfg.pose_hold_shoulder_fade_from_cm, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_shoulder_fade_to_cm);
+                        double u = (std::min)(1.0, (std::max)(0.0, (length(pts[i].err) - f0) / (f1 - f0)));
+                        double cap = arm_fcap * 100.0 * draw_scale;
+                        if (cap < pts[i].fmax) pts[i].fmax = cap + (pts[i].fmax - cap) * u;
+                    }
                 Mat3 invI = about_com.inverse();
                 Vec3 vb = v_com_now + g * DT, wb = w_now; // gravity this frame, taken off again below (the physics adds it)
+                if (arm_lag)
+                {
+                    // The arm carries the weapon's weight at the grip (the soft arm spring would let the hand
+                    // sag g / omega^2, 7 cm for a polearm); its lever about the grip is still the turn's to hold.
+                    for (int i = 0; i < n; ++i)
+                    {
+                        Vec3 J = g * (-mass * DT / n);
+                        vb = vb + J * (1.0 / mass);
+                        wb = wb + invI * cross(pts[i].r, J);
+                    }
+                }
                 Vec3 ang;
                 Vec3 err_rot = scaled_axis((rot * target_rot.inverse()).normalized());
                 // The wrist's end stop (Matthew 2026-11-19: with the turning limit at a real wrist's 30 N m,
@@ -9729,14 +9891,25 @@ namespace
                 // Within pose_hold_wrist_free_deg of the hand the turn is limited to the wrist's strength (a
                 // long weapon held at its end droops); past it the limit rises to pose_hold_wrist_stop_torque
                 // by pose_hold_wrist_stop_deg, as a real wrist bottoms out and the forearm takes the load.
-                double tcap = rf * st * body.total * 1e4 * draw_scale;
+                double tpow = cfg.pose_hold_torque_strength_power > 0.0 ? cfg.pose_hold_torque_strength_power : 1.0;
+                auto tpw = [&](double t) { t = (std::max)(0.0, t); return t < 1.0 ? std::pow(t, tpow) : t; };
+                double tbody = tpw(body.total);
+                if (two) tbody = 0.5 * (tbody + tpw(s2b.total));
+                double tcap = rf * st * tbody * 1e4 * draw_scale;
                 {
                     double bend = length(err_rot) * 57.2958;
                     double f0 = cfg.pose_hold_wrist_free_deg, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_wrist_stop_deg);
-                    double hard = cfg.pose_hold_wrist_stop_torque * st * body.total * 1e4 * draw_scale;
-                    if (cfg.pose_hold_wrist_stop_torque > 0.0 && bend > f0 && hard > tcap)
+                    double hard = cfg.pose_hold_wrist_stop_torque * st * tbody * 1e4 * draw_scale;
+                    double away = 1.0;
+                    if (cfg.pose_hold_wrist_stop_spin > 0.0 && bend > 0.01)
                     {
-                        double u = (std::min)(1.0, (bend - f0) / (f1 - f0));
+                        // err_rot is the turn from the hand to the weapon: spinning further along it is going on past.
+                        double sp = dot(w_now - target_ang, err_rot * (1.0 / length(err_rot)));
+                        away = (std::min)(1.0, (std::max)(0.0, sp / cfg.pose_hold_wrist_stop_spin));
+                    }
+                    if (cfg.pose_hold_wrist_stop_torque > 0.0 && bend > f0 && hard > tcap && away > 0.0)
+                    {
+                        double u = (std::min)(1.0, (bend - f0) / (f1 - f0)) * away;
                         tcap = tcap + (hard - tcap) * u;
                         HSVR_LOG_EVERY(0.5, "Hold: %s wrist bent %.0f deg from the hand: turning limit %.0f N m (wrist stop)", side == 0 ? "left" : "right", bend,
                                        tcap / 1e4);
@@ -10659,6 +10832,42 @@ namespace
             boosted = (std::max)(ni_len, cfg.stab_arm_mass_kg * v);
             write_three(locals + ni_prop->GetOffset_Internal(), ni_prop, -tip_fwd.x * boosted, -tip_fwd.y * boosted, -tip_fwd.z * boosted);
         }
+        else if (cfg.hit_assist && ni_prop && ni_len > 1.0 && h.weapon == weapon && !stuck)
+        {
+            // Every other hit on a person (cuts, blunt blows, armour): the game reads the blow from
+            // the contact impulse (its hit velocity is the larger of the weapon's speed and that
+            // impulse, ModularWeaponBP @40497; a lodge needs cutting rate x impulse >= 10000). In
+            // the flat game the arm is jointed behind the weapon and adds its mass to that impulse;
+            // the VR hold leaves only the weapon's own (playtest 2026-11-20: a 1.3 kg mace's median
+            // impulse 129 on flesh, 46 on a helmet). So his arm's mass, times his strength, is added
+            // at the speed the struck point closes on the surface.
+            UObject* base = object_property(weapon, STR("BaseMesh"));
+            Vec3 n{ni[0] / ni_len, ni[1] / ni_len, ni[2] / ni_len};
+            double closing = 0.0;
+            if (base)
+            {
+                Call va(base, STR("GetPhysicsLinearVelocityAtPoint"));
+                va.three(STR("Point"), impact.x, impact.y, impact.z);
+                va.run();
+                Vec3 vp = va.vec();
+                closing = std::fabs(dot(vp, n));
+                if (closing < 1e-3)
+                {
+                    Call lv(base, STR("GetPhysicsLinearVelocity"));
+                    lv.run();
+                    closing = std::fabs(dot(lv.vec(), n));
+                }
+            }
+            if (closing >= cfg.hit_assist_min_cms)
+            {
+                double strength = (std::max)(0.05, h.body_strength);
+                boosted = ni_len + cfg.hit_arm_mass_kg * strength * closing;
+                write_three(locals + ni_prop->GetOffset_Internal(), ni_prop, n.x * boosted, n.y * boosted, n.z * boosted);
+                HSVR_LOG("Stab: hit assist: %s %ls on %ls %ls: impulse %.0f -> %.0f (struck point closing at %.0f cm/s, arm %.1f kg x strength %.0f%%)",
+                         side == 0 ? "left" : "right", weapon->GetName().c_str(), victim_comp ? victim_comp->GetName().c_str() : STR("?"), bone_s.c_str(), ni_len, boosted,
+                         closing, cfg.hit_arm_mass_kg, strength * 100.0);
+            }
+        }
 
         w.weapon = weapon;
         w.id = ++g_stab_count;
@@ -10688,6 +10897,7 @@ namespace
     {
         hsvr::Config cfg = hsvr::config();
         if (!cfg.stab_wound_hold || cfg.stab_wound_settle_s <= 0.0) return;
+        if (on && !stuck_is_thrust(weapon)) return; // a lodged cut goes through (cut_follow_through)
         if (on)
         {
             RawArray* joints = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
@@ -10900,6 +11110,38 @@ namespace
                 last_log = now;
                 HSVR_LOG("Stab: rubber band taken off the held weapons (right %d, left %d ticks so far; his soft-not-attached R %d L %d)", cleared[1], cleared[0],
                          (int)bool_property(pawn, STR("R Hand Soft Not Attached")), (int)bool_property(pawn, STR("L Hand Soft Not Attached")));
+            }
+        }
+    }
+
+    // A cut that lodges goes through when the hand carries on (Matthew 2026-11-20: "the sword just
+    // doesn't follow through, it stays stuck in the enemy's body but my hand's somewhere else"). In
+    // the flat game his arm keeps pulling on the lodged edge until the stuck joint gives or the
+    // blade slides out; under the VR hold the joint never feels that pull (its force reads 0), so
+    // a lodged edge (not a thrust) is let go once the hand is cut_release_cm past it.
+    void cut_through_tick(UObject* pawn)
+    {
+        hsvr::Config cfg = hsvr::config();
+        if (!cfg.cut_follow_through || !pawn) return;
+        static double since[2] = {-1.0, -1.0};
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (!weapon || g_hold[side].weapon != weapon || !bool_property(weapon, STR("Stuck In Body")) || stuck_is_thrust(weapon))
+            {
+                since[side] = -1.0;
+                continue;
+            }
+            double now = hsvr::now_seconds();
+            if (since[side] < 0.0) since[side] = now;
+            double lag = g_hold[side].lag;
+            if (lag >= cfg.cut_release_cm && now - since[side] >= cfg.cut_release_after_s)
+            {
+                Call r(weapon, STR("Release All Jammed Bones"));
+                r.run();
+                HSVR_LOG("Stab: %s cut goes through: %ls let out of %ls after %.2f s, hand %.0f cm past it", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                         stab_name_var(weapon, STR("Hit Bone Name")).c_str(), now - since[side], lag);
+                since[side] = -1.0;
             }
         }
     }
@@ -13056,6 +13298,7 @@ namespace
         for (auto& pin : g_pawn_pins) set_variable(context, pin.first.c_str(), pin.second, nullptr, nullptr);
         if (g_pose_active.load())
         {
+            keep_player_off_knees(context, true);
             crouch_after_tick(context);
             weapon_spring_after_tick(context);
             swing_speed_after_tick(context);
@@ -13067,6 +13310,7 @@ namespace
             frames_tick(context);
         }
         stab_no_rubber_band(context);
+        cut_through_tick(context);
         stab_log_tick(context);
         install_hit_haptics();
         grip_flip_tick(context);
@@ -15321,6 +15565,21 @@ namespace
                 else if (w == "fist_l") value = is_fist(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
                 else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
                 else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
+                else if (w == "actor_z") value = pawn ? actor_location(pawn).z : 0.0;
+                else if (w.rfind("var:", 0) == 0 && pawn)
+                {
+                    // var:<pawn variable>, '_' for spaces (var:Leg_R_Tonus); a variable named with '_' is tried as written first
+                    std::wstring n(w.begin() + 4, w.end());
+                    FProperty* p = pawn->GetPropertyByNameInChain(n.c_str());
+                    if (!p)
+                    {
+                        for (auto& ch : n)
+                            if (ch == L'_') ch = L' ';
+                        p = pawn->GetPropertyByNameInChain(n.c_str());
+                    }
+                    if (p) value = number_property(pawn, p);
+                    else known = false;
+                }
                 else known = false;
                 std::string o = op;
                 bool pass = false;
@@ -16940,8 +17199,17 @@ class HalfSwordVR : public CppUserModBase
     auto on_unreal_init() -> void override
     {
         HSVR_LOG("Unreal initialised");
-        Unreal::FUObjectArray::AddUObjectDeleteListener(&g_freed_listener); // gc_sync: what the game frees
         g_vr_started = hsvr::vr_start();
+        if (!g_vr_started)
+        {
+            // No VR this session (SteamVR closed at launch with vr_auto=1, enabled=0, or no headset):
+            // stay out of the game entirely, so it plays flat as if the mod weren't installed. No
+            // hooks, no engine-tick work, no test room (that is driven from the tick).
+            HSVR_LOG("Mod off for this session: no hooks installed, the game runs unmodified");
+            Output::send<LogLevel::Verbose>(STR("[HalfSwordVR] off this session (no VR), see HalfSwordVR.log\n"));
+            return;
+        }
+        Unreal::FUObjectArray::AddUObjectDeleteListener(&g_freed_listener); // gc_sync: what the game frees
         if (g_vr_started)
         {
             hsvr::stereo_set_anchor_provider(&provide_anchor);

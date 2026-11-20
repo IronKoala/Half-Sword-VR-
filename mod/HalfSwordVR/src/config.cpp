@@ -40,8 +40,10 @@ namespace hsvr
         fprintf(f,
                 "; Half Sword VR settings. Edit and save; the mod re-reads this file while the game runs.\n"
                 "enabled=%d\n"
-                "; Only start VR if SteamVR is already running when the game starts.\n"
-                "require_steamvr_running=%d\n"
+                "; 1 = VR and the mod only when SteamVR is already running as the game starts; otherwise the game\n"
+                "; plays flat as if the mod weren't there. 0 = always start VR (opens SteamVR if it is closed).\n"
+                "vr_auto=%d\n"
+                "vr_auto_processes=%s\n"
                 "; Per-eye resolution as a fraction of what the headset asks for (1.0 = full).\n"
                 "render_scale=%.2f\n"
                 "world_scale=%.2f\n"
@@ -102,7 +104,7 @@ namespace hsvr
                 "capture_seconds=%.0f\n"
                 "stereo_slot_offset=%d\n"
                 "dev_fake_headset=%d\n",
-                d.enabled, d.require_steamvr_running, d.render_scale, d.world_scale, d.anchor.c_str(), d.head_bone.c_str(), d.heading.c_str(),
+                d.enabled, d.vr_auto, d.vr_auto_processes.c_str(), d.render_scale, d.world_scale, d.anchor.c_str(), d.head_bone.c_str(), d.heading.c_str(),
                 d.eye_forward_cm, d.eye_up_cm, d.anchor_smoothing, d.near_clip_cm, d.gamma_mode, d.ui_panel, d.ui_panel_auto,
                 d.ui_distance_m, d.ui_width_m, d.ui_height_offset_m, d.ui_opacity_gain, d.ui_menu_backdrop, d.ui_use_alpha, d.mirror_window, (unsigned)d.recenter_key, (unsigned)d.toggle_ui_key, (unsigned)d.toggle_view_key, (unsigned)d.toggle_mode_key,
                 d.predict_frames, d.pose_max_age, d.separate_render_target, d.sharpen, d.screen_percentage, d.extra_commands.c_str(), d.fix_clouds, d.cloud_mode, d.light_samples, d.idle_helper, d.log_poses, d.log_input, d.capture_seconds, d.stereo_slot_offset, d.dev_fake_headset);
@@ -237,7 +239,13 @@ namespace hsvr
             note_missing(key, out);
         };
         flag("enabled", c.enabled);
-        flag("require_steamvr_running", c.require_steamvr_running);
+        integer("vr_auto", c.vr_auto);
+        text("vr_auto_processes", c.vr_auto_processes);
+        {
+            // Older name: only read when it is in the file, never added.
+            auto it = kv.find("require_steamvr_running");
+            if (it != kv.end() && !it->second.empty()) c.require_steamvr_running = strtol(it->second.c_str(), nullptr, 0) != 0;
+        }
         num("render_scale", c.render_scale);
         num("world_scale", c.world_scale);
         text("anchor", c.anchor);
@@ -400,6 +408,15 @@ namespace hsvr
         num("pose_hold_damping_ratio", c.pose_hold_damping_ratio);
         num("pose_hold_target_vel_smooth_s", c.pose_hold_target_vel_smooth_s);
         flag("pose_body_size_strength", c.pose_body_size_strength);
+        flag("pose_hold_arm_lag", c.pose_hold_arm_lag);
+        num("pose_hold_arm_lag_s", c.pose_hold_arm_lag_s);
+        num("pose_hold_arm_lag_max_s", c.pose_hold_arm_lag_max_s);
+        num("pose_hold_arm_reach_cm", c.pose_hold_arm_reach_cm);
+        num("pose_hold_shoulder_torque", c.pose_hold_shoulder_torque);
+        num("pose_hold_shoulder_fade_from_cm", c.pose_hold_shoulder_fade_from_cm);
+        num("pose_hold_shoulder_fade_to_cm", c.pose_hold_shoulder_fade_to_cm);
+        num("pose_hold_wrist_stop_spin", c.pose_hold_wrist_stop_spin);
+        num("pose_hold_torque_strength_power", c.pose_hold_torque_strength_power);
         num("pose_slide_ring_max_len_cm", c.pose_slide_ring_max_len_cm);
         num("pose_slide_ring_max_width_cm", c.pose_slide_ring_max_width_cm);
         num("pose_slide_gap_max_cm", c.pose_slide_gap_max_cm);
@@ -456,6 +473,14 @@ namespace hsvr
         flag("stab_drag", c.stab_drag);
         num("stab_drag_force_scale", c.stab_drag_force_scale);
         num("stab_drag_grip_s", c.stab_drag_grip_s);
+        num("stab_drag_reach_slack_cm", c.stab_drag_reach_slack_cm);
+        num("stab_drag_reach_s", c.stab_drag_reach_s);
+        flag("hit_assist", c.hit_assist);
+        num("hit_arm_mass_kg", c.hit_arm_mass_kg);
+        num("hit_assist_min_cms", c.hit_assist_min_cms);
+        flag("cut_follow_through", c.cut_follow_through);
+        num("cut_release_cm", c.cut_release_cm);
+        num("cut_release_after_s", c.cut_release_after_s);
         flag("grip_flip", c.grip_flip);
         num("stab_yank_cm", c.stab_yank_cm);
         num("stab_yank_s", c.stab_yank_s);
@@ -470,6 +495,7 @@ namespace hsvr
         num("stab_wound_in_cms", c.stab_wound_in_cms);
         num("stab_wound_out_cms", c.stab_wound_out_cms);
         num("stab_wound_head_factor", c.stab_wound_head_factor);
+        num("stab_wound_head_in_factor", c.stab_wound_head_in_factor);
         flag("pose_sheathe", c.pose_sheathe);
         num("pose_sheathe_mouth_cm", c.pose_sheathe_mouth_cm);
         num("pose_sheathe_angle_deg", c.pose_sheathe_angle_deg);
@@ -571,6 +597,7 @@ namespace hsvr
         flag("kick_on_a", c.kick_on_a);
         num("kick_tap_s", c.kick_tap_s);
         flag("pose_crouch_keep_leg_ik", c.pose_crouch_keep_leg_ik);
+        flag("pose_player_no_kneel", c.pose_player_no_kneel);
         flag("pose_capsule_floor_clamp", c.pose_capsule_floor_clamp);
         flag("pose_capsule_no_step_offset", c.pose_capsule_no_step_offset);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);
