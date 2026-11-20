@@ -6645,15 +6645,23 @@ namespace
         double speed = length(v), r = read_param_number(locals, rig), c = cut ? read_param_number(locals, cut) : 0.0, s = stab ? read_param_number(locals, stab) : 0.0;
         // The hand's own speed when it hit (to learn the fist's velocity factor).
         double hand_speed = g_swing_v[side] * 100.0;
+        // Learnt only from blows at fist speed (test 12: each blow also logs 3-7 slow touches at
+        // 1-11 cm/s, which made impulse per velocity 56x too big after three of them).
+        Config cfg = config();
+        double lo = cfg.pose_swing_speed_lo, hi = (std::max)(lo + 0.1, cfg.pose_swing_speed_hi);
+        bool blow = speed >= (lo + (hi - lo) * cfg.pose_elbow_min_ass / 75.0) * 100.0;
         PunchStats& P = g_punch;
         int k = (std::min)(P.n, 19);
         auto mean = [&](double& m, double x) { m = (m * k + x) / (k + 1); };
-        mean(P.rigidity, r);
-        mean(P.cut, c);
-        mean(P.stab, s);
-        if (speed > 1.0) mean(P.impulse_per_v, length(ni) / speed);
-        if (hand_speed > 50.0) mean(P.v_per_speed, speed / hand_speed);
-        P.n += 1;
+        if (blow)
+        {
+            mean(P.rigidity, r);
+            mean(P.cut, c);
+            mean(P.stab, s);
+            mean(P.impulse_per_v, length(ni) / speed);
+            if (hand_speed > 50.0) mean(P.v_per_speed, speed / hand_speed);
+            P.n += 1;
+        }
         if (kick) P.kick = read_param_number(locals, kick);
         if (blunt) P.blunt_int = read_param_number(locals, blunt);
         if (draw) P.draw_cut = read_param_number(locals, draw);
@@ -6665,9 +6673,9 @@ namespace
         double cos_ni = speed > 1.0 && length(ni) > 1e-6 ? dot(v, ni) / (speed * length(ni)) : 0.0;
         double cos_n = speed > 1.0 && length(nrm) > 1e-6 ? dot(v, nrm) / (speed * length(nrm)) : 0.0;
         std::wstring b = bone ? reinterpret_cast<FName*>(locals + bone->GetOffset_Internal())->ToString() : STR("?");
-        HSVR_LOG("Punch: %s fist hit %ls (%ls): velocity %.0f cm/s (hand %.0f), impulse %.0f, rigidity %.2f, cut %.2f, stab %.2f, kick %.2f, blunt %.0f, draw %.2f, "
+        HSVR_LOG("Punch: %s fist %s %ls (%ls): velocity %.0f cm/s (hand %.0f), impulse %.0f, rigidity %.2f, cut %.2f, stab %.2f, kick %.2f, blunt %.0f, draw %.2f, "
                  "lower %d, parent %d, extra %d, cos(velocity, impulse) %.2f, cos(velocity, normal) %.2f; learnt from %d hits: rigidity %.2f, cut %.2f, impulse/velocity %.3f, velocity/hand %.2f",
-                 side == 0 ? "left" : "right", victim->GetName().c_str(), b.c_str(), speed, hand_speed, length(ni), r, c, s, P.kick, P.blunt_int, P.draw_cut,
+                 side == 0 ? "left" : "right", blow ? "blow on" : "touch on", victim->GetName().c_str(), b.c_str(), speed, hand_speed, length(ni), r, c, s, P.kick, P.blunt_int, P.draw_cut,
                  (int)P.lower_threshold, (int)P.damage_parent, (int)P.extra_high, cos_ni, cos_n, P.n, P.rigidity, P.cut, P.impulse_per_v, P.v_per_speed);
     }
 
@@ -6745,23 +6753,32 @@ namespace
                 FName best_bone;
                 for (int i = 0; i < 3; ++i)
                 {
-                    Call cp(mesh, STR("GetClosestPointOnCollision"));
-                    cp.three(STR("Point"), pts[i].x, pts[i].y, pts[i].z);
-                    cp.run();
-                    double d = cp.number();
-                    if (d < 0.0 || d >= best_d) continue;
-                    best_d = d, best_i = i;
-                    best_pt = d > 0.0 ? cp.vec(STR("OutPointOnBody")) : pts[i];
-                }
-                if (best_i >= 0 && best_d <= cfg.pose_elbow_radius_cm)
-                {
-                    // His bone there (GetClosestPointOnCollision takes a bone, it does not give one back).
+                    // His nearest physics body first: GetClosestPointOnCollision with no bone measures only
+                    // his root body (the pelvis), so test 12 never saw the elbow reach his head.
                     Call fb(mesh, STR("FindClosestBone_K2"));
-                    fb.three(STR("TestLocation"), best_pt.x, best_pt.y, best_pt.z);
+                    fb.three(STR("TestLocation"), pts[i].x, pts[i].y, pts[i].z);
                     fb.number(STR("IgnoreScale"), 0.0);
                     fb.flag(STR("bRequirePhysicsAsset"), true);
                     fb.run();
-                    if (FProperty* rp = fb.param(STR("ReturnValue"))) best_bone = *reinterpret_cast<FName*>(fb.buffer.data() + rp->GetOffset_Internal());
+                    FProperty* rp = fb.param(STR("ReturnValue"));
+                    if (!rp) continue;
+                    FName bone = *reinterpret_cast<FName*>(fb.buffer.data() + rp->GetOffset_Internal());
+                    Call cp(mesh, STR("GetClosestPointOnCollision"));
+                    cp.three(STR("Point"), pts[i].x, pts[i].y, pts[i].z);
+                    cp.name(STR("BoneName"), bone);
+                    cp.run();
+                    double d = cp.number();
+                    if (d < 0.0 || d >= best_d) continue;
+                    best_d = d, best_i = i, best_bone = bone;
+                    best_pt = d > 0.0 ? cp.vec(STR("OutPointOnBody")) : pts[i];
+                }
+                static double near_log = -10.0;
+                if (best_i >= 0 && best_d < 30.0 && now - near_log >= 1.0)
+                {
+                    near_log = now;
+                    HSVR_LOG("Elbow: %s arm near %ls: %s %.1f cm from his %ls, speed %.0f cm/s (needs %.0f), in contact since last hit %d",
+                             side == 0 ? "left" : "right", w->GetName().c_str(), best_i == 0 ? "elbow" : best_i == 1 ? "forearm" : "upper arm", best_d,
+                             best_bone.ToString().c_str(), length(E.vel[best_i]), min_speed, (int)(E.touching_until[w] > 0.0));
                 }
                 double& until = E.touching_until[w];
                 if (best_i < 0 || best_d > cfg.pose_elbow_radius_cm)
