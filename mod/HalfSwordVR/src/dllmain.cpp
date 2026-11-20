@@ -52,11 +52,127 @@ using namespace RC::Unreal;
 
 namespace
 {
+    // ---- name lookups, cached ------------------------------------------------------------------
+    // UE4SS looks a property or function up by name with no cache: it builds an FName (the engine
+    // hashes the string and searches its name table) and walks every field of the class and its
+    // supers (Willie_BP has hundreds). GetName() turns an FName into a new string each time. The mod
+    // does such lookups thousands of times a frame (profile 2026-11-20: 3.5 ms a frame), so the
+    // answer is kept per class (or per function, for parameters) and name. Classes and functions are
+    // dropped when the game frees them (lookup_cache_prune, from gc_sync). A receiver that is itself a
+    // class or struct is looked up the old way: UE4SS then searches that struct, not its class.
+    enum LookupKind : int { LkProp, LkFunc, LkIsA, LkParam, LkCount };
+    struct LookupKey
+    {
+        const void* owner;
+        const TCHAR* name;
+        bool operator==(const LookupKey& o) const { return owner == o.owner && name == o.name; }
+    };
+    struct LookupKeyHash
+    {
+        size_t operator()(const LookupKey& k) const { return std::hash<const void*>()(k.owner) * 31u ^ std::hash<const void*>()(k.name); }
+    };
+    struct LookupEntry
+    {
+        std::wstring name; // the text the pointer had when cached (a reused buffer may hold another)
+        void* value;
+    };
+    struct LookupTable
+    {
+        std::unordered_map<LookupKey, LookupEntry, LookupKeyHash> by_pointer;
+        std::unordered_map<const void*, std::unordered_map<std::wstring, void*>> by_text;
+    };
+    std::mutex g_lookup_mutex;
+    LookupTable g_lookup[LkCount];
+    template <typename F> void* cached_lookup(int kind, const void* owner, const TCHAR* name, F compute)
+    {
+        LookupTable& t = g_lookup[kind];
+        {
+            std::lock_guard<std::mutex> lock(g_lookup_mutex);
+            auto it = t.by_pointer.find(LookupKey{owner, name});
+            if (it != t.by_pointer.end() && it->second.name == name) return it->second.value;
+            auto o = t.by_text.find(owner);
+            if (o != t.by_text.end())
+            {
+                auto n = o->second.find(name);
+                if (n != o->second.end())
+                {
+                    t.by_pointer[LookupKey{owner, name}] = LookupEntry{name, n->second};
+                    return n->second;
+                }
+            }
+        }
+        void* value = compute(); // outside the lock: it may run engine code
+        std::lock_guard<std::mutex> lock(g_lookup_mutex);
+        if (t.by_pointer.size() > 200000) t.by_pointer.clear(); // names from short-lived buffers: keep it bounded
+        t.by_pointer[LookupKey{owner, name}] = LookupEntry{name, value};
+        t.by_text[owner][name] = value;
+        return value;
+    }
+    // Called from gc_sync with the batch of freed objects: drops the classes and functions in it.
+    void lookup_cache_prune(const std::unordered_set<const void*>& freed, bool all)
+    {
+        std::lock_guard<std::mutex> lock(g_lookup_mutex);
+        for (LookupTable& t : g_lookup)
+        {
+            if (all)
+            {
+                t.by_pointer.clear();
+                t.by_text.clear();
+                continue;
+            }
+            for (auto it = t.by_pointer.begin(); it != t.by_pointer.end();)
+                it = freed.count(it->first.owner) ? t.by_pointer.erase(it) : std::next(it);
+            for (auto it = t.by_text.begin(); it != t.by_text.end();)
+                it = freed.count(it->first) ? t.by_text.erase(it) : std::next(it);
+        }
+    }
+    // Is the object's class (or a super of it) named class_name.
+    bool is_a(UObject* object, const TCHAR* class_name)
+    {
+        if (!object) return false;
+        UStruct* cls = object->GetClassPrivate();
+        if (!cls) return false;
+        return cached_lookup(LkIsA, cls, class_name, [&]() -> void* {
+                   for (UStruct* level = cls; level; level = level->GetSuperStruct())
+                       if (level->GetName() == class_name) return reinterpret_cast<void*>(1);
+                   return nullptr;
+               }) != nullptr;
+    }
+    // A class, struct or function as the receiver: UE4SS searches it, not its class (no cache).
+    bool receiver_is_struct(UObject* o) { return is_a(o, STR("Struct")); }
+    FProperty* prop_chain(UObject* o, const TCHAR* name)
+    {
+        if (!o) return nullptr;
+        if (receiver_is_struct(o)) return (*o).GetPropertyByNameInChain(name);
+        return static_cast<FProperty*>(cached_lookup(LkProp, o->GetClassPrivate(), name, [&] { return static_cast<void*>((*o).GetPropertyByNameInChain(name)); }));
+    }
+    template <typename T> T* value_ptr(UObject* o, const TCHAR* name)
+    {
+        FProperty* p = prop_chain(o, name);
+        return p ? reinterpret_cast<T*>(reinterpret_cast<uint8_t*>(o) + p->GetOffset_Internal()) : nullptr;
+    }
+    UFunction* func_chain(UObject* o, const TCHAR* name)
+    {
+        if (!o) return nullptr;
+        if (receiver_is_struct(o)) return (*o).GetFunctionByNameInChain(name);
+        return static_cast<UFunction*>(cached_lookup(LkFunc, o->GetClassPrivate(), name, [&] { return static_cast<void*>((*o).GetFunctionByNameInChain(name)); }));
+    }
+    // A function's parameter by name.
+    FProperty* func_param(UFunction* fn, const TCHAR* name)
+    {
+        if (!fn) return nullptr;
+        return static_cast<FProperty*>(cached_lookup(LkParam, fn, name, [&]() -> void* {
+            for (FProperty* p : fn->ForEachProperty())
+                if (p->GetName() == name) return p;
+            return nullptr;
+        }));
+    }
+
     // ---- reflection helpers (game thread) ------------------------------------------------------
     UObject* object_property(UObject* owner, const TCHAR* name)
     {
         if (!owner) return nullptr;
-        UObject** value = owner->GetValuePtrByPropertyNameInChain<UObject*>(name);
+        UObject** value = value_ptr<UObject*>(owner, name);
         return value ? *value : nullptr;
     }
 
@@ -64,7 +180,7 @@ namespace
     bool bool_property(UObject* owner, const TCHAR* name)
     {
         if (!owner) return false;
-        FProperty* property = owner->GetPropertyByNameInChain(name);
+        FProperty* property = prop_chain(owner, name);
         if (!property) return false;
         auto* flag = static_cast<FBoolProperty*>(property);
         const uint8_t* byte = reinterpret_cast<const uint8_t*>(owner) + property->GetOffset_Internal() + flag->GetByteOffset();
@@ -75,7 +191,7 @@ namespace
     UObject* brush_resource(UObject* widget)
     {
         if (!widget) return nullptr;
-        FProperty* property = widget->GetPropertyByNameInChain(STR("Brush"));
+        FProperty* property = prop_chain(widget, STR("Brush"));
         if (!property) return nullptr;
         UScriptStruct* brush_struct = static_cast<FStructProperty*>(property)->GetStruct();
         if (!brush_struct) return nullptr;
@@ -189,6 +305,7 @@ namespace
         HSVR_LOG("GC: the game freed %zu object(s)%s; dropping them from the mod's lists", n, g_freed_all ? " (more than recorded: every kept pointer dropped)" : "");
         prune_freed();
         for (auto& f : g_prune_hooks) f();
+        lookup_cache_prune(g_freed_now, g_freed_all);
         g_freed_now.clear();
         g_freed_all = false;
     }
@@ -274,7 +391,7 @@ namespace
         UObject* viewport = object_property(g_engine, STR("GameViewport"));
         UObject* game_instance = object_property(viewport, STR("GameInstance"));
         if (!game_instance) return nullptr;
-        RawArray* players = game_instance->GetValuePtrByPropertyNameInChain<RawArray>(STR("LocalPlayers"));
+        RawArray* players = value_ptr<RawArray>(game_instance, STR("LocalPlayers"));
         if (!players || players->Num < 1 || !players->Data) return nullptr;
         UObject* local_player = static_cast<UObject*>(players->Data[0]);
         return object_property(local_player, STR("PlayerController"));
@@ -340,8 +457,8 @@ namespace
         g_logged_pawn = pawn;
         HSVR_LOG("Player pawn: %ls", pawn->GetFullName().c_str());
         HSVR_LOG("Player mesh: %ls", mesh->GetFullName().c_str());
-        UFunction* num_fn = mesh->GetFunctionByNameInChain(STR("GetNumBones"));
-        UFunction* name_fn = mesh->GetFunctionByNameInChain(STR("GetBoneName"));
+        UFunction* num_fn = func_chain(mesh, STR("GetNumBones"));
+        UFunction* name_fn = func_chain(mesh, STR("GetBoneName"));
         if (!num_fn || !name_fn) return;
         NumBonesParams count{};
         mesh->ProcessEvent(num_fn, &count);
@@ -391,8 +508,8 @@ namespace
         if (!pawn || !mesh) return false;
         log_bones_once(pawn, mesh);
 
-        UFunction* socket_fn = mesh->GetFunctionByNameInChain(STR("GetSocketLocation"));
-        UFunction* actor_fn = pawn->GetFunctionByNameInChain(STR("K2_GetActorLocation"));
+        UFunction* socket_fn = func_chain(mesh, STR("GetSocketLocation"));
+        UFunction* actor_fn = func_chain(pawn, STR("K2_GetActorLocation"));
         if (!socket_fn || !actor_fn) return false;
         SocketLocationParams socket{};
         socket.InSocketName = head_bone_name();
@@ -407,7 +524,7 @@ namespace
         double body_yaw = 0.0;
         if (UObject* controller = find_player_controller())
         {
-            if (ue::FRotator* rotation = controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")))
+            if (ue::FRotator* rotation = value_ptr<ue::FRotator>(controller, STR("ControlRotation")))
             {
                 out.has_heading = true;
                 body_yaw = rotation->Yaw; // with body turning on, the mod writes the body's yaw here
@@ -440,7 +557,7 @@ namespace
     bool bone_location(UObject* mesh, const std::string& bone, hsvr::Vec3& out)
     {
         if (!mesh) return false;
-        UFunction* socket_fn = mesh->GetFunctionByNameInChain(STR("GetSocketLocation"));
+        UFunction* socket_fn = func_chain(mesh, STR("GetSocketLocation"));
         if (!socket_fn) return false;
         SocketLocationParams socket{};
         socket.InSocketName = bone_fname(bone);
@@ -516,7 +633,7 @@ namespace
 
     int is_simulating(UObject* mesh, const std::string& bone)
     {
-        UFunction* fn = mesh->GetFunctionByNameInChain(STR("IsSimulatingPhysics"));
+        UFunction* fn = func_chain(mesh, STR("IsSimulatingPhysics"));
         if (!fn) return -1;
         IsSimulatingParams p{};
         p.BoneName = bone_fname(bone);
@@ -531,8 +648,8 @@ namespace
     // body regardless, so it is called after it. Each step is logged with what the pelvis reads after.
     void set_simulate(UObject* mesh, bool simulate, bool report = false)
     {
-        UFunction* whole = mesh->GetFunctionByNameInChain(STR("SetSimulatePhysics"));
-        UFunction* every_body = mesh->GetFunctionByNameInChain(STR("SetAllBodiesSimulatePhysics"));
+        UFunction* whole = func_chain(mesh, STR("SetSimulatePhysics"));
+        UFunction* every_body = func_chain(mesh, STR("SetAllBodiesSimulatePhysics"));
         if (whole)
         {
             SimulatePhysicsParams p{simulate};
@@ -558,7 +675,7 @@ namespace
         double now = hsvr::now_seconds();
         if (now - last < 1.0) return;
         last = now;
-        UFunction* actor_fn = pawn->GetFunctionByNameInChain(STR("K2_GetActorLocation"));
+        UFunction* actor_fn = func_chain(pawn, STR("K2_GetActorLocation"));
         ActorLocationParams actor{};
         if (actor_fn) pawn->ProcessEvent(actor_fn, &actor);
         hsvr::Vec3 pelvis, head, hand_l, hand_r;
@@ -782,7 +899,7 @@ namespace
             hsvr::Vec3 at;
             UObject* mesh = find_pawn_mesh();
             std::string bone(cfg.dev_pose_bone);
-            UFunction* rotation_fn = mesh ? mesh->GetFunctionByNameInChain(STR("GetSocketRotation")) : nullptr;
+            UFunction* rotation_fn = mesh ? func_chain(mesh, STR("GetSocketRotation")) : nullptr;
             SocketRotationParams r{};
             r.InSocketName = bone_fname(bone);
             if (rotation_fn) mesh->ProcessEvent(rotation_fn, &r);
@@ -814,19 +931,13 @@ namespace
 
         Call(UObject* object, const TCHAR* name) : target(object)
         {
-            fn = object ? object->GetFunctionByNameInChain(name) : nullptr;
+            fn = object ? func_chain(object, name) : nullptr;
             size_t size = 16;
             if (fn)
                 for (FProperty* p : fn->ForEachProperty()) size = (std::max)(size, (size_t)p->GetOffset_Internal() + (size_t)p->GetSize());
             buffer.assign(size + 16, 0);
         }
-        FProperty* param(const TCHAR* name)
-        {
-            if (!fn) return nullptr;
-            for (FProperty* p : fn->ForEachProperty())
-                if (p->GetName() == name) return p;
-            return nullptr;
-        }
+        FProperty* param(const TCHAR* name) { return func_param(fn, name); }
         void three(const TCHAR* name, double a, double b, double c)
         {
             if (FProperty* p = param(name)) write_three(buffer.data() + p->GetOffset_Internal(), p, a, b, c);
@@ -1188,7 +1299,7 @@ namespace
     double actor_heading(UObject* pawn)
     {
         if (UObject* controller = find_player_controller())
-            if (ue::FRotator* rotation = controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation"))) return rotation->Yaw;
+            if (ue::FRotator* rotation = value_ptr<ue::FRotator>(controller, STR("ControlRotation"))) return rotation->Yaw;
         Call c(pawn, STR("K2_GetActorRotation"));
         c.run();
         return c.vec().y;
@@ -1448,7 +1559,7 @@ namespace
         // Where your feet would stand under your hips, a little ahead in the direction you move.
         Vec3 velocity{0, 0, 0};
         if (UObject* movement = object_property(pawn, STR("CharacterMovement")))
-            if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+            if (FProperty* vp = prop_chain(movement, STR("Velocity")))
             {
                 double v[3];
                 read_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v);
@@ -1627,8 +1738,8 @@ namespace
         if (!looked)
         {
             looked = true;
-            prop[0] = context->GetPropertyByNameInChain(STR("L Grip Type"));
-            prop[1] = context->GetPropertyByNameInChain(STR("R Grip Type"));
+            prop[0] = prop_chain(context, STR("L Grip Type"));
+            prop[1] = prop_chain(context, STR("R Grip Type"));
             HSVR_LOG("Fingers: the animation's grip types L %s, R %s (%ls / %ls)", prop[0] ? "found" : "MISSING", prop[1] ? "found" : "MISSING",
                      prop[0] ? prop[0]->GetClass().GetName().c_str() : STR("-"), prop[1] ? prop[1]->GetClass().GetName().c_str() : STR("-"));
         }
@@ -1680,8 +1791,8 @@ namespace
         if (!g_effector_looked)
         {
             g_effector_looked = true;
-            g_effector[0] = context->GetPropertyByNameInChain(STR("Left Foot Effector Location"));
-            g_effector[1] = context->GetPropertyByNameInChain(STR("Right Foot Effector Location"));
+            g_effector[0] = prop_chain(context, STR("Left Foot Effector Location"));
+            g_effector[1] = prop_chain(context, STR("Right Foot Effector Location"));
             std::string seen;
             for (UStruct* level = static_cast<UStruct*>(context->GetClassPrivate()); level; level = level->GetSuperStruct())
                 for (FProperty* p : level->ForEachProperty())
@@ -1854,7 +1965,7 @@ namespace
     bool set_bool_property(UObject* owner, const TCHAR* name, bool value)
     {
         if (!owner) return false;
-        FProperty* property = owner->GetPropertyByNameInChain(name);
+        FProperty* property = prop_chain(owner, name);
         if (!property || property->GetClass().GetName() != STR("BoolProperty")) return false;
         auto* flag = static_cast<FBoolProperty*>(property);
         uint8_t* byte = reinterpret_cast<uint8_t*>(owner) + property->GetOffset_Internal() + flag->GetByteOffset();
@@ -2253,7 +2364,7 @@ namespace
                         if (!b) continue;
                         p0 = component_location(b);
                         ax = component_rotation(b).rotate(Vec3{0, 0, 1});
-                        if (FProperty* lp = w->GetPropertyByNameInChain(STR("Length to Top R Default"))) len = (std::max)(20.0, number_property(w, lp));
+                        if (FProperty* lp = prop_chain(w, STR("Length to Top R Default"))) len = (std::max)(20.0, number_property(w, lp));
                         t0 = now;
                         break;
                     }
@@ -2277,7 +2388,7 @@ namespace
                 static Quat aim{0, 0, 0, 1};
                 Vec3 want = (body * rot_to_quat(-g_fake_thrust_pitch.load(), 0.0, 0.0)).normalized().rotate({1.0, 0.0, 0.0});
                 UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
-                RawArray* tips = held ? held->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")) : nullptr;
+                RawArray* tips = held ? value_ptr<RawArray>(held, STR("Tips")) : nullptr;
                 if (tips && tips->Data && tips->Num > 0 && tips->Data[0])
                 {
                     Call f(static_cast<UObject*>(tips->Data[0]), STR("GetForwardVector"));
@@ -2662,7 +2773,7 @@ namespace
             for (UObject* c : parts)
             {
                 if (!c) continue;
-                FProperty* p = c->GetPropertyByNameInChain(STR("bEnableUpdateRateOptimizations"));
+                FProperty* p = prop_chain(c, STR("bEnableUpdateRateOptimizations"));
                 if (!p || p->GetClass().GetName() != STR("BoolProperty")) continue;
                 auto* flag = static_cast<FBoolProperty*>(p);
                 uint8_t* byte = reinterpret_cast<uint8_t*>(c) + p->GetOffset_Internal() + flag->GetByteOffset();
@@ -2673,7 +2784,7 @@ namespace
                 }
             }
             // EVisibilityBasedAnimTickOption: AlwaysTickPoseAndRefreshBones 0.
-            if (FProperty* p = mesh->GetPropertyByNameInChain(STR("VisibilityBasedAnimTickOption")))
+            if (FProperty* p = prop_chain(mesh, STR("VisibilityBasedAnimTickOption")))
             {
                 uint8_t* at = reinterpret_cast<uint8_t*>(mesh) + p->GetOffset_Internal();
                 if (*at != 0)
@@ -2750,8 +2861,8 @@ namespace
         for (UObject* c : g_head_pieces)
         {
             if (!c) continue;
-            FProperty* lp = c->GetPropertyByNameInChain(STR("RelativeLocation"));
-            FProperty* rp = c->GetPropertyByNameInChain(STR("RelativeRotation"));
+            FProperty* lp = prop_chain(c, STR("RelativeLocation"));
+            FProperty* rp = prop_chain(c, STR("RelativeRotation"));
             if (!lp || !rp) continue;
             // Each piece is moved so ITS head bone lands on the view's head spot: this takes out both the
             // view's newer headset pose and anything his body drew late.
@@ -3221,9 +3332,9 @@ namespace
             int mode = -1;
             if (movement)
             {
-                if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+                if (FProperty* vp = prop_chain(movement, STR("Velocity")))
                     read_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v);
-                if (FProperty* mp = movement->GetPropertyByNameInChain(STR("MovementMode")))
+                if (FProperty* mp = prop_chain(movement, STR("MovementMode")))
                     mode = *(reinterpret_cast<uint8_t*>(movement) + mp->GetOffset_Internal());
             }
             // What his body really does on screen: chest and hips turned from where they were at calibration.
@@ -3356,7 +3467,7 @@ namespace
         add.three(STR("WorldDirection"), dir.x, dir.y, 0.0);
         add.number(STR("ScaleValue"), scale);
         add.run();
-        if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Movement Input Vector")))
+        if (FProperty* p = prop_chain(pawn, STR("Movement Input Vector")))
             write_three(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal(), p, dir.x * scale, dir.y * scale, 0.0);
         g_stick_walk_until = now_seconds() + 0.5;
         static double last = 0.0;
@@ -3366,7 +3477,7 @@ namespace
             last = now;
             double v[3] = {0, 0, 0};
             if (UObject* movement = object_property(pawn, STR("CharacterMovement")))
-                if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+                if (FProperty* vp = prop_chain(movement, STR("Velocity")))
                     read_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v);
             HSVR_LOG("Walk: stick %.2f toward %.0f deg, speed %.0f cm/s", scale, yaw, std::sqrt(v[0] * v[0] + v[1] * v[1]));
         }
@@ -3376,7 +3487,7 @@ namespace
     {
         using namespace hsvr;
         UObject* controller = find_player_controller();
-        ue::FRotator* rotation = controller ? controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")) : nullptr;
+        ue::FRotator* rotation = controller ? value_ptr<ue::FRotator>(controller, STR("ControlRotation")) : nullptr;
         if (!rotation) return;
         auto wrap = [](double a) {
             while (a > 180.0) a -= 360.0;
@@ -3476,7 +3587,7 @@ namespace
     // or less while standing still starts the game's canned kneel (legs without IK).
     void set_named_number(UObject* owner, const TCHAR* name, double value)
     {
-        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        FProperty* p = owner ? prop_chain(owner, name) : nullptr;
         if (!p) return;
         uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
         auto kind = p->GetClass().GetName();
@@ -3588,7 +3699,7 @@ namespace
         if (!g_swing_looked)
         {
             g_swing_looked = true;
-            g_swing_proxy = pawn->GetPropertyByNameInChain(STR("Swing Velocity proxy"));
+            g_swing_proxy = prop_chain(pawn, STR("Swing Velocity proxy"));
             HSVR_LOG("Swing: the game's swing speed input %s (%ls)", g_swing_proxy ? "found" : "MISSING", g_swing_proxy ? g_swing_proxy->GetClass().GetName().c_str() : STR("-"));
         }
         if (!g_swing_proxy) return;
@@ -3715,7 +3826,7 @@ namespace
         g_hold_location = actor_location(context);
         g_hold_have = true;
         {
-            FProperty* p = context->GetPropertyByNameInChain(STR("Step Height 2"));
+            FProperty* p = prop_chain(context, STR("Step Height 2"));
             g_step_h2_have = p != nullptr;
             g_step_h2_pre = p ? number_property(context, p) : 0.0;
         }
@@ -3898,7 +4009,7 @@ namespace
         bool first = true;
         for (const TCHAR* name : path)
         {
-            p = first ? owner->GetPropertyByNameInChain(name) : struct_member(type, name);
+            p = first ? prop_chain(owner, name) : struct_member(type, name);
             first = false;
             if (!p) return NAN;
             at += p->GetOffset_Internal();
@@ -3926,7 +4037,7 @@ namespace
         bool first = true;
         for (const TCHAR* name : path)
         {
-            p = first ? owner->GetPropertyByNameInChain(name) : struct_member(type, name);
+            p = first ? prop_chain(owner, name) : struct_member(type, name);
             first = false;
             if (!p) return {};
             at += p->GetOffset_Internal();
@@ -4019,14 +4130,14 @@ namespace
             HSVR_LOG("Grip: no physics asset found on %ls", mesh->GetFullName().c_str());
             return out;
         }
-        FProperty* list = physics->GetPropertyByNameInChain(STR("SkeletalBodySetups"));
+        FProperty* list = prop_chain(physics, STR("SkeletalBodySetups"));
         if (!list) return out;
         const RawArray* arr = reinterpret_cast<const RawArray*>(reinterpret_cast<uint8_t*>(physics) + list->GetOffset_Internal());
         for (int32_t i = 0; i < arr->Num; ++i)
         {
             UObject* body = reinterpret_cast<UObject*>(arr->Data[i]);
             if (!body) continue;
-            FProperty* bn = body->GetPropertyByNameInChain(STR("BoneName"));
+            FProperty* bn = prop_chain(body, STR("BoneName"));
             if (bn) out.push_back(*reinterpret_cast<FName*>(reinterpret_cast<uint8_t*>(body) + bn->GetOffset_Internal()));
         }
         return out;
@@ -4363,7 +4474,7 @@ namespace
 
     void dump_joint(UObject* joint)
     {
-        FProperty* p = joint ? joint->GetPropertyByNameInChain(STR("ConstraintInstance")) : nullptr;
+        FProperty* p = joint ? prop_chain(joint, STR("ConstraintInstance")) : nullptr;
         if (!p) return;
         HSVR_LOG("Grip: full joint settings of %ls:", joint->GetFullName().c_str());
         dump_struct(STR("ConstraintInstance"), struct_type(p), reinterpret_cast<const uint8_t*>(joint) + p->GetOffset_Internal(), 0);
@@ -4761,11 +4872,11 @@ namespace
             std::string missing;
             for (int i = 0; i < 4; ++i)
             {
-                FProperty* p = pawn->GetPropertyByNameInChain(flag_names[i]);
+                FProperty* p = prop_chain(pawn, flag_names[i]);
                 flags[i] = p && p->GetClass().GetName() == STR("BoolProperty") ? p : nullptr;
                 if (!flags[i]) { missing += " "; for (const TCHAR* c = flag_names[i]; *c; ++c) missing += (char)*c; }
             }
-            FProperty* p = pawn->GetPropertyByNameInChain(STR("Legs Tonus Far Step"));
+            FProperty* p = prop_chain(pawn, STR("Legs Tonus Far Step"));
             far_step = p && p->GetClass().GetName() == STR("DoubleProperty") ? p : nullptr;
             if (!far_step) missing += " Legs Tonus Far Step";
             HSVR_LOG("Knees: your player's kneel and kneel-fall kept off, leg tonus far-step kept at 1 (pose_player_no_kneel)%s%s",
@@ -5018,7 +5129,7 @@ namespace
             return;
         }
         const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
-        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
+        UFunction* fn = pawn ? func_chain(pawn, name) : nullptr;
         if (!fn)
         {
             HSVR_LOG("Hold: no \"%ls\" on the character, the weapon is not dropped", name);
@@ -5058,7 +5169,7 @@ namespace
         // pelvis pin when the slot's scabbard is the released weapon's), also on the mod's hand-overs. Its
         // Scabbard reference is hidden from that check for the call and put back after.
         UObject* kept_scab = nullptr;
-        FProperty* scab_prop = held ? held->GetPropertyByNameInChain(STR("Scabbard")) : nullptr;
+        FProperty* scab_prop = held ? prop_chain(held, STR("Scabbard")) : nullptr;
         if (hsvr::config().pose_keep_scabbard_on_drop && scab_prop && scab_prop->GetClass().GetName() == STR("ObjectProperty"))
         {
             UObject** slot = reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(held) + scab_prop->GetOffset_Internal());
@@ -5152,7 +5263,7 @@ namespace
     bool give_hand_weapon(int side, UObject* pawn, UObject* weapon)
     {
         const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
-        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
+        UFunction* fn = pawn ? func_chain(pawn, name) : nullptr;
         if (!fn || !weapon) return false;
         // Sized from the function. The fixed 4096-byte static block this replaced was overrun: the
         // hand position written for the fist landed on the grab button's state (fist-eat test 4).
@@ -5244,7 +5355,7 @@ namespace
             if (!c || c->GetOuterPrivate() != weapon) continue;
             Vec3 o = local(component_location(c));
             std::wstring tags;
-            if (RawArray* t = c->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")))
+            if (RawArray* t = value_ptr<RawArray>(c, STR("ComponentTags")))
                 for (int32_t i = 0; i < t->Num && t->Data; ++i) tags += reinterpret_cast<const FName*>(t->Data)[i].ToString() + STR(" ");
             double lo = 0, hi = 0;
             bool have_bounds = false;
@@ -5298,7 +5409,7 @@ namespace
     bool set_variable(UObject* owner, const TCHAR* name, double number, UObject* object = nullptr, const FName* fname = nullptr)
     {
         if (!owner) return false;
-        FProperty* p = owner->GetPropertyByNameInChain(name);
+        FProperty* p = prop_chain(owner, name);
         if (!p) return false;
         uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
         auto kind = p->GetClass().GetName();
@@ -5314,19 +5425,13 @@ namespace
     }
 
     // Is the object's class, or one it is built on, named `class_name` (e.g. ModularWeaponBP_C)?
-    bool is_a(UObject* object, const TCHAR* class_name)
-    {
-        if (!object) return false;
-        for (UStruct* level = object->GetClassPrivate(); level; level = level->GetSuperStruct())
-            if (level->GetName() == class_name) return true;
-        return false;
-    }
+
 
     // Does a list of names (actor Tags / ComponentTags) hold this one?
     bool has_tag(UObject* owner, const TCHAR* list, const TCHAR* tag)
     {
         if (!owner) return false;
-        RawArray* tags = owner->GetValuePtrByPropertyNameInChain<RawArray>(list);
+        RawArray* tags = value_ptr<RawArray>(owner, list);
         if (!tags || !tags->Data) return false;
         std::wstring want(tag);
         const FName* names = reinterpret_cast<const FName*>(tags->Data);
@@ -5443,7 +5548,7 @@ namespace
             if (owner == object_property(pawn, STR("Weapon L")) || owner == object_property(pawn, STR("Weapon R"))) continue;
             static const FName none_bone = FName(STR("None"), FNAME_Add);
             FName bone = none_bone;
-            if (c->GetFunctionByNameInChain(STR("FindClosestBone_K2")))
+            if (func_chain(c, STR("FindClosestBone_K2")))
             {
                 Call fb(c, STR("FindClosestBone_K2"));
                 fb.three(STR("TestLocation"), mid.x, mid.y, mid.z);
@@ -5531,7 +5636,7 @@ namespace
             if (is_a(owner, STR("ModularWeaponBP_C"))) continue;
             if (has_tag(c, STR("ComponentTags"), STR("NoGrab")) || has_tag(owner, STR("Tags"), STR("Sheathed"))) continue;
             FName bone = none_bone;
-            bool skeletal = c->GetFunctionByNameInChain(STR("FindClosestBone_K2")) != nullptr;
+            bool skeletal = func_chain(c, STR("FindClosestBone_K2")) != nullptr;
             if (skeletal)
             {
                 Call fb(c, STR("FindClosestBone_K2"));
@@ -5622,7 +5727,7 @@ namespace
             HSVR_LOG("Grab: %s hand: the game did not take the body in 0.3 s; left", L ? "left" : "right");
             return;
         }
-        UFunction* fn = pawn->GetFunctionByNameInChain(L ? STR("Grab Specific Object L H") : STR("Grab Specific Object R H"));
+        UFunction* fn = func_chain(pawn, L ? STR("Grab Specific Object L H") : STR("Grab Specific Object R H"));
         if (!fn)
         {
             HSVR_LOG("Grab: %s hand: the game did not take it and there is no Grab Specific Object", L ? "left" : "right");
@@ -5726,7 +5831,7 @@ namespace
     const TCHAR* grip_type_name(int side) { return side == 0 ? STR("L_GripType_Current") : STR("R_GripType_Current"); }
     double read_number_variable(UObject* owner, const TCHAR* name)
     {
-        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        FProperty* p = owner ? prop_chain(owner, name) : nullptr;
         if (!p) return -1.0;
         uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
         auto kind = p->GetClass().GetName();
@@ -6228,7 +6333,7 @@ namespace
     bool set_up_hand(int side, UObject* pawn, UClass* cls, bool dropped, bool destroy_previous, bool dont_save)
     {
         const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
-        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
+        UFunction* fn = pawn ? func_chain(pawn, name) : nullptr;
         if (!fn) return false;
         // Sized from the function. The fixed 4096-byte static block this replaced was overrun: the
         // hand position written for the fist landed on the grab button's state (fist-eat test 4).
@@ -6446,7 +6551,7 @@ namespace
         UObject* found = nullptr;
         for (const TCHAR* name : {STR("Voice Scene"), STR("VoiceScene")})
         {
-            FProperty* p = pawn ? pawn->GetPropertyByNameInChain(name) : nullptr;
+            FProperty* p = pawn ? prop_chain(pawn, name) : nullptr;
             if (!p || p->GetClass().GetName() != STR("ObjectProperty")) continue;
             UObject* c = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal());
             if (c && is_a(c, STR("SceneComponent")) && c->GetOuterPrivate() == pawn)
@@ -8503,7 +8608,7 @@ namespace
             };
             auto part_name = [](UObject* p) { return p ? p->GetName() : std::wstring(STR("?")); };
             double bottom = 0.0;
-            if (FProperty* bpz = weapon->GetPropertyByNameInChain(STR("Length to Bottom"))) bottom = number_property(weapon, bpz);
+            if (FProperty* bpz = prop_chain(weapon, STR("Length to Bottom"))) bottom = number_property(weapon, bpz);
             if (probe(0.0).state != 2)
             {
                 m.ok = true;
@@ -8647,7 +8752,7 @@ namespace
         {
             double lo = 0.0, hi = 0.0, top = 0.0;
             bool wide_lo = false, wide_hi = false;
-            if (FProperty* p = item->GetPropertyByNameInChain(STR("Length to Top R Default"))) top = number_property(item, p);
+            if (FProperty* p = prop_chain(item, STR("Length to Top R Default"))) top = number_property(item, p);
             std::vector<std::pair<double, double>> extra;
             bool ok = measure_weapon_axis(item, base, Vec3{}, cfg.pose_slide_wide_cm, top, lo, hi, wide_lo, wide_hi, &extra);
             measured = ok && !(lo == 0.0 && hi == 0.0);
@@ -8789,8 +8894,8 @@ namespace
         Quat binv = component_rotation(base).inverse();
         auto z_of = [&](UObject* c) { return binv.rotate(component_location(c) - bp).z - h.pivot.z; };
         double bottom = 0.0, top = 0.0;
-        if (FProperty* p = weapon->GetPropertyByNameInChain(STR("Length to Bottom"))) bottom = number_property(weapon, p);
-        if (FProperty* p = weapon->GetPropertyByNameInChain(STR("Length to Top R Default"))) top = number_property(weapon, p);
+        if (FProperty* p = prop_chain(weapon, STR("Length to Bottom"))) bottom = number_property(weapon, p);
+        if (FProperty* p = prop_chain(weapon, STR("Length to Top R Default"))) top = number_property(weapon, p);
         double stop = 1e9;
         const char* how = "none";
         if (UObject* head = object_property(weapon, STR("Head")))
@@ -8809,7 +8914,7 @@ namespace
             for (UObject* c : comps)
             {
                 if (!c || c->GetOuterPrivate() != weapon) continue;
-                RawArray* t = c->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags"));
+                RawArray* t = value_ptr<RawArray>(c, STR("ComponentTags"));
                 bool tagged = false;
                 for (int32_t i = 0; t && t->Data && i < t->Num; ++i)
                 {
@@ -8963,7 +9068,7 @@ namespace
         static double last = 1.0;
         if (pawn == last_pawn) return last;
         double scale = -1.0, mass_scale = -1.0;
-        if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Character Scale (Set in BP)")))
+        if (FProperty* p = prop_chain(pawn, STR("Character Scale (Set in BP)")))
         {
             if (p->GetClass().GetName() == STR("StructProperty"))
             {
@@ -8972,7 +9077,7 @@ namespace
                 scale = v[0];
             }
         }
-        if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Mass Scale (Set in BP)"))) mass_scale = number_property(pawn, p);
+        if (FProperty* p = prop_chain(pawn, STR("Mass Scale (Set in BP)"))) mass_scale = number_property(pawn, p);
         // Read too early (before the game sets them) they are 0: try again next time.
         if (!(scale > 0.3 && scale < 3.0) || !(mass_scale > 0.1 && mass_scale < 5.0)) return 1.0;
         auto arm = [](double sc, double ms) { return (2.61 * sc * sc * sc + 1.0) * ms; };
@@ -8991,7 +9096,7 @@ namespace
         if (!cfg.pose_body_strength || !pawn) return b;
         // Muscle Rate can be negative (the creator's lowest weight is -1), so "not found" is asked of the
         // property itself, not read off a -1 value (playtest 14:14: a weight -1 Willie got full grip strength).
-        FProperty* muscle = pawn->GetPropertyByNameInChain(STR("Muscle Rate"));
+        FProperty* muscle = prop_chain(pawn, STR("Muscle Rate"));
         bool muscle_found = muscle != nullptr;
         b.muscle_rate = muscle ? number_property(pawn, muscle) : 0.0;
         b.tonus = read_number_variable(pawn, side == 0 ? STR("Arm L Tonus") : STR("Arm R Tonus"));
@@ -9045,7 +9150,7 @@ namespace
     StaminaHand g_stamina_hand[2];
     double number_var(UObject* owner, const TCHAR* name, bool& found)
     {
-        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        FProperty* p = owner ? prop_chain(owner, name) : nullptr;
         found = p != nullptr;
         return p ? number_property(owner, p) : 0.0;
     }
@@ -9113,7 +9218,7 @@ namespace
     bool stuck_is_thrust(UObject* weapon)
     {
         if (!weapon) return false;
-        RawArray* joints = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
+        RawArray* joints = value_ptr<RawArray>(weapon, STR("Stuck Constraints Array"));
         UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[joints->Num - 1]) : nullptr;
         return cs && bool_property(cs, STR("Thrust?"));
     }
@@ -10084,9 +10189,9 @@ namespace
             if (std::fabs(mass - s.mass) > 0.005 || moved > 0.3 || unstuck != s.unstuck)
             {
                 double rate = 0.0;
-                if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Weapon Stuck In Static Mesh Check Rate"))) rate = number_property(pawn, p);
+                if (FProperty* p = prop_chain(pawn, STR("Weapon Stuck In Static Mesh Check Rate"))) rate = number_property(pawn, p);
                 double md = 0.0;
-                if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Movement Dislocation"))) md = number_property(pawn, p);
+                if (FProperty* p = prop_chain(pawn, STR("Movement Dislocation"))) md = number_property(pawn, p);
                 HSVR_LOG("Kick: %s weapon body changed: mass %.3f -> %.3f kg, centre of mass moved %.1f cm in its frame, Unstuck %d -> %d, "
                          "check rate %.2f, Movement Dislocation %.1f, Collisions Disabled Temporarily %d",
                          side == 0 ? "left" : "right", s.mass, mass, moved, (int)s.unstuck, (int)unstuck, rate, md,
@@ -10253,10 +10358,10 @@ namespace
         if (it != cache.end()) return it->second;
         int sharp = 0;
         bool any = false;
-        if (RawArray* tips = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")); tips && tips->Data)
+        if (RawArray* tips = value_ptr<RawArray>(weapon, STR("Tips")); tips && tips->Data)
             for (int32_t i = 0; i < tips->Num; ++i)
                 if (UObject* tp = static_cast<UObject*>(tips->Data[i]))
-                    if (RawArray* tags = tp->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")); tags && tags->Data)
+                    if (RawArray* tags = value_ptr<RawArray>(tp, STR("ComponentTags")); tags && tags->Data)
                         for (int32_t j = 0; j < tags->Num; ++j)
                         {
                             std::wstring s = reinterpret_cast<const FName*>(tags->Data)[j].ToString();
@@ -10664,7 +10769,7 @@ namespace
     double stab_var(UObject* owner, const TCHAR* name)
     {
         if (!owner) return -999.0;
-        FProperty* p = owner->GetPropertyByNameInChain(name);
+        FProperty* p = prop_chain(owner, name);
         if (!p) return -999.0;
         auto kind = p->GetClass().GetName();
         const uint8_t* at = reinterpret_cast<const uint8_t*>(owner) + p->GetOffset_Internal();
@@ -10676,7 +10781,7 @@ namespace
     int stab_array_num(UObject* owner, const TCHAR* name)
     {
         if (!owner) return -1;
-        FProperty* p = owner->GetPropertyByNameInChain(name);
+        FProperty* p = prop_chain(owner, name);
         if (!p || p->GetClass().GetName() != STR("ArrayProperty")) return -1;
         const uint8_t* at = reinterpret_cast<const uint8_t*>(owner) + p->GetOffset_Internal();
         return *reinterpret_cast<const int32_t*>(at + sizeof(void*));
@@ -10685,7 +10790,7 @@ namespace
     std::wstring stab_name_var(UObject* owner, const TCHAR* name)
     {
         if (!owner) return STR("?");
-        FName* n = owner->GetValuePtrByPropertyNameInChain<FName>(name);
+        FName* n = value_ptr<FName>(owner, name);
         return n ? n->ToString() : STR("?");
     }
 
@@ -10809,7 +10914,7 @@ namespace
         // forward, the direction a thrust goes in (ModularWeaponBP @36603).
         UObject* tip = nullptr;
         double tip_d = 1e9;
-        if (RawArray* tips = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")); tips && tips->Data)
+        if (RawArray* tips = value_ptr<RawArray>(weapon, STR("Tips")); tips && tips->Data)
             for (int32_t i = 0; i < tips->Num; ++i)
                 if (UObject* t = static_cast<UObject*>(tips->Data[i]))
                 {
@@ -10948,7 +11053,7 @@ namespace
         if (on && !stuck_is_thrust(weapon)) return; // a lodged cut goes through (cut_follow_through)
         if (on)
         {
-            RawArray* joints = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
+            RawArray* joints = value_ptr<RawArray>(weapon, STR("Stuck Constraints Array"));
             UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[joints->Num - 1]) : nullptr;
             if (!cs) return;
             if (g_young_joint[side] == cs) return;
@@ -10962,7 +11067,7 @@ namespace
         {
             g_young_joint[side] = nullptr;
             g_young_since[side] = -1.0;
-            RawArray* joints = weapon ? weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array")) : nullptr;
+            RawArray* joints = weapon ? value_ptr<RawArray>(weapon, STR("Stuck Constraints Array")) : nullptr;
             bool alive = false;
             if (joints && joints->Data)
                 for (int32_t i = 0; i < joints->Num; ++i) alive = alive || joints->Data[i] == cs;
@@ -11221,7 +11326,7 @@ namespace
             // overlaps the body, Constraint_Weapon_Stuck_BP @25565-@26093).
             if (UObject* held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
             {
-                RawArray* joints = held->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
+                RawArray* joints = value_ptr<RawArray>(held, STR("Stuck Constraints Array"));
                 UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[0]) : nullptr;
                 if (cs)
                 {
@@ -11629,7 +11734,7 @@ namespace
 
     double blade_length(UObject* w)
     {
-        FProperty* lp = w ? w->GetPropertyByNameInChain(STR("Length to Top R Default")) : nullptr;
+        FProperty* lp = w ? prop_chain(w, STR("Length to Top R Default")) : nullptr;
         return lp ? (std::max)(10.0, number_property(w, lp)) : 80.0;
     }
 
@@ -12547,7 +12652,7 @@ namespace
             if (!joint || !weapon) continue;
             // Only a seated weapon (the game first pulls a new weapon into the hand over a short distance).
             if (side == 1)
-                if (FProperty* p = pawn->GetPropertyByNameInChain(STR("R Hand Soft Attach Distance")))
+                if (FProperty* p = prop_chain(pawn, STR("R Hand Soft Attach Distance")))
                     if (number_property(pawn, p) > 0.0) continue;
             if (bool_property(weapon, STR("Is Sheathed")) || bool_property(pawn, STR("Sheathing R")) || bool_property(pawn, STR("Unsheathing R"))) continue;
             UObject* base = object_property(weapon, STR("BaseMesh"));
@@ -12582,7 +12687,7 @@ namespace
                     if (g_joint_trace.load() && side == 1)
                     {
                         auto var = [&](const TCHAR* n) {
-                            FProperty* p = pawn->GetPropertyByNameInChain(n);
+                            FProperty* p = prop_chain(pawn, n);
                             return p ? number_property(pawn, p) : -999.0;
                         };
                         HSVR_LOG("Joint: before free: %s | Soft Not Attached %.0f, Soft Attach Distance %.1f, Attached Correctly %.0f, Weapon R Collisions Disabled Temporarily %.0f",
@@ -12899,8 +13004,8 @@ namespace
         {
             last = now;
             double rate[2] = {-1, -1};
-            if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Grab L Release Rate"))) rate[0] = number_property(pawn, p);
-            if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Grab R Release Rate"))) rate[1] = number_property(pawn, p);
+            if (FProperty* p = prop_chain(pawn, STR("Grab L Release Rate"))) rate[0] = number_property(pawn, p);
+            if (FProperty* p = prop_chain(pawn, STR("Grab R Release Rate"))) rate[1] = number_property(pawn, p);
             HSVR_LOG("Grip: left %s mass %.2f kg force %.0f gap %.1f cm slip %.2f, weapon %.0f cm from hand, simulating %d, scale %.2f; "
                      "right %s mass %.2f kg force %.0f gap %.1f cm slip %.2f, weapon %.0f cm from hand, simulating %d, scale %.2f",
                      g_grip_log[0].active ? "spring" : "-", g_grip_log[0].mass, g_grip_log[0].force, g_grip_log[0].gap, rate[0], g_grip_log[0].hand_dist,
@@ -13379,7 +13484,7 @@ namespace
         if (hsvr::config().pose_capsule_no_step_offset && g_step_h2_have && rise <= 30.0)
         {
             auto flag_on = [&](const TCHAR* name) {
-                FProperty* p = context->GetPropertyByNameInChain(name);
+                FProperty* p = prop_chain(context, name);
                 return p && number_property(context, p) > 0.5;
             };
             if (!flag_on(STR("Climbing In Air")) && !flag_on(STR("Jump Pressed")) && !flag_on(STR("Fallen")))
@@ -13422,7 +13527,7 @@ namespace
             for (const TCHAR* name : {STR("Pain Stumble Immediate"), STR("Pain Stumble Delayed"), STR("Stumble Direction"), STR("Dodge Vector"),
                                       STR("Capsule Max Dislocation"), STR("Climbing In Air")})
             {
-                FProperty* p = context->GetPropertyByNameInChain(name);
+                FProperty* p = prop_chain(context, name);
                 char part[96];
                 std::snprintf(part, sizeof(part), ", %ls %.1f", name, p ? number_property(context, p) : -1.0);
                 values += part;
@@ -13443,7 +13548,7 @@ namespace
         }
         for (const TCHAR* name : {STR("Pain Stumble Immediate"), STR("Pain Stumble Delayed"), STR("Stumble Direction"), STR("Dodge Vector")})
         {
-            FProperty* p = context->GetPropertyByNameInChain(name);
+            FProperty* p = prop_chain(context, name);
             if (p && p->GetClass().GetName() == STR("StructProperty"))
                 std::memset(reinterpret_cast<uint8_t*>(context) + p->GetOffset_Internal(), 0, p->GetSize());
         }
@@ -13451,7 +13556,7 @@ namespace
         // stick (and half a second after, so he slows down by the game's own braking).
         if (!g_stick_walking && now_seconds() > g_stick_walk_until)
             if (UObject* movement = object_property(context, STR("CharacterMovement")))
-                if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+                if (FProperty* vp = prop_chain(movement, STR("Velocity")))
                     write_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, 0.0, 0.0, 0.0);
     }
 
@@ -13983,7 +14088,7 @@ namespace
             HSVR_LOG("Script: hsvr.call: no game instance yet");
             return;
         }
-        UFunction* function = game_instance->GetFunctionByNameInChain(wanted.c_str());
+        UFunction* function = func_chain(game_instance, wanted.c_str());
         if (!function)
         {
             HSVR_LOG("Script: hsvr.call: %ls has no function \"%s\"", game_instance->GetFullName().c_str(), name_text.c_str());
@@ -14129,7 +14234,7 @@ namespace
         }
         UObject* pawn = nullptr;
         find_pawn_mesh(&pawn);
-        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(setup_name) : nullptr;
+        UFunction* fn = pawn ? func_chain(pawn, setup_name) : nullptr;
         if (!fn)
         {
             HSVR_LOG("Script: hsvr.give_weapon: no character or no \"%ls\"", setup_name);
@@ -14383,7 +14488,7 @@ namespace
         for (const TCHAR* v : {STR("R Hand Active"), STR("L Hand Active"), STR("R Down"), STR("L Down"), STR("Chain Attack"), STR("BobnWeave"), STR("Dodging"),
                                STR("Alt Thrusting"), STR("AI In Combat"), STR("Is Crouched??")})
             if (!set_variable(foe, v, 0.0)) missing += std::wstring(v) + STR(", ");
-        if (FProperty* p = foe->GetPropertyByNameInChain(STR("Aim Vector_0")))
+        if (FProperty* p = prop_chain(foe, STR("Aim Vector_0")))
             write_three(reinterpret_cast<uint8_t*>(foe) + p->GetOffset_Internal(), p, 0.0, 0.0, 0.0);
         HSVR_LOG("Passive: %ls (controller %ls) made passive%ls%ls", foe->GetName().c_str(), ai->GetName().c_str(), missing.empty() ? STR("") : STR("; not found: "),
                  missing.c_str());
@@ -14506,7 +14611,7 @@ namespace
         static bool installed = false;
         if (installed) return;
         UObject* gi = game_instance_object();
-        UFunction* fn = gi ? gi->GetFunctionByNameInChain(STR("Load Game")) : nullptr;
+        UFunction* fn = gi ? func_chain(gi, STR("Load Game")) : nullptr;
         if (!fn)
         {
             HSVR_LOG("TestRoom: the game instance has no \"Load Game\"");
@@ -14757,14 +14862,14 @@ namespace
     {
         gc_sync();
         HSVR_PROF(PerfRoomHooks);
-        int32_t* c = ctx.Context ? ctx.Context->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
+        int32_t* c = ctx.Context ? value_ptr<int32_t>(ctx.Context, STR("Enemy Count")) : nullptr;
         g_room_count_before = c ? *c : -1;
     }
     void room_count_post(Unreal::UnrealScriptFunctionCallableContext& ctx, void*)
     {
         gc_sync();
         HSVR_PROF(PerfRoomHooks);
-        int32_t* c = ctx.Context ? ctx.Context->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
+        int32_t* c = ctx.Context ? value_ptr<int32_t>(ctx.Context, STR("Enemy Count")) : nullptr;
         HSVR_LOG("TestRoom: game mode %ls: Enemy Count %d -> %d, Match Won %d", ctx.TheStack.Node() ? ctx.TheStack.Node()->GetName().c_str() : STR("?"), g_room_count_before,
                  c ? *c : -1, (int)bool_property(ctx.Context, STR("Match Won")));
     }
@@ -14774,7 +14879,7 @@ namespace
         if (done || !gm) return;
         done = true;
         for (const TCHAR* f : {STR("Minus Enemy"), STR("Plus Enemy"), STR("Multiplayer Match Win Check")})
-            if (UFunction* fn = gm->GetFunctionByNameInChain(f)) UObjectGlobals::RegisterHook(fn, &room_count_pre, &room_count_post, nullptr);
+            if (UFunction* fn = func_chain(gm, f)) UObjectGlobals::RegisterHook(fn, &room_count_pre, &room_count_post, nullptr);
     }
 
     // The match is still called won now and then when every foe is out at about the same moment
@@ -14810,7 +14915,7 @@ namespace
         {
             set_variable(gm, STR("Match Won"), 0.0);
             set_variable(gm, STR("All Enemies Dead"), 0.0);
-            if (int32_t* count = gm->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count"))) *count = 100;
+            if (int32_t* count = value_ptr<int32_t>(gm, STR("Enemy Count"))) *count = 100;
         }
         HSVR_LOG("TestRoom: respawn: the game put up its win screen; taken down (time, Rounds Won, Match Won and Enemy Count put back)");
     }
@@ -14840,7 +14945,7 @@ namespace
         room_watch_counting(room_game_mode());
         room_watch_winscreen();
         UObject* gm = room_game_mode();
-        int32_t* count = gm ? gm->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
+        int32_t* count = gm ? value_ptr<int32_t>(gm, STR("Enemy Count")) : nullptr;
         if (!count) return;
         if (*count < 100)
         {
@@ -14913,7 +15018,7 @@ namespace
             set_variable(a, STR("Spawn in Pants"), 0.0);
             set_variable(a, STR("Blossfechten Gear"), 0.0);
             if (passport)
-                if (FProperty* dst = a->GetPropertyByNameInChain(STR("Character Passport")))
+                if (FProperty* dst = prop_chain(a, STR("Character Passport")))
                     dst->CopyCompleteValue(reinterpret_cast<uint8_t*>(a) + dst->GetOffset_Internal(), passport);
         }, 0.875 + 0.125 * height);
         if (passport) pp->DestroyValue(passport);
@@ -15209,7 +15314,7 @@ namespace
                 // passport says which weapon class it spawned (none = nothing).
                 UObject* cls = nullptr;
                 if (loot)
-                    if (FProperty* pp = loot->GetPropertyByNameInChain(STR("Weapon Passport")))
+                    if (FProperty* pp = prop_chain(loot, STR("Weapon Passport")))
                         if (FProperty* wc = struct_member_prefix(struct_type(pp), STR("WeaponClass")))
                             cls = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(loot) + pp->GetOffset_Internal() + wc->GetOffset_Internal());
                 got = cls != nullptr;
@@ -15407,7 +15512,7 @@ namespace
                  on_table, foes, standing, ai_on);
         if (UObject* gm = room_game_mode())
         {
-            int32_t* count = gm->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count"));
+            int32_t* count = value_ptr<int32_t>(gm, STR("Enemy Count"));
             HSVR_LOG("TestRoom: check: game mode Enemy Count %d, Match Won %d, All Enemies Dead %d", count ? *count : -1, (int)bool_property(gm, STR("Match Won")),
                      (int)bool_property(gm, STR("All Enemies Dead")));
         }
@@ -15485,7 +15590,7 @@ namespace
             UObjectGlobals::FindAllOf(STR("UserWidget"), widgets);
             for (UObject* widget : widgets)
             {
-                UFunction* in_viewport_fn = widget ? widget->GetFunctionByNameInChain(STR("IsInViewport")) : nullptr;
+                UFunction* in_viewport_fn = widget ? func_chain(widget, STR("IsInViewport")) : nullptr;
                 if (!in_viewport_fn) continue;
                 BoolReturnParams in_viewport{};
                 widget->ProcessEvent(in_viewport_fn, &in_viewport);
@@ -15631,12 +15736,12 @@ namespace
                 {
                     // var:<pawn variable>, '_' for spaces (var:Leg_R_Tonus); a variable named with '_' is tried as written first
                     std::wstring n(w.begin() + 4, w.end());
-                    FProperty* p = pawn->GetPropertyByNameInChain(n.c_str());
+                    FProperty* p = prop_chain(pawn, n.c_str());
                     if (!p)
                     {
                         for (auto& ch : n)
                             if (ch == L'_') ch = L' ';
-                        p = pawn->GetPropertyByNameInChain(n.c_str());
+                        p = prop_chain(pawn, n.c_str());
                     }
                     if (p) value = number_property(pawn, p);
                     else known = false;
@@ -15969,7 +16074,7 @@ namespace
                 if (from_tip)
                 {
                     UObject* wr = object_property(player, STR("Weapon R"));
-                    RawArray* tips = wr ? wr->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")) : nullptr;
+                    RawArray* tips = wr ? value_ptr<RawArray>(wr, STR("Tips")) : nullptr;
                     double best = 0.0;
                     if (tips && tips->Data)
                         for (int32_t i = 0; i < tips->Num; ++i)
@@ -16100,7 +16205,7 @@ namespace
                 {
                     if (!c || c->GetOuterPrivate() != pawn || !is_a(c, STR("PrimitiveComponent"))) continue;
                     std::wstring tags;
-                    if (RawArray* t = c->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")))
+                    if (RawArray* t = value_ptr<RawArray>(c, STR("ComponentTags")))
                         for (int32_t i = 0; i < t->Num && t->Data; ++i) tags += reinterpret_cast<const FName*>(t->Data)[i].ToString() + STR(" ");
                     std::wstring name = c->GetName();
                     if (probe)
@@ -16604,8 +16709,8 @@ namespace
         {
             // Both neighbours are reflected properties, so their offsets can be asked for by name.
             size_t begin = 0x400, end = 0x1800;
-            FProperty* before = engine->GetPropertyByNameInChain(STR("SelectionHighlightIntensityBillboards"));
-            FProperty* after = engine->GetPropertyByNameInChain(STR("GlobalNetTravelCount"));
+            FProperty* before = prop_chain(engine, STR("SelectionHighlightIntensityBillboards"));
+            FProperty* after = prop_chain(engine, STR("GlobalNetTravelCount"));
             if (before && after && after->GetOffset_Internal() > before->GetOffset_Internal())
             {
                 begin = (size_t)before->GetOffset_Internal() + 4;
@@ -16684,8 +16789,8 @@ namespace
         {
             walk_widget_tree(object_property(tree, STR("RootWidget")), depth + 1, budget, visit);
         }
-        UFunction* count_fn = widget->GetFunctionByNameInChain(STR("GetChildrenCount"));
-        UFunction* child_fn = widget->GetFunctionByNameInChain(STR("GetChildAt"));
+        UFunction* count_fn = func_chain(widget, STR("GetChildrenCount"));
+        UFunction* child_fn = func_chain(widget, STR("GetChildAt"));
         if (!count_fn || !child_fn) return;
         IntReturnParams count{};
         widget->ProcessEvent(count_fn, &count);
@@ -16708,7 +16813,7 @@ namespace
         for (UObject* widget : widgets)
         {
             if (!widget) continue;
-            UFunction* in_viewport_fn = widget->GetFunctionByNameInChain(STR("IsInViewport"));
+            UFunction* in_viewport_fn = func_chain(widget, STR("IsInViewport"));
             if (!in_viewport_fn) continue;
             BoolReturnParams in_viewport{};
             widget->ProcessEvent(in_viewport_fn, &in_viewport);
@@ -16726,14 +16831,14 @@ namespace
         int lines = 0;
         int total = walk_screen_widgets([&lines](UObject* widget, int depth) {
             int visibility = -1;
-            if (UFunction* visibility_fn = widget->GetFunctionByNameInChain(STR("GetVisibility")))
+            if (UFunction* visibility_fn = func_chain(widget, STR("GetVisibility")))
             {
                 ByteReturnParams v{};
                 widget->ProcessEvent(visibility_fn, &v);
                 visibility = v.ReturnValue;
             }
             float opacity = -1.0f;
-            if (UFunction* opacity_fn = widget->GetFunctionByNameInChain(STR("GetRenderOpacity")))
+            if (UFunction* opacity_fn = func_chain(widget, STR("GetRenderOpacity")))
             {
                 FloatParams o{};
                 widget->ProcessEvent(opacity_fn, &o);
@@ -16768,19 +16873,19 @@ namespace
             if (name.rfind(STR("Slider "), 0) != 0) return;
             bool holds = false, hovered = false;
             float value = -1.0f;
-            if (UFunction* fn = widget->GetFunctionByNameInChain(STR("HasMouseCapture")))
+            if (UFunction* fn = func_chain(widget, STR("HasMouseCapture")))
             {
                 BoolReturnParams r{};
                 widget->ProcessEvent(fn, &r);
                 holds = r.ReturnValue;
             }
-            if (UFunction* fn = widget->GetFunctionByNameInChain(STR("IsHovered")))
+            if (UFunction* fn = func_chain(widget, STR("IsHovered")))
             {
                 BoolReturnParams r{};
                 widget->ProcessEvent(fn, &r);
                 hovered = r.ReturnValue;
             }
-            if (UFunction* fn = widget->GetFunctionByNameInChain(STR("GetValue")))
+            if (UFunction* fn = func_chain(widget, STR("GetValue")))
             {
                 FloatParams r{};
                 widget->ProcessEvent(fn, &r);
@@ -16809,7 +16914,7 @@ namespace
         uint64_t hash = 1469598103934665603ull;
         walk_screen_widgets([&hash](UObject* widget, int) {
             int visibility = -1;
-            if (UFunction* visibility_fn = widget->GetFunctionByNameInChain(STR("GetVisibility")))
+            if (UFunction* visibility_fn = func_chain(widget, STR("GetVisibility")))
             {
                 ByteReturnParams v{};
                 widget->ProcessEvent(visibility_fn, &v);
@@ -16831,7 +16936,7 @@ namespace
         if (UObject* controller = find_player_controller())
         {
             game.have_player = true;
-            if (ue::FRotator* rotation = controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")))
+            if (ue::FRotator* rotation = value_ptr<ue::FRotator>(controller, STR("ControlRotation")))
             {
                 game.view_yaw = rotation->Yaw;
             }
@@ -16971,7 +17076,7 @@ namespace
             {
                 UObject* pawn = nullptr;
                 find_pawn_mesh(&pawn);
-                UFunction* kick = pawn ? pawn->GetFunctionByNameInChain(STR("Kick Event")) : nullptr;
+                UFunction* kick = pawn ? func_chain(pawn, STR("Kick Event")) : nullptr;
                 if (kick)
                 {
                     std::vector<uint8_t> block = param_block(kick);
@@ -17003,7 +17108,7 @@ namespace
         UObject* game_mode = object_property(world, STR("AuthorityGameMode"));
         bool won = bool_property(game_mode, STR("Match Won"));
         bool ended = bool_property(pawn, STR("Player Match End"));
-        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(STR("VO Deescalate")) : nullptr;
+        UFunction* fn = pawn ? func_chain(pawn, STR("VO Deescalate")) : nullptr;
         if (!pawn || !game_mode || !fn || !won || ended)
         {
             HSVR_LOG("Menu: A held, not continuing (character %s, game mode %s, VO Deescalate %s, Match Won %d, Player Match End %d)",
@@ -17194,7 +17299,7 @@ namespace
         for (UObject* p : prims)
         {
             if (!p || p->GetName().rfind(STR("Default__"), 0) == 0) continue;
-            UFunction* fn = p->GetFunctionByNameInChain(STR("IsSimulatingPhysics"));
+            UFunction* fn = func_chain(p, STR("IsSimulatingPhysics"));
             if (!fn) continue;
             IsSimulatingParams q{};
             p->ProcessEvent(fn, &q);
