@@ -413,6 +413,7 @@ namespace hsvr
         bool pose_hold_let_go_ignore_self = true;
         bool pose_hold_let_go = true;
         double pose_hold_let_go_s = 0.15;
+        double pose_hold_let_go_reach_slack_cm = 15.0; // with the arm-lag hold: how far past his reach the grip may trail
         // No let-go for this long after a weapon comes into the hand (long weapons swing into place).
         double pose_hold_let_go_grace_s = 1.0;
         // Something is in the held weapon's way when it ends a tick this far (cm) short of where the
