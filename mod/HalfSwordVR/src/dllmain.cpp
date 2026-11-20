@@ -6667,6 +6667,7 @@ namespace
         uint8_t* locals = context.TheStack.Locals();
         UObject* victim = context.Context;
         UObject* pawn = live_posed_pawn();
+        if (!pawn) find_pawn_mesh(&pawn); // flat mode: the player's pawn, unposed
         if (!fn || !locals || !victim || !pawn || victim == pawn) return;
         FProperty *normal_p = nullptr, *collided = nullptr, *vel = nullptr, *imp = nullptr, *cut = nullptr, *stab = nullptr, *rig = nullptr, *kick = nullptr, *blunt = nullptr,
                   *lower = nullptr, *parent = nullptr, *extra = nullptr, *draw = nullptr, *bone = nullptr;
