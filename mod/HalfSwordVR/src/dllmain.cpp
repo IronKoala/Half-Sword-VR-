@@ -52,11 +52,127 @@ using namespace RC::Unreal;
 
 namespace
 {
+    // ---- name lookups, cached ------------------------------------------------------------------
+    // UE4SS looks a property or function up by name with no cache: it builds an FName (the engine
+    // hashes the string and searches its name table) and walks every field of the class and its
+    // supers (Willie_BP has hundreds). GetName() turns an FName into a new string each time. The mod
+    // does such lookups thousands of times a frame (profile 2026-11-20: 3.5 ms a frame), so the
+    // answer is kept per class (or per function, for parameters) and name. Classes and functions are
+    // dropped when the game frees them (lookup_cache_prune, from gc_sync). A receiver that is itself a
+    // class or struct is looked up the old way: UE4SS then searches that struct, not its class.
+    enum LookupKind : int { LkProp, LkFunc, LkIsA, LkParam, LkCount };
+    struct LookupKey
+    {
+        const void* owner;
+        const TCHAR* name;
+        bool operator==(const LookupKey& o) const { return owner == o.owner && name == o.name; }
+    };
+    struct LookupKeyHash
+    {
+        size_t operator()(const LookupKey& k) const { return std::hash<const void*>()(k.owner) * 31u ^ std::hash<const void*>()(k.name); }
+    };
+    struct LookupEntry
+    {
+        std::wstring name; // the text the pointer had when cached (a reused buffer may hold another)
+        void* value;
+    };
+    struct LookupTable
+    {
+        std::unordered_map<LookupKey, LookupEntry, LookupKeyHash> by_pointer;
+        std::unordered_map<const void*, std::unordered_map<std::wstring, void*>> by_text;
+    };
+    std::mutex g_lookup_mutex;
+    LookupTable g_lookup[LkCount];
+    template <typename F> void* cached_lookup(int kind, const void* owner, const TCHAR* name, F compute)
+    {
+        LookupTable& t = g_lookup[kind];
+        {
+            std::lock_guard<std::mutex> lock(g_lookup_mutex);
+            auto it = t.by_pointer.find(LookupKey{owner, name});
+            if (it != t.by_pointer.end() && it->second.name == name) return it->second.value;
+            auto o = t.by_text.find(owner);
+            if (o != t.by_text.end())
+            {
+                auto n = o->second.find(name);
+                if (n != o->second.end())
+                {
+                    t.by_pointer[LookupKey{owner, name}] = LookupEntry{name, n->second};
+                    return n->second;
+                }
+            }
+        }
+        void* value = compute(); // outside the lock: it may run engine code
+        std::lock_guard<std::mutex> lock(g_lookup_mutex);
+        if (t.by_pointer.size() > 200000) t.by_pointer.clear(); // names from short-lived buffers: keep it bounded
+        t.by_pointer[LookupKey{owner, name}] = LookupEntry{name, value};
+        t.by_text[owner][name] = value;
+        return value;
+    }
+    // Called from gc_sync with the batch of freed objects: drops the classes and functions in it.
+    void lookup_cache_prune(const std::unordered_set<const void*>& freed, bool all)
+    {
+        std::lock_guard<std::mutex> lock(g_lookup_mutex);
+        for (LookupTable& t : g_lookup)
+        {
+            if (all)
+            {
+                t.by_pointer.clear();
+                t.by_text.clear();
+                continue;
+            }
+            for (auto it = t.by_pointer.begin(); it != t.by_pointer.end();)
+                it = freed.count(it->first.owner) ? t.by_pointer.erase(it) : std::next(it);
+            for (auto it = t.by_text.begin(); it != t.by_text.end();)
+                it = freed.count(it->first) ? t.by_text.erase(it) : std::next(it);
+        }
+    }
+    // Is the object's class (or a super of it) named class_name.
+    bool is_a(UObject* object, const TCHAR* class_name)
+    {
+        if (!object) return false;
+        UStruct* cls = object->GetClassPrivate();
+        if (!cls) return false;
+        return cached_lookup(LkIsA, cls, class_name, [&]() -> void* {
+                   for (UStruct* level = cls; level; level = level->GetSuperStruct())
+                       if (level->GetName() == class_name) return reinterpret_cast<void*>(1);
+                   return nullptr;
+               }) != nullptr;
+    }
+    // A class, struct or function as the receiver: UE4SS searches it, not its class (no cache).
+    bool receiver_is_struct(UObject* o) { return is_a(o, STR("Struct")); }
+    FProperty* prop_chain(UObject* o, const TCHAR* name)
+    {
+        if (!o) return nullptr;
+        if (receiver_is_struct(o)) return (*o).GetPropertyByNameInChain(name);
+        return static_cast<FProperty*>(cached_lookup(LkProp, o->GetClassPrivate(), name, [&] { return static_cast<void*>((*o).GetPropertyByNameInChain(name)); }));
+    }
+    template <typename T> T* value_ptr(UObject* o, const TCHAR* name)
+    {
+        FProperty* p = prop_chain(o, name);
+        return p ? reinterpret_cast<T*>(reinterpret_cast<uint8_t*>(o) + p->GetOffset_Internal()) : nullptr;
+    }
+    UFunction* func_chain(UObject* o, const TCHAR* name)
+    {
+        if (!o) return nullptr;
+        if (receiver_is_struct(o)) return (*o).GetFunctionByNameInChain(name);
+        return static_cast<UFunction*>(cached_lookup(LkFunc, o->GetClassPrivate(), name, [&] { return static_cast<void*>((*o).GetFunctionByNameInChain(name)); }));
+    }
+    // A function's parameter by name.
+    FProperty* func_param(UFunction* fn, const TCHAR* name)
+    {
+        if (!fn) return nullptr;
+        return static_cast<FProperty*>(cached_lookup(LkParam, fn, name, [&]() -> void* {
+            for (FProperty* p : fn->ForEachProperty())
+                if (p->GetName() == name) return p;
+            return nullptr;
+        }));
+    }
+
     // ---- reflection helpers (game thread) ------------------------------------------------------
     UObject* object_property(UObject* owner, const TCHAR* name)
     {
         if (!owner) return nullptr;
-        UObject** value = owner->GetValuePtrByPropertyNameInChain<UObject*>(name);
+        UObject** value = value_ptr<UObject*>(owner, name);
         return value ? *value : nullptr;
     }
 
@@ -64,7 +180,7 @@ namespace
     bool bool_property(UObject* owner, const TCHAR* name)
     {
         if (!owner) return false;
-        FProperty* property = owner->GetPropertyByNameInChain(name);
+        FProperty* property = prop_chain(owner, name);
         if (!property) return false;
         auto* flag = static_cast<FBoolProperty*>(property);
         const uint8_t* byte = reinterpret_cast<const uint8_t*>(owner) + property->GetOffset_Internal() + flag->GetByteOffset();
@@ -75,7 +191,7 @@ namespace
     UObject* brush_resource(UObject* widget)
     {
         if (!widget) return nullptr;
-        FProperty* property = widget->GetPropertyByNameInChain(STR("Brush"));
+        FProperty* property = prop_chain(widget, STR("Brush"));
         if (!property) return nullptr;
         UScriptStruct* brush_struct = static_cast<FStructProperty*>(property)->GetStruct();
         if (!brush_struct) return nullptr;
@@ -189,6 +305,7 @@ namespace
         HSVR_LOG("GC: the game freed %zu object(s)%s; dropping them from the mod's lists", n, g_freed_all ? " (more than recorded: every kept pointer dropped)" : "");
         prune_freed();
         for (auto& f : g_prune_hooks) f();
+        lookup_cache_prune(g_freed_now, g_freed_all);
         g_freed_now.clear();
         g_freed_all = false;
     }
@@ -211,6 +328,7 @@ namespace
     };
     PerfAcc g_perf[PerfCount];
     thread_local uint64_t t_perf_child = 0;
+    thread_local int t_perf_depth = 0; // mod scopes open on this thread (game-cost probes skip calls the mod makes)
     inline uint64_t perf_now()
     {
         LARGE_INTEGER c;
@@ -221,9 +339,14 @@ namespace
     {
         PerfId id;
         uint64_t start, saved;
-        explicit PerfScope(PerfId i) : id(i), start(perf_now()), saved(t_perf_child) { t_perf_child = 0; }
+        explicit PerfScope(PerfId i) : id(i), start(perf_now()), saved(t_perf_child)
+        {
+            t_perf_child = 0;
+            ++t_perf_depth;
+        }
         ~PerfScope()
         {
+            --t_perf_depth;
             uint64_t all = perf_now() - start;
             g_perf[id].ticks.fetch_add(all - (std::min)(all, t_perf_child), std::memory_order_relaxed);
             g_perf[id].calls.fetch_add(1, std::memory_order_relaxed);
@@ -231,6 +354,39 @@ namespace
         }
     };
 #define HSVR_PROF(id) PerfScope perf_scope_(id)
+
+    // Finer timers inside the big entry points (Perf: line's "inside:" part), to find which step of
+    // the player's tick or the game tick costs the time. They do not change the totals above.
+    struct SubAcc
+    {
+        const char* name;
+        std::atomic<uint64_t> ticks{0}, calls{0};
+        uint64_t last_ticks = 0, last_calls = 0;
+    };
+    std::mutex g_sub_mutex;
+    std::vector<SubAcc*> g_subs;
+    SubAcc* sub_register(const char* name)
+    {
+        std::lock_guard<std::mutex> lock(g_sub_mutex);
+        SubAcc* a = new SubAcc;
+        a->name = name;
+        g_subs.push_back(a);
+        return a;
+    }
+    struct SubScope
+    {
+        SubAcc* acc;
+        uint64_t start;
+        explicit SubScope(SubAcc* a) : acc(a), start(perf_now()) {}
+        ~SubScope()
+        {
+            acc->ticks.fetch_add(perf_now() - start, std::memory_order_relaxed);
+            acc->calls.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+#define HSVR_SUB_CAT2(a, b) a##b
+#define HSVR_SUB_CAT(a, b) HSVR_SUB_CAT2(a, b)
+#define HSVR_SUB(label) static SubAcc* HSVR_SUB_CAT(sub_acc_, __LINE__) = sub_register(label); SubScope HSVR_SUB_CAT(sub_scope_, __LINE__)(HSVR_SUB_CAT(sub_acc_, __LINE__))
 
     // Still a live object: not destroyed and not waiting for clean-up (below, after Call). Only for
     // pointers that are not freed (taken this frame, or kept in a holder that gc_sync cleans).
@@ -241,7 +397,7 @@ namespace
         UObject* viewport = object_property(g_engine, STR("GameViewport"));
         UObject* game_instance = object_property(viewport, STR("GameInstance"));
         if (!game_instance) return nullptr;
-        RawArray* players = game_instance->GetValuePtrByPropertyNameInChain<RawArray>(STR("LocalPlayers"));
+        RawArray* players = value_ptr<RawArray>(game_instance, STR("LocalPlayers"));
         if (!players || players->Num < 1 || !players->Data) return nullptr;
         UObject* local_player = static_cast<UObject*>(players->Data[0]);
         return object_property(local_player, STR("PlayerController"));
@@ -307,8 +463,8 @@ namespace
         g_logged_pawn = pawn;
         HSVR_LOG("Player pawn: %ls", pawn->GetFullName().c_str());
         HSVR_LOG("Player mesh: %ls", mesh->GetFullName().c_str());
-        UFunction* num_fn = mesh->GetFunctionByNameInChain(STR("GetNumBones"));
-        UFunction* name_fn = mesh->GetFunctionByNameInChain(STR("GetBoneName"));
+        UFunction* num_fn = func_chain(mesh, STR("GetNumBones"));
+        UFunction* name_fn = func_chain(mesh, STR("GetBoneName"));
         if (!num_fn || !name_fn) return;
         NumBonesParams count{};
         mesh->ProcessEvent(num_fn, &count);
@@ -358,8 +514,8 @@ namespace
         if (!pawn || !mesh) return false;
         log_bones_once(pawn, mesh);
 
-        UFunction* socket_fn = mesh->GetFunctionByNameInChain(STR("GetSocketLocation"));
-        UFunction* actor_fn = pawn->GetFunctionByNameInChain(STR("K2_GetActorLocation"));
+        UFunction* socket_fn = func_chain(mesh, STR("GetSocketLocation"));
+        UFunction* actor_fn = func_chain(pawn, STR("K2_GetActorLocation"));
         if (!socket_fn || !actor_fn) return false;
         SocketLocationParams socket{};
         socket.InSocketName = head_bone_name();
@@ -374,7 +530,7 @@ namespace
         double body_yaw = 0.0;
         if (UObject* controller = find_player_controller())
         {
-            if (ue::FRotator* rotation = controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")))
+            if (ue::FRotator* rotation = value_ptr<ue::FRotator>(controller, STR("ControlRotation")))
             {
                 out.has_heading = true;
                 body_yaw = rotation->Yaw; // with body turning on, the mod writes the body's yaw here
@@ -407,7 +563,7 @@ namespace
     bool bone_location(UObject* mesh, const std::string& bone, hsvr::Vec3& out)
     {
         if (!mesh) return false;
-        UFunction* socket_fn = mesh->GetFunctionByNameInChain(STR("GetSocketLocation"));
+        UFunction* socket_fn = func_chain(mesh, STR("GetSocketLocation"));
         if (!socket_fn) return false;
         SocketLocationParams socket{};
         socket.InSocketName = bone_fname(bone);
@@ -483,7 +639,7 @@ namespace
 
     int is_simulating(UObject* mesh, const std::string& bone)
     {
-        UFunction* fn = mesh->GetFunctionByNameInChain(STR("IsSimulatingPhysics"));
+        UFunction* fn = func_chain(mesh, STR("IsSimulatingPhysics"));
         if (!fn) return -1;
         IsSimulatingParams p{};
         p.BoneName = bone_fname(bone);
@@ -498,8 +654,8 @@ namespace
     // body regardless, so it is called after it. Each step is logged with what the pelvis reads after.
     void set_simulate(UObject* mesh, bool simulate, bool report = false)
     {
-        UFunction* whole = mesh->GetFunctionByNameInChain(STR("SetSimulatePhysics"));
-        UFunction* every_body = mesh->GetFunctionByNameInChain(STR("SetAllBodiesSimulatePhysics"));
+        UFunction* whole = func_chain(mesh, STR("SetSimulatePhysics"));
+        UFunction* every_body = func_chain(mesh, STR("SetAllBodiesSimulatePhysics"));
         if (whole)
         {
             SimulatePhysicsParams p{simulate};
@@ -525,7 +681,7 @@ namespace
         double now = hsvr::now_seconds();
         if (now - last < 1.0) return;
         last = now;
-        UFunction* actor_fn = pawn->GetFunctionByNameInChain(STR("K2_GetActorLocation"));
+        UFunction* actor_fn = func_chain(pawn, STR("K2_GetActorLocation"));
         ActorLocationParams actor{};
         if (actor_fn) pawn->ProcessEvent(actor_fn, &actor);
         hsvr::Vec3 pelvis, head, hand_l, hand_r;
@@ -749,7 +905,7 @@ namespace
             hsvr::Vec3 at;
             UObject* mesh = find_pawn_mesh();
             std::string bone(cfg.dev_pose_bone);
-            UFunction* rotation_fn = mesh ? mesh->GetFunctionByNameInChain(STR("GetSocketRotation")) : nullptr;
+            UFunction* rotation_fn = mesh ? func_chain(mesh, STR("GetSocketRotation")) : nullptr;
             SocketRotationParams r{};
             r.InSocketName = bone_fname(bone);
             if (rotation_fn) mesh->ProcessEvent(rotation_fn, &r);
@@ -781,19 +937,13 @@ namespace
 
         Call(UObject* object, const TCHAR* name) : target(object)
         {
-            fn = object ? object->GetFunctionByNameInChain(name) : nullptr;
+            fn = object ? func_chain(object, name) : nullptr;
             size_t size = 16;
             if (fn)
                 for (FProperty* p : fn->ForEachProperty()) size = (std::max)(size, (size_t)p->GetOffset_Internal() + (size_t)p->GetSize());
             buffer.assign(size + 16, 0);
         }
-        FProperty* param(const TCHAR* name)
-        {
-            if (!fn) return nullptr;
-            for (FProperty* p : fn->ForEachProperty())
-                if (p->GetName() == name) return p;
-            return nullptr;
-        }
+        FProperty* param(const TCHAR* name) { return func_param(fn, name); }
         void three(const TCHAR* name, double a, double b, double c)
         {
             if (FProperty* p = param(name)) write_three(buffer.data() + p->GetOffset_Internal(), p, a, b, c);
@@ -1155,7 +1305,7 @@ namespace
     double actor_heading(UObject* pawn)
     {
         if (UObject* controller = find_player_controller())
-            if (ue::FRotator* rotation = controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation"))) return rotation->Yaw;
+            if (ue::FRotator* rotation = value_ptr<ue::FRotator>(controller, STR("ControlRotation"))) return rotation->Yaw;
         Call c(pawn, STR("K2_GetActorRotation"));
         c.run();
         return c.vec().y;
@@ -1415,7 +1565,7 @@ namespace
         // Where your feet would stand under your hips, a little ahead in the direction you move.
         Vec3 velocity{0, 0, 0};
         if (UObject* movement = object_property(pawn, STR("CharacterMovement")))
-            if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+            if (FProperty* vp = prop_chain(movement, STR("Velocity")))
             {
                 double v[3];
                 read_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v);
@@ -1559,6 +1709,7 @@ namespace
             HSVR_LOG("Pose: written inside his animation update (pose_in_anim_update)");
         }
         g_pose_in_anim_at.store(hsvr::now_seconds());
+        HSVR_SUB("anim:pose_body");
         pose_body(cfg);
     }
 
@@ -1593,8 +1744,8 @@ namespace
         if (!looked)
         {
             looked = true;
-            prop[0] = context->GetPropertyByNameInChain(STR("L Grip Type"));
-            prop[1] = context->GetPropertyByNameInChain(STR("R Grip Type"));
+            prop[0] = prop_chain(context, STR("L Grip Type"));
+            prop[1] = prop_chain(context, STR("R Grip Type"));
             HSVR_LOG("Fingers: the animation's grip types L %s, R %s (%ls / %ls)", prop[0] ? "found" : "MISSING", prop[1] ? "found" : "MISSING",
                      prop[0] ? prop[0]->GetClass().GetName().c_str() : STR("-"), prop[1] ? prop[1]->GetClass().GetName().c_str() : STR("-"));
         }
@@ -1646,8 +1797,8 @@ namespace
         if (!g_effector_looked)
         {
             g_effector_looked = true;
-            g_effector[0] = context->GetPropertyByNameInChain(STR("Left Foot Effector Location"));
-            g_effector[1] = context->GetPropertyByNameInChain(STR("Right Foot Effector Location"));
+            g_effector[0] = prop_chain(context, STR("Left Foot Effector Location"));
+            g_effector[1] = prop_chain(context, STR("Right Foot Effector Location"));
             std::string seen;
             for (UStruct* level = static_cast<UStruct*>(context->GetClassPrivate()); level; level = level->GetSuperStruct())
                 for (FProperty* p : level->ForEachProperty())
@@ -1820,7 +1971,7 @@ namespace
     bool set_bool_property(UObject* owner, const TCHAR* name, bool value)
     {
         if (!owner) return false;
-        FProperty* property = owner->GetPropertyByNameInChain(name);
+        FProperty* property = prop_chain(owner, name);
         if (!property || property->GetClass().GetName() != STR("BoolProperty")) return false;
         auto* flag = static_cast<FBoolProperty*>(property);
         uint8_t* byte = reinterpret_cast<uint8_t*>(owner) + property->GetOffset_Internal() + flag->GetByteOffset();
@@ -2219,7 +2370,7 @@ namespace
                         if (!b) continue;
                         p0 = component_location(b);
                         ax = component_rotation(b).rotate(Vec3{0, 0, 1});
-                        if (FProperty* lp = w->GetPropertyByNameInChain(STR("Length to Top R Default"))) len = (std::max)(20.0, number_property(w, lp));
+                        if (FProperty* lp = prop_chain(w, STR("Length to Top R Default"))) len = (std::max)(20.0, number_property(w, lp));
                         t0 = now;
                         break;
                     }
@@ -2243,7 +2394,7 @@ namespace
                 static Quat aim{0, 0, 0, 1};
                 Vec3 want = (body * rot_to_quat(-g_fake_thrust_pitch.load(), 0.0, 0.0)).normalized().rotate({1.0, 0.0, 0.0});
                 UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
-                RawArray* tips = held ? held->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")) : nullptr;
+                RawArray* tips = held ? value_ptr<RawArray>(held, STR("Tips")) : nullptr;
                 if (tips && tips->Data && tips->Num > 0 && tips->Data[0])
                 {
                     Call f(static_cast<UObject*>(tips->Data[0]), STR("GetForwardVector"));
@@ -2615,7 +2766,12 @@ namespace
                 }
             }
         if (helmet != g_helmet)
-            HSVR_LOG("Helmet: %ls (%d skeletal pieces on his body, %d on the head)", helmet ? helmet->GetFullName().c_str() : STR("none worn"), (int)parts.size(), tagged);
+        {
+            UObject* sk = helmet ? object_property(helmet, STR("SkeletalMesh")) : nullptr;
+            if (helmet && !sk) sk = object_property(helmet, STR("SkeletalMeshAsset"));
+            HSVR_LOG("Helmet: %ls, mesh %ls (%d skeletal pieces on his body, %d on the head)", helmet ? helmet->GetFullName().c_str() : STR("none worn"),
+                     sk ? sk->GetName().c_str() : STR("-"), (int)parts.size(), tagged);
+        }
         g_helmet = helmet;
         g_head_pieces = head_pieces;
         if (cfg.pose_no_uro)
@@ -2628,7 +2784,7 @@ namespace
             for (UObject* c : parts)
             {
                 if (!c) continue;
-                FProperty* p = c->GetPropertyByNameInChain(STR("bEnableUpdateRateOptimizations"));
+                FProperty* p = prop_chain(c, STR("bEnableUpdateRateOptimizations"));
                 if (!p || p->GetClass().GetName() != STR("BoolProperty")) continue;
                 auto* flag = static_cast<FBoolProperty*>(p);
                 uint8_t* byte = reinterpret_cast<uint8_t*>(c) + p->GetOffset_Internal() + flag->GetByteOffset();
@@ -2639,7 +2795,7 @@ namespace
                 }
             }
             // EVisibilityBasedAnimTickOption: AlwaysTickPoseAndRefreshBones 0.
-            if (FProperty* p = mesh->GetPropertyByNameInChain(STR("VisibilityBasedAnimTickOption")))
+            if (FProperty* p = prop_chain(mesh, STR("VisibilityBasedAnimTickOption")))
             {
                 uint8_t* at = reinterpret_cast<uint8_t*>(mesh) + p->GetOffset_Internal();
                 if (*at != 0)
@@ -2716,8 +2872,8 @@ namespace
         for (UObject* c : g_head_pieces)
         {
             if (!c) continue;
-            FProperty* lp = c->GetPropertyByNameInChain(STR("RelativeLocation"));
-            FProperty* rp = c->GetPropertyByNameInChain(STR("RelativeRotation"));
+            FProperty* lp = prop_chain(c, STR("RelativeLocation"));
+            FProperty* rp = prop_chain(c, STR("RelativeRotation"));
             if (!lp || !rp) continue;
             // Each piece is moved so ITS head bone lands on the view's head spot: this takes out both the
             // view's newer headset pose and anything his body drew late.
@@ -3187,9 +3343,9 @@ namespace
             int mode = -1;
             if (movement)
             {
-                if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+                if (FProperty* vp = prop_chain(movement, STR("Velocity")))
                     read_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v);
-                if (FProperty* mp = movement->GetPropertyByNameInChain(STR("MovementMode")))
+                if (FProperty* mp = prop_chain(movement, STR("MovementMode")))
                     mode = *(reinterpret_cast<uint8_t*>(movement) + mp->GetOffset_Internal());
             }
             // What his body really does on screen: chest and hips turned from where they were at calibration.
@@ -3322,7 +3478,7 @@ namespace
         add.three(STR("WorldDirection"), dir.x, dir.y, 0.0);
         add.number(STR("ScaleValue"), scale);
         add.run();
-        if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Movement Input Vector")))
+        if (FProperty* p = prop_chain(pawn, STR("Movement Input Vector")))
             write_three(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal(), p, dir.x * scale, dir.y * scale, 0.0);
         g_stick_walk_until = now_seconds() + 0.5;
         static double last = 0.0;
@@ -3332,7 +3488,7 @@ namespace
             last = now;
             double v[3] = {0, 0, 0};
             if (UObject* movement = object_property(pawn, STR("CharacterMovement")))
-                if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+                if (FProperty* vp = prop_chain(movement, STR("Velocity")))
                     read_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v);
             HSVR_LOG("Walk: stick %.2f toward %.0f deg, speed %.0f cm/s", scale, yaw, std::sqrt(v[0] * v[0] + v[1] * v[1]));
         }
@@ -3342,7 +3498,7 @@ namespace
     {
         using namespace hsvr;
         UObject* controller = find_player_controller();
-        ue::FRotator* rotation = controller ? controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")) : nullptr;
+        ue::FRotator* rotation = controller ? value_ptr<ue::FRotator>(controller, STR("ControlRotation")) : nullptr;
         if (!rotation) return;
         auto wrap = [](double a) {
             while (a > 180.0) a -= 360.0;
@@ -3442,7 +3598,7 @@ namespace
     // or less while standing still starts the game's canned kneel (legs without IK).
     void set_named_number(UObject* owner, const TCHAR* name, double value)
     {
-        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        FProperty* p = owner ? prop_chain(owner, name) : nullptr;
         if (!p) return;
         uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
         auto kind = p->GetClass().GetName();
@@ -3554,7 +3710,7 @@ namespace
         if (!g_swing_looked)
         {
             g_swing_looked = true;
-            g_swing_proxy = pawn->GetPropertyByNameInChain(STR("Swing Velocity proxy"));
+            g_swing_proxy = prop_chain(pawn, STR("Swing Velocity proxy"));
             HSVR_LOG("Swing: the game's swing speed input %s (%ls)", g_swing_proxy ? "found" : "MISSING", g_swing_proxy ? g_swing_proxy->GetClass().GetName().c_str() : STR("-"));
         }
         if (!g_swing_proxy) return;
@@ -3681,23 +3837,23 @@ namespace
         g_hold_location = actor_location(context);
         g_hold_have = true;
         {
-            FProperty* p = context->GetPropertyByNameInChain(STR("Step Height 2"));
+            FProperty* p = prop_chain(context, STR("Step Height 2"));
             g_step_h2_have = p != nullptr;
             g_step_h2_pre = p ? number_property(context, p) : 0.0;
         }
         if (g_pose_active.load())
         {
-            log_joint_before_tick(context);
-            block_offhand_search_before_tick(context);
-            keep_player_off_knees(context, false);
-            turn_body_before_tick();
-            stick_walk_before_tick(context);
-            swing_speed_before_tick(context);
-            fist_flags_before_tick(context);
-            body_grab_before_tick(context);
+            { HSVR_SUB("before:log_joint_before_tick"); log_joint_before_tick(context); }
+            { HSVR_SUB("before:block_offhand_search_before_tick"); block_offhand_search_before_tick(context); }
+            { HSVR_SUB("before:keep_player_off_knees"); keep_player_off_knees(context, false); }
+            { HSVR_SUB("before:turn_body_before_tick"); turn_body_before_tick(); }
+            { HSVR_SUB("before:stick_walk_before_tick"); stick_walk_before_tick(context); }
+            { HSVR_SUB("before:swing_speed_before_tick"); swing_speed_before_tick(context); }
+            { HSVR_SUB("before:fist_flags_before_tick"); fist_flags_before_tick(context); }
+            { HSVR_SUB("before:body_grab_before_tick"); body_grab_before_tick(context); }
             for (int side = 0; side < 2; ++side)
                 if (g_draw[side].active) set_bool_property(context, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
-            scabbard_before_tick(context);
+            { HSVR_SUB("before:scabbard_before_tick"); scabbard_before_tick(context); }
         }
     }
 
@@ -3864,7 +4020,7 @@ namespace
         bool first = true;
         for (const TCHAR* name : path)
         {
-            p = first ? owner->GetPropertyByNameInChain(name) : struct_member(type, name);
+            p = first ? prop_chain(owner, name) : struct_member(type, name);
             first = false;
             if (!p) return NAN;
             at += p->GetOffset_Internal();
@@ -3892,7 +4048,7 @@ namespace
         bool first = true;
         for (const TCHAR* name : path)
         {
-            p = first ? owner->GetPropertyByNameInChain(name) : struct_member(type, name);
+            p = first ? prop_chain(owner, name) : struct_member(type, name);
             first = false;
             if (!p) return {};
             at += p->GetOffset_Internal();
@@ -3985,14 +4141,14 @@ namespace
             HSVR_LOG("Grip: no physics asset found on %ls", mesh->GetFullName().c_str());
             return out;
         }
-        FProperty* list = physics->GetPropertyByNameInChain(STR("SkeletalBodySetups"));
+        FProperty* list = prop_chain(physics, STR("SkeletalBodySetups"));
         if (!list) return out;
         const RawArray* arr = reinterpret_cast<const RawArray*>(reinterpret_cast<uint8_t*>(physics) + list->GetOffset_Internal());
         for (int32_t i = 0; i < arr->Num; ++i)
         {
             UObject* body = reinterpret_cast<UObject*>(arr->Data[i]);
             if (!body) continue;
-            FProperty* bn = body->GetPropertyByNameInChain(STR("BoneName"));
+            FProperty* bn = prop_chain(body, STR("BoneName"));
             if (bn) out.push_back(*reinterpret_cast<FName*>(reinterpret_cast<uint8_t*>(body) + bn->GetOffset_Internal()));
         }
         return out;
@@ -4329,7 +4485,7 @@ namespace
 
     void dump_joint(UObject* joint)
     {
-        FProperty* p = joint ? joint->GetPropertyByNameInChain(STR("ConstraintInstance")) : nullptr;
+        FProperty* p = joint ? prop_chain(joint, STR("ConstraintInstance")) : nullptr;
         if (!p) return;
         HSVR_LOG("Grip: full joint settings of %ls:", joint->GetFullName().c_str());
         dump_struct(STR("ConstraintInstance"), struct_type(p), reinterpret_cast<const uint8_t*>(joint) + p->GetOffset_Internal(), 0);
@@ -4727,11 +4883,11 @@ namespace
             std::string missing;
             for (int i = 0; i < 4; ++i)
             {
-                FProperty* p = pawn->GetPropertyByNameInChain(flag_names[i]);
+                FProperty* p = prop_chain(pawn, flag_names[i]);
                 flags[i] = p && p->GetClass().GetName() == STR("BoolProperty") ? p : nullptr;
                 if (!flags[i]) { missing += " "; for (const TCHAR* c = flag_names[i]; *c; ++c) missing += (char)*c; }
             }
-            FProperty* p = pawn->GetPropertyByNameInChain(STR("Legs Tonus Far Step"));
+            FProperty* p = prop_chain(pawn, STR("Legs Tonus Far Step"));
             far_step = p && p->GetClass().GetName() == STR("DoubleProperty") ? p : nullptr;
             if (!far_step) missing += " Legs Tonus Far Step";
             HSVR_LOG("Knees: your player's kneel and kneel-fall kept off, leg tonus far-step kept at 1 (pose_player_no_kneel)%s%s",
@@ -4984,7 +5140,7 @@ namespace
             return;
         }
         const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
-        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
+        UFunction* fn = pawn ? func_chain(pawn, name) : nullptr;
         if (!fn)
         {
             HSVR_LOG("Hold: no \"%ls\" on the character, the weapon is not dropped", name);
@@ -5024,7 +5180,7 @@ namespace
         // pelvis pin when the slot's scabbard is the released weapon's), also on the mod's hand-overs. Its
         // Scabbard reference is hidden from that check for the call and put back after.
         UObject* kept_scab = nullptr;
-        FProperty* scab_prop = held ? held->GetPropertyByNameInChain(STR("Scabbard")) : nullptr;
+        FProperty* scab_prop = held ? prop_chain(held, STR("Scabbard")) : nullptr;
         if (hsvr::config().pose_keep_scabbard_on_drop && scab_prop && scab_prop->GetClass().GetName() == STR("ObjectProperty"))
         {
             UObject** slot = reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(held) + scab_prop->GetOffset_Internal());
@@ -5118,7 +5274,7 @@ namespace
     bool give_hand_weapon(int side, UObject* pawn, UObject* weapon)
     {
         const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
-        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
+        UFunction* fn = pawn ? func_chain(pawn, name) : nullptr;
         if (!fn || !weapon) return false;
         // Sized from the function. The fixed 4096-byte static block this replaced was overrun: the
         // hand position written for the fist landed on the grab button's state (fist-eat test 4).
@@ -5210,7 +5366,7 @@ namespace
             if (!c || c->GetOuterPrivate() != weapon) continue;
             Vec3 o = local(component_location(c));
             std::wstring tags;
-            if (RawArray* t = c->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")))
+            if (RawArray* t = value_ptr<RawArray>(c, STR("ComponentTags")))
                 for (int32_t i = 0; i < t->Num && t->Data; ++i) tags += reinterpret_cast<const FName*>(t->Data)[i].ToString() + STR(" ");
             double lo = 0, hi = 0;
             bool have_bounds = false;
@@ -5264,7 +5420,7 @@ namespace
     bool set_variable(UObject* owner, const TCHAR* name, double number, UObject* object = nullptr, const FName* fname = nullptr)
     {
         if (!owner) return false;
-        FProperty* p = owner->GetPropertyByNameInChain(name);
+        FProperty* p = prop_chain(owner, name);
         if (!p) return false;
         uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
         auto kind = p->GetClass().GetName();
@@ -5280,19 +5436,13 @@ namespace
     }
 
     // Is the object's class, or one it is built on, named `class_name` (e.g. ModularWeaponBP_C)?
-    bool is_a(UObject* object, const TCHAR* class_name)
-    {
-        if (!object) return false;
-        for (UStruct* level = object->GetClassPrivate(); level; level = level->GetSuperStruct())
-            if (level->GetName() == class_name) return true;
-        return false;
-    }
+
 
     // Does a list of names (actor Tags / ComponentTags) hold this one?
     bool has_tag(UObject* owner, const TCHAR* list, const TCHAR* tag)
     {
         if (!owner) return false;
-        RawArray* tags = owner->GetValuePtrByPropertyNameInChain<RawArray>(list);
+        RawArray* tags = value_ptr<RawArray>(owner, list);
         if (!tags || !tags->Data) return false;
         std::wstring want(tag);
         const FName* names = reinterpret_cast<const FName*>(tags->Data);
@@ -5409,7 +5559,7 @@ namespace
             if (owner == object_property(pawn, STR("Weapon L")) || owner == object_property(pawn, STR("Weapon R"))) continue;
             static const FName none_bone = FName(STR("None"), FNAME_Add);
             FName bone = none_bone;
-            if (c->GetFunctionByNameInChain(STR("FindClosestBone_K2")))
+            if (func_chain(c, STR("FindClosestBone_K2")))
             {
                 Call fb(c, STR("FindClosestBone_K2"));
                 fb.three(STR("TestLocation"), mid.x, mid.y, mid.z);
@@ -5497,7 +5647,7 @@ namespace
             if (is_a(owner, STR("ModularWeaponBP_C"))) continue;
             if (has_tag(c, STR("ComponentTags"), STR("NoGrab")) || has_tag(owner, STR("Tags"), STR("Sheathed"))) continue;
             FName bone = none_bone;
-            bool skeletal = c->GetFunctionByNameInChain(STR("FindClosestBone_K2")) != nullptr;
+            bool skeletal = func_chain(c, STR("FindClosestBone_K2")) != nullptr;
             if (skeletal)
             {
                 Call fb(c, STR("FindClosestBone_K2"));
@@ -5588,7 +5738,7 @@ namespace
             HSVR_LOG("Grab: %s hand: the game did not take the body in 0.3 s; left", L ? "left" : "right");
             return;
         }
-        UFunction* fn = pawn->GetFunctionByNameInChain(L ? STR("Grab Specific Object L H") : STR("Grab Specific Object R H"));
+        UFunction* fn = func_chain(pawn, L ? STR("Grab Specific Object L H") : STR("Grab Specific Object R H"));
         if (!fn)
         {
             HSVR_LOG("Grab: %s hand: the game did not take it and there is no Grab Specific Object", L ? "left" : "right");
@@ -5625,6 +5775,10 @@ namespace
         hsvr::Vec3 a, b;
         std::string name;
         int grip_r = -1, grip_l = -1; // finger shape for that hand (-1 = the game's own)
+        // A fixed grip (a one-handed sword's): touching anywhere on a..b takes it, but the hand always
+        // holds it at a + (b - a) * fixed_t and never slides along it.
+        bool fixed = false;
+        double fixed_t = 0.0;
     };
     const std::vector<Handle>& item_handles(UObject* item, UObject* base);
     // Weapons and tools are taken only by a handle; shields and bottles anywhere.
@@ -5643,6 +5797,11 @@ namespace
     FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t);
     int clamp_grip_type(int side, int g);
     double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out = nullptr, UObject** out_part = nullptr);
+    bool class_name_starts(UObject* object, const TCHAR* prefix);
+    // A shield touched away from its straps and handles: may the hand take it there (its rim, not a face)?
+    bool shield_off_handle_ok(int side, UObject* shield, UObject* base, const hsvr::Vec3& hand, const hsvr::Config& cfg);
+    // A pavise that hand wears on its forearm (pose_pavise_forearm): the game's own strap grip for that hand.
+    bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg);
 
     // The grab button (Phase 4): squeezing a controller's grip with that hand empty picks up the
     // nearest loose weapon whose body is within pose_grab_radius_cm of the hand; letting go of the
@@ -5692,7 +5851,7 @@ namespace
     const TCHAR* grip_type_name(int side) { return side == 0 ? STR("L_GripType_Current") : STR("R_GripType_Current"); }
     double read_number_variable(UObject* owner, const TCHAR* name)
     {
-        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        FProperty* p = owner ? prop_chain(owner, name) : nullptr;
         if (!p) return -1.0;
         uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
         auto kind = p->GetClass().GetName();
@@ -5940,6 +6099,7 @@ namespace
                      weapon->GetName().c_str(), hi >= 0 ? hs[hi].name.c_str() : "none", hd);
             return false;
         }
+        if (!on_handle && class_name_starts(weapon, STR("Shield")) && !shield_off_handle_ok(side, weapon, base, at, cfg)) return false;
         Vec3 spot = local;
         if (!on_handle)
         {
@@ -6194,7 +6354,7 @@ namespace
     bool set_up_hand(int side, UObject* pawn, UClass* cls, bool dropped, bool destroy_previous, bool dont_save)
     {
         const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
-        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(name) : nullptr;
+        UFunction* fn = pawn ? func_chain(pawn, name) : nullptr;
         if (!fn) return false;
         // Sized from the function. The fixed 4096-byte static block this replaced was overrun: the
         // hand position written for the fist landed on the grab button's state (fist-eat test 4).
@@ -6425,7 +6585,7 @@ namespace
         UObject* found = nullptr;
         for (const TCHAR* name : {STR("Voice Scene"), STR("VoiceScene")})
         {
-            FProperty* p = pawn ? pawn->GetPropertyByNameInChain(name) : nullptr;
+            FProperty* p = pawn ? prop_chain(pawn, name) : nullptr;
             if (!p || p->GetClass().GetName() != STR("ObjectProperty")) continue;
             UObject* c = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal());
             if (c && is_a(c, STR("SceneComponent")) && c->GetOuterPrivate() == pawn)
@@ -6765,6 +6925,94 @@ namespace
         return cls;
     }
 
+    // A shield's plate normal in its BaseMesh frame: the local axis with the least collision across it
+    // (asked from 200 cm out each way, as hsvr.bring_object's rim test), found once per class.
+    hsvr::Vec3 shield_plate_normal(UObject* shield, UObject* base)
+    {
+        using namespace hsvr;
+        static std::unordered_map<std::wstring, Vec3> known;
+        std::wstring cls = shield_class(shield);
+        auto f = known.find(cls);
+        if (f != known.end()) return f->second;
+        Vec3 centre = component_location(base);
+        Quat rot = component_rotation(base);
+        const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        double across[3];
+        bool ok = true;
+        for (int a = 0; a < 3; ++a)
+        {
+            across[a] = 0.0;
+            for (double sgn : {1.0, -1.0})
+            {
+                Vec3 dir = rot.rotate(axes[a] * sgn), p;
+                if (closest_on_weapon(shield, centre + dir * 200.0, &p) < 0.0)
+                {
+                    ok = false;
+                    p = centre;
+                }
+                across[a] += dot(p - centre, dir);
+            }
+        }
+        int thin = 0;
+        for (int a = 1; a < 3; ++a)
+            if (across[a] < across[thin]) thin = a;
+        HSVR_LOG("Shield: %ls across its local X %.1f, Y %.1f, Z %.1f cm: plate faces along %c", cls.c_str(), across[0], across[1], across[2], "XYZ"[thin]);
+        if (ok) known[cls] = axes[thin];
+        return axes[thin];
+    }
+
+    // Pavises start locked to the forearm, like a real pavise (Matthew 2026-11-20). The game already
+    // straps a shield to the forearm for grip types 6 (Shield) and 7 (Shield_Heavy): its joint is to
+    // lowerarm_x at shield_x_socket (shield_grips.md). Pavise_Light is 6 for both hands (forearm through
+    // its lower strap, fist on its top handle); Pavise_Heavy is 7 for the left hand only (forearm
+    // through its long strap, fist on its side bar) and 8 (a handle in the hand) for the right; the
+    // Tower pavise is 8 for both and has no forearm strap on its mesh. So: the game's own forearm
+    // grip, kept (not moved into the hand), wherever the game has one for that hand.
+    bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg)
+    {
+        if (!cfg.pose_pavise_forearm || !shield || !class_name_starts(shield, STR("Shield_Pavise"))) return false;
+        double g = read_number_variable(shield, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default"));
+        return g == 6.0 || g == 7.0;
+    }
+
+    // Away from its straps and handles a shield is taken only by its rim: the point the hand touched
+    // is within pose_shield_rim_cm of an outer edge (a probe that far out from it, along the plate,
+    // finds the shield's nearest point off to the side, past the edge). A flat face is never taken.
+    bool shield_off_handle_ok(int side, UObject* shield, UObject* base, const hsvr::Vec3& hand, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (cfg.pose_shield_grab_face) return true;
+        const char* hname = side == 0 ? "left" : "right";
+        if (!cfg.pose_shield_grab_rim)
+        {
+            HSVR_LOG("Grab: %s hand touched %ls off its straps and handles: not taken (pose_shield_grab_rim 0)", hname, shield->GetName().c_str());
+            return false;
+        }
+        Vec3 touch;
+        if (closest_on_weapon(shield, hand, &touch) < 0.0) return false;
+        Quat rot = component_rotation(base);
+        Vec3 n = normalized(rot.rotate(shield_plate_normal(shield, base)));
+        // Two directions along the plate, and eight probes round the touch point.
+        Vec3 u = cross(n, Vec3{0, 0, 1});
+        if (length(u) < 0.2) u = cross(n, Vec3{1, 0, 0});
+        u = normalized(u);
+        Vec3 v = cross(n, u);
+        double r = cfg.pose_shield_rim_cm, most = 0.0;
+        for (int i = 0; i < 8; ++i)
+        {
+            double ang = i * 3.14159265358979 / 4.0;
+            Vec3 probe = touch + (u * std::cos(ang) + v * std::sin(ang)) * r, p;
+            if (closest_on_weapon(shield, probe, &p) < 0.0) continue;
+            Vec3 off = p - probe;
+            off = off - n * dot(off, n); // along the plate only (a curved face sits a little behind)
+            most = (std::max)(most, length(off));
+        }
+        bool rim = most > 1.0;
+        HSVR_LOG("Grab: %s hand touched %ls off its straps and handles: %s (an edge %s %.0f cm; probes reached %.1f cm past it)", hname, shield->GetName().c_str(),
+                 rim ? "by the rim, taken" : "on a flat face, not taken", rim ? "within" : "not within", r, most);
+        return rim;
+    }
+
     // A shield taken with the grip button. The hand point, in the shield's frame from before the
     // game's set-up moves it, is matched against its fittings: the nearest within
     // pose_shield_point_cm wins. One of the game's own for that hand keeps the game's grip (bucklers
@@ -6778,6 +7026,11 @@ namespace
     {
         using namespace hsvr;
         const char* hand = side == 0 ? "left" : "right";
+        if (pavise_on_forearm(shield, side, cfg))
+        {
+            HSVR_LOG("Shield: %s hand took %ls: strapped on the forearm (the game's own strap grip, pose_pavise_forearm)", hand, shield->GetName().c_str());
+            return;
+        }
         std::wstring cls = shield_class(shield);
         Vec3 local = w0_rot.inverse().rotate(palm - w0_pos);
         Vec3 best_on;
@@ -8184,9 +8437,12 @@ namespace
                                  hi >= 0 ? hs[hi].name.c_str() : "none", hd, cfg.pose_grab_handle_cm);
                         continue;
                     }
+                    if (!(hi >= 0 && hd <= cfg.pose_grab_handle_cm) && class_name_starts(best, STR("Shield")) && !shield_off_handle_ok(side, best, hb, at, cfg)) continue;
                     bool ok = give_hand_weapon(side, pawn, best);
                     UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
-                    if (ok && now == best)
+                    if (ok && now == best && pavise_on_forearm(best, side, cfg))
+                        HSVR_LOG("Grab: %s hand took %ls: strapped on the forearm (the game's own strap grip, pose_pavise_forearm)", hand, best->GetName().c_str());
+                    else if (ok && now == best)
                     {
                         if (hi >= 0 && hd <= cfg.pose_grab_handle_cm)
                         {
@@ -8300,7 +8556,10 @@ namespace
             Vec3 hand_point = target + hand_rot.rotate(h.in_hand);
             double from_shoulder = length(grip_at - shoulder) - length(h.in_hand);
             double from_hand = length(grip_at - hand_point);
-            bool out = from_shoulder > reach + 2.0 || (!in_body && from_hand > reach);
+            // With the arm-lag hold a swing trails the hand by a few cm more, so the grip may be a little past
+            // reach without being stuck (playtest 2026-11-20: a flail let go with your hand 20 cm from it).
+            double reach_slack = cfg.pose_hold_arm_lag ? (std::max)(2.0, cfg.pose_hold_let_go_reach_slack_cm) : 2.0;
+            bool out = from_shoulder > reach + reach_slack || (!in_body && from_hand > reach);
             if (in_body && !stuck_is_thrust(h.weapon)) out = false; // a lodged cut: cut_through_tick decides
             if (in_body && cfg.stab_drag && stuck_is_thrust(h.weapon))
             {
@@ -8482,7 +8741,7 @@ namespace
             };
             auto part_name = [](UObject* p) { return p ? p->GetName() : std::wstring(STR("?")); };
             double bottom = 0.0;
-            if (FProperty* bpz = weapon->GetPropertyByNameInChain(STR("Length to Bottom"))) bottom = number_property(weapon, bpz);
+            if (FProperty* bpz = prop_chain(weapon, STR("Length to Bottom"))) bottom = number_property(weapon, bpz);
             if (probe(0.0).state != 2)
             {
                 m.ok = true;
@@ -8620,13 +8879,19 @@ namespace
                 Vec3 c{f.cx, f.cy, f.cz}, a = normalized(Vec3{f.ax, f.ay, f.az});
                 double h = (std::max)(0.0, f.length * 0.5 - half);
                 hs.push_back(Handle{c - a * h, c + a * h, f.name, 5, 5});
+                if (cfg.pose_shield_fixed_grip)
+                {
+                    // Fixed (Matthew 2026-11-20): held at its middle, any angle round it, never slid.
+                    hs.back().fixed = true;
+                    hs.back().fixed_t = 0.5;
+                }
             }
         }
         else
         {
             double lo = 0.0, hi = 0.0, top = 0.0;
             bool wide_lo = false, wide_hi = false;
-            if (FProperty* p = item->GetPropertyByNameInChain(STR("Length to Top R Default"))) top = number_property(item, p);
+            if (FProperty* p = prop_chain(item, STR("Length to Top R Default"))) top = number_property(item, p);
             std::vector<std::pair<double, double>> extra;
             bool ok = measure_weapon_axis(item, base, Vec3{}, cfg.pose_slide_wide_cm, top, lo, hi, wide_lo, wide_hi, &extra);
             measured = ok && !(lo == 0.0 && hi == 0.0);
@@ -8635,6 +8900,21 @@ namespace
                 double g0 = (std::min)(0.0, lo + half), g1 = (std::max)(0.0, hi - half);
                 hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, g1}, "grip", -1, 2});
                 bool hafted = hi - lo >= 30.0;
+                // One-handed sword (a Guard, a blade past it, not hafted) by the game's own grip type, which
+                // ModularWeaponBP copies from its grip module (UG @19423 Grip R Hand Default = Spawned Weapon
+                // Grip.Grip R Hand Default). The game two-hands only types 10-16 (Willie_BP UG @494280 maps
+                // them to one-handed types; 0-9 and 17 stay as they are; grip_type_flow.md section 3).
+                double grip_type = read_number_variable(item, STR("Grip R Hand Default"));
+                bool two_hand_type = grip_type >= 10.0 && grip_type <= 16.0;
+                bool sword = !hafted && wide_hi && weapon_has_guard(item);
+                if (sword)
+                    HSVR_LOG("Handles: %ls: sword, game grip type %.0f (%s), grip %.1f..%.1f cm", item->GetName().c_str(), grip_type,
+                             grip_type < 0.0 ? "not found" : two_hand_type ? "two-handed: grip slides" : "one-handed", g0, g1);
+                if (sword && cfg.pose_slide_fixed_1h_sword && grip_type >= 0.0 && !two_hand_type && g1 - g0 > 1e-3)
+                {
+                    hs.back().fixed = true;
+                    hs.back().fixed_t = (std::min)(1.0, (std::max)(0.0, (0.0 - g0) / (g1 - g0))); // the game's grip point
+                }
                 if (hafted)
                 {
                     // Every further haft stretch is a handle of its own; the head is not (B&S).
@@ -8655,7 +8935,8 @@ namespace
         for (const Handle& h : hs)
         {
             char one[160];
-            std::snprintf(one, sizeof(one), "%s%s (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f)", list.empty() ? "" : "; ", h.name.c_str(), h.a.x, h.a.y, h.a.z, h.b.x, h.b.y, h.b.z);
+            std::snprintf(one, sizeof(one), "%s%s (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f)%s", list.empty() ? "" : "; ", h.name.c_str(), h.a.x, h.a.y, h.a.z, h.b.x, h.b.y, h.b.z,
+                          h.fixed ? " fixed, no slide" : "");
             list += one;
         }
         // A weapon whose parts were not found yet (spawned straight into the hand) is measured again next
@@ -8703,11 +8984,12 @@ namespace
     FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t)
     {
         using namespace hsvr;
+        if (hd.fixed) t = hd.fixed_t;
         Vec3 local = hd.a + (hd.b - hd.a) * t;
         Vec3 axis_local = length(hd.b - hd.a) > 1e-3 ? normalized(hd.b - hd.a) : Vec3{0, 0, 1};
         Vec3 axis = w0_rot.rotate(axis_local);
         FreeGrip g = make_free_grip(side, mesh, w0_pos, w0_rot, palm, w0_pos + w0_rot.rotate(local), &axis, hd.name.c_str());
-        g.has_handle = length(hd.b - hd.a) > 1e-3;
+        g.has_handle = length(hd.b - hd.a) > 1e-3 && !hd.fixed; // no slide on a fixed grip
         g.ha = hd.a;
         g.hb = hd.b;
         g.t = t;
@@ -8768,8 +9050,8 @@ namespace
         Quat binv = component_rotation(base).inverse();
         auto z_of = [&](UObject* c) { return binv.rotate(component_location(c) - bp).z - h.pivot.z; };
         double bottom = 0.0, top = 0.0;
-        if (FProperty* p = weapon->GetPropertyByNameInChain(STR("Length to Bottom"))) bottom = number_property(weapon, p);
-        if (FProperty* p = weapon->GetPropertyByNameInChain(STR("Length to Top R Default"))) top = number_property(weapon, p);
+        if (FProperty* p = prop_chain(weapon, STR("Length to Bottom"))) bottom = number_property(weapon, p);
+        if (FProperty* p = prop_chain(weapon, STR("Length to Top R Default"))) top = number_property(weapon, p);
         double stop = 1e9;
         const char* how = "none";
         if (UObject* head = object_property(weapon, STR("Head")))
@@ -8788,7 +9070,7 @@ namespace
             for (UObject* c : comps)
             {
                 if (!c || c->GetOuterPrivate() != weapon) continue;
-                RawArray* t = c->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags"));
+                RawArray* t = value_ptr<RawArray>(c, STR("ComponentTags"));
                 bool tagged = false;
                 for (int32_t i = 0; t && t->Data && i < t->Num; ++i)
                 {
@@ -8942,7 +9224,7 @@ namespace
         static double last = 1.0;
         if (pawn == last_pawn) return last;
         double scale = -1.0, mass_scale = -1.0;
-        if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Character Scale (Set in BP)")))
+        if (FProperty* p = prop_chain(pawn, STR("Character Scale (Set in BP)")))
         {
             if (p->GetClass().GetName() == STR("StructProperty"))
             {
@@ -8951,7 +9233,7 @@ namespace
                 scale = v[0];
             }
         }
-        if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Mass Scale (Set in BP)"))) mass_scale = number_property(pawn, p);
+        if (FProperty* p = prop_chain(pawn, STR("Mass Scale (Set in BP)"))) mass_scale = number_property(pawn, p);
         // Read too early (before the game sets them) they are 0: try again next time.
         if (!(scale > 0.3 && scale < 3.0) || !(mass_scale > 0.1 && mass_scale < 5.0)) return 1.0;
         auto arm = [](double sc, double ms) { return (2.61 * sc * sc * sc + 1.0) * ms; };
@@ -8970,7 +9252,7 @@ namespace
         if (!cfg.pose_body_strength || !pawn) return b;
         // Muscle Rate can be negative (the creator's lowest weight is -1), so "not found" is asked of the
         // property itself, not read off a -1 value (playtest 14:14: a weight -1 Willie got full grip strength).
-        FProperty* muscle = pawn->GetPropertyByNameInChain(STR("Muscle Rate"));
+        FProperty* muscle = prop_chain(pawn, STR("Muscle Rate"));
         bool muscle_found = muscle != nullptr;
         b.muscle_rate = muscle ? number_property(pawn, muscle) : 0.0;
         b.tonus = read_number_variable(pawn, side == 0 ? STR("Arm L Tonus") : STR("Arm R Tonus"));
@@ -9024,7 +9306,7 @@ namespace
     StaminaHand g_stamina_hand[2];
     double number_var(UObject* owner, const TCHAR* name, bool& found)
     {
-        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        FProperty* p = owner ? prop_chain(owner, name) : nullptr;
         found = p != nullptr;
         return p ? number_property(owner, p) : 0.0;
     }
@@ -9092,7 +9374,7 @@ namespace
     bool stuck_is_thrust(UObject* weapon)
     {
         if (!weapon) return false;
-        RawArray* joints = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
+        RawArray* joints = value_ptr<RawArray>(weapon, STR("Stuck Constraints Array"));
         UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[joints->Num - 1]) : nullptr;
         return cs && bool_property(cs, STR("Thrust?"));
     }
@@ -9171,7 +9453,7 @@ namespace
                                     : (forearm ? " (on the forearm: strap shield)" : ""));
             }
             h.forearm = forearm;
-            if (forearm && !h.free.set && !h.into_hand_tried && cfg.pose_shield_in_hand)
+            if (forearm && !h.free.set && !h.into_hand_tried && cfg.pose_shield_in_hand && !pavise_on_forearm(weapon, side, cfg))
             {
                 h.into_hand_tried = true;
                 FreeGrip g;
@@ -9239,7 +9521,14 @@ namespace
             const std::vector<Handle>& hs = item_handles(weapon, base);
             double t = 0.0, d = 1e9;
             int hi = nearest_handle(hs, pivot, t, d);
-            if (hi >= 0 && d <= 4.0 && length(hs[hi].b - hs[hi].a) > 1e-3)
+            if (hi >= 0 && d <= 4.0 && hs[hi].fixed)
+            {
+                // A one-handed sword: held at its fixed spot (the game's grip point), no slide.
+                g.handle = hs[hi].name;
+                g.t = hs[hi].fixed_t;
+                g.pivot = hs[hi].a + (hs[hi].b - hs[hi].a) * g.t;
+            }
+            else if (hi >= 0 && d <= 4.0 && length(hs[hi].b - hs[hi].a) > 1e-3)
             {
                 g.has_handle = true;
                 g.ha = hs[hi].a;
@@ -9251,8 +9540,8 @@ namespace
                 g.pivot = g.ha + ab * g.t;
             }
             h.free = g;
-            HSVR_LOG("Hold: %s hand holds %ls by the game's grip%s%s", side == 0 ? "left" : "right", weapon->GetName().c_str(), g.has_handle ? ", on its " : " (no handle near)",
-                     g.has_handle ? g.handle.c_str() : "");
+            HSVR_LOG("Hold: %s hand holds %ls by the game's grip%s%s", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                     g.has_handle ? ", on its " : !g.handle.empty() ? ", at its " : " (no handle near)", g.handle.c_str());
         }
         if (h.free.set && h.free.has_handle && cfg.pose_slide && cfg.pose_hold_exact)
         {
@@ -9833,10 +10122,30 @@ namespace
                     double om = 2.0 / lag;
                     double z = cfg.pose_hold_damping_ratio > 0.0 ? cfg.pose_hold_damping_ratio : 1.0;
                     double per_point = two ? mass * 0.5 : mass;
+                    // Far behind the hand (a big jump, or pushed back by something) the hold stiffens back to the
+                    // B&S springs over pose_hold_shoulder_fade_from..to_cm (or 30..60 deg turned away): the hand is
+                    // on the weapon and can't be half a metre from it. The soft arm spring alone let weapons trail
+                    // 40-120 cm and the stuck rule dropped them (playtest 2026-11-20 18:30 UTC, max-strength Willie).
+                    double pk_o = pk, rk_o = rk;
+                    double pc_o = 2.0 * z * std::sqrt((std::max)(0.0, pk_o * st * per_point)) / dst;
+                    double rc_o = 2.0 * z * std::sqrt((std::max)(0.0, rk_o * st * 1e4 * ig)) / (dst * 1e4);
+                    double f0 = cfg.pose_hold_shoulder_fade_from_cm, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_shoulder_fade_to_cm);
+                    double e_cm = length(pivot_now - target_pivot);
+                    double e_deg = length(scaled_axis((rot * target_rot.inverse()).normalized())) * 57.2958;
+                    double stiff = (std::max)((std::min)(1.0, (std::max)(0.0, (e_cm - f0) / (f1 - f0))), (std::min)(1.0, (std::max)(0.0, (e_deg - 30.0) / 30.0)));
                     pk = per_point * om * om / (std::max)(1e-3, st);
                     pc = 2.0 * z * per_point * om / dst;
                     rk = (ig / 1e4) * om * om / (std::max)(1e-3, st);
                     rc = 2.0 * z * (ig / 1e4) * om / dst;
+                    if (stiff > 0.0)
+                    {
+                        pk += (std::max)(0.0, pk_o - pk) * stiff;
+                        pc += (std::max)(0.0, pc_o - pc) * stiff;
+                        rk += (std::max)(0.0, rk_o - rk) * stiff;
+                        rc += (std::max)(0.0, rc_o - rc) * stiff;
+                        HSVR_LOG_EVERY(0.5, "Hold: %s %ls %.0f cm / %.0f deg behind: arm spring stiffened %.0f%% toward the hand's", side == 0 ? "left" : "right",
+                                       weapon->GetName().c_str(), e_cm, e_deg, stiff * 100.0);
+                    }
                     if (cfg.pose_hold_shoulder_torque > 0.0)
                     {
                         double tau = cfg.pose_hold_shoulder_torque * (std::max)(0.0, body.total) + (two ? cfg.pose_hold_shoulder_torque * (std::max)(0.0, s2b.total) : 0.0);
@@ -10063,9 +10372,9 @@ namespace
             if (std::fabs(mass - s.mass) > 0.005 || moved > 0.3 || unstuck != s.unstuck)
             {
                 double rate = 0.0;
-                if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Weapon Stuck In Static Mesh Check Rate"))) rate = number_property(pawn, p);
+                if (FProperty* p = prop_chain(pawn, STR("Weapon Stuck In Static Mesh Check Rate"))) rate = number_property(pawn, p);
                 double md = 0.0;
-                if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Movement Dislocation"))) md = number_property(pawn, p);
+                if (FProperty* p = prop_chain(pawn, STR("Movement Dislocation"))) md = number_property(pawn, p);
                 HSVR_LOG("Kick: %s weapon body changed: mass %.3f -> %.3f kg, centre of mass moved %.1f cm in its frame, Unstuck %d -> %d, "
                          "check rate %.2f, Movement Dislocation %.1f, Collisions Disabled Temporarily %d",
                          side == 0 ? "left" : "right", s.mass, mass, moved, (int)s.unstuck, (int)unstuck, rate, md,
@@ -10232,10 +10541,10 @@ namespace
         if (it != cache.end()) return it->second;
         int sharp = 0;
         bool any = false;
-        if (RawArray* tips = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")); tips && tips->Data)
+        if (RawArray* tips = value_ptr<RawArray>(weapon, STR("Tips")); tips && tips->Data)
             for (int32_t i = 0; i < tips->Num; ++i)
                 if (UObject* tp = static_cast<UObject*>(tips->Data[i]))
-                    if (RawArray* tags = tp->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")); tags && tags->Data)
+                    if (RawArray* tags = value_ptr<RawArray>(tp, STR("ComponentTags")); tags && tags->Data)
                         for (int32_t j = 0; j < tags->Num; ++j)
                         {
                             std::wstring s = reinterpret_cast<const FName*>(tags->Data)[j].ToString();
@@ -10643,7 +10952,7 @@ namespace
     double stab_var(UObject* owner, const TCHAR* name)
     {
         if (!owner) return -999.0;
-        FProperty* p = owner->GetPropertyByNameInChain(name);
+        FProperty* p = prop_chain(owner, name);
         if (!p) return -999.0;
         auto kind = p->GetClass().GetName();
         const uint8_t* at = reinterpret_cast<const uint8_t*>(owner) + p->GetOffset_Internal();
@@ -10655,7 +10964,7 @@ namespace
     int stab_array_num(UObject* owner, const TCHAR* name)
     {
         if (!owner) return -1;
-        FProperty* p = owner->GetPropertyByNameInChain(name);
+        FProperty* p = prop_chain(owner, name);
         if (!p || p->GetClass().GetName() != STR("ArrayProperty")) return -1;
         const uint8_t* at = reinterpret_cast<const uint8_t*>(owner) + p->GetOffset_Internal();
         return *reinterpret_cast<const int32_t*>(at + sizeof(void*));
@@ -10664,7 +10973,7 @@ namespace
     std::wstring stab_name_var(UObject* owner, const TCHAR* name)
     {
         if (!owner) return STR("?");
-        FName* n = owner->GetValuePtrByPropertyNameInChain<FName>(name);
+        FName* n = value_ptr<FName>(owner, name);
         return n ? n->ToString() : STR("?");
     }
 
@@ -10788,7 +11097,7 @@ namespace
         // forward, the direction a thrust goes in (ModularWeaponBP @36603).
         UObject* tip = nullptr;
         double tip_d = 1e9;
-        if (RawArray* tips = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")); tips && tips->Data)
+        if (RawArray* tips = value_ptr<RawArray>(weapon, STR("Tips")); tips && tips->Data)
             for (int32_t i = 0; i < tips->Num; ++i)
                 if (UObject* t = static_cast<UObject*>(tips->Data[i]))
                 {
@@ -10940,7 +11249,7 @@ namespace
         if (on && !stuck_is_thrust(weapon)) return; // a lodged cut goes through (cut_follow_through)
         if (on)
         {
-            RawArray* joints = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
+            RawArray* joints = value_ptr<RawArray>(weapon, STR("Stuck Constraints Array"));
             UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[joints->Num - 1]) : nullptr;
             if (!cs) return;
             if (g_young_joint[side] == cs) return;
@@ -10954,7 +11263,7 @@ namespace
         {
             g_young_joint[side] = nullptr;
             g_young_since[side] = -1.0;
-            RawArray* joints = weapon ? weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array")) : nullptr;
+            RawArray* joints = weapon ? value_ptr<RawArray>(weapon, STR("Stuck Constraints Array")) : nullptr;
             bool alive = false;
             if (joints && joints->Data)
                 for (int32_t i = 0; i < joints->Num; ++i) alive = alive || joints->Data[i] == cs;
@@ -11141,6 +11450,17 @@ namespace
         {
             UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             if (!weapon || g_hold[side].weapon != weapon) continue;
+            // "Just Picked Up" blocks sticking for 2 s after any equip (ModularWeaponBP @42292); in VR
+            // a weapon is in the hand within 0.1 s and stabbed with at once (playtest 2026-11-20d:
+            // 10% of hits, e.g. a head thrust at cutting 79 x impulse 2799 refused). Cleared once it
+            // has been held stab_pickup_grace_s.
+            if (hsvr::config().stab_pickup_grace_s >= 0.0 && g_hold[side].started > 0.0 &&
+                hsvr::now_seconds() - g_hold[side].started >= hsvr::config().stab_pickup_grace_s && bool_property(weapon, STR("Just Picked Up")))
+            {
+                set_variable(weapon, STR("Just Picked Up"), 0.0);
+                HSVR_LOG_EVERY(2.0, "Stab: %s %ls: Just Picked Up cleared after %.2f s in the hand", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                               hsvr::now_seconds() - g_hold[side].started);
+            }
             if (!bool_property(weapon, STR("Being Rubber Banded"))) continue;
             set_variable(weapon, STR("Being Rubber Banded"), 0.0);
             ++cleared[side];
@@ -11213,7 +11533,7 @@ namespace
             // overlaps the body, Constraint_Weapon_Stuck_BP @25565-@26093).
             if (UObject* held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
             {
-                RawArray* joints = held->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
+                RawArray* joints = value_ptr<RawArray>(held, STR("Stuck Constraints Array"));
                 UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[0]) : nullptr;
                 if (cs)
                 {
@@ -11621,7 +11941,7 @@ namespace
 
     double blade_length(UObject* w)
     {
-        FProperty* lp = w ? w->GetPropertyByNameInChain(STR("Length to Top R Default")) : nullptr;
+        FProperty* lp = w ? prop_chain(w, STR("Length to Top R Default")) : nullptr;
         return lp ? (std::max)(10.0, number_property(w, lp)) : 80.0;
     }
 
@@ -12539,7 +12859,7 @@ namespace
             if (!joint || !weapon) continue;
             // Only a seated weapon (the game first pulls a new weapon into the hand over a short distance).
             if (side == 1)
-                if (FProperty* p = pawn->GetPropertyByNameInChain(STR("R Hand Soft Attach Distance")))
+                if (FProperty* p = prop_chain(pawn, STR("R Hand Soft Attach Distance")))
                     if (number_property(pawn, p) > 0.0) continue;
             if (bool_property(weapon, STR("Is Sheathed")) || bool_property(pawn, STR("Sheathing R")) || bool_property(pawn, STR("Unsheathing R"))) continue;
             UObject* base = object_property(weapon, STR("BaseMesh"));
@@ -12574,7 +12894,7 @@ namespace
                     if (g_joint_trace.load() && side == 1)
                     {
                         auto var = [&](const TCHAR* n) {
-                            FProperty* p = pawn->GetPropertyByNameInChain(n);
+                            FProperty* p = prop_chain(pawn, n);
                             return p ? number_property(pawn, p) : -999.0;
                         };
                         HSVR_LOG("Joint: before free: %s | Soft Not Attached %.0f, Soft Attach Distance %.1f, Attached Correctly %.0f, Weapon R Collisions Disabled Temporarily %.0f",
@@ -12891,8 +13211,8 @@ namespace
         {
             last = now;
             double rate[2] = {-1, -1};
-            if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Grab L Release Rate"))) rate[0] = number_property(pawn, p);
-            if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Grab R Release Rate"))) rate[1] = number_property(pawn, p);
+            if (FProperty* p = prop_chain(pawn, STR("Grab L Release Rate"))) rate[0] = number_property(pawn, p);
+            if (FProperty* p = prop_chain(pawn, STR("Grab R Release Rate"))) rate[1] = number_property(pawn, p);
             HSVR_LOG("Grip: left %s mass %.2f kg force %.0f gap %.1f cm slip %.2f, weapon %.0f cm from hand, simulating %d, scale %.2f; "
                      "right %s mass %.2f kg force %.0f gap %.1f cm slip %.2f, weapon %.0f cm from hand, simulating %d, scale %.2f",
                      g_grip_log[0].active ? "spring" : "-", g_grip_log[0].mass, g_grip_log[0].force, g_grip_log[0].gap, rate[0], g_grip_log[0].hand_dist,
@@ -13338,24 +13658,25 @@ namespace
         for (auto& pin : g_pawn_pins) set_variable(context, pin.first.c_str(), pin.second, nullptr, nullptr);
         if (g_pose_active.load())
         {
-            keep_player_off_knees(context, true);
-            crouch_after_tick(context);
-            weapon_spring_after_tick(context);
-            swing_speed_after_tick(context);
-            fist_flags_after_tick(context);
-            body_grab_after_tick(context);
-            body_hit_watch(context);
-            elbow_tick(context);
-            thrown_tick(context);
-            frames_tick(context);
+            { HSVR_SUB("after:keep_player_off_knees"); keep_player_off_knees(context, true); }
+            { HSVR_SUB("after:crouch_after_tick"); crouch_after_tick(context); }
+            { HSVR_SUB("after:weapon_spring_after_tick"); weapon_spring_after_tick(context); }
+            { HSVR_SUB("after:swing_speed_after_tick"); swing_speed_after_tick(context); }
+            { HSVR_SUB("after:fist_flags_after_tick"); fist_flags_after_tick(context); }
+            { HSVR_SUB("after:body_grab_after_tick"); body_grab_after_tick(context); }
+            { HSVR_SUB("after:body_hit_watch"); body_hit_watch(context); }
+            { HSVR_SUB("after:elbow_tick"); elbow_tick(context); }
+            { HSVR_SUB("after:thrown_tick"); thrown_tick(context); }
+            { HSVR_SUB("after:frames_tick"); frames_tick(context); }
         }
-        stab_no_rubber_band(context);
-        cut_through_tick(context);
-        stab_log_tick(context);
-        install_hit_haptics();
-        grip_flip_tick(context);
+        { HSVR_SUB("after:stab_no_rubber_band"); stab_no_rubber_band(context); }
+        { HSVR_SUB("after:cut_through_tick"); cut_through_tick(context); }
+        { HSVR_SUB("after:stab_log_tick"); stab_log_tick(context); }
+        { HSVR_SUB("after:install_hit_haptics"); install_hit_haptics(); }
+        { HSVR_SUB("after:grip_flip_tick"); grip_flip_tick(context); }
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
+        HSVR_SUB("after:capsule_hold");
         using namespace hsvr;
         Vec3 now_at = actor_location(context);
         // Sideways the capsule goes back where it was. Its height is the game's own: it sets it
@@ -13370,7 +13691,7 @@ namespace
         if (hsvr::config().pose_capsule_no_step_offset && g_step_h2_have && rise <= 30.0)
         {
             auto flag_on = [&](const TCHAR* name) {
-                FProperty* p = context->GetPropertyByNameInChain(name);
+                FProperty* p = prop_chain(context, name);
                 return p && number_property(context, p) > 0.5;
             };
             if (!flag_on(STR("Climbing In Air")) && !flag_on(STR("Jump Pressed")) && !flag_on(STR("Fallen")))
@@ -13413,7 +13734,7 @@ namespace
             for (const TCHAR* name : {STR("Pain Stumble Immediate"), STR("Pain Stumble Delayed"), STR("Stumble Direction"), STR("Dodge Vector"),
                                       STR("Capsule Max Dislocation"), STR("Climbing In Air")})
             {
-                FProperty* p = context->GetPropertyByNameInChain(name);
+                FProperty* p = prop_chain(context, name);
                 char part[96];
                 std::snprintf(part, sizeof(part), ", %ls %.1f", name, p ? number_property(context, p) : -1.0);
                 values += part;
@@ -13434,7 +13755,7 @@ namespace
         }
         for (const TCHAR* name : {STR("Pain Stumble Immediate"), STR("Pain Stumble Delayed"), STR("Stumble Direction"), STR("Dodge Vector")})
         {
-            FProperty* p = context->GetPropertyByNameInChain(name);
+            FProperty* p = prop_chain(context, name);
             if (p && p->GetClass().GetName() == STR("StructProperty"))
                 std::memset(reinterpret_cast<uint8_t*>(context) + p->GetOffset_Internal(), 0, p->GetSize());
         }
@@ -13442,7 +13763,7 @@ namespace
         // stick (and half a second after, so he slows down by the game's own braking).
         if (!g_stick_walking && now_seconds() > g_stick_walk_until)
             if (UObject* movement = object_property(context, STR("CharacterMovement")))
-                if (FProperty* vp = movement->GetPropertyByNameInChain(STR("Velocity")))
+                if (FProperty* vp = prop_chain(movement, STR("Velocity")))
                     write_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, 0.0, 0.0, 0.0);
     }
 
@@ -13677,12 +13998,24 @@ namespace
             run_console_command(std::string(command));
             HSVR_LOG("Picture: %s", command);
         }
-        if (cfg.screen_percentage >= 0.0 && cfg.screen_percentage != applied_percentage)
+        // The game sets its own r.ScreenPercentage (55) again when the hub or an arena loads, so the
+        // value is checked every frame and put back, the same way light_samples is.
+        if (cfg.screen_percentage >= 0.0)
         {
-            applied_percentage = cfg.screen_percentage;
-            snprintf(command, sizeof(command), "r.ScreenPercentage %.0f", cfg.screen_percentage);
-            run_console_command(std::string(command));
-            HSVR_LOG("Picture: %s", command);
+            float now = console_variable(STR("r.ScreenPercentage"));
+            bool changed = cfg.screen_percentage != applied_percentage;
+            if (changed || (now > -900.0f && std::fabs((double)now - cfg.screen_percentage) > 0.5))
+            {
+                snprintf(command, sizeof(command), "r.ScreenPercentage %.0f", cfg.screen_percentage);
+                run_console_command(std::string(command));
+                static int lines_left = 20;
+                if (changed || lines_left > 0)
+                {
+                    if (!changed) --lines_left;
+                    HSVR_LOG("Picture: %s (it read %g)", command, (double)now);
+                }
+                applied_percentage = cfg.screen_percentage;
+            }
         }
         if (cfg.extra_commands != applied_commands)
         {
@@ -13962,7 +14295,7 @@ namespace
             HSVR_LOG("Script: hsvr.call: no game instance yet");
             return;
         }
-        UFunction* function = game_instance->GetFunctionByNameInChain(wanted.c_str());
+        UFunction* function = func_chain(game_instance, wanted.c_str());
         if (!function)
         {
             HSVR_LOG("Script: hsvr.call: %ls has no function \"%s\"", game_instance->GetFullName().c_str(), name_text.c_str());
@@ -14108,7 +14441,7 @@ namespace
         }
         UObject* pawn = nullptr;
         find_pawn_mesh(&pawn);
-        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(setup_name) : nullptr;
+        UFunction* fn = pawn ? func_chain(pawn, setup_name) : nullptr;
         if (!fn)
         {
             HSVR_LOG("Script: hsvr.give_weapon: no character or no \"%ls\"", setup_name);
@@ -14362,7 +14695,7 @@ namespace
         for (const TCHAR* v : {STR("R Hand Active"), STR("L Hand Active"), STR("R Down"), STR("L Down"), STR("Chain Attack"), STR("BobnWeave"), STR("Dodging"),
                                STR("Alt Thrusting"), STR("AI In Combat"), STR("Is Crouched??")})
             if (!set_variable(foe, v, 0.0)) missing += std::wstring(v) + STR(", ");
-        if (FProperty* p = foe->GetPropertyByNameInChain(STR("Aim Vector_0")))
+        if (FProperty* p = prop_chain(foe, STR("Aim Vector_0")))
             write_three(reinterpret_cast<uint8_t*>(foe) + p->GetOffset_Internal(), p, 0.0, 0.0, 0.0);
         HSVR_LOG("Passive: %ls (controller %ls) made passive%ls%ls", foe->GetName().c_str(), ai->GetName().c_str(), missing.empty() ? STR("") : STR("; not found: "),
                  missing.c_str());
@@ -14485,7 +14818,7 @@ namespace
         static bool installed = false;
         if (installed) return;
         UObject* gi = game_instance_object();
-        UFunction* fn = gi ? gi->GetFunctionByNameInChain(STR("Load Game")) : nullptr;
+        UFunction* fn = gi ? func_chain(gi, STR("Load Game")) : nullptr;
         if (!fn)
         {
             HSVR_LOG("TestRoom: the game instance has no \"Load Game\"");
@@ -14736,14 +15069,14 @@ namespace
     {
         gc_sync();
         HSVR_PROF(PerfRoomHooks);
-        int32_t* c = ctx.Context ? ctx.Context->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
+        int32_t* c = ctx.Context ? value_ptr<int32_t>(ctx.Context, STR("Enemy Count")) : nullptr;
         g_room_count_before = c ? *c : -1;
     }
     void room_count_post(Unreal::UnrealScriptFunctionCallableContext& ctx, void*)
     {
         gc_sync();
         HSVR_PROF(PerfRoomHooks);
-        int32_t* c = ctx.Context ? ctx.Context->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
+        int32_t* c = ctx.Context ? value_ptr<int32_t>(ctx.Context, STR("Enemy Count")) : nullptr;
         HSVR_LOG("TestRoom: game mode %ls: Enemy Count %d -> %d, Match Won %d", ctx.TheStack.Node() ? ctx.TheStack.Node()->GetName().c_str() : STR("?"), g_room_count_before,
                  c ? *c : -1, (int)bool_property(ctx.Context, STR("Match Won")));
     }
@@ -14753,7 +15086,7 @@ namespace
         if (done || !gm) return;
         done = true;
         for (const TCHAR* f : {STR("Minus Enemy"), STR("Plus Enemy"), STR("Multiplayer Match Win Check")})
-            if (UFunction* fn = gm->GetFunctionByNameInChain(f)) UObjectGlobals::RegisterHook(fn, &room_count_pre, &room_count_post, nullptr);
+            if (UFunction* fn = func_chain(gm, f)) UObjectGlobals::RegisterHook(fn, &room_count_pre, &room_count_post, nullptr);
     }
 
     // The match is still called won now and then when every foe is out at about the same moment
@@ -14789,7 +15122,7 @@ namespace
         {
             set_variable(gm, STR("Match Won"), 0.0);
             set_variable(gm, STR("All Enemies Dead"), 0.0);
-            if (int32_t* count = gm->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count"))) *count = 100;
+            if (int32_t* count = value_ptr<int32_t>(gm, STR("Enemy Count"))) *count = 100;
         }
         HSVR_LOG("TestRoom: respawn: the game put up its win screen; taken down (time, Rounds Won, Match Won and Enemy Count put back)");
     }
@@ -14819,7 +15152,7 @@ namespace
         room_watch_counting(room_game_mode());
         room_watch_winscreen();
         UObject* gm = room_game_mode();
-        int32_t* count = gm ? gm->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
+        int32_t* count = gm ? value_ptr<int32_t>(gm, STR("Enemy Count")) : nullptr;
         if (!count) return;
         if (*count < 100)
         {
@@ -14892,7 +15225,7 @@ namespace
             set_variable(a, STR("Spawn in Pants"), 0.0);
             set_variable(a, STR("Blossfechten Gear"), 0.0);
             if (passport)
-                if (FProperty* dst = a->GetPropertyByNameInChain(STR("Character Passport")))
+                if (FProperty* dst = prop_chain(a, STR("Character Passport")))
                     dst->CopyCompleteValue(reinterpret_cast<uint8_t*>(a) + dst->GetOffset_Internal(), passport);
         }, 0.875 + 0.125 * height);
         if (passport) pp->DestroyValue(passport);
@@ -15188,7 +15521,7 @@ namespace
                 // passport says which weapon class it spawned (none = nothing).
                 UObject* cls = nullptr;
                 if (loot)
-                    if (FProperty* pp = loot->GetPropertyByNameInChain(STR("Weapon Passport")))
+                    if (FProperty* pp = prop_chain(loot, STR("Weapon Passport")))
                         if (FProperty* wc = struct_member_prefix(struct_type(pp), STR("WeaponClass")))
                             cls = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(loot) + pp->GetOffset_Internal() + wc->GetOffset_Internal());
                 got = cls != nullptr;
@@ -15386,12 +15719,24 @@ namespace
                  on_table, foes, standing, ai_on);
         if (UObject* gm = room_game_mode())
         {
-            int32_t* count = gm->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count"));
+            int32_t* count = value_ptr<int32_t>(gm, STR("Enemy Count"));
             HSVR_LOG("TestRoom: check: game mode Enemy Count %d, Match Won %d, All Enemies Dead %d", count ? *count : -1, (int)bool_property(gm, STR("Match Won")),
                      (int)bool_property(gm, STR("All Enemies Dead")));
         }
     }
 
+    bool g_script_player_immortal = false;
+    void script_immortal_tick()
+    {
+        static double last = -10.0;
+        if (!g_script_player_immortal) return;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        if (pawn && !set_bool_property(pawn, STR("Immortal"), true)) HSVR_LOG_EVERY(30.0, "Script: hsvr.player_immortal: no Immortal variable on the player");
+    }
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -15464,7 +15809,7 @@ namespace
             UObjectGlobals::FindAllOf(STR("UserWidget"), widgets);
             for (UObject* widget : widgets)
             {
-                UFunction* in_viewport_fn = widget ? widget->GetFunctionByNameInChain(STR("IsInViewport")) : nullptr;
+                UFunction* in_viewport_fn = widget ? func_chain(widget, STR("IsInViewport")) : nullptr;
                 if (!in_viewport_fn) continue;
                 BoolReturnParams in_viewport{};
                 widget->ProcessEvent(in_viewport_fn, &in_viewport);
@@ -15489,6 +15834,14 @@ namespace
             if (entry.command.rfind("hsvr.set ", 0) == 0)
             {
                 script_set_game_instance(entry.command.substr(9));
+                continue;
+            }
+            if (entry.command == "hsvr.player_immortal")
+            {
+                // Test: the player's Willie gets the game's own Immortal flag (kept on about once a
+                // second, also across respawns), so an unattended fight stays a fight.
+                g_script_player_immortal = true;
+                HSVR_LOG("Script: hsvr.player_immortal: on");
                 continue;
             }
             if (entry.command == "hsvr.test_room_boot")
@@ -15610,12 +15963,12 @@ namespace
                 {
                     // var:<pawn variable>, '_' for spaces (var:Leg_R_Tonus); a variable named with '_' is tried as written first
                     std::wstring n(w.begin() + 4, w.end());
-                    FProperty* p = pawn->GetPropertyByNameInChain(n.c_str());
+                    FProperty* p = prop_chain(pawn, n.c_str());
                     if (!p)
                     {
                         for (auto& ch : n)
                             if (ch == L'_') ch = L' ';
-                        p = pawn->GetPropertyByNameInChain(n.c_str());
+                        p = prop_chain(pawn, n.c_str());
                     }
                     if (p) value = number_property(pawn, p);
                     else known = false;
@@ -15948,7 +16301,7 @@ namespace
                 if (from_tip)
                 {
                     UObject* wr = object_property(player, STR("Weapon R"));
-                    RawArray* tips = wr ? wr->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")) : nullptr;
+                    RawArray* tips = wr ? value_ptr<RawArray>(wr, STR("Tips")) : nullptr;
                     double best = 0.0;
                     if (tips && tips->Data)
                         for (int32_t i = 0; i < tips->Num; ++i)
@@ -16079,7 +16432,7 @@ namespace
                 {
                     if (!c || c->GetOuterPrivate() != pawn || !is_a(c, STR("PrimitiveComponent"))) continue;
                     std::wstring tags;
-                    if (RawArray* t = c->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")))
+                    if (RawArray* t = value_ptr<RawArray>(c, STR("ComponentTags")))
                         for (int32_t i = 0; i < t->Num && t->Data; ++i) tags += reinterpret_cast<const FName*>(t->Data)[i].ToString() + STR(" ");
                     std::wstring name = c->GetName();
                     if (probe)
@@ -16130,6 +16483,176 @@ namespace
                 UObject* pawn = nullptr;
                 find_pawn_mesh(&pawn);
                 if (pawn) weapon_dump(entry.command.size() > 17 && entry.command[17] == '0' ? 0 : 1, pawn);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.wear ", 0) == 0)
+            {
+                // hsvr.wear <armour class path>: he puts that armour piece on the way the game does when he
+                // picks one up (Willie's "Equip Armor" with an armour actor, armor_equip.md). The class
+                // default passport is empty, so the spawned actor's passport gets its class, slot and an
+                // ID first. For unattended tests: the scripted Free Mode start has no helmet.
+                std::string rest = entry.command.substr(10);
+                while (!rest.empty() && rest.back() == ' ') rest.pop_back();
+                std::wstring path(rest.begin(), rest.end());
+                UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
+                if (!cls)
+                {
+                    std::wstring asset = path;
+                    if (asset.size() > 2 && asset.substr(asset.size() - 2) == STR("_C")) asset.resize(asset.size() - 2);
+                    load_asset_object(asset);
+                    cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
+                }
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+                if (!cls || !mesh || !gs || !func_chain(pawn, STR("Equip Armor")))
+                {
+                    HSVR_LOG("Script: hsvr.wear: %s (class %s, character %s)", rest.c_str(), cls ? "found" : "NOT FOUND", mesh ? "found" : "none");
+                    continue;
+                }
+                hsvr::Vec3 at = component_location(mesh) + hsvr::Vec3{0, 0, 300.0};
+                auto fill_transform = [&](Call& c) {
+                    FProperty* p = c.param(STR("SpawnTransform"));
+                    UScriptStruct* type = p ? struct_type(p) : nullptr;
+                    if (!type) return;
+                    uint8_t* tat = c.buffer.data() + p->GetOffset_Internal();
+                    if (FProperty* r = struct_member(type, STR("Rotation")))
+                        if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                        {
+                            uint8_t* wat = tat + r->GetOffset_Internal() + w->GetOffset_Internal();
+                            if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                            else *reinterpret_cast<float*>(wat) = 1.0f;
+                        }
+                    if (FProperty* t = struct_member(type, STR("Translation"))) write_three(tat + t->GetOffset_Internal(), t, at.x, at.y, at.z);
+                    if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(tat + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+                };
+                Call begin(gs, STR("BeginDeferredActorSpawnFromClass"));
+                begin.object(STR("WorldContextObject"), pawn);
+                begin.object(STR("ActorClass"), cls);
+                fill_transform(begin);
+                begin.byte(STR("CollisionHandlingOverride"), 1);
+                begin.run();
+                UObject* actor = begin.object_result();
+                if (!actor)
+                {
+                    HSVR_LOG("Script: hsvr.wear: %s NOT spawned", rest.c_str());
+                    continue;
+                }
+                FProperty* pp = class_member(actor, STR("Armor Passport"));
+                UScriptStruct* pt = struct_type(pp);
+                FProperty* core = struct_member_prefix(pt, STR("ArmorCore_"));
+                FProperty* slot = struct_member_prefix(pt, STR("Slot_"));
+                FProperty* id = struct_member_prefix(pt, STR("ID_"));
+                double armor_slot = read_number_variable(actor, STR("Armor Slot"));
+                if (pp && core && slot && id && armor_slot >= 0.0)
+                {
+                    uint8_t* base = reinterpret_cast<uint8_t*>(actor) + pp->GetOffset_Internal();
+                    *reinterpret_cast<UClass**>(base + core->GetOffset_Internal()) = cls;
+                    *(base + slot->GetOffset_Internal()) = (uint8_t)armor_slot;
+                    *reinterpret_cast<int32_t*>(base + id->GetOffset_Internal()) = 4000 + (int32_t)armor_slot;
+                }
+                Call finish(gs, STR("FinishSpawningActor"));
+                finish.object(STR("Actor"), actor);
+                fill_transform(finish);
+                finish.run();
+                Call equip(pawn, STR("Equip Armor"));
+                equip.object(STR("Armor Actor"), actor);
+                equip.run();
+                FProperty* picked = equip.param(STR("Picked Up"));
+                bool ok = picked && (equip.buffer[picked->GetOffset_Internal()] & static_cast<FBoolProperty*>(picked)->GetFieldMask()) != 0;
+                HSVR_LOG("Script: hsvr.wear: %s, slot %d, passport %s, equipped: %s", rest.c_str(), (int)armor_slot,
+                         (pp && core && slot && id) ? "set" : "NOT SET (members not found)", ok ? "yes" : "no");
+                g_helmet_pawn = nullptr; // look for head pieces again now
+                continue;
+            }
+            if (entry.command.rfind("hsvr.helmet_probe", 0) == 0)
+            {
+                // hsvr.helmet_probe: what you see a helmet from (the see-through hunt, playtest 2026-11-20):
+                // each piece on his head with its mesh, its visibility flags and its materials (two-sided or
+                // not), and where each eye and the game's flat first-person camera are in the helmet's own
+                // head-bone frame (x, y forward, z up as the meshes are made), plus the near clip.
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                if (!pawn || !mesh) continue;
+                hsvr::Config pcfg = hsvr::config();
+                UObject* ref = g_helmet ? g_helmet : mesh;
+                hsvr::Vec3 hb = socket_location(ref, bone_fname("head"));
+                // The meshes' own frame at the head: the component's rotation (the head bone is unrotated
+                // in the reference pose), turned with the head bone's pose against the body.
+                hsvr::Quat hr = socket_rotation(ref, bone_fname("head"));
+                auto local = [&](const hsvr::Vec3& w) { return hr.inverse().rotate(w - hb); };
+                HSVR_LOG("Probe helmet: near clip %.2f cm, eye offset fwd %.1f up %.1f; head bone of %ls", pcfg.near_clip_cm, pcfg.eye_forward_cm, pcfg.eye_up_cm, ref->GetName().c_str());
+                for (int e = 0; e < 2; ++e)
+                {
+                    hsvr::Vec3 at;
+                    hsvr::Quat r;
+                    if (!hsvr::stereo_last_eye(e, at, r)) continue;
+                    hsvr::Vec3 l = local(at), f = hr.inverse().rotate(r.rotate(hsvr::Vec3{1, 0, 0}));
+                    HSVR_LOG("Probe helmet: eye %d at (%.2f, %.2f, %.2f) in the head frame, looking (%.2f, %.2f, %.2f)", e, l.x, l.y, l.z, f.x, f.y, f.z);
+                }
+                for (const TCHAR* cam : {STR("First Person Camera"), STR("Camera Scene FP"), STR("CameraBoomFP")})
+                    if (UObject* c = object_property(pawn, cam))
+                    {
+                        hsvr::Vec3 l = local(component_location(c));
+                        hsvr::Vec3 f = hr.inverse().rotate(component_rotation(c).rotate(hsvr::Vec3{1, 0, 0}));
+                        HSVR_LOG("Probe helmet: flat %ls at (%.2f, %.2f, %.2f) in the head frame, facing (%.2f, %.2f, %.2f)", cam, l.x, l.y, l.z, f.x, f.y, f.z);
+                    }
+                {
+                    double v[3] = {0, 0, 0};
+                    if (FProperty* fp = prop_chain(pawn, STR("Helmet FPV Offset"))) read_three(reinterpret_cast<uint8_t*>(pawn) + fp->GetOffset_Internal(), fp, v);
+                    HSVR_LOG("Probe helmet: Helmet FPV Offset (%.2f, %.2f, %.2f)", v[0], v[1], v[2]);
+                }
+                for (UObject* c : g_head_pieces)
+                {
+                    if (!c) continue;
+                    UObject* sk = object_property(c, STR("SkeletalMesh"));
+                    if (!sk) sk = object_property(c, STR("SkeletalMeshAsset"));
+                    auto flag = [&](const TCHAR* n) {
+                        FProperty* p = prop_chain(c, n);
+                        return p ? number_property(c, p) : -1.0;
+                    };
+                    Call vis(c, STR("IsVisible"));
+                    vis.run();
+                    FProperty* vr = vis.param(STR("ReturnValue"));
+                    bool visible = vr && (vis.buffer[vr->GetOffset_Internal()] & static_cast<FBoolProperty*>(vr)->GetFieldMask()) != 0;
+                    Call lb(c, STR("GetLocalBounds"));
+                    lb.run();
+                    hsvr::Vec3 mn = lb.vec(STR("Min")), mx = lb.vec(STR("Max"));
+                    HSVR_LOG("Probe helmet: piece %ls mesh %ls visible %d ownerNoSee %.0f hiddenInGame %.0f bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f)", c->GetName().c_str(),
+                             sk ? sk->GetName().c_str() : STR("?"), visible ? 1 : 0, flag(STR("bOwnerNoSee")), flag(STR("bHiddenInGame")), mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
+                    Call nm(c, STR("GetNumMaterials"));
+                    nm.run();
+                    int n = nm.integer();
+                    for (int i = 0; i < n && i < 16; ++i)
+                    {
+                        Call gm(c, STR("GetMaterial"));
+                        if (FProperty* ip = gm.param(STR("ElementIndex"))) *reinterpret_cast<int32_t*>(gm.buffer.data() + ip->GetOffset_Internal()) = i;
+                        gm.run();
+                        UObject* m = gm.object_result();
+                        if (!m) continue;
+                        Call bm(m, STR("GetBaseMaterial"));
+                        bm.run();
+                        UObject* b = bm.object_result();
+                        double two = -1.0, over = -1.0, over_two = -1.0;
+                        if (b)
+                            if (FProperty* tp = prop_chain(b, STR("TwoSided"))) two = number_property(b, tp);
+                        if (FProperty* bo = prop_chain(m, STR("BasePropertyOverrides")))
+                        {
+                            UScriptStruct* t = struct_type(bo);
+                            uint8_t* mat = reinterpret_cast<uint8_t*>(m) + bo->GetOffset_Internal();
+                            auto rb = [&](const TCHAR* n) {
+                                FProperty* f = struct_member(t, n);
+                                if (!f) return -1.0;
+                                auto* fb = static_cast<FBoolProperty*>(f);
+                                return (mat[f->GetOffset_Internal() + fb->GetByteOffset()] & fb->GetFieldMask()) ? 1.0 : 0.0;
+                            };
+                            over = rb(STR("bOverride_TwoSided"));
+                            over_two = rb(STR("TwoSided"));
+                        }
+                        HSVR_LOG("Probe helmet:   material %d %ls (base %ls): base two-sided %.0f, instance override %.0f -> %.0f", i, m->GetName().c_str(),
+                                 b ? b->GetName().c_str() : STR("?"), two, over, over_two);
+                    }
+                }
                 continue;
             }
             if (entry.command.rfind("hsvr.spawn ", 0) == 0)
@@ -16583,8 +17106,8 @@ namespace
         {
             // Both neighbours are reflected properties, so their offsets can be asked for by name.
             size_t begin = 0x400, end = 0x1800;
-            FProperty* before = engine->GetPropertyByNameInChain(STR("SelectionHighlightIntensityBillboards"));
-            FProperty* after = engine->GetPropertyByNameInChain(STR("GlobalNetTravelCount"));
+            FProperty* before = prop_chain(engine, STR("SelectionHighlightIntensityBillboards"));
+            FProperty* after = prop_chain(engine, STR("GlobalNetTravelCount"));
             if (before && after && after->GetOffset_Internal() > before->GetOffset_Internal())
             {
                 begin = (size_t)before->GetOffset_Internal() + 4;
@@ -16663,8 +17186,8 @@ namespace
         {
             walk_widget_tree(object_property(tree, STR("RootWidget")), depth + 1, budget, visit);
         }
-        UFunction* count_fn = widget->GetFunctionByNameInChain(STR("GetChildrenCount"));
-        UFunction* child_fn = widget->GetFunctionByNameInChain(STR("GetChildAt"));
+        UFunction* count_fn = func_chain(widget, STR("GetChildrenCount"));
+        UFunction* child_fn = func_chain(widget, STR("GetChildAt"));
         if (!count_fn || !child_fn) return;
         IntReturnParams count{};
         widget->ProcessEvent(count_fn, &count);
@@ -16687,7 +17210,7 @@ namespace
         for (UObject* widget : widgets)
         {
             if (!widget) continue;
-            UFunction* in_viewport_fn = widget->GetFunctionByNameInChain(STR("IsInViewport"));
+            UFunction* in_viewport_fn = func_chain(widget, STR("IsInViewport"));
             if (!in_viewport_fn) continue;
             BoolReturnParams in_viewport{};
             widget->ProcessEvent(in_viewport_fn, &in_viewport);
@@ -16705,14 +17228,14 @@ namespace
         int lines = 0;
         int total = walk_screen_widgets([&lines](UObject* widget, int depth) {
             int visibility = -1;
-            if (UFunction* visibility_fn = widget->GetFunctionByNameInChain(STR("GetVisibility")))
+            if (UFunction* visibility_fn = func_chain(widget, STR("GetVisibility")))
             {
                 ByteReturnParams v{};
                 widget->ProcessEvent(visibility_fn, &v);
                 visibility = v.ReturnValue;
             }
             float opacity = -1.0f;
-            if (UFunction* opacity_fn = widget->GetFunctionByNameInChain(STR("GetRenderOpacity")))
+            if (UFunction* opacity_fn = func_chain(widget, STR("GetRenderOpacity")))
             {
                 FloatParams o{};
                 widget->ProcessEvent(opacity_fn, &o);
@@ -16747,19 +17270,19 @@ namespace
             if (name.rfind(STR("Slider "), 0) != 0) return;
             bool holds = false, hovered = false;
             float value = -1.0f;
-            if (UFunction* fn = widget->GetFunctionByNameInChain(STR("HasMouseCapture")))
+            if (UFunction* fn = func_chain(widget, STR("HasMouseCapture")))
             {
                 BoolReturnParams r{};
                 widget->ProcessEvent(fn, &r);
                 holds = r.ReturnValue;
             }
-            if (UFunction* fn = widget->GetFunctionByNameInChain(STR("IsHovered")))
+            if (UFunction* fn = func_chain(widget, STR("IsHovered")))
             {
                 BoolReturnParams r{};
                 widget->ProcessEvent(fn, &r);
                 hovered = r.ReturnValue;
             }
-            if (UFunction* fn = widget->GetFunctionByNameInChain(STR("GetValue")))
+            if (UFunction* fn = func_chain(widget, STR("GetValue")))
             {
                 FloatParams r{};
                 widget->ProcessEvent(fn, &r);
@@ -16788,7 +17311,7 @@ namespace
         uint64_t hash = 1469598103934665603ull;
         walk_screen_widgets([&hash](UObject* widget, int) {
             int visibility = -1;
-            if (UFunction* visibility_fn = widget->GetFunctionByNameInChain(STR("GetVisibility")))
+            if (UFunction* visibility_fn = func_chain(widget, STR("GetVisibility")))
             {
                 ByteReturnParams v{};
                 widget->ProcessEvent(visibility_fn, &v);
@@ -16810,7 +17333,7 @@ namespace
         if (UObject* controller = find_player_controller())
         {
             game.have_player = true;
-            if (ue::FRotator* rotation = controller->GetValuePtrByPropertyNameInChain<ue::FRotator>(STR("ControlRotation")))
+            if (ue::FRotator* rotation = value_ptr<ue::FRotator>(controller, STR("ControlRotation")))
             {
                 game.view_yaw = rotation->Yaw;
             }
@@ -16950,7 +17473,7 @@ namespace
             {
                 UObject* pawn = nullptr;
                 find_pawn_mesh(&pawn);
-                UFunction* kick = pawn ? pawn->GetFunctionByNameInChain(STR("Kick Event")) : nullptr;
+                UFunction* kick = pawn ? func_chain(pawn, STR("Kick Event")) : nullptr;
                 if (kick)
                 {
                     std::vector<uint8_t> block = param_block(kick);
@@ -16982,7 +17505,7 @@ namespace
         UObject* game_mode = object_property(world, STR("AuthorityGameMode"));
         bool won = bool_property(game_mode, STR("Match Won"));
         bool ended = bool_property(pawn, STR("Player Match End"));
-        UFunction* fn = pawn ? pawn->GetFunctionByNameInChain(STR("VO Deescalate")) : nullptr;
+        UFunction* fn = pawn ? func_chain(pawn, STR("VO Deescalate")) : nullptr;
         if (!pawn || !game_mode || !fn || !won || ended)
         {
             HSVR_LOG("Menu: A held, not continuing (character %s, game mode %s, VO Deescalate %s, Match Won %d, Player Match End %d)",
@@ -17105,6 +17628,609 @@ namespace
     }
 
     // The Perf: line (see PerfScope). Object counts come from the engine's class hash tables.
+    // ---- Game-thread cost probes (perf_events, perf_sample), for "where do the game's 18 ms a frame go
+    // in a 9-foe fight". Both only measure; they change nothing in the game.
+    //
+    // perf_events: every ProcessEvent the game makes on its game thread (native code calling a
+    // Blueprint: actor ReceiveTick, anim BlueprintUpdateAnimation, timers, delegates, hit events),
+    // timed per class and function, with the mod's own time inside taken out. Calls the mod itself
+    // makes are skipped. Pre is registered after the mod's own pre callbacks and post before its post
+    // callbacks, so those sit outside the timed span.
+    //
+    // perf_sample: a thread that stops the game thread about 1000 times a second, walks its stack
+    // with the exe's unwind tables and counts each function (by start address) once per sample:
+    // "self" = the function running, "incl" = anywhere on the stack. Addresses are module+RVA, to
+    // look up in Ghidra.
+    DWORD g_game_thread_id = 0;
+    HANDLE g_game_thread = nullptr;
+    bool g_ev_active = false; // changed only from the engine tick (no ProcessEvent open), so pre/post pair up
+    struct EvKey
+    {
+        const void* cls;
+        const void* fn;
+        bool operator==(const EvKey& o) const { return cls == o.cls && fn == o.fn; }
+    };
+    struct EvKeyHash
+    {
+        size_t operator()(const EvKey& k) const { return std::hash<const void*>{}(k.cls) * 31u ^ std::hash<const void*>{}(k.fn); }
+    };
+    struct EvStat
+    {
+        std::string name;
+        uint64_t incl = 0, excl = 0, outer = 0, calls = 0, worst = 0;
+    };
+    std::unordered_map<EvKey, EvStat, EvKeyHash> g_ev_stats;
+    struct EvFrame
+    {
+        EvStat* st;
+        uint64_t start, child, mod_at;
+    };
+    EvFrame g_ev_stack[512];
+    int g_ev_depth = 0;
+    uint64_t g_ev_outer_ticks = 0, g_ev_calls = 0, g_ev_skipped = 0;
+    bool g_ev_naming = false;
+
+    void ev_pre(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        if (!g_ev_active || GetCurrentThreadId() != g_game_thread_id) return;
+        if (g_ev_depth >= 512) { ++g_ev_depth; return; }
+        EvFrame& f = g_ev_stack[g_ev_depth++];
+        f.st = nullptr;
+        f.child = 0;
+        f.mod_at = t_perf_child;
+        f.start = 0;
+        if (t_perf_depth > 0 || g_ev_naming || !context || !function)
+        {
+            ++g_ev_skipped;
+            return;
+        }
+        EvKey k{context->GetClassPrivate(), function};
+        auto it = g_ev_stats.find(k);
+        if (it == g_ev_stats.end())
+        {
+            g_ev_naming = true; // naming can run script (ToString); do not time ourselves
+            EvStat st;
+            UStruct* cls = context->GetClassPrivate();
+            st.name = (cls ? narrow(cls->GetName()) : std::string("?")) + "." + narrow(function->GetName());
+            g_ev_naming = false;
+            it = g_ev_stats.emplace(k, std::move(st)).first;
+        }
+        f.st = &it->second;
+        f.mod_at = t_perf_child;
+        f.start = perf_now();
+    }
+    void ev_post(Hook::TCallbackIterationData<void>&, UObject*, UFunction*, void*)
+    {
+        if (!g_ev_active || GetCurrentThreadId() != g_game_thread_id || g_ev_depth <= 0) return;
+        if (g_ev_depth > 512) { --g_ev_depth; return; }
+        EvFrame f = g_ev_stack[--g_ev_depth];
+        if (!f.st) return;
+        uint64_t all = perf_now() - f.start, mod = t_perf_child - f.mod_at;
+        uint64_t incl = all - (std::min)(all, mod);
+        f.st->incl += incl;
+        f.st->excl += incl - (std::min)(incl, f.child);
+        f.st->worst = (std::max)(f.st->worst, incl);
+        ++f.st->calls;
+        ++g_ev_calls;
+        if (g_ev_depth > 0)
+            g_ev_stack[g_ev_depth - 1].child += incl;
+        else
+        {
+            f.st->outer += incl;
+            g_ev_outer_ticks += incl;
+        }
+    }
+
+    // Sampler.
+    struct SampleCount
+    {
+        uint64_t self = 0, incl = 0;
+    };
+    std::mutex g_sample_mutex;
+    std::unordered_map<uint64_t, SampleCount> g_samples, g_samples_all;
+    uint64_t g_sample_total = 0, g_sample_total_all = 0, g_sample_failed = 0;
+    std::atomic<bool> g_sampler_running{false}, g_sample_on{false};
+
+    // Walks the suspended thread's stack. No allocation, no locks of ours: the game thread may hold
+    // the heap lock while it is stopped. Returns how many frames; fn[i] = function start (or the
+    // address itself when it has no unwind entry).
+    int sample_walk(HANDLE thread, uint64_t* fn, int max)
+    {
+        CONTEXT ctx{};
+        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if (!GetThreadContext(thread, &ctx)) return -1;
+        int n = 0;
+        __try
+        {
+            while (n < max && ctx.Rip)
+            {
+                DWORD64 base = 0;
+                PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(ctx.Rip, &base, nullptr);
+                if (!rf)
+                {
+                    fn[n++] = ctx.Rip;
+                    if (n > 1) break; // code without unwind data mid-stack (hook stubs): stop
+                    ctx.Rip = *reinterpret_cast<DWORD64*>(ctx.Rsp); // leaf: return address on top
+                    ctx.Rsp += 8;
+                    continue;
+                }
+                fn[n++] = base + rf->BeginAddress;
+                void* handler_data = nullptr;
+                DWORD64 establisher = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, rf, &ctx, &handler_data, &establisher, nullptr);
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        return n;
+    }
+    DWORD WINAPI sampler_thread(void*)
+    {
+        HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /*CREATE_WAITABLE_TIMER_HIGH_RESOLUTION*/, TIMER_ALL_ACCESS);
+        if (!timer) timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+        uint64_t fn[96];
+        while (g_sampler_running.load())
+        {
+            LARGE_INTEGER due;
+            due.QuadPart = -10000; // 1 ms
+            SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
+            WaitForSingleObject(timer, 20);
+            HANDLE h = g_game_thread;
+            if (!h || !g_sample_on.load()) continue;
+            if (SuspendThread(h) == (DWORD)-1) continue;
+            int n = sample_walk(h, fn, 96);
+            ResumeThread(h);
+            std::lock_guard<std::mutex> lock(g_sample_mutex);
+            if (n <= 0)
+            {
+                ++g_sample_failed;
+                continue;
+            }
+            ++g_sample_total, ++g_sample_total_all;
+            for (int i = 0; i < n; ++i)
+            {
+                bool seen = false;
+                for (int j = 0; j < i && !seen; ++j) seen = fn[j] == fn[i];
+                if (seen) continue;
+                SampleCount& c = g_samples[fn[i]];
+                SampleCount& a = g_samples_all[fn[i]];
+                ++c.incl, ++a.incl;
+                if (i == 0) ++c.self, ++a.self;
+            }
+        }
+        CloseHandle(timer);
+        return 0;
+    }
+    std::string module_rva(uint64_t addr)
+    {
+        HMODULE m = nullptr;
+        char b[300];
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(addr), &m) || !m)
+        {
+            snprintf(b, sizeof b, "?+0x%llx", (unsigned long long)addr);
+            return b;
+        }
+        wchar_t path[MAX_PATH];
+        DWORD len = GetModuleFileNameW(m, path, MAX_PATH);
+        std::wstring w(path, len);
+        size_t slash = w.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) w = w.substr(slash + 1);
+        snprintf(b, sizeof b, "%s+0x%llx", narrow(w).c_str(), (unsigned long long)(addr - reinterpret_cast<uint64_t>(m)));
+        return b;
+    }
+    // Every probe's game-thread setup, from the engine tick (no ProcessEvent open there).
+    void probes_tick()
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        if (!g_game_thread_id)
+        {
+            g_game_thread_id = GetCurrentThreadId();
+            g_game_thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, g_game_thread_id);
+        }
+        g_ev_depth = 0;
+        g_ev_active = cfg.perf_events;
+        g_sample_on = cfg.perf_sample;
+        if (cfg.perf_sample && !g_sampler_running.load())
+        {
+            g_sampler_running = true;
+            HANDLE t = CreateThread(nullptr, 0, &sampler_thread, nullptr, 0, nullptr);
+            if (t)
+            {
+                SetThreadPriority(t, THREAD_PRIORITY_TIME_CRITICAL);
+                CloseHandle(t);
+                HSVR_LOG("Perf sample: sampling the game thread about 1000 times a second");
+            }
+            else
+                g_sampler_running = false;
+        }
+    }
+    // The probes' part of the Perf report; frames = engine ticks in the period.
+    void probes_report(uint64_t frames, double ms_per_tick, double seconds)
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        if (g_game_thread)
+        {
+            static uint64_t last_cpu = 0;
+            FILETIME c, e, k, u;
+            if (GetThreadTimes(g_game_thread, &c, &e, &k, &u))
+            {
+                uint64_t cpu = ((uint64_t)k.dwHighDateTime << 32 | k.dwLowDateTime) + ((uint64_t)u.dwHighDateTime << 32 | u.dwLowDateTime);
+                if (last_cpu && frames)
+                    HSVR_LOG("Perf game thread: %.2f ms CPU a frame (%.0f%% busy)", (cpu - last_cpu) / 1e4 / frames, (cpu - last_cpu) / 1e5 / seconds);
+                last_cpu = cpu;
+            }
+        }
+        if (cfg.perf_events && frames && !g_ev_stats.empty())
+        {
+            std::vector<EvStat*> v;
+            for (auto& kv : g_ev_stats)
+                if (kv.second.calls) v.push_back(&kv.second);
+            auto line = [&](const char* title, auto key, size_t top) {
+                std::sort(v.begin(), v.end(), [&](EvStat* a, EvStat* b) { return key(a) > key(b); });
+                HSVR_LOG("Perf events %s:", title); // one entry a line (the log line is capped at 2 KB)
+                for (size_t i = 0; i < v.size() && i < top; ++i)
+                {
+                    double ms = key(v[i]) * ms_per_tick / frames;
+                    if (ms < 0.02) break;
+                    HSVR_LOG("Perf events     %s %.2f ms (%.1f calls, %.3f ms each, worst %.2f; self %.2f)", v[i]->name.c_str(), ms, (double)v[i]->calls / frames,
+                             v[i]->incl * ms_per_tick / v[i]->calls, v[i]->worst * ms_per_tick, v[i]->excl * ms_per_tick / frames);
+                }
+            };
+            HSVR_LOG("Perf events: Blueprint calls from native code %.2f ms a frame (outermost, mod time taken out); %.0f timed calls, %.0f skipped (mod's own) a frame",
+                     g_ev_outer_ticks * ms_per_tick / frames, (double)g_ev_calls / frames, (double)g_ev_skipped / frames);
+            line("by outermost time (ms a frame)", [](EvStat* s) { return s->outer; }, 25);
+            line("by self time (ms a frame)", [](EvStat* s) { return s->excl; }, 25);
+            for (auto& kv : g_ev_stats) kv.second.incl = kv.second.excl = kv.second.outer = kv.second.calls = kv.second.worst = 0;
+            g_ev_outer_ticks = g_ev_calls = g_ev_skipped = 0;
+        }
+        if (cfg.perf_sample)
+        {
+            std::vector<std::pair<uint64_t, SampleCount>> v, all;
+            uint64_t total, total_all, failed;
+            {
+                std::lock_guard<std::mutex> lock(g_sample_mutex);
+                v.assign(g_samples.begin(), g_samples.end());
+                all.assign(g_samples_all.begin(), g_samples_all.end());
+                total = g_sample_total, total_all = g_sample_total_all, failed = g_sample_failed;
+                g_samples.clear();
+                g_sample_total = 0, g_sample_failed = 0;
+            }
+            if (total)
+            {
+                std::map<std::string, uint64_t> modules;
+                for (auto& kv : v)
+                    if (kv.second.self)
+                    {
+                        std::string r = module_rva(kv.first);
+                        modules[r.substr(0, r.find('+'))] += kv.second.self;
+                    }
+                std::string mods;
+                for (auto& kv : modules)
+                {
+                    char b[160];
+                    snprintf(b, sizeof b, "%s%s %.1f%%", mods.empty() ? "" : ", ", kv.first.c_str(), 100.0 * kv.second / total);
+                    mods += b;
+                }
+                HSVR_LOG("Perf sample: %llu samples (%llu failed); self time by module: %s", (unsigned long long)total, (unsigned long long)failed, mods.c_str());
+                auto line = [&](const char* title, bool self, size_t top) {
+                    std::sort(v.begin(), v.end(), [&](auto& a, auto& b) { return (self ? a.second.self : a.second.incl) > (self ? b.second.self : b.second.incl); });
+                    HSVR_LOG("Perf sample %s:", title); // one entry a line (the log line is capped at 2 KB)
+                    for (size_t i = 0; i < v.size() && i < top; ++i)
+                    {
+                        uint64_t n = self ? v[i].second.self : v[i].second.incl;
+                        HSVR_LOG("Perf sample     %s %.1f%%", module_rva(v[i].first).c_str(), 100.0 * n / total);
+                    }
+                };
+                line("self (function running)", true, 30);
+                line("inclusive (on the stack)", false, 60);
+            }
+            // Everything since start, for Ghidra lookups.
+            if (total_all)
+            {
+                std::sort(all.begin(), all.end(), [](auto& a, auto& b) { return a.second.incl > b.second.incl; });
+                CreateDirectoryW((hsvr::mod_dir() + L"logs\\").c_str(), nullptr);
+                FILE* f = _wfopen((hsvr::mod_dir() + L"logs\\perf_samples.tsv").c_str(), L"wb");
+                if (f)
+                {
+                    fprintf(f, "address\tself_pct\tincl_pct\tself\tincl\t(total %llu samples)\n", (unsigned long long)total_all);
+                    for (auto& kv : all)
+                    {
+                        if (kv.second.incl * 2000 < total_all) break; // under 0.05%
+                        fprintf(f, "%s\t%.2f\t%.2f\t%llu\t%llu\n", module_rva(kv.first).c_str(), 100.0 * kv.second.self / total_all, 100.0 * kv.second.incl / total_all,
+                                (unsigned long long)kv.second.self, (unsigned long long)kv.second.incl);
+                    }
+                    fclose(f);
+                }
+            }
+        }
+    }
+
+    // ---- perf_bp_segments: time inside Willie's event graph (ExecuteUbergraph_Willie_BP), by bytecode
+    // segment. Every flow opcode (jump, branch, sequence push/pop, return) is a segment boundary; the
+    // time from one boundary to the next in the same script frame goes to the segment that starts at
+    // the first one (its bytecode offset, as in the decompile listing ub_Willie_BP.txt). Calls made
+    // from inside a segment count in it. Done by wrapping those opcodes' entries in the engine's
+    // opcode table (GNatives), found by scanning the exe's writable data for a 256-entry table of
+    // code pointers in which most unused opcodes share one handler. Only measures.
+    using VmNative = void (*)(UObject*, void*, void*);
+    VmNative* g_gnatives = nullptr;
+    VmNative g_vm_orig[256] = {};
+    UFunction* g_seg_target = nullptr;
+    const uint8_t* g_seg_base = nullptr;
+    bool g_seg_bad = false;
+    struct SegStat
+    {
+        uint64_t ticks = 0, count = 0;
+    };
+    std::unordered_map<uint32_t, SegStat> g_seg_stats;
+    struct SegOpen
+    {
+        void* frame;
+        uint32_t off;
+        uint64_t t;
+    };
+    SegOpen g_seg_open[64];
+    int g_seg_open_n = 0;
+    bool g_seg_on = false;
+    // FFrame (UE 5.4): FOutputDevice (vtable + 2 bools = 16 bytes), then Node, Object, Code, Locals.
+    inline UFunction* frame_node(void* f) { return *reinterpret_cast<UFunction**>(static_cast<uint8_t*>(f) + 0x10); }
+    inline const uint8_t* frame_code(void* f) { return *reinterpret_cast<const uint8_t**>(static_cast<uint8_t*>(f) + 0x20); }
+
+    // A segment is keyed by where execution LANDS after a flow opcode (the jump target, the popped
+    // sequence pin, or the next statement when a branch is not taken), so its time is that code's.
+    // The flow opcode's own condition (which can call functions) counts in the segment it opens.
+    constexpr uint32_t kSegPending = 0xFFFFFFFFu;
+    int seg_find(void* frame)
+    {
+        int i = 0;
+        while (i < g_seg_open_n && g_seg_open[i].frame != frame) ++i;
+        return i;
+    }
+    // Before a flow opcode runs: close the segment that ran up to it.
+    void seg_mark(void* frame, int op)
+    {
+        if (!g_seg_on || GetCurrentThreadId() != g_game_thread_id || frame_node(frame) != g_seg_target) return;
+        uint64_t now = perf_now();
+        const uint8_t* at = frame_code(frame) - 1; // Step has read the opcode byte
+        if (op == 0x4E && !g_seg_base) // EX_ComputedJump: the graph's entry, at offset 5
+        {
+            const uint8_t* base = at - 5;
+            if (base[0] != 0x4C || at[0] != 0x4E) // EX_PushExecutionFlow at 0
+            {
+                if (!g_seg_bad) HSVR_LOG("Perf segments: script layout not as expected (bytes %02x %02x); off", base[0], at[0]);
+                g_seg_bad = true;
+                g_seg_on = false;
+                return;
+            }
+            g_seg_base = base;
+            HSVR_LOG("Perf segments: Willie's event graph found, timing its segments");
+        }
+        if (!g_seg_base) return;
+        int i = seg_find(frame);
+        if (i < g_seg_open_n && op != 0x4E && g_seg_open[i].off != kSegPending)
+        {
+            SegStat& s = g_seg_stats[g_seg_open[i].off];
+            s.ticks += now - g_seg_open[i].t;
+            ++s.count;
+        }
+        if (i == g_seg_open_n)
+        {
+            if (g_seg_open_n >= 64) return;
+            // Another Willie's graph run from inside this one (a hit, damage): its time is its own,
+            // so the open segments stop counting until it returns.
+            for (int j = 0; j < g_seg_open_n; ++j)
+            {
+                if (g_seg_open[j].off != kSegPending) g_seg_stats[g_seg_open[j].off].ticks += now - g_seg_open[j].t;
+                g_seg_open[j].t = now;
+            }
+            ++g_seg_open_n;
+        }
+        g_seg_open[i] = {frame, kSegPending, now};
+    }
+    // After it ran: open the segment where execution landed, or end the frame at the return (the
+    // script loop stops at EX_Return itself; it never goes through the table).
+    void seg_after(void* frame)
+    {
+        if (!g_seg_on || !g_seg_base || GetCurrentThreadId() != g_game_thread_id || frame_node(frame) != g_seg_target) return;
+        int i = seg_find(frame);
+        if (i == g_seg_open_n) return;
+        const uint8_t* code = frame_code(frame);
+        if (*code == 0x04)
+        {
+            g_seg_open[i] = g_seg_open[--g_seg_open_n];
+            uint64_t t = perf_now();
+            for (int j = 0; j < g_seg_open_n; ++j) g_seg_open[j].t = t;
+            return;
+        }
+        g_seg_open[i].off = (uint32_t)(code - g_seg_base);
+    }
+    template <int Op> void vm_wrap(UObject* context, void* frame, void* result)
+    {
+        seg_mark(frame, Op);
+        g_vm_orig[Op](context, frame, result);
+        seg_after(frame);
+    }
+
+    VmNative* find_gnatives()
+    {
+        auto* mod = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + dos->e_lfanew);
+        IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+        uint8_t *text_lo = nullptr, *text_hi = nullptr;
+        for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+            if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)
+            {
+                uint8_t* lo = mod + sec[i].VirtualAddress;
+                if (!text_lo || lo < text_lo) text_lo = lo;
+                if (lo + sec[i].Misc.VirtualSize > text_hi) text_hi = lo + sec[i].Misc.VirtualSize;
+            }
+        VmNative* found = nullptr;
+        int candidates = 0;
+        // Best near-miss, logged when nothing qualifies.
+        size_t best_in = 0, best_most = 0, best_distinct = 0;
+        uint64_t best_at = 0;
+        auto in_text = [&](uint64_t v) { return v >= (uint64_t)text_lo && v < (uint64_t)text_hi; };
+        for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+        {
+            if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE) || (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+            auto* p = reinterpret_cast<uint64_t*>(mod + sec[i].VirtualAddress);
+            size_t n = sec[i].Misc.VirtualSize / 8;
+            if (n < 256) continue;
+            // Sliding count of entries pointing into the exe's code; mods (UE4SS) may have repointed
+            // a few opcodes into their own dlls, so up to 16 others are allowed if not null.
+            size_t in = 0;
+            for (size_t j = 0; j < 256; ++j) in += in_text(p[j]);
+            for (size_t k = 0; k + 256 <= n; ++k)
+            {
+                if (k)
+                {
+                    in -= in_text(p[k - 1]);
+                    in += in_text(p[k + 255]);
+                }
+                if (in < 240) continue;
+                bool nonnull = true;
+                for (int j = 0; j < 256 && nonnull; ++j) nonnull = p[k + j] != 0;
+                if (!nonnull) continue;
+                std::unordered_map<uint64_t, int> c;
+                for (int j = 0; j < 256; ++j) ++c[p[k + j]];
+                uint64_t common = 0;
+                int most = 0;
+                for (auto& kv : c)
+                    if (kv.second > most) most = kv.second, common = kv.first;
+                if (in > best_in || (in == best_in && (size_t)most > best_most))
+                    best_in = in, best_most = most, best_distinct = c.size(), best_at = (uint64_t)(reinterpret_cast<uint8_t*>(p + k) - mod);
+                if (most < 30 || c.size() < 60) continue;
+                bool ours_defined = true;
+                for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F}) ours_defined = ours_defined && p[k + op] != common;
+                if (!ours_defined) continue;
+                ++candidates;
+                if (!found) found = reinterpret_cast<VmNative*>(p + k);
+                // skip past this table
+                for (size_t j = 1; j < 256 && k + 1 + 256 <= n; ++j)
+                {
+                    ++k;
+                    in -= in_text(p[k - 1]);
+                    in += in_text(p[k + 255]);
+                }
+            }
+        }
+        if (!found)
+            HSVR_LOG("Perf segments: no opcode table; closest at exe+0x%llx: %zu of 256 entries in exe code, most common entry %zu times, %zu distinct",
+                     (unsigned long long)best_at, best_in, best_most, best_distinct);
+        if (found) HSVR_LOG("Perf segments: opcode table at exe+0x%llx (%d candidate%s)", (unsigned long long)(reinterpret_cast<uint8_t*>(found) - mod), candidates, candidates == 1 ? "" : "s");
+        return candidates == 1 ? found : nullptr;
+    }
+    // UE4SS finds the table itself by signature and logs "[PS] Found GNatives: 0x..." in UE4SS.log
+    // (this launch's log, next to UE4SS.dll). Read it from there; checked against the exe's data.
+    VmNative* gnatives_from_ue4ss_log()
+    {
+        HMODULE ue4ss = GetModuleHandleW(L"UE4SS.dll");
+        if (!ue4ss) return nullptr;
+        wchar_t path[MAX_PATH];
+        DWORD len = GetModuleFileNameW(ue4ss, path, MAX_PATH);
+        std::wstring w(path, len);
+        w = w.substr(0, w.find_last_of(L"\\/") + 1) + L"UE4SS.log";
+        HANDLE h = CreateFileW(w.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return nullptr;
+        std::string text;
+        char buf[65536];
+        DWORD got = 0;
+        while (text.size() < (64u << 20) && ReadFile(h, buf, sizeof buf, &got, nullptr) && got) text.append(buf, got);
+        CloseHandle(h);
+        size_t at = text.rfind("Found GNatives: 0x");
+        if (at == std::string::npos) return nullptr;
+        uint64_t v = strtoull(text.c_str() + at + 18, nullptr, 16);
+        auto* mod = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + reinterpret_cast<IMAGE_DOS_HEADER*>(mod)->e_lfanew);
+        if (v < (uint64_t)mod || v + 256 * 8 > (uint64_t)mod + nt->OptionalHeader.SizeOfImage)
+        {
+            HSVR_LOG("Perf segments: UE4SS's GNatives 0x%llx is outside the exe; not used", (unsigned long long)v);
+            return nullptr;
+        }
+        auto* t = reinterpret_cast<VmNative*>(v);
+        std::unordered_map<uint64_t, int> c;
+        int nulls = 0;
+        for (int j = 0; j < 256; ++j) ++c[(uint64_t)t[j]], nulls += t[j] == nullptr;
+        int most = 0;
+        uint64_t common = 0;
+        for (auto& kv : c)
+            if (kv.second > most) most = kv.second, common = kv.first;
+        std::string ours;
+        for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
+        {
+            char b[48];
+            snprintf(b, sizeof b, " %02X=%s", op, (uint64_t)t[op] == common ? "common" : (t[op] ? "own" : "null"));
+            ours += b;
+        }
+        HSVR_LOG("Perf segments: UE4SS's GNatives at exe+0x%llx: most common entry %d times, %zu distinct, %d null; flow opcodes%s", (unsigned long long)(v - (uint64_t)mod),
+                 most, c.size(), nulls, ours.c_str());
+        for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
+            if (!t[op] || (uint64_t)t[op] == common) return nullptr;
+        return t;
+    }
+    // From the engine tick (no script running on the game thread).
+    void segments_tick()
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        g_seg_open_n = 0;
+        if (!cfg.perf_bp_segments || g_seg_bad)
+        {
+            g_seg_on = false;
+            return;
+        }
+        if (!g_seg_target)
+            g_seg_target = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:ExecuteUbergraph_Willie_BP"));
+        if (!g_seg_target) return;
+        if (!g_gnatives)
+        {
+            g_gnatives = gnatives_from_ue4ss_log();
+            if (!g_gnatives) g_gnatives = find_gnatives();
+            if (!g_gnatives)
+            {
+                HSVR_LOG("Perf segments: opcode table not found (or not unique); off");
+                g_seg_bad = true;
+                return;
+            }
+            DWORD old = 0;
+            VirtualProtect(g_gnatives, 256 * sizeof(VmNative), PAGE_READWRITE, &old);
+#define HSVR_WRAP(op) g_vm_orig[op] = g_gnatives[op], g_gnatives[op] = &vm_wrap<op>
+            HSVR_WRAP(0x06);
+            HSVR_WRAP(0x07);
+            HSVR_WRAP(0x4C);
+            HSVR_WRAP(0x4D);
+            HSVR_WRAP(0x4E);
+            HSVR_WRAP(0x4F);
+#undef HSVR_WRAP
+        }
+        g_seg_on = true;
+    }
+    void segments_report(uint64_t frames, double ms_per_tick)
+    {
+        if (!g_seg_on || !frames || g_seg_stats.empty()) return;
+        std::vector<std::pair<uint32_t, SegStat>> v(g_seg_stats.begin(), g_seg_stats.end());
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second.ticks > b.second.ticks; });
+        double total = 0.0;
+        for (auto& kv : v) total += kv.second.ticks * ms_per_tick / frames;
+        HSVR_LOG("Perf segments: Willie's event graph %.2f ms a frame in all; by segment (offset in ub_Willie_BP.txt where the code runs from, after a jump/branch/sequence pin):", total);
+        for (size_t i = 0; i < v.size() && i < 60; ++i)
+        {
+            double ms = v[i].second.ticks * ms_per_tick / frames;
+            if (ms < 0.01) break;
+            HSVR_LOG("Perf segments     @%u %.3f ms (%.1f a frame, %.4f ms each)", v[i].first, ms, (double)v[i].second.count / frames, v[i].second.ticks * ms_per_tick / v[i].second.count);
+        }
+        // Everything, for mapping onto the listing.
+        CreateDirectoryW((hsvr::mod_dir() + L"logs\\").c_str(), nullptr);
+        if (FILE* f = _wfopen((hsvr::mod_dir() + L"logs\\perf_segments.tsv").c_str(), L"ab"))
+        {
+            for (auto& kv : v)
+                fprintf(f, "%.1f\t%u\t%.4f\t%.2f\n", hsvr::now_seconds(), kv.first, kv.second.ticks * ms_per_tick / frames, (double)kv.second.count / frames);
+            fclose(f);
+        }
+        g_seg_stats.clear();
+    }
+
     void perf_report(float delta_seconds)
     {
         static double since = -1.0;
@@ -17142,6 +18268,22 @@ namespace
             snprintf(b, sizeof b, ", %s %.2f (%.0f calls)", kPerfNames[i], ms, calls);
             parts += b;
         }
+        {
+            std::lock_guard<std::mutex> lock(g_sub_mutex);
+            std::string inside;
+            for (SubAcc* a : g_subs)
+            {
+                uint64_t t = a->ticks.load(), c = a->calls.load();
+                double ms = (t - a->last_ticks) * ms_per_tick / frames;
+                double calls = (double)(c - a->last_calls) / frames;
+                a->last_ticks = t, a->last_calls = c;
+                if (ms < 0.02) continue;
+                char b[128];
+                snprintf(b, sizeof b, "%s%s %.2f (%.1f)", inside.empty() ? "" : ", ", a->name, ms, calls);
+                inside += b;
+            }
+            if (!inside.empty()) HSVR_LOG("Perf inside (ms a frame, calls a frame): %s", inside.c_str());
+        }
         // What the game has, to tell a pile-up (bodies, decals, actors) from the mod's own time.
         uint64_t census_start = perf_now();
         auto count = [](const TCHAR* cls) {
@@ -17157,7 +18299,7 @@ namespace
         for (UObject* p : prims)
         {
             if (!p || p->GetName().rfind(STR("Default__"), 0) == 0) continue;
-            UFunction* fn = p->GetFunctionByNameInChain(STR("IsSimulatingPhysics"));
+            UFunction* fn = func_chain(p, STR("IsSimulatingPhysics"));
             if (!fn) continue;
             IsSimulatingParams q{};
             p->ProcessEvent(fn, &q);
@@ -17170,6 +18312,8 @@ namespace
                  "%d decals, %d primitives (%d simulating, %d of them skeletal); counted in %.1f ms",
                  frames / (now - since), 1000.0 * dt_sum / frames, 1000.0 * dt_max, now - since, total, parts.c_str(), Unreal::UObjectArray::GetNumElements(), actors,
                  willies, weapons, ais, decals, (int)prims.size(), simulating, sim_skel, census_ms);
+        probes_report(frames, ms_per_tick, now - since);
+        segments_report(frames, ms_per_tick);
         since = now;
         frames = 0, dt_sum = 0.0, dt_max = 0.0;
     }
@@ -17177,12 +18321,15 @@ namespace
     void game_tick(UObject* engine, float delta_seconds)
     {
         gc_sync();
+        g_ev_active = false; // the census below calls the game; not the game's own time
         perf_report(delta_seconds); // outside the tick's own scope: the census is not per-frame time
+        probes_tick();
+        segments_tick();
         HSVR_PROF(PerfTick);
         g_engine = engine;
-        hit_frame_refresh();
-        hsvr::config_reload_if_changed();
-        hsvr::stereo_begin_game_frame(delta_seconds);
+        { HSVR_SUB("tick:hit_frame_refresh"); hit_frame_refresh(); }
+        { HSVR_SUB("tick:config_reload"); hsvr::config_reload_if_changed(); }
+        { HSVR_SUB("tick:stereo_begin_game_frame"); hsvr::stereo_begin_game_frame(delta_seconds); }
         if (!g_vr_started) return;
         auto& shared = hsvr::shared();
 
@@ -17203,25 +18350,25 @@ namespace
             HSVR_LOG("Applied VR console settings (vsync off, no frame cap, no motion blur, no depth of field)");
         }
 
-        watch_input();
+        { HSVR_SUB("tick:watch_input"); watch_input(); }
 
         hsvr::Config cfg = hsvr::config();
-        log_controllers(cfg);
-        body_log_tick(cfg);
-        pose_probe(cfg);
+        { HSVR_SUB("tick:log_controllers"); log_controllers(cfg); }
+        { HSVR_SUB("tick:body_log_tick"); body_log_tick(cfg); }
+        { HSVR_SUB("tick:pose_probe"); pose_probe(cfg); }
         // Inside his animation update when that runs (pose_after_anim_update); here otherwise (first
         // frames, menus, the switch off), so the pose still starts and releases.
-        if (!cfg.pose_in_anim_update || hsvr::now_seconds() - g_pose_in_anim_at.load() > 0.25) pose_body(cfg);
-        hide_own_head(cfg);
-        grab_button(cfg, hsvr::controllers_state(), shared.menu_up.load());
-        watch_vars_tick();
+        if (!cfg.pose_in_anim_update || hsvr::now_seconds() - g_pose_in_anim_at.load() > 0.25) { HSVR_SUB("tick:pose_body"); pose_body(cfg); }
+        { HSVR_SUB("tick:hide_own_head"); hide_own_head(cfg); }
+        { HSVR_SUB("tick:grab_button"); grab_button(cfg, hsvr::controllers_state(), shared.menu_up.load()); }
+        { HSVR_SUB("tick:watch_vars_tick"); watch_vars_tick(); }
         if (g_console_done)
         {
-            apply_picture_settings(cfg);
-            keep_clouds_correct(cfg);
-            keep_light_samples(cfg);
-            run_dev_script(cfg);
-            test_room_tick(cfg);
+            { HSVR_SUB("tick:apply_picture_settings"); apply_picture_settings(cfg); }
+            { HSVR_SUB("tick:keep_clouds_correct"); keep_clouds_correct(cfg); }
+            { HSVR_SUB("tick:keep_light_samples"); keep_light_samples(cfg); }
+            { HSVR_SUB("tick:run_dev_script"); run_dev_script(cfg); script_immortal_tick(); }
+            { HSVR_SUB("tick:test_room_tick"); test_room_tick(cfg); }
         }
         // The mod's keys count only while the game has the keyboard, so that Home or End typed in
         // another program does not move the view or hide the panel.
@@ -17308,6 +18455,9 @@ class HalfSwordVR : public CppUserModBase
             hsvr::vr_install_present_hook();
         }
         Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});
+        // Cost probe: pre after the mod's pre callbacks, post before its post callbacks (perf_events).
+        Hook::RegisterProcessEventPreCallback(&ev_pre, {false, false, STR("HalfSwordVR"), STR("CostProbePre")});
+        Hook::RegisterProcessEventPostCallback(&ev_post, {false, false, STR("HalfSwordVR"), STR("CostProbePost")});
         Hook::RegisterProcessEventPostCallback(&capsule_after_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleAfter")});
         Hook::RegisterProcessEventPostCallback(&pose_after_anim_update, {false, false, STR("HalfSwordVR"), STR("PoseAfterAnim")});
         Hook::RegisterProcessEventPostCallback(&feet_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FeetAfterAnim")});

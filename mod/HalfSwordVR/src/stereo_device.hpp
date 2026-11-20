@@ -33,6 +33,8 @@ namespace hsvr
     // Where the view is anchored this frame (the point between the eyes at the recenter pose) and
     // the heading "straight ahead" maps to. Game thread. False until a frame has been placed.
     bool stereo_view_anchor(Vec3& anchor, double& base_yaw);
+    // Where the engine last drew eye 0 or 1 (world location and rotation). Game thread.
+    bool stereo_last_eye(int index, Vec3& location, Quat& rotation);
 
     // True while the engine draws the eyes into their own full-size target (settings key
     // separate_render_target) rather than side by side into the game window.
