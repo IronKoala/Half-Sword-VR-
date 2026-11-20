@@ -7465,8 +7465,16 @@ namespace
         if (now - last_try < 2.0) return;
         last_try = now;
         UFunction* gd = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:Get Damage"));
-        UFunction* sim = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.PrimitiveComponent:IsSimulatingPhysics"));
-        if (!gd || !sim) return;
+        // The UFUNCTION is declared on SceneComponent (UE 5.4 SceneComponent.h); PrimitiveComponent and
+        // SkeletalMeshComponent only override the C++ virtual, so there is no PrimitiveComponent one.
+        UFunction* sim = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.SceneComponent:IsSimulatingPhysics"));
+        if (!sim) sim = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.PrimitiveComponent:IsSimulatingPhysics"));
+        if (!gd || !sim)
+        {
+            static int tries = 0;
+            if (++tries == 5) HSVR_LOG("Player damage: not installed: Get Damage %s, IsSimulatingPhysics %s", gd ? "found" : "MISSING", sim ? "found" : "MISSING");
+            return;
+        }
         installed = true;
         g_get_damage_fn = gd;
         UObjectGlobals::RegisterHook(sim, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, &player_sim_check_post, nullptr);
