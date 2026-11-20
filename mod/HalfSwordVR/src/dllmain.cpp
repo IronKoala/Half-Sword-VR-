@@ -5769,6 +5769,10 @@ namespace
         hsvr::Vec3 a, b;
         std::string name;
         int grip_r = -1, grip_l = -1; // finger shape for that hand (-1 = the game's own)
+        // A fixed grip (a one-handed sword's): touching anywhere on a..b takes it, but the hand always
+        // holds it at a + (b - a) * fixed_t and never slides along it.
+        bool fixed = false;
+        double fixed_t = 0.0;
     };
     const std::vector<Handle>& item_handles(UObject* item, UObject* base);
     // Weapons and tools are taken only by a handle; shields and bottles anywhere.
@@ -5787,6 +5791,11 @@ namespace
     FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t);
     int clamp_grip_type(int side, int g);
     double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out = nullptr, UObject** out_part = nullptr);
+    bool class_name_starts(UObject* object, const TCHAR* prefix);
+    // A shield touched away from its straps and handles: may the hand take it there (its rim, not a face)?
+    bool shield_off_handle_ok(int side, UObject* shield, UObject* base, const hsvr::Vec3& hand, const hsvr::Config& cfg);
+    // A pavise that hand wears on its forearm (pose_pavise_forearm): the game's own strap grip for that hand.
+    bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg);
 
     // The grab button (Phase 4): squeezing a controller's grip with that hand empty picks up the
     // nearest loose weapon whose body is within pose_grab_radius_cm of the hand; letting go of the
@@ -6084,6 +6093,7 @@ namespace
                      weapon->GetName().c_str(), hi >= 0 ? hs[hi].name.c_str() : "none", hd);
             return false;
         }
+        if (!on_handle && class_name_starts(weapon, STR("Shield")) && !shield_off_handle_ok(side, weapon, base, at, cfg)) return false;
         Vec3 spot = local;
         if (!on_handle)
         {
@@ -6896,6 +6906,94 @@ namespace
         return cls;
     }
 
+    // A shield's plate normal in its BaseMesh frame: the local axis with the least collision across it
+    // (asked from 200 cm out each way, as hsvr.bring_object's rim test), found once per class.
+    hsvr::Vec3 shield_plate_normal(UObject* shield, UObject* base)
+    {
+        using namespace hsvr;
+        static std::unordered_map<std::wstring, Vec3> known;
+        std::wstring cls = shield_class(shield);
+        auto f = known.find(cls);
+        if (f != known.end()) return f->second;
+        Vec3 centre = component_location(base);
+        Quat rot = component_rotation(base);
+        const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        double across[3];
+        bool ok = true;
+        for (int a = 0; a < 3; ++a)
+        {
+            across[a] = 0.0;
+            for (double sgn : {1.0, -1.0})
+            {
+                Vec3 dir = rot.rotate(axes[a] * sgn), p;
+                if (closest_on_weapon(shield, centre + dir * 200.0, &p) < 0.0)
+                {
+                    ok = false;
+                    p = centre;
+                }
+                across[a] += dot(p - centre, dir);
+            }
+        }
+        int thin = 0;
+        for (int a = 1; a < 3; ++a)
+            if (across[a] < across[thin]) thin = a;
+        HSVR_LOG("Shield: %ls across its local X %.1f, Y %.1f, Z %.1f cm: plate faces along %c", cls.c_str(), across[0], across[1], across[2], "XYZ"[thin]);
+        if (ok) known[cls] = axes[thin];
+        return axes[thin];
+    }
+
+    // Pavises start locked to the forearm, like a real pavise (Matthew 2026-11-20). The game already
+    // straps a shield to the forearm for grip types 6 (Shield) and 7 (Shield_Heavy): its joint is to
+    // lowerarm_x at shield_x_socket (shield_grips.md). Pavise_Light is 6 for both hands (forearm through
+    // its lower strap, fist on its top handle); Pavise_Heavy is 7 for the left hand only (forearm
+    // through its long strap, fist on its side bar) and 8 (a handle in the hand) for the right; the
+    // Tower pavise is 8 for both and has no forearm strap on its mesh. So: the game's own forearm
+    // grip, kept (not moved into the hand), wherever the game has one for that hand.
+    bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg)
+    {
+        if (!cfg.pose_pavise_forearm || !shield || !class_name_starts(shield, STR("Shield_Pavise"))) return false;
+        double g = read_number_variable(shield, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default"));
+        return g == 6.0 || g == 7.0;
+    }
+
+    // Away from its straps and handles a shield is taken only by its rim: the point the hand touched
+    // is within pose_shield_rim_cm of an outer edge (a probe that far out from it, along the plate,
+    // finds the shield's nearest point off to the side, past the edge). A flat face is never taken.
+    bool shield_off_handle_ok(int side, UObject* shield, UObject* base, const hsvr::Vec3& hand, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (cfg.pose_shield_grab_face) return true;
+        const char* hname = side == 0 ? "left" : "right";
+        if (!cfg.pose_shield_grab_rim)
+        {
+            HSVR_LOG("Grab: %s hand touched %ls off its straps and handles: not taken (pose_shield_grab_rim 0)", hname, shield->GetName().c_str());
+            return false;
+        }
+        Vec3 touch;
+        if (closest_on_weapon(shield, hand, &touch) < 0.0) return false;
+        Quat rot = component_rotation(base);
+        Vec3 n = normalized(rot.rotate(shield_plate_normal(shield, base)));
+        // Two directions along the plate, and eight probes round the touch point.
+        Vec3 u = cross(n, Vec3{0, 0, 1});
+        if (length(u) < 0.2) u = cross(n, Vec3{1, 0, 0});
+        u = normalized(u);
+        Vec3 v = cross(n, u);
+        double r = cfg.pose_shield_rim_cm, most = 0.0;
+        for (int i = 0; i < 8; ++i)
+        {
+            double ang = i * 3.14159265358979 / 4.0;
+            Vec3 probe = touch + (u * std::cos(ang) + v * std::sin(ang)) * r, p;
+            if (closest_on_weapon(shield, probe, &p) < 0.0) continue;
+            Vec3 off = p - probe;
+            off = off - n * dot(off, n); // along the plate only (a curved face sits a little behind)
+            most = (std::max)(most, length(off));
+        }
+        bool rim = most > 1.0;
+        HSVR_LOG("Grab: %s hand touched %ls off its straps and handles: %s (an edge %s %.0f cm; probes reached %.1f cm past it)", hname, shield->GetName().c_str(),
+                 rim ? "by the rim, taken" : "on a flat face, not taken", rim ? "within" : "not within", r, most);
+        return rim;
+    }
+
     // A shield taken with the grip button. The hand point, in the shield's frame from before the
     // game's set-up moves it, is matched against its fittings: the nearest within
     // pose_shield_point_cm wins. One of the game's own for that hand keeps the game's grip (bucklers
@@ -6909,6 +7007,11 @@ namespace
     {
         using namespace hsvr;
         const char* hand = side == 0 ? "left" : "right";
+        if (pavise_on_forearm(shield, side, cfg))
+        {
+            HSVR_LOG("Shield: %s hand took %ls: strapped on the forearm (the game's own strap grip, pose_pavise_forearm)", hand, shield->GetName().c_str());
+            return;
+        }
         std::wstring cls = shield_class(shield);
         Vec3 local = w0_rot.inverse().rotate(palm - w0_pos);
         Vec3 best_on;
@@ -8315,9 +8418,12 @@ namespace
                                  hi >= 0 ? hs[hi].name.c_str() : "none", hd, cfg.pose_grab_handle_cm);
                         continue;
                     }
+                    if (!(hi >= 0 && hd <= cfg.pose_grab_handle_cm) && class_name_starts(best, STR("Shield")) && !shield_off_handle_ok(side, best, hb, at, cfg)) continue;
                     bool ok = give_hand_weapon(side, pawn, best);
                     UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
-                    if (ok && now == best)
+                    if (ok && now == best && pavise_on_forearm(best, side, cfg))
+                        HSVR_LOG("Grab: %s hand took %ls: strapped on the forearm (the game's own strap grip, pose_pavise_forearm)", hand, best->GetName().c_str());
+                    else if (ok && now == best)
                     {
                         if (hi >= 0 && hd <= cfg.pose_grab_handle_cm)
                         {
@@ -8431,7 +8537,10 @@ namespace
             Vec3 hand_point = target + hand_rot.rotate(h.in_hand);
             double from_shoulder = length(grip_at - shoulder) - length(h.in_hand);
             double from_hand = length(grip_at - hand_point);
-            bool out = from_shoulder > reach + 2.0 || (!in_body && from_hand > reach);
+            // With the arm-lag hold a swing trails the hand by a few cm more, so the grip may be a little past
+            // reach without being stuck (playtest 2026-11-20: a flail let go with your hand 20 cm from it).
+            double reach_slack = cfg.pose_hold_arm_lag ? (std::max)(2.0, cfg.pose_hold_let_go_reach_slack_cm) : 2.0;
+            bool out = from_shoulder > reach + reach_slack || (!in_body && from_hand > reach);
             if (in_body && !stuck_is_thrust(h.weapon)) out = false; // a lodged cut: cut_through_tick decides
             if (in_body && cfg.stab_drag && stuck_is_thrust(h.weapon))
             {
@@ -8751,6 +8860,12 @@ namespace
                 Vec3 c{f.cx, f.cy, f.cz}, a = normalized(Vec3{f.ax, f.ay, f.az});
                 double h = (std::max)(0.0, f.length * 0.5 - half);
                 hs.push_back(Handle{c - a * h, c + a * h, f.name, 5, 5});
+                if (cfg.pose_shield_fixed_grip)
+                {
+                    // Fixed (Matthew 2026-11-20): held at its middle, any angle round it, never slid.
+                    hs.back().fixed = true;
+                    hs.back().fixed_t = 0.5;
+                }
             }
         }
         else
@@ -8766,6 +8881,21 @@ namespace
                 double g0 = (std::min)(0.0, lo + half), g1 = (std::max)(0.0, hi - half);
                 hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, g1}, "grip", -1, 2});
                 bool hafted = hi - lo >= 30.0;
+                // One-handed sword (a Guard, a blade past it, not hafted) by the game's own grip type, which
+                // ModularWeaponBP copies from its grip module (UG @19423 Grip R Hand Default = Spawned Weapon
+                // Grip.Grip R Hand Default). The game two-hands only types 10-16 (Willie_BP UG @494280 maps
+                // them to one-handed types; 0-9 and 17 stay as they are; grip_type_flow.md section 3).
+                double grip_type = read_number_variable(item, STR("Grip R Hand Default"));
+                bool two_hand_type = grip_type >= 10.0 && grip_type <= 16.0;
+                bool sword = !hafted && wide_hi && weapon_has_guard(item);
+                if (sword)
+                    HSVR_LOG("Handles: %ls: sword, game grip type %.0f (%s), grip %.1f..%.1f cm", item->GetName().c_str(), grip_type,
+                             grip_type < 0.0 ? "not found" : two_hand_type ? "two-handed: grip slides" : "one-handed", g0, g1);
+                if (sword && cfg.pose_slide_fixed_1h_sword && grip_type >= 0.0 && !two_hand_type && g1 - g0 > 1e-3)
+                {
+                    hs.back().fixed = true;
+                    hs.back().fixed_t = (std::min)(1.0, (std::max)(0.0, (0.0 - g0) / (g1 - g0))); // the game's grip point
+                }
                 if (hafted)
                 {
                     // Every further haft stretch is a handle of its own; the head is not (B&S).
@@ -8786,7 +8916,8 @@ namespace
         for (const Handle& h : hs)
         {
             char one[160];
-            std::snprintf(one, sizeof(one), "%s%s (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f)", list.empty() ? "" : "; ", h.name.c_str(), h.a.x, h.a.y, h.a.z, h.b.x, h.b.y, h.b.z);
+            std::snprintf(one, sizeof(one), "%s%s (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f)%s", list.empty() ? "" : "; ", h.name.c_str(), h.a.x, h.a.y, h.a.z, h.b.x, h.b.y, h.b.z,
+                          h.fixed ? " fixed, no slide" : "");
             list += one;
         }
         // A weapon whose parts were not found yet (spawned straight into the hand) is measured again next
@@ -8834,11 +8965,12 @@ namespace
     FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t)
     {
         using namespace hsvr;
+        if (hd.fixed) t = hd.fixed_t;
         Vec3 local = hd.a + (hd.b - hd.a) * t;
         Vec3 axis_local = length(hd.b - hd.a) > 1e-3 ? normalized(hd.b - hd.a) : Vec3{0, 0, 1};
         Vec3 axis = w0_rot.rotate(axis_local);
         FreeGrip g = make_free_grip(side, mesh, w0_pos, w0_rot, palm, w0_pos + w0_rot.rotate(local), &axis, hd.name.c_str());
-        g.has_handle = length(hd.b - hd.a) > 1e-3;
+        g.has_handle = length(hd.b - hd.a) > 1e-3 && !hd.fixed; // no slide on a fixed grip
         g.ha = hd.a;
         g.hb = hd.b;
         g.t = t;
@@ -9302,7 +9434,7 @@ namespace
                                     : (forearm ? " (on the forearm: strap shield)" : ""));
             }
             h.forearm = forearm;
-            if (forearm && !h.free.set && !h.into_hand_tried && cfg.pose_shield_in_hand)
+            if (forearm && !h.free.set && !h.into_hand_tried && cfg.pose_shield_in_hand && !pavise_on_forearm(weapon, side, cfg))
             {
                 h.into_hand_tried = true;
                 FreeGrip g;
@@ -9370,7 +9502,14 @@ namespace
             const std::vector<Handle>& hs = item_handles(weapon, base);
             double t = 0.0, d = 1e9;
             int hi = nearest_handle(hs, pivot, t, d);
-            if (hi >= 0 && d <= 4.0 && length(hs[hi].b - hs[hi].a) > 1e-3)
+            if (hi >= 0 && d <= 4.0 && hs[hi].fixed)
+            {
+                // A one-handed sword: held at its fixed spot (the game's grip point), no slide.
+                g.handle = hs[hi].name;
+                g.t = hs[hi].fixed_t;
+                g.pivot = hs[hi].a + (hs[hi].b - hs[hi].a) * g.t;
+            }
+            else if (hi >= 0 && d <= 4.0 && length(hs[hi].b - hs[hi].a) > 1e-3)
             {
                 g.has_handle = true;
                 g.ha = hs[hi].a;
@@ -9382,8 +9521,8 @@ namespace
                 g.pivot = g.ha + ab * g.t;
             }
             h.free = g;
-            HSVR_LOG("Hold: %s hand holds %ls by the game's grip%s%s", side == 0 ? "left" : "right", weapon->GetName().c_str(), g.has_handle ? ", on its " : " (no handle near)",
-                     g.has_handle ? g.handle.c_str() : "");
+            HSVR_LOG("Hold: %s hand holds %ls by the game's grip%s%s", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                     g.has_handle ? ", on its " : !g.handle.empty() ? ", at its " : " (no handle near)", g.handle.c_str());
         }
         if (h.free.set && h.free.has_handle && cfg.pose_slide && cfg.pose_hold_exact)
         {
@@ -9964,10 +10103,30 @@ namespace
                     double om = 2.0 / lag;
                     double z = cfg.pose_hold_damping_ratio > 0.0 ? cfg.pose_hold_damping_ratio : 1.0;
                     double per_point = two ? mass * 0.5 : mass;
+                    // Far behind the hand (a big jump, or pushed back by something) the hold stiffens back to the
+                    // B&S springs over pose_hold_shoulder_fade_from..to_cm (or 30..60 deg turned away): the hand is
+                    // on the weapon and can't be half a metre from it. The soft arm spring alone let weapons trail
+                    // 40-120 cm and the stuck rule dropped them (playtest 2026-11-20 18:30 UTC, max-strength Willie).
+                    double pk_o = pk, rk_o = rk;
+                    double pc_o = 2.0 * z * std::sqrt((std::max)(0.0, pk_o * st * per_point)) / dst;
+                    double rc_o = 2.0 * z * std::sqrt((std::max)(0.0, rk_o * st * 1e4 * ig)) / (dst * 1e4);
+                    double f0 = cfg.pose_hold_shoulder_fade_from_cm, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_shoulder_fade_to_cm);
+                    double e_cm = length(pivot_now - target_pivot);
+                    double e_deg = length(scaled_axis((rot * target_rot.inverse()).normalized())) * 57.2958;
+                    double stiff = (std::max)((std::min)(1.0, (std::max)(0.0, (e_cm - f0) / (f1 - f0))), (std::min)(1.0, (std::max)(0.0, (e_deg - 30.0) / 30.0)));
                     pk = per_point * om * om / (std::max)(1e-3, st);
                     pc = 2.0 * z * per_point * om / dst;
                     rk = (ig / 1e4) * om * om / (std::max)(1e-3, st);
                     rc = 2.0 * z * (ig / 1e4) * om / dst;
+                    if (stiff > 0.0)
+                    {
+                        pk += (std::max)(0.0, pk_o - pk) * stiff;
+                        pc += (std::max)(0.0, pc_o - pc) * stiff;
+                        rk += (std::max)(0.0, rk_o - rk) * stiff;
+                        rc += (std::max)(0.0, rc_o - rc) * stiff;
+                        HSVR_LOG_EVERY(0.5, "Hold: %s %ls %.0f cm / %.0f deg behind: arm spring stiffened %.0f%% toward the hand's", side == 0 ? "left" : "right",
+                                       weapon->GetName().c_str(), e_cm, e_deg, stiff * 100.0);
+                    }
                     if (cfg.pose_hold_shoulder_torque > 0.0)
                     {
                         double tau = cfg.pose_hold_shoulder_torque * (std::max)(0.0, body.total) + (two ? cfg.pose_hold_shoulder_torque * (std::max)(0.0, s2b.total) : 0.0);
@@ -11259,6 +11418,17 @@ namespace
         {
             UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             if (!weapon || g_hold[side].weapon != weapon) continue;
+            // "Just Picked Up" blocks sticking for 2 s after any equip (ModularWeaponBP @42292); in VR
+            // a weapon is in the hand within 0.1 s and stabbed with at once (playtest 2026-11-20d:
+            // 10% of hits, e.g. a head thrust at cutting 79 x impulse 2799 refused). Cleared once it
+            // has been held stab_pickup_grace_s.
+            if (hsvr::config().stab_pickup_grace_s >= 0.0 && g_hold[side].started > 0.0 &&
+                hsvr::now_seconds() - g_hold[side].started >= hsvr::config().stab_pickup_grace_s && bool_property(weapon, STR("Just Picked Up")))
+            {
+                set_variable(weapon, STR("Just Picked Up"), 0.0);
+                HSVR_LOG_EVERY(2.0, "Stab: %s %ls: Just Picked Up cleared after %.2f s in the hand", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                               hsvr::now_seconds() - g_hold[side].started);
+            }
             if (!bool_property(weapon, STR("Being Rubber Banded"))) continue;
             set_variable(weapon, STR("Being Rubber Banded"), 0.0);
             ++cleared[side];

@@ -300,6 +300,7 @@ namespace hsvr
         bool stab_wound_hold = true;
         // A weapon the mod holds is never left "Being Rubber Banded" by the game (it then can't stick and hits at x0.1).
         bool stab_no_rubber_band = true;
+        double stab_pickup_grace_s = 0.3; // the game's 2 s "Just Picked Up" (no sticking) cut to this; < 0 = the game's
         // A body with the weapon stuck in it is dragged by the hand (all its strength x
         // stab_drag_force_scale across the wound) instead of the hand letting go; the weapon slips
         // only after pulling at full strength with the grip past reach for stab_drag_grip_s x his
@@ -338,8 +339,8 @@ namespace hsvr
         double stab_start_depth_max_cm = 4.5;
         double stab_wound_in_cms = 120.0; // (was 50: daggers needed pushing and pushing, playtest 2026-11-20)
         double stab_wound_head_in_factor = 0.6;
-        double stab_wound_out_cms = 40.0;
-        double stab_wound_head_factor = 0.35;
+        double stab_wound_out_cms = 60.0;
+        double stab_wound_head_factor = 0.6;
         double pose_hold_turn_spring = 1100.0;
         double pose_hold_turn_damper = 75.0;
         // One hand's most turning force at the grip (N m, x his strength): a real wrist, not B&S's 250. A war
@@ -415,6 +416,7 @@ namespace hsvr
         bool pose_hold_let_go_ignore_self = true;
         bool pose_hold_let_go = true;
         double pose_hold_let_go_s = 0.15;
+        double pose_hold_let_go_reach_slack_cm = 15.0; // with the arm-lag hold: how far past his reach the grip may trail
         // No let-go for this long after a weapon comes into the hand (long weapons swing into place).
         double pose_hold_let_go_grace_s = 1.0;
         // Something is in the held weapon's way when it ends a tick this far (cm) short of where the
@@ -481,6 +483,11 @@ namespace hsvr
         double pose_slide_gap_max_cm = 4.0;
         bool pose_slide_rondel_stops = true;
         bool pose_slide_butt_is_haft = true;
+        // A one-handed sword (its grip module's game grip type, "Grip R Hand Default", is not one of the
+        // game's two-hand types 10-16) is held at one fixed spot on its grip, the game's own grip point:
+        // no trigger slide along the grip (Matthew 2026-11-20). Hand-and-a-half and two-handed swords, and
+        // every non-sword, keep the slide. The blade (half-swording) is unchanged.
+        bool pose_slide_fixed_1h_sword = true;
         double pose_slide_rate_min = 3.0;
         double pose_slide_rate_max = 40.0;
         double pose_slide_max_cm_s = 250.0; // fastest the hand runs along a weapon
@@ -522,6 +529,21 @@ namespace hsvr
         // game's sword grip, curled; -1 = leave the game's).
         bool pose_shield_in_hand = true;
         double pose_shield_hand_grip_type = 2.0;
+        // Shield straps and handles are fixed grips (Matthew 2026-11-20: "the grips, they should be
+        // fixed... I shouldn't be able to slide up and down"): the hand always holds one at its middle,
+        // at whatever angle round it the hand came in, and the trigger never slides it. 0 = slide.
+        bool pose_shield_fixed_grip = true;
+        // Away from its straps and handles a shield is taken only by its rim (the hand within
+        // pose_shield_rim_cm of an outer edge), never by the flat front or back (Matthew 2026-11-20:
+        // "I can also grab the shields anywhere... the flat front... I shouldn't be able to").
+        // pose_shield_grab_rim 0 = straps and handles only; pose_shield_grab_face 1 = anywhere, as before.
+        bool pose_shield_grab_rim = true;
+        double pose_shield_rim_cm = 4.0;
+        bool pose_shield_grab_face = false;
+        // Pavises start locked to the forearm like a real pavise (Matthew 2026-11-20): the game's own
+        // forearm strap grip is kept (not moved into the hand) where the game has one for that hand
+        // (light pavise both hands, heavy pavise left hand). Overrides pose_shield_in_hand for pavises.
+        bool pose_pavise_forearm = true;
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;
@@ -846,11 +868,11 @@ namespace hsvr
         // to stab_arm_mass_kg x that speed, along the thrust. The game then judges the stab itself
         // (alignment, armour, sticking, damage).
         bool stab_assist = true;
-        double stab_min_speed_cms = 120.0;
+        double stab_min_speed_cms = 70.0;  // (120 until 2026-11-20: "too much force, too much effort")
         double stab_min_into_cos = 0.5;
         double stab_arm_mass_kg = 4.0;
-        double stab_push_force_n = 150.0;
-        double stab_push_time_s = 0.15;
+        double stab_push_force_n = 60.0;
+        double stab_push_time_s = 0.1;
         // 1 = your character's head (and hair) is not drawn in your own view while you look out of
         // it; it still casts its shadow and is there for the game (hits, other characters). Helmets
         // and other headwear stay visible.
