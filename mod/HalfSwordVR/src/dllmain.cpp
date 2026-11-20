@@ -874,6 +874,7 @@ namespace
         hsvr::Vec3 target[2]; // last hand targets (where the hand bone goes, from the controller)
         hsvr::Quat hand_rot[2]; // and the hand bone's world rotation there
         hsvr::Vec3 raw_target[2]; // the same before scaling your reach to his (for measuring your arm)
+        hsvr::Vec3 reach_target[2]; // scaled to his reach but not yet clamped to it (where you mean his hand to be)
         bool hand_valid[2] = {false, false};
         hsvr::Vec3 swivel_local[2]; // smoothed elbow direction, in the body's frame
         bool swivel_valid[2] = {false, false};
@@ -889,6 +890,60 @@ namespace
         double swivel_time[2] = {0.0, 0.0};
     };
     PoseState g_pose;
+
+    // ---- Torso lean (see pose_lean in config.hpp) -----------------------------------------------
+    // The bones it bends, parent first; the last one (head) is only measured, never bent here.
+    const char* const kLeanBones[7] = {"spine_02", "spine_03", "spine_04", "spine_05", "neck_01", "neck_02", "head"};
+    const double kTwistWeight[6] = {0.10, 0.12, 0.14, 0.16, 0.22, 0.26};
+    struct LeanState
+    {
+        bool calibrated = false;
+        hsvr::Vec3 pts[7];       // the bones standing, relative to the actor, in the body's frame (at calibration)
+        double fwd = 0.0, side = 0.0;     // degrees bent now (smoothed and held to what the head height allows)
+        double want_fwd = 0.0, want_side = 0.0; // from the head alone
+        double twist = 0.0;      // torso twist total (degrees), shared with pose_torso_twist
+        hsvr::Quat q[6];         // each bone's turn this frame, in the body's frame (twist and bend)
+        hsvr::Vec3 head_moved;   // how far the bend and twist carry the head, in the body's frame
+        double pitch = 0.0, roll = 0.0; // your head's pitch down and roll right (degrees)
+        double t = 0.0;
+        double held = 1.0;       // share of the wanted bend allowed by the head height
+    };
+    LeanState g_lean;
+    // Test: hsvr.fake_head_tilt <pitch down> <roll right> <drop cm> nods the TRACKED headset about the
+    // base of the neck (12 cm below the head bone) and lowers it, for the pose only (not the view).
+    std::atomic<double> g_fake_tilt_pitch{0.0}, g_fake_tilt_roll{0.0}, g_fake_tilt_drop{0.0};
+    // Test: hsvr.fake_head_pose 1 = with no tracked headset (dev_fake_headset), a still head at the view's
+    // anchor (where your eyes were at recentring), looking straight ahead; the tilt above applies to it.
+    std::atomic<bool> g_fake_head_pose{false};
+    // Test: hsvr.fake_head_wobble <deg> <hz> nods the head (tracked or fake) up and down by that much,
+    // live from the clock, so the pose and the view's late copy see different head poses (as a moving
+    // real head does a frame apart).
+    std::atomic<double> g_fake_wobble_deg{0.0}, g_fake_wobble_hz{1.0};
+
+    // The bend and twist of the 6 bones, and where they carry the head (body frame). Each bone turns
+    // about its own joint and carries everything above it, as the end-of-graph Modify Bone nodes do
+    // in component space (Additive).
+    hsvr::Vec3 lean_fk(double fwd_deg, double side_deg, double twist_deg, hsvr::Quat out[6])
+    {
+        using namespace hsvr;
+        Vec3 p[7];
+        for (int i = 0; i < 7; ++i) p[i] = g_lean.pts[i];
+        const Vec3 up{0, 0, 1}, right{0, 1, 0}, fwd{1, 0, 0};
+        for (int i = 0; i < 6; ++i)
+        {
+            // Half Sword's Bend_F: spine_02..05 +20 deg each, neck_01 and neck_02 -30 each (of 80);
+            // Bend_L/R: spine 22.5 each, neck -30 each (of 90). Forward is a turn about right; a lean to
+            // the right is a turn about forward by minus the angle.
+            double f = i < 4 ? fwd_deg / 4.0 : -fwd_deg * 0.375;
+            double sd = i < 4 ? side_deg / 4.0 : -side_deg / 3.0;
+            Quat bend = (quat_axis_angle(right, f * kDegToRad) * quat_axis_angle(fwd, -sd * kDegToRad)).normalized();
+            Quat q = (quat_axis_angle(up, twist_deg * kTwistWeight[i] * kDegToRad) * bend).normalized();
+            out[i] = q;
+            for (int j = i + 1; j < 7; ++j) p[j] = p[i] + q.rotate(p[j] - p[i]);
+        }
+        return p[6] - g_lean.pts[6];
+    }
+
     UObject* live_posed_pawn()
     {
         UObject* posed = g_pose.pawn;
@@ -987,6 +1042,15 @@ namespace
         g_pose_room_moved_local = {};
 
         g_pose.chest_rot_local = (body_inv * socket_rotation(g_pose.mesh, bone_fname("spine_05"))).normalized();
+        g_lean = LeanState{};
+        g_lean.calibrated = true;
+        for (int i = 0; i < 7; ++i)
+        {
+            if (!bone_exists(d, kLeanBones[i])) g_lean.calibrated = false;
+            g_lean.pts[i] = body_inv.rotate(socket_location(d, bone_fname(kLeanBones[i])) - actor);
+        }
+        HSVR_LOG("Lean: %s; spine_02 at %.1f cm, head %.1f cm above the actor, head %.1f cm in front of spine_02",
+                 g_lean.calibrated ? "calibrated" : "a bone is MISSING, lean off", g_lean.pts[0].z, g_lean.pts[6].z, g_lean.pts[6].x - g_lean.pts[0].x);
         g_pose.pelvis_rot_local = (body_inv * socket_rotation(g_pose.mesh, bone_fname("pelvis"))).normalized();
         g_pose.feet_calibrated = true;
         for (int side = 0; side < 2; ++side)
@@ -1337,6 +1401,20 @@ namespace
         pose_body(cfg);
     }
 
+    // The mod's fist is in that hand (set each tick by grab_button), for the fist's finger shape.
+    std::atomic<bool> g_fist_side[2] = {false, false};
+    std::atomic<bool> g_fist_open[2] = {false, false}; // a slap: the fist is there but the hand is open (fingers as the game's)
+    std::atomic<int> g_fist_shape_test{-99}; // test: hsvr.fist_shape <n> (-99 = pose_fist_shape)
+    bool set_bool_property(UObject* owner, const TCHAR* name, bool value);
+    bool set_variable(UObject* owner, const TCHAR* name, double number, UObject* object, const FName* fname);
+    double read_number_variable(UObject* owner, const TCHAR* name);
+    bool fingers_tracked_on(int side); // the hand's fingers follow yours (then the fist needs no shape)
+    int fist_shape(const hsvr::Config& cfg)
+    {
+        int t = g_fist_shape_test.load();
+        return t != -99 ? t : cfg.pose_fist_shape;
+    }
+
     void fingers_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!g_pose_active.load() || !context || context != g_pose.instance || !function) return;
@@ -1363,6 +1441,20 @@ namespace
         {
             if (!prop[side]) continue;
             int g = side == g_anim_grip_two_side ? g_anim_grip_two : (now - g_anim_grip_time[side] < 0.1 ? g_anim_grip[side] : -1);
+            // A fist: the shape chosen for it (pose_fist_shape). The animation's own fist needs 'Hand
+            // Active' (0 in VR), so the hand would stay open (playtest 2026-11-19 21:10).
+            if (g_fist_side[side].load() && !g_fist_open[side].load() && !fingers_tracked_on(side))
+            {
+                int shape = fist_shape(hsvr::config());
+                if (shape >= 0 && shape <= 17) g = shape;
+                else if (shape == -1) set_bool_property(context, side == 0 ? STR("Grabbed L") : STR("Grabbed R"), true);
+                else if (shape == 100 || shape == 101)
+                {
+                    set_bool_property(context, side == 0 ? STR("L Guarding") : STR("R Guarding"), true);
+                    if (shape == 101 && read_number_variable(context, STR("Aim Swing Speed")) < 75.0)
+                        set_variable(context, STR("Aim Swing Speed"), 75.0, nullptr, nullptr);
+                }
+            }
             if (g != last[side])
             {
                 HSVR_LOG("Fingers: %s hand shows %d%s", side == 0 ? "left" : "right", g, g < 0 ? " (the game's own)" : "");
@@ -1502,6 +1594,24 @@ namespace
         }
         Vec3 up = component_inv.rotate({0.0, 0.0, 1.0});
         double total = rel * (std::min)(1.0, cfg.pose_torso_twist);
+        if (g_lean.calibrated)
+        {
+            // With the torso lean: the same twist plus the bend (lean_fk, the bones' turns in the body's
+            // frame), turned into his component's frame.
+            Quat q[6];
+            lean_fk(g_lean.fwd, g_lean.side, total, q);
+            Quat body = quat_from_yaw_deg(hips_yaw);
+            Quat to_comp = component_inv * body;
+            for (int i = 0; i < 6; ++i)
+            {
+                ModifyBoneNode* n = chain_node(kLeanBones[i]);
+                if (!n) continue;
+                if (total == 0.0 && g_lean.fwd == 0.0 && g_lean.side == 0.0) node_release(*n);
+                else node_add_rotation(*n, (to_comp * q[i] * to_comp.inverse()).normalized());
+            }
+            g_pose.twist_deg = total;
+            return;
+        }
         for (const auto& link : chain)
         {
             ModifyBoneNode* n = chain_node(link.bone);
@@ -1513,6 +1623,7 @@ namespace
     }
 
     std::atomic<int> g_fake_arm_mode{0};
+    std::atomic<int> g_fake_arm_epoch{0}; // bumped by every hsvr.arm_move: timed test paths restart
     std::atomic<double> g_fake_two_up{20.0};
     // hsvr.arm_move 10 <speed cm/s> <pitch deg> <height cm>: the right hand thrusts (stab tests).
     std::atomic<double> g_fake_thrust_pitch{60.0};
@@ -1532,6 +1643,9 @@ namespace
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     std::atomic<bool> g_fake_stick_click{false}; // test: hsvr.stick_click 1 holds the left stick click
     std::string g_park_socket;                  // test: hsvr.arm_park <socket> (arm mode 13): right hand there
+    double g_arm_floor[3] = {45.0, 15.0, 5.0};
+    std::atomic<double> g_fake_jitter_cm{0.0};
+    bool is_fist(UObject* weapon);  // test: hsvr.fake_jitter <cm>: tracking-like noise on the fake hands (rms per axis)  // test: hsvr.arm_floor <fwd> <side> <height> (arm mode 14): right hand near the floor
     std::atomic<float> g_fake_trigger[2] = {-1.0f, -1.0f}; // test: hsvr.trigger <0|1> <value>, -1 = the controller
     std::atomic<float> g_fake_squeeze[2] = {-1.0f, -1.0f}; // test: hsvr.squeeze <0|1> <value>, -1 = the controller
 
@@ -1753,6 +1867,145 @@ namespace
                 local = Vec3{35.0 + 10.0 * std::sin(t), out * 15.0, -15.0 + 20.0 * std::cos(t)};
             }
             grip = shoulder + body.rotate(local);
+            if (mode == 15 && side == 1 && g_pose.pawn)
+            {
+                // Pickup test: the right controller this high above the grip point of the nearest loose
+                // weapon (one no one holds, not sheathed), as a hand reaching for it on the floor.
+                static UObject* item = nullptr;
+                static double found_at = -1.0;
+                if (!item || now - found_at > 1.0)
+                {
+                    found_at = now;
+                    item = nullptr;
+                    std::vector<UObject*> ws;
+                    UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), ws);
+                    Vec3 ap = actor_location(g_pose.pawn);
+                    double best = 1e9;
+                    for (UObject* w : ws)
+                    {
+                        if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || bool_property(w, STR("Is Sheathed")) || is_fist(w)) continue;
+                        if (object_property(g_pose.pawn, STR("Weapon R")) == w || object_property(g_pose.pawn, STR("Weapon L")) == w) continue;
+                        UObject* b = object_property(w, STR("BaseMesh"));
+                        if (!b) continue;
+                        double d = length(component_location(b) - ap);
+                        if (d < best) { best = d; item = w; }
+                    }
+                }
+                if (item)
+                    if (UObject* b = object_property(item, STR("BaseMesh"))) grip = component_location(b) + Vec3{0, 0, g_arm_floor[2]};
+            }
+            if (mode == 18 && side == 1)
+            {
+                // Elbow / forearm test: the right hand swept from out to his right side, raised, across in
+                // front of his chest in 0.12 s (a horizontal elbow strike: the forearm and elbow lead),
+                // back over 0.6 s, every 2.2 s. Put a foe 35-45 cm in front.
+                static double t0 = -1.0;
+                static int seen18 = -1;
+                if (seen18 != g_fake_arm_epoch.load()) t0 = now;
+                seen18 = g_fake_arm_epoch.load();
+                // Aimed at the nearest other Willie's head when there is one (the sweep's frame faces him, the
+                // hand passing at 60% of his distance, so the forearm and elbow cross his head/neck).
+                Quat frame = body;
+                double reach = 18.0, height = 12.0;
+                {
+                    std::vector<UObject*> ws;
+                    UObjectGlobals::FindAllOf(STR("Willie_BP_C"), ws);
+                    UObject* foe = nullptr;
+                    double best = 1e9;
+                    for (UObject* w : ws)
+                    {
+                        if (!w || w == g_pose.pawn || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                        double d = length(actor_location(w) - shoulder);
+                        if (d < best) { best = d; foe = w; }
+                    }
+                    if (UObject* fm = foe ? object_property(foe, STR("Mesh")) : nullptr)
+                    {
+                        Vec3 head = socket_location(fm, bone_fname("head"));
+                        Vec3 to = head - shoulder;
+                        double flat = std::sqrt(to.x * to.x + to.y * to.y);
+                        if (flat > 5.0 && flat < 120.0)
+                        {
+                            frame = quat_from_yaw_deg(std::atan2(to.y, to.x) * 180.0 / 3.14159265358979);
+                            reach = flat * 0.6;
+                            height = to.z;
+                        }
+                    }
+                }
+                Vec3 a{reach, out * 38.0, height}, b{reach, -out * 25.0, height};
+                double t = std::fmod(now - t0, 2.2);
+                double u = t < 1.4 ? 0.0 : (t < 1.52 ? (t - 1.4) / 0.12 : (t < 1.6 ? 1.0 : (std::max)(0.0, 1.0 - (t - 1.6) / 0.6)));
+                grip = shoulder + frame.rotate(a + (b - a) * u);
+            }
+            if ((mode == 16 || mode == 17) && side == 1 && g_pose.pawn)
+            {
+                // Fist and grapple tests, on the nearest other Willie. 16: the right hand rests 25 cm in
+                // front of his shoulder 1.4 s, punches through the foe's head (10 cm past it) in 0.12 s,
+                // stays 0.2 s and comes back over 0.5 s (a punch at ~5-8 m/s), every 2.2 s.
+                // 17: the right hand on the foe's neck_02 for 2 s, then pulls back toward him 30 cm
+                // over 1 s and holds there (a throat grab and pull).
+                static UObject* foe = nullptr;
+                static double found_at = -1.0, t0 = -1.0;
+                static int seen = -1;
+                if (seen != g_fake_arm_epoch.load()) t0 = now;
+                seen = g_fake_arm_epoch.load();
+                if (!foe || now - found_at > 1.0)
+                {
+                    found_at = now;
+                    foe = nullptr;
+                    std::vector<UObject*> ws;
+                    UObjectGlobals::FindAllOf(STR("Willie_BP_C"), ws);
+                    Vec3 ap = actor_location(g_pose.pawn);
+                    double best = 1e9;
+                    for (UObject* w : ws)
+                    {
+                        if (!w || w == g_pose.pawn || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                        double d = length(actor_location(w) - ap);
+                        if (d < best) { best = d; foe = w; }
+                    }
+                }
+                UObject* fm = foe ? object_property(foe, STR("Mesh")) : nullptr;
+                if (fm)
+                {
+                    Vec3 rest = shoulder + body.rotate(Vec3{25.0, out * 10.0, -5.0});
+                    if (mode == 16)
+                    {
+                        Vec3 head = socket_location(fm, bone_fname("head"));
+                        Vec3 dir = head - rest;
+                        double dl = length(dir);
+                        Vec3 hit = dl > 1.0 ? head + dir * (10.0 / dl) : head;
+                        double t = std::fmod(now - t0, 2.2);
+                        if (t < 1.4) grip = rest;
+                        else if (t < 1.52) grip = rest + (hit - rest) * ((t - 1.4) / 0.12);
+                        else if (t < 1.72) grip = hit;
+                        else grip = hit + (rest - hit) * (std::min)(1.0, (t - 1.72) / 0.5);
+                    }
+                    else
+                    {
+                        Vec3 neck = socket_location(fm, bone_fname("neck_02"));
+                        Vec3 back = rest - neck;
+                        double bl = length(back);
+                        Vec3 pulled = bl > 1.0 ? neck + back * (30.0 / bl) : neck;
+                        double t = now - t0;
+                        static Vec3 hold_at, pull_to;
+                        if (t < 2.0)
+                        {
+                            hold_at = neck;
+                            pull_to = pulled;
+                            grip = neck;
+                        }
+                        else grip = hold_at + (pull_to - hold_at) * (std::min)(1.0, (t - 2.0) / 1.0);
+                    }
+                }
+            }
+            if (mode == 14 && side == 1 && g_pose.pawn)
+            {
+                // Floor test: the right controller this far ahead of and beside his capsule, this high above
+                // the floor under it (the capsule's bottom).
+                Vec3 ap = actor_location(g_pose.pawn);
+                double floor_z = ap.z - 90.0 * component_scale_z(object_property(g_pose.pawn, STR("Mesh")));
+                Vec3 flat = body.rotate(Vec3{g_arm_floor[0], g_arm_floor[1], 0.0});
+                grip = Vec3{ap.x + flat.x, ap.y + flat.y, floor_z + g_arm_floor[2]};
+            }
             if (mode == 13 && side == 1 && g_pose.pawn && !g_park_socket.empty())
             {
                 // Holster test: the right hand's grip point parked on a named socket of his mesh.
@@ -1840,6 +2093,20 @@ namespace
             }
             if (mode == 9) grip_rot = (body * quat_axis_angle(Vec3{0, 1, 0}, std::fmod(now, 6.0) / 6.0 * 2.0 * 3.14159265358979) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
         }
+        if (cfg.dev_pose_fake_tracking && g_fake_jitter_cm.load() > 0.0)
+        {
+            // Like a tracked controller: noise of this size at ~10-20 Hz (a fresh offset every 3 frames, eased).
+            static Vec3 cur[2], next[2];
+            static int n[2] = {0, 0};
+            auto gauss = []() {
+                double u1 = (std::rand() + 1.0) / (RAND_MAX + 2.0), u2 = (std::rand() + 1.0) / (RAND_MAX + 2.0);
+                return std::sqrt(-2.0 * std::log(u1)) * std::cos(6.283185307 * u2);
+            };
+            double j = g_fake_jitter_cm.load();
+            if (++n[side] % 3 == 0) next[side] = Vec3{gauss() * j, gauss() * j, gauss() * j};
+            cur[side] = cur[side] + (next[side] - cur[side]) * 0.5;
+            grip = grip + cur[side];
+        }
         Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
         g_pose.raw_target[side] = target;
         Vec3 S = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
@@ -1847,6 +2114,7 @@ namespace
         // as far out along his arm as it is along yours.
         if (cfg.pose_user_arm_cm > 1.0 && tracked) target = S + (target - S) * ((a.upper_length + a.lower_length) / cfg.pose_user_arm_cm);
         g_pose.target[side] = target;
+        g_pose.reach_target[side] = target;
         S = shoulder_reach(side, cfg, S, target, component_inv);
 
         Vec3 to = target - S;
@@ -2097,6 +2365,305 @@ namespace
             HSVR_LOG("Pose: %s now ticks %s the physics", i == 0 ? "his posed skeleton" : "his visible body", want ? "after" : "before");
         }
         g_pose_post_physics.store(want && set_on[0] == driver && set_post[0]);
+        static UObject* prereq_on = nullptr;
+        if (cfg.pose_mesh_after_driver && mesh && driver && prereq_on != mesh)
+        {
+            Call add(mesh, STR("AddTickPrerequisiteComponent"));
+            add.object(STR("PrerequisiteComponent"), driver);
+            if (add.fn && add.run())
+            {
+                prereq_on = mesh;
+                HSVR_LOG("Pose: his visible body now always ticks after his posed skeleton");
+            }
+        }
+    }
+
+    void set_named_number(UObject* owner, const TCHAR* name, double value);
+
+    // ---- Worn armour: animated every frame, and the helmet measured against your headset ---------
+    // Each worn piece is its own skeletal mesh on CharacterMesh0 copying its pose (ABP_CopyPose,
+    // PostUpdateWork), with update-rate optimisation on (torso_lean_and_helmet.md). pose_no_uro turns
+    // that off on his body, head and armour, and has his body refresh its bones every frame.
+    UObject* g_helmet = nullptr;     // the worn piece tagged "Head 2" or "Head 1" (helmet, hood), or null
+    UObject* g_helmet_pawn = nullptr;
+    std::vector<UObject*> g_head_pieces; // every worn piece on the head, and his head (CharacterMesh_Head)
+    void armour_scan(const hsvr::Config& cfg, UObject* pawn, UObject* mesh)
+    {
+        static double last = 0.0;
+        double now = hsvr::now_seconds();
+        if (pawn == g_helmet_pawn && now - last < 1.0) return;
+        last = now;
+        if (pawn != g_helmet_pawn) g_helmet = nullptr;
+        g_helmet_pawn = pawn;
+        UObject* helmet = nullptr;
+        std::vector<UObject*> parts;
+        Call kids(mesh, STR("GetChildrenComponents"));
+        kids.flag(STR("bIncludeAllDescendants"), false);
+        if (kids.run())
+            if (FProperty* cp = kids.param(STR("Children")))
+            {
+                struct RawArray
+                {
+                    UObject** data;
+                    int32_t num, max;
+                };
+                RawArray* arr = reinterpret_cast<RawArray*>(kids.buffer.data() + cp->GetOffset_Internal());
+                for (int32_t i = 0; arr->data && i < arr->num && i < 512; ++i)
+                    if (UObject* c = arr->data[i])
+                        if (c->GetClassPrivate()->GetName().find(STR("SkeletalMeshComponent")) != std::wstring::npos) parts.push_back(c);
+            }
+        int tagged = 0;
+        std::vector<UObject*> head_pieces;
+        if (UObject* head = object_property(pawn, STR("CharacterMesh_Head"))) head_pieces.push_back(head);
+        for (UObject* c : parts)
+            for (const TCHAR* tag : {STR("Head 2"), STR("Head 1")})
+            {
+                Call has(c, STR("ComponentHasTag"));
+                has.name(STR("Tag"), FName(tag, FNAME_Add));
+                if (!has.run()) continue;
+                FProperty* rp = has.param(STR("ReturnValue"));
+                if (rp && *(has.buffer.data() + rp->GetOffset_Internal()))
+                {
+                    if (!helmet || tag[5] == L'2') helmet = c; // the helmet slot (Head 2) over a hood (Head 1)
+                    head_pieces.push_back(c);
+                    ++tagged;
+                    break;
+                }
+            }
+        if (helmet != g_helmet)
+            HSVR_LOG("Helmet: %ls (%d skeletal pieces on his body, %d on the head)", helmet ? helmet->GetFullName().c_str() : STR("none worn"), (int)parts.size(), tagged);
+        g_helmet = helmet;
+        g_head_pieces = head_pieces;
+        if (cfg.pose_no_uro)
+        {
+            static int said = 0;
+            parts.push_back(mesh);
+            parts.push_back(object_property(pawn, STR("CharacterMesh_Head")));
+            parts.push_back(object_property(pawn, STR("DriverSkeleton")));
+            int changed = 0;
+            for (UObject* c : parts)
+            {
+                if (!c) continue;
+                FProperty* p = c->GetPropertyByNameInChain(STR("bEnableUpdateRateOptimizations"));
+                if (!p || p->GetClass().GetName() != STR("BoolProperty")) continue;
+                auto* flag = static_cast<FBoolProperty*>(p);
+                uint8_t* byte = reinterpret_cast<uint8_t*>(c) + p->GetOffset_Internal() + flag->GetByteOffset();
+                if (*byte & flag->GetFieldMask())
+                {
+                    *byte &= (uint8_t)~flag->GetFieldMask();
+                    ++changed;
+                }
+            }
+            // EVisibilityBasedAnimTickOption: AlwaysTickPoseAndRefreshBones 0.
+            if (FProperty* p = mesh->GetPropertyByNameInChain(STR("VisibilityBasedAnimTickOption")))
+            {
+                uint8_t* at = reinterpret_cast<uint8_t*>(mesh) + p->GetOffset_Internal();
+                if (*at != 0)
+                {
+                    HSVR_LOG("Pose: his body's animation tick option was %d; now refreshes its bones every frame", (int)*at);
+                    *at = 0;
+                }
+            }
+            if (changed && said < 20)
+            {
+                ++said;
+                HSVR_LOG("Pose: update-rate optimisation off on %d of his meshes (body, head, armour)", changed);
+            }
+        }
+    }
+
+    // ---- Helmet on this frame's headset pose (pose_helmet_late) ----------------------------------
+    // The pose runs on the headset pose read when the previous frame's views were set up; the view then
+    // takes a newer one. Right after the view takes it, every head piece is moved rigidly by the change
+    // (new headset pose x the one the pose used, inverted), so it sits exactly where the view is. Its
+    // place on the body is put back at the start of the next pose.
+    bool head_pose_world(const hsvr::Config& cfg, const hsvr::ControllerState& state, hsvr::Vec3& w, hsvr::Quat& r);
+    struct HeadUsed
+    {
+        bool valid = false;
+        hsvr::Vec3 at;   // headset (eyes) in the world, as this frame's pose used it
+        hsvr::Quat rot;
+        UObject* pawn = nullptr;
+    } g_head_used;
+    struct MovedPiece
+    {
+        UObject* comp;
+        double loc[3], rot[3];
+    };
+    std::vector<MovedPiece> g_late_moved;
+    struct LateStats
+    {
+        double worst_cm = 0, worst_deg = 0, sum_cm = 0, after_worst = 0, view_worst = 0, view_worst_deg = 0;
+        int n = 0;
+        double last_log = 0;
+    } g_late_stats;
+
+    void late_restore()
+    {
+        for (auto& m : g_late_moved)
+        {
+            Call c(m.comp, STR("K2_SetRelativeLocationAndRotation"));
+            c.three(STR("NewLocation"), m.loc[0], m.loc[1], m.loc[2]);
+            c.three(STR("NewRotation"), m.rot[0], m.rot[1], m.rot[2]);
+            c.flag(STR("bSweep"), false);
+            c.flag(STR("bTeleport"), true);
+            c.run();
+        }
+        g_late_moved.clear();
+    }
+
+    void helmet_on_latch()
+    {
+        using namespace hsvr;
+        hsvr::Config cfg = config();
+        if (!cfg.pose_helmet_late || !g_head_used.valid || !g_pose_active.load()) return;
+        UObject* pawn = live_posed_pawn();
+        if (!pawn || pawn != g_head_used.pawn || pawn != g_helmet_pawn || g_head_pieces.empty()) return;
+        Vec3 w;
+        Quat r;
+        if (!head_pose_world(cfg, controllers_state(), w, r)) return;
+        // Where the head bone belongs on the view's headset pose (as the head lock puts it).
+        Vec3 want = w - r.rotate(Vec3{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm});
+        Quat want_rot = (r * g_pose.head_offset).normalized();
+        Quat dr = (r * g_head_used.rot.inverse()).normalized();
+        double view_cm = length(w - g_head_used.at), view_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(dr.w))) * kRadToDeg;
+        late_restore();
+        double off_cm = 0.0, off_deg = 0.0, after = 0.0;
+        for (UObject* c : g_head_pieces)
+        {
+            if (!c) continue;
+            FProperty* lp = c->GetPropertyByNameInChain(STR("RelativeLocation"));
+            FProperty* rp = c->GetPropertyByNameInChain(STR("RelativeRotation"));
+            if (!lp || !rp) continue;
+            // Each piece is moved so ITS head bone lands on the view's head spot: this takes out both the
+            // view's newer headset pose and anything his body drew late.
+            Vec3 bone = socket_location(c, bone_fname("head"));
+            Quat bone_rot = socket_rotation(c, bone_fname("head"));
+            Quat d = (want_rot * bone_rot.inverse()).normalized();
+            double cm = length(want - bone), deg = 2.0 * std::acos((std::min)(1.0, std::fabs(d.w))) * kRadToDeg;
+            off_cm = (std::max)(off_cm, cm);
+            off_deg = (std::max)(off_deg, deg);
+            if (cm > 20.0 || deg > 45.0) continue; // not a frame's drift: leave it on the body
+            MovedPiece m{c, {0, 0, 0}, {0, 0, 0}};
+            read_three(reinterpret_cast<uint8_t*>(c) + lp->GetOffset_Internal(), lp, m.loc);
+            read_three(reinterpret_cast<uint8_t*>(c) + rp->GetOffset_Internal(), rp, m.rot);
+            Vec3 at = component_location(c);
+            Quat rot = component_rotation(c);
+            set_component_transform(c, want + d.rotate(at - bone), (d * rot).normalized(), true);
+            g_late_moved.push_back(m);
+            after = (std::max)(after, length(socket_location(c, bone_fname("head")) - want));
+        }
+        auto& st = g_late_stats;
+        st.worst_cm = (std::max)(st.worst_cm, off_cm);
+        st.worst_deg = (std::max)(st.worst_deg, off_deg);
+        st.after_worst = (std::max)(st.after_worst, after);
+        st.sum_cm += off_cm;
+        st.view_worst = (std::max)(st.view_worst, view_cm);
+        st.view_worst_deg = (std::max)(st.view_worst_deg, view_deg);
+        ++st.n;
+        double now = now_seconds();
+        if (now - st.last_log >= 0.25)
+        {
+            st.last_log = now;
+            HSVR_LOG("Helmet: as drawn before the late move, off the view's head spot by worst %.2f cm / %.2f deg (mean %.2f cm) over %d frames, %d head pieces; "
+                     "after the move worst %.3f cm; the view's headset moved %.2f cm / %.2f deg since the pose",
+                     st.worst_cm, st.worst_deg, st.n ? st.sum_cm / st.n : 0.0, st.n, (int)g_head_pieces.size(), st.after_worst, st.view_worst, st.view_worst_deg);
+            st = LateStats{};
+            st.last_log = now;
+        }
+    }
+
+    // Your headset in the world, as the pose uses it (with the test's made-up nod, hsvr.fake_head_tilt).
+    bool head_pose_world(const hsvr::Config& cfg, const hsvr::ControllerState& state, hsvr::Vec3& w, hsvr::Quat& r)
+    {
+        using namespace hsvr;
+        if (state.head_valid)
+        {
+            if (!stereo_tracking_to_world(state.head, w, r)) return false;
+        }
+        else
+        {
+            double base_yaw = 0.0;
+            if (!g_fake_head_pose.load() || !stereo_view_anchor(w, base_yaw)) return false;
+            r = quat_from_yaw_deg(base_yaw);
+        }
+        double p = g_fake_tilt_pitch.load(), ro = g_fake_tilt_roll.load(), dr = g_fake_tilt_drop.load();
+        if (double wa = g_fake_wobble_deg.load(); wa != 0.0) p += wa * std::sin(now_seconds() * 2.0 * kPi * g_fake_wobble_hz.load());
+        if (p != 0.0 || ro != 0.0 || dr != 0.0)
+        {
+            Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
+            Vec3 pivot = w - r.rotate(eye_offset) - Vec3{0.0, 0.0, 12.0};
+            Quat y = quat_from_yaw_deg(quat_yaw_deg(r));
+            Quat t = (quat_axis_angle(y.rotate({0, 1, 0}), p * kDegToRad) * quat_axis_angle(y.rotate({1, 0, 0}), -ro * kDegToRad)).normalized();
+            w = pivot + t.rotate(w - pivot) - Vec3{0.0, 0.0, dr};
+            r = (t * r).normalized();
+        }
+        return true;
+    }
+
+    // Torso lean for this frame: how far to bend (from your head's pitch and roll, smoothed), held to
+    // what the head height allows (his hips can't rise above standing: drop + head_moved.z >= -slack),
+    // and the twist share (pose_torso_twist). Fills g_lean.q / head_moved.
+    void lean_update(const hsvr::Config& cfg, bool have_head, const hsvr::Quat& head_rot, double heading, double drop)
+    {
+        using namespace hsvr;
+        double now = now_seconds(), dt = now - g_lean.t;
+        g_lean.t = now;
+        double want_f = 0.0, want_s = 0.0, twist = 0.0;
+        if (have_head)
+        {
+            Vec3 f = head_rot.rotate({1, 0, 0}), rt = head_rot.rotate({0, 1, 0});
+            g_lean.pitch = std::asin((std::max)(-1.0, (std::min)(1.0, -f.z))) * kRadToDeg;
+            g_lean.roll = std::asin((std::max)(-1.0, (std::min)(1.0, -rt.z))) * kRadToDeg;
+            if (cfg.pose_lean && g_lean.calibrated)
+            {
+                want_f = (std::min)(cfg.pose_lean_max_deg, (std::max)(0.0, g_lean.pitch - cfg.pose_lean_pitch_dead_deg) * cfg.pose_lean_pitch_gain);
+                double r = std::fabs(g_lean.roll) - cfg.pose_lean_roll_dead_deg;
+                want_s = r > 0.0 ? (std::min)(cfg.pose_lean_side_max_deg, r * cfg.pose_lean_roll_gain) * (g_lean.roll < 0.0 ? -1.0 : 1.0) : 0.0;
+            }
+            if (cfg.pose_torso_twist > 0.0)
+            {
+                double rel = quat_yaw_deg(head_rot) - heading;
+                while (rel > 180.0) rel -= 360.0;
+                while (rel < -180.0) rel += 360.0;
+                twist = (std::max)(-90.0, (std::min)(90.0, rel)) * (std::min)(1.0, cfg.pose_torso_twist);
+            }
+        }
+        g_lean.want_fwd = want_f;
+        g_lean.want_side = want_s;
+        double a = (cfg.pose_lean_smooth_s > 1e-4 && dt > 0.0 && dt < 0.2) ? 1.0 - std::exp(-dt / cfg.pose_lean_smooth_s) : 1.0;
+        double f = g_lean.fwd + (want_f - g_lean.fwd) * a, sd = g_lean.side + (want_s - g_lean.side) * a;
+        g_lean.twist = twist;
+        if (!g_lean.calibrated)
+        {
+            g_lean.fwd = g_lean.side = 0.0;
+            for (auto& q : g_lean.q) q = Quat{};
+            g_lean.head_moved = {};
+            return;
+        }
+        // Held to the head height: the largest share of (f, sd) whose head drop fits.
+        double lo = 0.0, hi = 1.0;
+        Quat q[6];
+        Vec3 m = lean_fk(f, sd, twist, q);
+        if (drop + m.z < -cfg.pose_lean_slack_cm)
+        {
+            for (int it = 0; it < 10; ++it)
+            {
+                double mid = 0.5 * (lo + hi);
+                if (drop + lean_fk(f * mid, sd * mid, twist, q).z < -cfg.pose_lean_slack_cm) hi = mid;
+                else lo = mid;
+            }
+            f *= lo;
+            sd *= lo;
+            m = lean_fk(f, sd, twist, q);
+            g_lean.held = lo;
+        }
+        else
+            g_lean.held = 1.0;
+        g_lean.fwd = f;
+        g_lean.side = sd;
+        for (int i = 0; i < 6; ++i) g_lean.q[i] = q[i];
+        g_lean.head_moved = m;
     }
 
     void pose_body(const hsvr::Config& cfg)
@@ -2106,6 +2673,9 @@ namespace
         UObject* mesh = find_pawn_mesh(&pawn);
         // A new map or a new life: everything kept about the old pawn's weapons and holds goes.
         if (g_pose.pawn && pawn != g_pose.pawn) forget_level_objects();
+        if (pawn && pawn == g_pose.pawn) late_restore(); // the head pieces back on his body (pose_helmet_late)
+        else g_late_moved.clear();
+        g_head_used.valid = false;
         bool willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
         UObject* driver = willie ? object_property(pawn, STR("DriverSkeleton")) : nullptr;
         UObject* instance = object_property(driver, STR("AnimScriptInstance"));
@@ -2168,11 +2738,11 @@ namespace
         Vec3 room{0, 0, 0};
         Vec3 anchor;
         double base_yaw = 0.0;
-        if (cfg.pose_follow_room && state.head_valid && stereo_view_anchor(anchor, base_yaw))
+        if (cfg.pose_follow_room && (state.head_valid || g_fake_head_pose.load()) && stereo_view_anchor(anchor, base_yaw))
         {
             Vec3 head_world;
             Quat head_rot;
-            if (stereo_tracking_to_world(state.head, head_world, head_rot))
+            if (head_pose_world(cfg, state, head_world, head_rot))
             {
                 // Walking is measured at your neck, not your eyes: your eyes swing round your neck when
                 // you turn or nod, and that is not a step (a 180 degree turn moved the eyes ~18 cm and
@@ -2236,12 +2806,12 @@ namespace
             double held = g_fake_head_drop.load();
             g_crouch_drop = held >= 0.0 ? (std::min)(55.0 * component_scale_z(mesh), held) : 20.0 - 20.0 * std::cos(now_seconds() * 0.4);
         }
-        else if (cfg.pose_crouch && state.head_valid)
+        else if (cfg.pose_crouch && (state.head_valid || g_fake_head_pose.load()))
         {
             Vec3 view_anchor, head_world;
             Quat head_rot;
             double unused_yaw = 0.0;
-            if (stereo_view_anchor(view_anchor, unused_yaw) && stereo_tracking_to_world(state.head, head_world, head_rot))
+            if (stereo_view_anchor(view_anchor, unused_yaw) && head_pose_world(cfg, state, head_world, head_rot))
             {
                 double scale = component_scale_z(mesh);
                 // Measured at the neck too, so looking down is not crouching.
@@ -2272,6 +2842,17 @@ namespace
         else
             g_button_crouch = 0.0;
         g_crouch_drop = (std::min)(55.0 * component_scale_z(mesh), g_crouch_drop + g_button_crouch);
+        // Torso lean: the bend carries his head forward and down; his hips go back by the forward part
+        // and stay up by the downward part, so his head still ends at your neck and the chest moves in.
+        {
+            Vec3 hw;
+            Quat hr;
+            bool have_head = !cfg.dev_pose_fake_tracking && head_pose_world(cfg, state, hw, hr);
+            lean_update(cfg, have_head, hr, heading, g_crouch_drop);
+            Vec3 m = g_lean.head_moved;
+            place = place - body.rotate(Vec3{m.x, m.y, 0.0});
+            g_crouch_drop = (std::max)(0.0, g_crouch_drop + m.z);
+        }
         if (g_crouch_drop > 10.0) crouch_push_log(pawn, mesh);
         place.z -= g_crouch_drop;
         // Moved, not teleported: a teleport snaps his kinematic physics bodies (the hand holding a
@@ -2296,7 +2877,7 @@ namespace
         {
             Vec3 head_world;
             Quat head_rot;
-            bool have = !cfg.dev_pose_fake_tracking && state.head_valid && stereo_tracking_to_world(state.head, head_world, head_rot);
+            bool have = !cfg.dev_pose_fake_tracking && head_pose_world(cfg, state, head_world, head_rot);
             if (!have && cfg.dev_pose_fake_tracking)
             {
                 // Made-up path: looks left and right, and up and down.
@@ -2305,6 +2886,53 @@ namespace
                 if (g_turn_valid && cfg.pose_body_turn) // the same made-up look the body turning follows
                     head_rot = (quat_from_yaw_deg(g_turn_yaw + 80.0 * std::sin(t * 0.25)) * rot_to_quat(20.0 * std::sin(t * 0.7), 0.0, 0.0)).normalized();
                 have = true;
+            }
+            g_head_used.valid = have && !cfg.dev_pose_fake_tracking;
+            g_head_used.at = head_world;
+            g_head_used.rot = head_rot;
+            g_head_used.pawn = pawn;
+            // The helmet (and his head) as drawn last frame against where the head was sent last frame:
+            // worst and mean over each quarter second (log "Helmet:").
+            {
+                static Vec3 prev_want;
+                static Quat prev_rot;
+                static bool prev_ok = false;
+                static double worst_cm = 0, worst_deg = 0, sum_cm = 0, mesh_worst = 0, last_log = 0;
+                static int count = 0;
+                if (prev_ok)
+                {
+                    auto angle = [](const Quat& a, const Quat& b) {
+                        double d = std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
+                        return 2.0 * std::acos((std::min)(1.0, d)) * kRadToDeg;
+                    };
+                    double mesh_cm = length(socket_location(mesh, bone_fname("head")) - prev_want);
+                    mesh_worst = (std::max)(mesh_worst, mesh_cm);
+                    if (g_helmet && g_helmet_pawn == pawn)
+                    {
+                        double cm = length(socket_location(g_helmet, bone_fname("head")) - prev_want);
+                        double deg = angle(socket_rotation(g_helmet, bone_fname("head")), prev_rot);
+                        worst_cm = (std::max)(worst_cm, cm);
+                        worst_deg = (std::max)(worst_deg, deg);
+                        sum_cm += cm;
+                        ++count;
+                    }
+                }
+                if (now - last_log >= 0.25)
+                {
+                    last_log = now;
+                    if (prev_ok)
+                        HSVR_LOG("Helmet: vs the headset last frame: worst %.2f cm / %.2f deg, mean %.2f cm over %d frames%s; his head bone worst %.2f cm",
+                                 worst_cm, worst_deg, count ? sum_cm / count : 0.0, count, g_helmet ? "" : " (no helmet worn)", mesh_worst);
+                    worst_cm = worst_deg = sum_cm = mesh_worst = 0.0;
+                    count = 0;
+                }
+                prev_ok = false;
+                if (have && cfg.pose_head_lock && g_pose_anchor_fixed && !cfg.dev_pose_fake_tracking)
+                {
+                    prev_want = head_world - head_rot.rotate(Vec3{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm});
+                    prev_rot = (head_rot * g_pose.head_offset).normalized();
+                    prev_ok = true;
+                }
             }
             if (ModifyBoneNode* n = chain_node("head"))
             {
@@ -2343,6 +2971,15 @@ namespace
             node_release(*n);
         }
         pose_torso_twist(cfg, have_look, look_rot, heading, component_inv);
+        // The game's own forward bends (crouch Root Height, Lean Forward (Grabbing)) feed
+        // Anim_Add_Bend_AO from the animation's copies, written by the update this runs after; with the
+        // lean they are set to standing, so only your lean bends him (torso_lean_and_helmet.md).
+        if (cfg.pose_lean && cfg.pose_lean_cancel_game_bend && g_lean.calibrated && cfg.pose_in_anim_update && g_pose_in_anim_at.load() >= now - 0.001)
+        {
+            set_named_number(g_pose.instance, STR("Root Height"), 85.0 * component_scale_z(mesh));
+            set_named_number(g_pose.instance, STR("Lean Forward (Grabbing)"), 0.0);
+        }
+        armour_scan(cfg, pawn, mesh);
         pose_feet(cfg, pawn, actor, heading, component_inv);
         for (int side = 0; side < 2; ++side)
         {
@@ -2375,6 +3012,21 @@ namespace
             double chest_yaw = quat_yaw_deg((socket_rotation(mesh, bone_fname("spine_05")) * g_pose.chest_rot_local.inverse()).normalized());
             double hips_yaw = quat_yaw_deg((socket_rotation(mesh, bone_fname("pelvis")) * g_pose.pelvis_rot_local.inverse()).normalized());
             double look_yaw = have_look ? quat_yaw_deg(look_rot) : 0.0;
+            {
+                // Where his chest is from your eyes (body frame): + forward = under your view when you look down.
+                Vec3 hw;
+                Quat hr;
+                if (!cfg.dev_pose_fake_tracking && head_pose_world(cfg, state, hw, hr))
+                {
+                    Vec3 c = body.inverse().rotate(socket_location(mesh, bone_fname("spine_05")) - hw);
+                    Vec3 cl = body.inverse().rotate(socket_location(mesh, bone_fname("clavicle_l")) - hw);
+                    Vec3 cr = body.inverse().rotate(socket_location(mesh, bone_fname("clavicle_r")) - hw);
+                    HSVR_LOG("Lean: your head pitch %.0f roll %.0f; wanted forward %.0f side %.0f, bent forward %.0f side %.0f (%.0f%% allowed by head height); "
+                             "head carried (%.1f, %.1f, %.1f) cm, crouch %.0f cm; chest (spine_05) %.1f cm in front of your eyes, %.1f below; clavicles %.1f / %.1f in front",
+                             g_lean.pitch, g_lean.roll, g_lean.want_fwd, g_lean.want_side, g_lean.fwd, g_lean.side, g_lean.held * 100.0, g_lean.head_moved.x,
+                             g_lean.head_moved.y, g_lean.head_moved.z, g_crouch_drop, c.x, -c.z, cl.x, cr.x);
+                }
+            }
             HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d, torso twist %.0f deg asked; on screen: head %.0f, chest %.0f, hips %.0f (chest %+.0f from hips)",
                      v[0], v[1], v[2], mode, g_pose.twist_deg, look_yaw, chest_yaw, hips_yaw, wrap_deg(chest_yaw - hips_yaw));
             if (g_feet_active.load())
@@ -2406,6 +3058,9 @@ namespace
     UFunction* g_receive_tick = nullptr;
     bool g_hold_have = false;
     hsvr::Vec3 g_hold_location;
+    // Step Height 2 just before his tick: the leash's height uses this value (walking_floor_loss.md).
+    bool g_step_h2_have = false;
+    double g_step_h2_pre = 0.0;
 
     double number_property(UObject* owner, FProperty* p)
     {
@@ -2772,11 +3427,21 @@ namespace
         }
     }
 
+    void fist_flags_before_tick(UObject* pawn);
+    void body_grab_before_tick(UObject* pawn);
+    void fist_flags_after_tick(UObject* pawn);
+    void body_grab_after_tick(UObject* pawn);
+    void body_hit_watch(UObject* pawn);
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
         g_hold_location = actor_location(context);
         g_hold_have = true;
+        {
+            FProperty* p = context->GetPropertyByNameInChain(STR("Step Height 2"));
+            g_step_h2_have = p != nullptr;
+            g_step_h2_pre = p ? number_property(context, p) : 0.0;
+        }
         if (g_pose_active.load())
         {
             log_joint_before_tick(context);
@@ -2784,6 +3449,8 @@ namespace
             turn_body_before_tick();
             stick_walk_before_tick(context);
             swing_speed_before_tick(context);
+            fist_flags_before_tick(context);
+            body_grab_before_tick(context);
             for (int side = 0; side < 2; ++side)
                 if (g_draw[side].active) set_bool_property(context, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
             scabbard_before_tick(context);
@@ -3702,6 +4369,8 @@ namespace
         UObject* weapon = nullptr;
         FreeGrip free;
         bool handle_slide = false;     // sliding along its handle this tick (axial momentum kept)
+        hsvr::Vec3 vel_f, ang_f;       // the hand's velocity and spin at the point held, smoothed
+        bool vel_f_set = false;
         hsvr::Vec3 handle_axis;        // that handle's line, world
         double handle_keep = 0.0;      // how much of its own motion along the line it keeps (0..1)
         bool handle_sliding_logged = false;
@@ -4639,12 +5308,22 @@ namespace
         int grip_r = -1, grip_l = -1; // finger shape for that hand (-1 = the game's own)
     };
     const std::vector<Handle>& item_handles(UObject* item, UObject* base);
+    // Weapons and tools are taken only by a handle; shields and bottles anywhere.
+    bool grab_needs_handle(UObject* item)
+    {
+        if (!item) return false;
+        std::wstring cls = item->GetClassPrivate() ? item->GetClassPrivate()->GetName() : std::wstring();
+        if (cls.rfind(STR("Shield"), 0) == 0) return false;
+        if (cls.find(STR("Consumable")) != std::wstring::npos || cls.find(STR("Bottle")) != std::wstring::npos) return false;
+        if (cls.find(STR("Fists")) != std::wstring::npos) return false;
+        return true;
+    }
     int nearest_handle(const std::vector<Handle>& hs, const hsvr::Vec3& local, double& t, double& dist);
     FreeGrip make_free_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const hsvr::Vec3& point,
                             const hsvr::Vec3* axis, const char* what);
     FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t);
     int clamp_grip_type(int side, int g);
-    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out = nullptr);
+    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out = nullptr, UObject** out_part = nullptr);
 
     // The grab button (Phase 4): squeezing a controller's grip with that hand empty picks up the
     // nearest loose weapon whose body is within pose_grab_radius_cm of the hand; letting go of the
@@ -4936,6 +5615,12 @@ namespace
         double t = 0.0, hd = 1e9;
         int hi = nearest_handle(hs, local, t, hd);
         bool on_handle = hi >= 0 && hd <= cfg.pose_grab_handle_cm;
+        if (!on_handle && cfg.pose_grab_weapon_handles_only && grab_needs_handle(weapon))
+        {
+            HSVR_LOG("Two hands: %s grip squeezed on %ls off its handles (nearest %s %.1f cm away): not taken", side == 0 ? "left" : "right",
+                     weapon->GetName().c_str(), hi >= 0 ? hs[hi].name.c_str() : "none", hd);
+            return false;
+        }
         Vec3 spot = local;
         if (!on_handle)
         {
@@ -5485,11 +6170,15 @@ namespace
     std::unordered_map<UObject*, std::vector<UObject*>> g_weapon_parts;
     double g_weapon_parts_time = -10.0;
 
-    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out)
+    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part)
     {
         if (!weapon) return -1.0;
         double now = hsvr::now_seconds();
-        if (now - g_weapon_parts_time > 0.25)
+        // A weapon spawned straight into the hand (free play) is not in a list made before it existed:
+        // rebuild at once for it (at most every 0.05 s), not only every 0.25 s (playtest 12:19: a fresh
+        // two-handed axe measured a zero-length handle and kept it).
+        bool unknown = g_weapon_parts.find(weapon) == g_weapon_parts.end();
+        if (now - g_weapon_parts_time > 0.25 || (unknown && now - g_weapon_parts_time > 0.05))
         {
             g_weapon_parts_time = now;
             g_weapon_parts.clear();
@@ -5528,6 +6217,7 @@ namespace
             if (d < 0.0 || (best >= 0.0 && d >= best)) continue;
             best = d;
             if (out) *out = q.vec(STR("OutPointOnBody"));
+            if (out_part) *out_part = c;
         }
         return best;
     }
@@ -5726,6 +6416,816 @@ namespace
         return true;
     }
 
+    // ---- Body grabs (a Willie's throat, arm, ...) ---------------------------------------------------
+    // The game's latch joins hand_r to the victim's bone with 'PhysicsConstraint R Hand' (linear
+    // limited, reeled in over 0.2 s; grab_pickup.md). Its grip-slip (UG @360300) lets go when the
+    // joint's force beats his grip strength; with his hand posed from your controller (kinematic),
+    // the pull has no limit. log_body_grab writes what the game sees every 0.1 s, to measure it.
+    // pose_grab_body_hold 1: after 0.25 s the joint's linear part becomes a capped spring (as Matthew's
+    // framework, protocol/grab.rs: the body's weight holds the hand back), and the hand pulled
+    // pose_grab_body_let_go_cm past where it took hold for 0.3 s lets go (B&S).
+    struct BodyGrab
+    {
+        bool on = false;
+        double since = -1.0, rest = 0.0, far_since = -1.0, last_log = -10.0;
+        UObject* comp = nullptr;
+        UObject* victim = nullptr;
+        FName bone;
+        bool softened = false;
+        double force = 0.0, torque = 0.0, release_rate = 0.0, stretch = 0.0, strangle = 0.0, choke = 0.0, conscious = 0.0;
+        double grip_t = 121.0; // his grip strength T as the game's slip rule computes it
+    };
+    BodyGrab g_body_grab[2];
+    std::atomic<int> g_body_hold_test{-99}; // test: hsvr.body_hold <n> (-99 = pose_grab_body_hold)
+
+    // The spring's cap: pose_grab_body_cap_per_t x his grip strength T, so the joint's force stays under
+    // T (the game's slip threshold) and his strength, injuries, pain and consciousness set how hard he
+    // can pull a body (test 4, 2026-11-19: the force levels off at about cap/500). 0 = pose_grab_body_max.
+    double body_spring_cap(const hsvr::Config& cfg, double grip_t)
+    {
+        return cfg.pose_grab_body_cap_per_t > 0.0 ? cfg.pose_grab_body_cap_per_t * (std::max)(1.0, grip_t) : cfg.pose_grab_body_max;
+    }
+    void body_spring_joint(UObject* joint, const hsvr::Config& cfg, double cap)
+    {
+        for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
+        {
+            Call c1(joint, fn);
+            c1.byte(STR("ConstraintType"), 0); // free: the spring holds it
+            c1.number(STR("LimitSize"), 0.0);
+            c1.run();
+        }
+        Call pos(joint, STR("SetLinearPositionDrive"));
+        pos.flag(STR("bEnableDriveX"), true);
+        pos.flag(STR("bEnableDriveY"), true);
+        pos.flag(STR("bEnableDriveZ"), true);
+        pos.run();
+        Call vel(joint, STR("SetLinearVelocityDrive"));
+        vel.flag(STR("bEnableDriveX"), true);
+        vel.flag(STR("bEnableDriveY"), true);
+        vel.flag(STR("bEnableDriveZ"), true);
+        vel.run();
+        Call target(joint, STR("SetLinearPositionTarget"));
+        target.three(STR("InPosTarget"), 0.0, 0.0, 0.0);
+        target.run();
+        Call vtarget(joint, STR("SetLinearVelocityTarget"));
+        vtarget.three(STR("InVelTarget"), 0.0, 0.0, 0.0);
+        vtarget.run();
+        Call lin(joint, STR("SetLinearDriveParams"));
+        lin.number(STR("PositionStrength"), cfg.pose_grab_body_spring);
+        lin.number(STR("VelocityStrength"), cfg.pose_grab_body_damper);
+        lin.number(STR("InForceLimit"), cap);
+        lin.run();
+    }
+
+    // Willie's tick re-shapes his hand joints every tick (as for weapons, @454086), so a softened body
+    // grab's spring is written again right after it.
+    void body_grab_after_tick(UObject* pawn)
+    {
+        hsvr::Config cfg = hsvr::config();
+        int hold = g_body_hold_test.load() != -99 ? g_body_hold_test.load() : cfg.pose_grab_body_hold;
+        if (hold != 1) return;
+        for (int side = 0; side < 2; ++side)
+            if (g_body_grab[side].on && g_body_grab[side].softened)
+                if (UObject* joint = object_property(pawn, side == 0 ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand")))
+                    body_spring_joint(joint, cfg, body_spring_cap(cfg, g_body_grab[side].grip_t));
+    }
+
+    // Limb strikes (elbows, forearms, open hands): the struck Willie's body-hit block (UG 791446, from
+    // his armour proxies' OnComponentHit -> NewFunction) damages himself (impulse capped at 1500 while
+    // standing, x the hitter's surface rigidity). Test 9: the posed arm's contacts do reach it.
+    // log_body_hits: every other Willie's 'Last Hit Impulse (Other Body)', Health and
+    // Consciousness, logged when they change, with what hit him ('Other Comp').
+    void body_hit_watch(UObject* pawn)
+    {
+        if (!hsvr::config().log_body_hits) return;
+        static std::vector<UObject*> foes;
+        static double found_at = -10.0;
+        struct Seen { double impulse = -1.0, health = -1.0, conscious = -1.0; };
+        static std::map<UObject*, Seen> seen;
+        double now = hsvr::now_seconds();
+        if (now - found_at > 1.0)
+        {
+            found_at = now;
+            foes.clear();
+            std::vector<UObject*> all;
+            UObjectGlobals::FindAllOf(STR("Willie_BP_C"), all);
+            for (UObject* w : all)
+                if (w && w != pawn && w->GetName().rfind(STR("Default__"), 0) != 0) foes.push_back(w);
+            std::map<UObject*, Seen> keep;
+            for (UObject* w : foes) keep[w] = seen[w];
+            seen.swap(keep);
+        }
+        for (UObject* w : foes)
+        {
+            Seen& was = seen[w];
+            // Willie-on-Willie contacts go through branch H of the block, which writes 'Last Hit Impulse
+            // (Other Body)' (reset after 1 s), not 'Last Hit Impulse' (ground hits only).
+            double impulse = read_number_variable(w, STR("Last Hit Impulse (Other Body)"));
+            double health = read_number_variable(w, STR("Health"));
+            double conscious = read_number_variable(w, STR("Consciousness"));
+            bool hit = was.impulse >= 0.0 && impulse != was.impulse && impulse > 0.0;
+            bool hurt = was.health >= 0.0 && health < was.health - 0.01;
+            if (hit || hurt)
+            {
+                UObject* other = object_property(w, STR("Other Comp"));
+                UObject* other_owner = nullptr;
+                if (other)
+                {
+                    Call oc(other, STR("GetOwner"));
+                    oc.run();
+                    other_owner = oc.object_result();
+                }
+                HSVR_LOG("Body hit: %ls last hit impulse %.0f, health %.1f -> %.1f, consciousness %.0f -> %.0f, hit by limbs %d, by %ls.%ls%s", w->GetName().c_str(), impulse,
+                         was.health, health, was.conscious, conscious, (int)bool_property(w, STR("Beig Hit By Limbs")), other_owner ? other_owner->GetName().c_str() : STR("?"),
+                         other ? other->GetName().c_str() : STR("?"), other_owner == pawn ? " (you)" : "");
+            }
+            was.impulse = impulse;
+            was.health = health;
+            was.conscious = conscious;
+        }
+    }
+
+    // pose_grab_body_no_slip: right before Willie's tick (where the slip rule runs), the held hand's
+    // 'Hand Block Drop' is set while his grip strength is above pose_grab_body_slip_below_t.
+    bool g_body_blocking[2] = {false, false};
+    void body_grab_before_tick(UObject* pawn)
+    {
+        hsvr::Config cfg = hsvr::config();
+        for (int side = 0; side < 2; ++side)
+        {
+            const BodyGrab& b = g_body_grab[side];
+            bool want = cfg.pose_grab_body_no_slip && b.on && b.grip_t >= cfg.pose_grab_body_slip_below_t;
+            const TCHAR* flag = side == 0 ? STR("L Hand Block Drop") : STR("R Hand Block Drop");
+            if (want) set_bool_property(pawn, flag, true);
+            else if (g_body_blocking[side]) set_bool_property(pawn, flag, false);
+            if (want != g_body_blocking[side])
+                HSVR_LOG("Body grab: %s hand's slip rule %s (his grip T %.0f)", side == 0 ? "left" : "right", want ? "held off" : "back to the game's", b.grip_t);
+            g_body_blocking[side] = want;
+        }
+    }
+
+    void body_grab_tick(UObject* pawn, const hsvr::Config& cfg_in)
+    {
+        using namespace hsvr;
+        Config cfg = cfg_in;
+        if (g_body_hold_test.load() != -99) cfg.pose_grab_body_hold = g_body_hold_test.load();
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        double now = now_seconds();
+        for (int side = 0; side < 2; ++side)
+        {
+            bool L = side == 0;
+            const char* hand = L ? "left" : "right";
+            BodyGrab& b = g_body_grab[side];
+            ObjectGrab& og = g_object_grab[side];
+            bool grabbed = bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R"));
+            bool body = grabbed && og.component && og.character;
+            if (!body)
+            {
+                if (b.on)
+                    HSVR_LOG("Body grab: %s hand let go after %.2f s (Grabbed %d); last: joint force %.0f / torque %.0f, release rate %.2f, stretch %.1f cm, strangle %.2f, choke %.3f, consciousness %.0f",
+                             hand, now - b.since, (int)grabbed, b.force, b.torque, b.release_rate, b.stretch, b.strangle, b.choke, b.conscious);
+                b = BodyGrab{};
+                continue;
+            }
+            Vec3 hb = mesh ? socket_location(mesh, bone_fname(L ? "hand_l" : "hand_r")) : Vec3{};
+            if (!b.on)
+            {
+                b.on = true;
+                b.since = now;
+                b.comp = og.component;
+                b.bone = og.bone;
+                Call oc(og.component, STR("GetOwner"));
+                oc.run();
+                b.victim = oc.object_result();
+                b.rest = length(hb - socket_location(b.comp, b.bone));
+                HSVR_LOG("Body grab: %s hand holds %ls bone %ls (%.1f cm from the hand bone)", hand, b.victim ? b.victim->GetName().c_str() : STR("?"),
+                         b.bone.ToString().c_str(), b.rest);
+            }
+            b.stretch = length(hb - socket_location(b.comp, b.bone)) - b.rest;
+            UObject* joint = object_property(pawn, L ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand"));
+            if (joint)
+            {
+                Call f(joint, STR("GetConstraintForce"));
+                if (f.run())
+                {
+                    b.force = length(f.vec(STR("OutLinearForce")));
+                    b.torque = length(f.vec(STR("OutAngularForce")));
+                }
+            }
+            b.release_rate = read_number_variable(pawn, L ? STR("Grab L Release Rate") : STR("Grab R Release Rate"));
+            if (b.victim)
+            {
+                b.strangle = read_number_variable(b.victim, STR("Strangle Rate"));
+                b.choke = read_number_variable(b.victim, STR("Choke To Death Rate"));
+                b.conscious = read_number_variable(b.victim, STR("Consciousness"));
+            }
+            // His grip strength as the game's slip rule computes it (grab_and_mass.md, UG @361596-362128;
+            // the gauntlet/Mordhau/zombie/lawnmower factors left out): T = Arm Tonus x All Body Tonus x
+            // Consciousness/100 x MRC(Pain, 5..10 -> 1..2) x max(MRU(Muscle Rate, 0..1 -> 1..1.5), 0.5),
+            // then max(T, Arm Health). It slips while the joint force is above T.
+            double tonus = read_number_variable(pawn, L ? STR("Arm L Tonus") : STR("Arm R Tonus"));
+            double body_tonus = read_number_variable(pawn, STR("All Body Tonus"));
+            double my_conscious = read_number_variable(pawn, STR("Consciousness"));
+            double pain = read_number_variable(pawn, STR("Pain"));
+            double muscle = read_number_variable(pawn, STR("Muscle Rate"));
+            double arm_health = read_number_variable(pawn, L ? STR("Arm_L Health") : STR("Arm_R Health"));
+            double pain_k = 1.0 + (std::max)(0.0, (std::min)(1.0, (pain - 5.0) / 5.0));
+            double t_est = tonus * body_tonus * my_conscious * 0.01 * pain_k * (std::max)(1.0 + 0.5 * muscle, 0.5);
+            t_est = (std::max)(t_est, arm_health);
+            b.grip_t = t_est;
+            if (cfg.pose_grab_body_hold == 1 && !b.softened && joint && now - b.since > 0.25)
+            {
+                double cap = body_spring_cap(cfg, b.grip_t);
+                body_spring_joint(joint, cfg, cap);
+                b.softened = true;
+                HSVR_LOG("Body grab: %s hand's joint made a spring (%.0f, %.0f, cap %.0f for his grip T %.0f)", hand, cfg.pose_grab_body_spring, cfg.pose_grab_body_damper, cap, b.grip_t);
+            }
+            if ((cfg.pose_grab_body_hold == 1 || cfg.pose_grab_body_no_slip) && b.stretch > cfg.pose_grab_body_let_go_cm)
+            {
+                if (b.far_since < 0.0) b.far_since = now;
+                else if (now - b.far_since > 0.3)
+                {
+                    HSVR_LOG("Body grab: %s hand pulled %.1f cm off its hold for 0.3 s: lets go", hand, b.stretch);
+                    release_object(side, pawn);
+                    continue;
+                }
+            }
+            else
+                b.far_since = -1.0;
+            if (cfg.log_body_grab && now - b.last_log >= 0.1)
+            {
+                b.last_log = now;
+                double vs = 0.0;
+                if (b.victim)
+                {
+                    Call v(b.victim, STR("GetVelocity"));
+                    if (v.run()) vs = length(v.vec());
+                }
+                // The slip rule's gates (UG @360189-362402): it runs only when all of these allow it.
+                HSVR_LOG("Body grab: %s %.2f s: his grip T~%.0f (arm tonus %.2f, body tonus %.2f, consciousness %.0f, pain %.1f, muscle %.2f, arm health %.0f); gates: invulnerable %d, dress-up %d, block drop %d, two-handed %d, soft not attached %d, sheathing %d, unsheathing %d",
+                         hand, now - b.since, b.grip_t, tonus, body_tonus, my_conscious, pain, muscle, arm_health, (int)bool_property(pawn, STR("Invulnerable")),
+                         (int)bool_property(pawn, STR("DressUp")), (int)bool_property(pawn, L ? STR("L Hand Block Drop") : STR("R Hand Block Drop")),
+                         (int)bool_property(pawn, L ? STR("L Two Handed Grip") : STR("R Two Handed Grip")),
+                         (int)bool_property(pawn, L ? STR("L Hand Soft Not Attached") : STR("R Hand Soft Not Attached")),
+                         (int)bool_property(pawn, L ? STR("L Weapon Sheathing") : STR("R Weapon Sheathing")),
+                         (int)bool_property(pawn, L ? STR("Weapon UnSheathing L") : STR("Weapon UnSheathing R")));
+                HSVR_LOG("Body grab: %s %.2f s: joint force %.0f / torque %.0f, release rate %.2f, stretch %.1f cm; victim strangle %.2f, choke %.3f, consciousness %.0f, throat force %.0f, being grabbed %d, moving %.0f cm/s",
+                         hand, now - b.since, b.force, b.torque, b.release_rate, b.stretch, b.strangle, b.choke, b.conscious,
+                         b.victim ? read_number_variable(b.victim, L ? STR("Grabbed Throat Constraint Force L") : STR("Grabbed Throat Constraint Force R")) : -1.0,
+                         b.victim ? (int)bool_property(b.victim, STR("Being Grabbed")) : -1, vs);
+            }
+        }
+    }
+
+    // ---- Fists from your real hand ---------------------------------------------------------------
+    // ---- Fingers from the real hand (Matthew 2026-11-19) ----------------------------------------
+    // ABP_Willie has no finger nodes (its 22 end-of-graph Modify Bone nodes are all the arms/head),
+    // so the fingers are written where his visible body takes its pose: CharacterMesh0's ABP_CopyPose1
+    // copies the DriverSkeleton through a Copy Pose From Mesh node, whose PreUpdate (game thread, right
+    // before BlueprintUpdateAnimation) snapshots the driver's component-space bones into the node's
+    // SourceMeshTransformArray; the worker evaluation later turns each into a local transform against
+    // its parent's snapshot (finger_pose_research.md section 3). So after that update the mod turns
+    // each finger joint, parent first, in that snapshot. Head, armour and gore copy CharacterMesh0,
+    // so gauntlets follow. Curl per joint at a full curl: the VR framework's table (ik/fingers.rs).
+    // The bend axis is found from the hand's own geometry (finger direction x palm normal), not
+    // assumed from the bone axes, and checked by sign each time.
+    struct XForm96
+    {
+        double qx, qy, qz, qw;
+        double tx, ty, tz, tpad;
+        double sx, sy, sz, spad;
+    };
+    static_assert(sizeof(XForm96) == 96, "FTransform (double) is 96 bytes in UE 5.4");
+    struct XFormArray
+    {
+        XForm96* data;
+        int32_t num;
+        int32_t max;
+    };
+
+    struct FingerRig
+    {
+        UObject* instance = nullptr; // ABP_CopyPose1 on CharacterMesh0
+        UObject* driver = nullptr;
+        bool looked = false;
+        bool ok = false;
+        int node_offset = -1;  // the copy node inside the anim instance
+        int array_offset = -1; // SourceMeshTransformArray inside the node
+        int bone_count = 0;
+        int hand[2] = {-1, -1};
+        int chain[2][5][3]; // [side][thumb..pinky][_01.._03]
+        std::vector<int> parent;
+            std::vector<int> subtree[2][5][3];           // bone and all its descendants
+        double found_at = -1.0;
+        int tries = 0;
+        double next_try = 0.0;
+    };
+    FingerRig g_frig;
+    // What the hand wants, set on the game tick (fingers_track_tick), read by the animation hook.
+    struct FingerWant
+    {
+        bool on = false;            // the hand is free: its fingers follow yours
+        double curl[5] = {0, 0, 0, 0, 0};    // smoothed, thumb .. little (the thumb may go below 0: lifted)
+        double target[5] = {0, 0, 0, 0, 0};
+        double splay = 0.0, target_splay = 0.0;
+        double at = -1.0;
+    };
+    FingerWant g_fwant[2];
+    std::atomic<float> g_fake_thumb[2] = {-1.0f, -1.0f}; // test: hsvr.thumb <0|1> <curl>, -1 = the controller
+    std::atomic<float> g_fake_fingers[2][5] = {{-1.0f, -1.0f, -1.0f, -1.0f, -1.0f}, {-1.0f, -1.0f, -1.0f, -1.0f, -1.0f}}; // test: hsvr.fingers
+    std::atomic<bool> g_finger_log_now{false};
+
+    // Full-curl bend per joint (radians), thumb .. little, _01 .. _03.
+    // The VR framework's table (avatar/src/rig.rs CURL, finger_pose_research.md 1.3), with how far a
+    // base may bend back (LIFT, a curl below 0) and each base's spread at splay 1 (+ toward the thumb).
+    const double g_finger_full[5][3] = {
+        {0.45, 0.60, 0.80},
+        {1.22, 1.66, 1.05},
+        {1.36, 1.75, 1.13},
+        {1.43, 1.75, 1.08},
+        {1.54, 1.66, 1.05},
+    };
+    const double g_finger_lift[5] = {1.6, 0.35, 0.35, 0.35, 0.35};
+    const double g_finger_spread[5] = {0.35, 0.21, 0.03, -0.14, -0.31};
+    const char* kFingerNames[5] = {"thumb", "index", "middle", "ring", "pinky"};
+
+    int driver_bone_index(UObject* mesh, const std::string& bone)
+    {
+        Call c(mesh, STR("GetBoneIndex"));
+        c.name(STR("BoneName"), bone_fname(bone));
+        return c.run() ? c.integer() : -1;
+    }
+
+    // The bone's transform in the component's space, by GetSocketTransform(RTS_Component).
+    bool component_space_bone(UObject* mesh, const std::string& bone, XForm96& out)
+    {
+        Call c(mesh, STR("GetSocketTransform"));
+        if (!c.fn) return false;
+        c.name(STR("InSocketName"), bone_fname(bone));
+        c.byte(STR("TransformSpace"), 2); // RTS_Component
+        FProperty* r = c.param(STR("ReturnValue"));
+        if (!r || r->GetSize() != (int)sizeof(XForm96)) return false;
+        if (!c.run()) return false;
+        std::memcpy(&out, c.buffer.data() + r->GetOffset_Internal(), sizeof(out));
+        return true;
+    }
+
+    bool readable(const void* p, size_t n)
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (!p || !VirtualQuery(p, &mbi, sizeof(mbi))) return false;
+        if (mbi.State != MEM_COMMIT) return false;
+        if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+        const uint8_t* end = reinterpret_cast<const uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
+        return reinterpret_cast<const uint8_t*>(p) + n <= end;
+    }
+
+    bool finger_rig_find(UObject* instance, UObject* driver)
+    {
+        FingerRig& R = g_frig;
+        R = FingerRig{};
+        R.instance = instance;
+        R.driver = driver;
+        R.looked = true;
+        // The driver's bones: count, parents, the hand and finger chains.
+        {
+            Call n(driver, STR("GetNumBones"));
+            if (!n.run()) return false;
+            R.bone_count = n.integer();
+        }
+        if (R.bone_count <= 0 || R.bone_count > 1024) return false;
+        R.parent.assign(R.bone_count, -1);
+        for (int i = 0; i < R.bone_count; ++i)
+        {
+            Call bn(driver, STR("GetBoneName"));
+            if (FProperty* p = bn.param(STR("BoneIndex"))) *reinterpret_cast<int32_t*>(bn.buffer.data() + p->GetOffset_Internal()) = i;
+            bn.run();
+            FProperty* rp = bn.param(STR("ReturnValue"));
+            if (!rp) return false;
+            FName name = *reinterpret_cast<FName*>(bn.buffer.data() + rp->GetOffset_Internal());
+            Call pb(driver, STR("GetParentBone"));
+            pb.name(STR("BoneName"), name);
+            pb.run();
+            FProperty* pr = pb.param(STR("ReturnValue"));
+            if (!pr) return false;
+            FName parent = *reinterpret_cast<FName*>(pb.buffer.data() + pr->GetOffset_Internal());
+            std::wstring pw = parent.ToString();
+            R.parent[i] = pw == STR("None") ? -1 : driver_bone_index(driver, std::string(pw.begin(), pw.end()));
+        }
+        bool bones_ok = true;
+        for (int side = 0; side < 2; ++side)
+        {
+            std::string sx = side == 0 ? "_l" : "_r";
+            R.hand[side] = driver_bone_index(driver, "hand" + sx);
+            if (R.hand[side] < 0) bones_ok = false;
+            for (int f = 0; f < 5; ++f)
+                for (int j = 0; j < 3; ++j)
+                {
+                    char nm[32];
+                    std::snprintf(nm, sizeof(nm), "%s_%02d%s", kFingerNames[f], j + 1, sx.c_str());
+                    R.chain[side][f][j] = driver_bone_index(driver, nm);
+                    if (R.chain[side][f][j] < 0) bones_ok = false;
+                }
+        }
+        if (!bones_ok)
+        {
+            HSVR_LOG("Fingers: the driver lacks a hand or finger bone; per-finger posing off");
+            return false;
+        }
+        // Each joint's subtree (it and everything below it), for turning a joint with what it carries.
+        for (int side = 0; side < 2; ++side)
+            for (int f = 0; f < 5; ++f)
+                for (int j = 0; j < 3; ++j)
+                {
+                    int root = R.chain[side][f][j];
+                    auto& out = R.subtree[side][f][j];
+                    for (int i = 0; i < R.bone_count; ++i)
+                        for (int a = i, guard = 0; a >= 0 && guard < 64; a = R.parent[a], ++guard)
+                            if (a == root)
+                            {
+                                out.push_back(i);
+                                break;
+                            }
+                }
+        // The copy node: a struct property of the anim instance whose struct is a Copy Pose From Mesh.
+        UScriptStruct* node_struct = nullptr;
+        for (UStruct* level = static_cast<UStruct*>(instance->GetClassPrivate()); level && R.node_offset < 0; level = level->GetSuperStruct())
+            for (FProperty* p : level->ForEachProperty())
+            {
+                if (p->GetClass().GetName() != STR("StructProperty")) continue;
+                UScriptStruct* s = static_cast<FStructProperty*>(p)->GetStruct();
+                if (!s || s->GetName().find(STR("AnimNode_CopyPoseFromMesh")) == std::wstring::npos) continue;
+                R.node_offset = p->GetOffset_Internal();
+                node_struct = s;
+                HSVR_LOG("Fingers: copy node %ls (%ls) at +%d, %d bytes", p->GetName().c_str(), s->GetName().c_str(), R.node_offset, s->GetPropertiesSize());
+                break;
+            }
+        if (R.node_offset < 0 || !node_struct)
+        {
+            HSVR_LOG("Fingers: no Copy Pose From Mesh node in %ls; per-finger posing off", instance->GetClassPrivate()->GetName().c_str());
+            return false;
+        }
+        // Its private snapshot: a transform array as long as the driver's skeleton, whose hand matches
+        // the driver's hand in component space.
+        XForm96 hand_cs{};
+        if (!component_space_bone(driver, "hand_r", hand_cs)) return false;
+        uint8_t* node = reinterpret_cast<uint8_t*>(instance) + R.node_offset;
+        int size = node_struct->GetPropertiesSize();
+        for (int off = 0; off + (int)sizeof(XFormArray) <= size; off += 8)
+        {
+            auto* a = reinterpret_cast<XFormArray*>(node + off);
+            if (a->num != R.bone_count || a->max < a->num || a->max > 4096 || !a->data) continue;
+            if (!readable(a->data, sizeof(XForm96) * (size_t)a->num)) continue;
+            const XForm96& h = a->data[R.hand[1]];
+            double d = std::sqrt((h.tx - hand_cs.tx) * (h.tx - hand_cs.tx) + (h.ty - hand_cs.ty) * (h.ty - hand_cs.ty) + (h.tz - hand_cs.tz) * (h.tz - hand_cs.tz));
+            HSVR_LOG("Fingers: transform array at node+%d (%d bones): hand_r (%.1f, %.1f, %.1f) vs driver (%.1f, %.1f, %.1f), %.2f cm apart, scale %.2f",
+                     off, a->num, h.tx, h.ty, h.tz, hand_cs.tx, hand_cs.ty, hand_cs.tz, d, h.sx);
+            if (d < 3.0)
+            {
+                R.array_offset = off;
+                break;
+            }
+        }
+        if (R.array_offset < 0)
+        {
+            HSVR_LOG("Fingers: the copy node's snapshot was not found; per-finger posing off (the fist shape stays)");
+            return false;
+        }
+        R.ok = true;
+        R.found_at = hsvr::now_seconds();
+        return true;
+    }
+
+    hsvr::Vec3 xf_pos(const XForm96& x) { return {x.tx, x.ty, x.tz}; }
+    hsvr::Quat xf_rot(const XForm96& x) { return {x.qx, x.qy, x.qz, x.qw}; }
+
+    // Turns bone `j` of a finger (and all it carries) about `axis` through its own position.
+    void turn_subtree(XForm96* bones, const std::vector<int>& subtree, const hsvr::Vec3& pivot, const hsvr::Quat& turn)
+    {
+        for (int i : subtree)
+        {
+            XForm96& b = bones[i];
+            hsvr::Quat r = (turn * xf_rot(b)).normalized();
+            hsvr::Vec3 p = pivot + turn.rotate(xf_pos(b) - pivot);
+            b.qx = r.x, b.qy = r.y, b.qz = r.z, b.qw = r.w;
+            b.tx = p.x, b.ty = p.y, b.tz = p.z;
+        }
+    }
+
+    // Signed bend of `child_dir` from `parent_dir` about `axis` (radians; + = toward the palm).
+    double bend_about(const hsvr::Vec3& parent_dir, const hsvr::Vec3& child_dir, const hsvr::Vec3& axis)
+    {
+        using namespace hsvr;
+        Vec3 a = parent_dir - axis * dot(parent_dir, axis), b = child_dir - axis * dot(child_dir, axis);
+        if (length(a) < 1e-6 || length(b) < 1e-6) return 0.0;
+        a = normalized(a), b = normalized(b);
+        return std::atan2(dot(cross(a, b), axis), dot(a, b));
+    }
+
+    // Writes one hand's fingers into the snapshot (the framework's Finger::bend, avatar/src/rig.rs):
+    // each finger's base spreads (splay), then each joint bends about the finger's flex axis to
+    // curl x CURL, replacing the bend the pose had (so curl 0 = straight); the thumb's base adds its
+    // bend to the pose's own (the game's open hand, the framework's rest pose). Axes from the hand
+    // bone (hand_bones.md: fingers +X on hand_l / -X on hand_r, thumb +Y, palm -Z), checked against
+    // the knuckles' own geometry in the log.
+    bool pose_hand_fingers(XForm96* B, int side, const double curl[5], double splay, bool log)
+    {
+        using namespace hsvr;
+        FingerRig& R = g_frig;
+        auto P = [&](int i) { return xf_pos(B[i]); };
+        const int(*ch)[3] = R.chain[side];
+        Quat hr = xf_rot(B[R.hand[side]]);
+        Vec3 hand = P(R.hand[side]);
+        Vec3 along = normalized(hr.rotate(Vec3{side == 0 ? 1.0 : -1.0, 0, 0}));
+        Vec3 thumbward = normalized(hr.rotate(Vec3{0, 1, 0}));
+        Vec3 palm = normalized(hr.rotate(Vec3{0, 0, -1}));
+        char line[900];
+        int at = 0;
+        if (log)
+        {
+            Vec3 g_along = normalized(P(ch[2][0]) - hand);
+            Vec3 g_across = normalized(P(ch[1][0]) - P(ch[4][0]));
+            Vec3 g_palm = normalized(cross(g_across, g_along) * (side == 1 ? -1.0 : 1.0));
+            at += std::snprintf(line, sizeof(line), " axes vs knuckles: along %.2f, thumb side %.2f, palm %.2f;", dot(along, g_along), dot(thumbward, g_across),
+                                dot(palm, g_palm));
+        }
+        Vec3 splay_axis = normalized(cross(along, thumbward)); // + turns a finger toward the thumb
+        for (int f = 0; f < 5; ++f)
+        {
+            bool thumb = f == 0;
+            int b0 = ch[f][0], b1 = ch[f][1], b2 = ch[f][2];
+            Vec3 seg1 = P(b2) - P(b1);
+            if (length(seg1) < 0.05) continue;
+            // The last segment has no child bone: it points as the one before it does, in its own bone's frame.
+            Vec3 u = xf_rot(B[b1]).inverse().rotate(normalized(seg1));
+            auto seg = [&](int j) {
+                return normalized(j < 2 ? P(ch[f][j + 1]) - P(ch[f][j]) : xf_rot(B[ch[f][j]]).rotate(u));
+            };
+            Vec3 tip_before = P(b2) + xf_rot(B[b2]).rotate(u) * 2.5;
+            double c0 = (std::max)(-g_finger_lift[f], (std::min)(1.0, curl[f]));
+            double c12 = (std::max)(0.0, (std::min)(1.0, curl[f]));
+            // Splay at the base: the fingers close up as the base curls.
+            double sp = (std::max)(0.0, (std::min)(1.0, splay)) * (1.0 - (std::max)(0.0, (std::min)(1.0, c0)));
+            double spread_now = bend_about(along, seg(0), splay_axis);
+            double spread_turn = thumb ? (sp - 0.3) * g_finger_spread[0] : sp * g_finger_spread[f] - spread_now;
+            turn_subtree(B, R.subtree[side][f][0], P(b0), quat_axis_angle(splay_axis, spread_turn));
+            Vec3 d0 = seg(0);
+            Vec3 toward = thumb ? normalized(palm * 0.6 - thumbward) : palm;
+            Vec3 axis = cross(d0, toward);
+            if (length(axis) < 1e-6) continue;
+            axis = normalized(axis);
+            double before[3] = {0, 0, 0}, after[3] = {0, 0, 0};
+            for (int j = 0; j < 3; ++j)
+            {
+                Vec3 prev = j == 0 ? along : seg(j - 1);
+                double bend = bend_about(prev, seg(j), axis);
+                double c = j == 0 ? c0 : c12;
+                double turn = (j == 0 && thumb) ? c * g_finger_full[0][0] : c * g_finger_full[f][j] - bend;
+                before[j] = bend;
+                turn_subtree(B, R.subtree[side][f][j], P(ch[f][j]), quat_axis_angle(axis, turn));
+                after[j] = bend_about(prev, seg(j), axis);
+            }
+            if (log && at < (int)sizeof(line) - 160)
+            {
+                Vec3 tip = P(b2) + xf_rot(B[b2]).rotate(u) * 2.5;
+                at += std::snprintf(line + at, sizeof(line) - at, " %s %.2f: %.0f/%.0f/%.0f -> %.0f/%.0f/%.0f deg, spread %.0f->%.0f, tip %.1f cm from hand, palmward %.1f->%.1f;",
+                                    kFingerNames[f], curl[f], before[0] * 57.3, before[1] * 57.3, before[2] * 57.3, after[0] * 57.3, after[1] * 57.3,
+                                    after[2] * 57.3, spread_now * 57.3, bend_about(along, d0, splay_axis) * 57.3, length(tip - hand), dot(tip_before - hand, palm),
+                                    dot(tip - hand, palm));
+            }
+        }
+        if (log) HSVR_LOG("Fingers %s (splay %.2f):%s", side == 0 ? "left" : "right", splay, line);
+        return true;
+    }
+
+    UFunction* g_copy_update_fn = nullptr;
+    void fingers_after_copy_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        FingerRig& R = g_frig;
+        if (!context || !function || !R.instance || context != R.instance || !g_pose_active.load()) return;
+        if (g_copy_update_fn) { if (function != g_copy_update_fn) return; }
+        else
+        {
+            if (function->GetName() != STR("BlueprintUpdateAnimation")) return;
+            g_copy_update_fn = function;
+            HSVR_LOG("Fingers: %ls's animation update seen", context->GetClassPrivate()->GetName().c_str());
+        }
+        if (!R.ok)
+        {
+            // Looked for every 2 s, up to 10 times (the snapshot can be empty or a frame apart at first).
+            double t = hsvr::now_seconds();
+            if (R.tries >= 10 || t < R.next_try || !R.driver) return;
+            int tries = R.tries + 1;
+            bool found = finger_rig_find(context, R.driver);
+            R.tries = tries;
+            R.next_try = t + 2.0;
+            if (!found)
+            {
+                if (tries == 10) HSVR_LOG("Fingers: gave up finding the copy node's snapshot; the fist shape stays");
+                return;
+            }
+            HSVR_LOG("Fingers: per-finger posing on (try %d)", tries);
+        }
+        uint8_t* node = reinterpret_cast<uint8_t*>(context) + R.node_offset;
+        auto* a = reinterpret_cast<XFormArray*>(node + R.array_offset);
+        if (a->num != R.bone_count || !a->data) return;
+        static double last_log = -10.0;
+        double now = hsvr::now_seconds();
+        bool log = g_finger_log_now.exchange(false) || (hsvr::config().log_fingers && now - last_log >= 1.0 && (g_fwant[0].on || g_fwant[1].on));
+        if (log) last_log = now;
+        for (int side = 0; side < 2; ++side)
+        {
+            const FingerWant& w = g_fwant[side];
+            if (!w.on || now - w.at > 0.2) continue;
+            pose_hand_fingers(a->data, side, w.curl, w.splay, log);
+        }
+    }
+
+    // Game tick: which hands are free, and the curls they want (smoothed).
+    void fingers_track_tick(const hsvr::Config& cfg, const hsvr::ControllerState& state, UObject* pawn)
+    {
+        double now = hsvr::now_seconds();
+        UObject* copy = g_pose.mesh ? object_property(g_pose.mesh, STR("AnimScriptInstance")) : nullptr;
+        if (copy != g_frig.instance || g_pose.driver != g_frig.driver)
+        {
+            g_frig = FingerRig{};
+            g_frig.instance = copy;
+            g_frig.driver = g_pose.driver;
+            g_copy_update_fn = nullptr;
+        }
+        for (int side = 0; side < 2; ++side)
+        {
+            FingerWant& w = g_fwant[side];
+            UObject* mine = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            bool free = cfg.pose_fingers_tracked && (!mine || is_fist(mine)) &&
+                        !bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")) && !scabbard_held(side) && !(g_two.active && side == g_two.second);
+            const hsvr::HandState& h = state.hand[side];
+            double target[5];
+            double touch_override = -1.0;
+            if (h.joints_valid && cfg.input_hand_tracking)
+                for (int f = 0; f < 5; ++f) target[f] = h.joint_curl[f];
+            else
+            {
+                // The VR framework's empty-hand curls from the sensors (ik/src/fingers.rs FingerSolver::target).
+                double sq = g_fake_squeeze[side].load() >= 0.0f ? g_fake_squeeze[side].load() : h.squeeze;
+                double trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : h.trigger;
+                if (g_fake_thumb[side].load() >= 0.0f) touch_override = g_fake_thumb[side].load();
+                double tc = touch_override >= 0.0 ? touch_override : h.sensor_curl[0];
+                bool touch_thumb = tc >= 0.79, thumb_press = tc >= 0.99;
+                target[0] = touch_thumb ? 0.12 + (0.75 - 0.12) * sq + (thumb_press ? 0.1 : 0.0) : -0.5; // lifted: a thumbs-up
+                target[1] = 0.05 + 0.95 * trig; // the trigger's touch sensor does not move it
+                const double lead[3] = {1.0, 1.03, 1.06};
+                for (int f = 2; f < 5; ++f) target[f] = 0.15 + 0.85 * sq * lead[f - 2];
+            }
+            for (int f = 0; f < 5; ++f)
+            {
+                float fake = g_fake_fingers[side][f].load();
+                if (fake >= 0.0f) target[f] = fake;
+                target[f] = (std::max)(f == 0 ? -g_finger_lift[0] : 0.0, (std::min)(1.0, target[f]));
+            }
+            double open = 1.0 - (target[1] + target[2] + target[3] + target[4]) / 4.0;
+            if (!free) { w.on = false; w.at = now; continue; }
+            double dt = w.on ? (std::min)(3.0 / 90.0, (std::max)(0.0, now - w.at)) : 1.0; // MAX_DT 3/90 s
+            double k = cfg.pose_fingers_tau_s > 0.0 ? 1.0 - std::exp(-dt / cfg.pose_fingers_tau_s) : 1.0;
+            for (int f = 0; f < 5; ++f)
+            {
+                w.target[f] = target[f];
+                w.curl[f] = w.on ? w.curl[f] + (target[f] - w.curl[f]) * k : target[f];
+            }
+            w.target_splay = 0.5 * open;
+            w.splay = w.on ? w.splay + (w.target_splay - w.splay) * k : w.target_splay;
+            w.on = true;
+            w.at = now;
+            // What the visible body shows (its last evaluated pose): fingertips from the hand bone.
+            static double shown_at[2] = {-10.0, -10.0};
+            if (cfg.log_fingers && g_frig.ok && now - shown_at[side] >= 1.0 && g_pose.mesh)
+            {
+                shown_at[side] = now;
+                std::string sx = side == 0 ? "_l" : "_r";
+                hsvr::Vec3 hand = socket_location(g_pose.mesh, bone_fname("hand" + sx));
+                double d[5];
+                for (int f = 0; f < 5; ++f) d[f] = hsvr::length(socket_location(g_pose.mesh, bone_fname(std::string(kFingerNames[f]) + "_03" + sx)) - hand);
+                HSVR_LOG("Fingers shown: %s curls %.2f/%.2f/%.2f/%.2f/%.2f; _03 from the hand bone: thumb %.1f, index %.1f, middle %.1f, ring %.1f, pinky %.1f cm (four-finger mean %.1f)",
+                         side == 0 ? "left" : "right", w.curl[0], w.curl[1], w.curl[2], w.curl[3], w.curl[4], d[0], d[1], d[2], d[3], d[4], (d[1] + d[2] + d[3] + d[4]) / 4.0);
+            }
+        }
+    }
+
+    bool fingers_tracked_on(int side)
+    {
+        return g_frig.ok && g_fwant[side].on && hsvr::now_seconds() - g_fwant[side].at < 0.2;
+    }
+
+    // Matthew 2026-11-19: the hand is a fist while you close it (grip, trigger, thumb resting on the
+    // stick or a button), and opens when you open it. Curls come from SteamVR's hand skeleton when it
+    // gives one, else from the sensors (controllers.cpp). A squeeze near something still grabs it.
+    bool g_finger_fist[2] = {false, false};
+    double g_fist_retry_at[2] = {-10.0, -10.0};
+    double g_slap_until[2] = {-10.0, -10.0};
+
+    void fist_finger_log(int side, UObject* pawn)
+    {
+        static double last[2] = {-10.0, -10.0};
+        double now = hsvr::now_seconds();
+        if (now - last[side] < 0.5) return;
+        last[side] = now;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        if (!mesh) return;
+        std::string sx = side == 0 ? "_l" : "_r";
+        hsvr::Vec3 hand = socket_location(mesh, bone_fname("hand" + sx));
+        double d[5];
+        const char* names[5] = {"thumb_03", "index_03", "middle_03", "ring_03", "pinky_03"};
+        for (int f = 0; f < 5; ++f) d[f] = length(socket_location(mesh, bone_fname(std::string(names[f]) + sx)) - hand);
+        HSVR_LOG("Fist shape %d: %s fingertips from the hand bone: thumb %.1f, index %.1f, middle %.1f, ring %.1f, pinky %.1f cm (four-finger mean %.1f)",
+                 fist_shape(hsvr::config()), side == 0 ? "left" : "right", d[0], d[1], d[2], d[3], d[4], (d[1] + d[2] + d[3] + d[4]) / 4.0);
+    }
+
+    void fists_from_fingers(const hsvr::Config& cfg, const hsvr::ControllerState& state, UObject* pawn, bool menu_up)
+    {
+        if (!cfg.pose_fists || !cfg.pose_fist_from_fingers) return;
+        for (int side = 0; side < 2; ++side)
+        {
+            const hsvr::HandState& h = state.hand[side];
+            float index = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : h.curl[1];
+            float grip = g_fake_squeeze[side].load() >= 0.0f ? g_fake_squeeze[side].load() : (h.curl[2] + h.curl[3] + h.curl[4]) / 3.0f;
+            float thumb = g_fake_thumb[side].load() >= 0.0f ? g_fake_thumb[side].load() : h.curl[0];
+            bool was = g_finger_fist[side];
+            bool now = was ? (index >= cfg.pose_fist_index_off && grip >= cfg.pose_fist_grip_off && thumb >= cfg.pose_fist_thumb_off)
+                           : (index >= cfg.pose_fist_index_on && grip >= cfg.pose_fist_grip_on && thumb >= cfg.pose_fist_thumb_on);
+            g_finger_fist[side] = now;
+            const char* hand = side == 0 ? "left" : "right";
+            if (now != was)
+                HSVR_LOG("Fist: %s hand %s (curls thumb %.2f index %.2f grip %.2f; skeleton %d: %.0f/%.0f/%.0f/%.0f/%.0f deg; trigger %.2f touch %d, squeeze %.2f, thumb touch %d)",
+                         hand, now ? "closed" : "opened", thumb, index, grip, (int)h.joints_valid, h.joint_deg[0], h.joint_deg[1], h.joint_deg[2], h.joint_deg[3],
+                         h.joint_deg[4], h.trigger, (int)h.trigger_touch, h.squeeze, (int)h.thumb_touch);
+            UObject* mine = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            // Slaps (Matthew 2026-11-19): the game has no open-hand weapon; an empty hand swung at Aim Swing
+            // Speed >= 30 becomes its fist (spawn rule @557803, fists_eating.md 1.1). So an open hand moving
+            // that fast gets the fist too (fingers left open), kept pose_fist_slap_keep_s after it slows.
+            double t = hsvr::now_seconds();
+            double lo = cfg.pose_swing_speed_lo, hi = (std::max)(lo + 0.1, cfg.pose_swing_speed_hi);
+            double hand_ass = g_swing_v[side] <= lo ? 0.0 : (std::min)(75.0, (g_swing_v[side] - lo) / (hi - lo) * 75.0);
+            if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass) g_slap_until[side] = t + cfg.pose_fist_slap_keep_s;
+            bool slap = !now && t < g_slap_until[side];
+            if (slap != g_fist_open[side].load() && (slap || is_fist(mine)))
+                HSVR_LOG("Fist: %s hand %s (hand swing speed %.0f)", hand, slap ? "slaps: open-hand fist" : "closed over its slap fist", hand_ass);
+            g_fist_open[side].store(slap);
+            if (!now && !slap)
+            {
+                if (is_fist(mine)) remove_fist(side, pawn, "hand opened");
+                continue;
+            }
+            if (is_fist(mine))
+            {
+                if (now) fist_finger_log(side, pawn);
+                continue;
+            }
+            if (mine || menu_up || bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")) || scabbard_held(side) ||
+                (g_two.active && side == g_two.second))
+                continue;
+            if (t < g_fist_retry_at[side]) continue;
+            if (!make_fist(side, pawn, cfg)) g_fist_retry_at[side] = t + 0.5;
+        }
+    }
+
+    // The game's own fist flags (fists_eating.md 1.1 / 4, plan B): 'Fist R/L Spawned' hidden from
+    // Willie's tick, whose removal fires on '!Hand Active' (always in VR), and set after it while the
+    // mod's fist is in that hand: his hit rules read it (Deal Complex Damage @22681: the punching arm
+    // with Aim Swing Speed >= 60). 'R/L Fisting Rate' (punch stamina): the game's own formula, target
+    // MRC(Aim Swing Speed, 25..50 -> Thrust Alpha..1), FInterpTo speed 0.1 (UF @473829), which the
+    // tick forces to 0 without 'Hand Active', so the mod keeps its own value and writes it after.
+    double g_fisting_rate[2] = {0.0, 0.0};
+    double g_fisting_t = -1.0;
+    void fist_flags_before_tick(UObject* pawn)
+    {
+        if (!hsvr::config().pose_fist_game_flags) return;
+        for (int side = 0; side < 2; ++side)
+            if (is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))) set_bool_property(pawn, fist_spawned_name(side), false);
+    }
+    void fist_flags_after_tick(UObject* pawn)
+    {
+        if (!hsvr::config().pose_fist_game_flags) return;
+        double now = hsvr::now_seconds(), dt = g_fisting_t > 0.0 ? (std::min)(0.1, now - g_fisting_t) : 0.0;
+        g_fisting_t = now;
+        double ass = read_number_variable(pawn, STR("Aim Swing Speed"));
+        for (int side = 0; side < 2; ++side)
+        {
+            bool fist = is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")));
+            set_bool_property(pawn, fist_spawned_name(side), fist);
+            if (!fist)
+            {
+                g_fisting_rate[side] = 0.0;
+                continue;
+            }
+            double thrust = read_number_variable(pawn, side == 0 ? STR("L Thrust Alpha") : STR("R Thrust Alpha"));
+            if (thrust < 0.0) thrust = 0.0;
+            double u = (std::max)(0.0, (std::min)(1.0, (ass - 25.0) / 25.0));
+            double target = thrust + (1.0 - thrust) * u;
+            g_fisting_rate[side] += (target - g_fisting_rate[side]) * (std::min)(1.0, dt * 0.1);
+            set_variable(pawn, side == 0 ? STR("L Fisting Rate") : STR("R Fisting Rate"), g_fisting_rate[side], nullptr, nullptr);
+        }
+    }
+
     void grab_button(const hsvr::Config& cfg, const hsvr::ControllerState& state, bool menu_up)
     {
         using namespace hsvr;
@@ -5753,6 +7253,11 @@ namespace
                     double falling = read_number_variable(pawn, STR("Free Fall Rate"));
                     if ((conscious >= 0.0 && conscious <= 0.0) || falling > 0.5) remove_fist(side, pawn, conscious <= 0.0 ? "knocked out" : "falling");
                 }
+        for (int side = 0; side < 2; ++side)
+            g_fist_side[side].store(pawn && is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))));
+        // Fingers every tick the body is posed, even with the controllers idle (test 10: behind the grab
+        // gate below, an unfaked fake headset never reached it).
+        if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
         {
             if (held[0] || held[1])
@@ -5762,6 +7267,7 @@ namespace
         }
         keep_brought_object(pawn, mesh);
         fist_trace(pawn);
+        body_grab_tick(pawn, cfg);
         for (int side = 0; side < 2; ++side) check_object_grab(side, pawn);
         eat_and_drink(pawn, cfg);
         for (int side = 0; side < 2; ++side)
@@ -5825,6 +7331,22 @@ namespace
             Vec3 at = hand_grab_point(mesh, side);
             if (cfg.pose_draw && try_draw(side, pawn, mesh, at, cfg)) continue;
             if (try_scabbard_grab(side, pawn, mesh, at, cfg)) continue;
+            // His arm can be too short for where your hand is (reaching to the floor: his crouch stops at
+            // 55 cm and he does not bend forward, so his hand stayed 20 cm above your controller on the
+            // floor, playtest 14:31). Then items are looked for at your controller, and what you touch there
+            // is pulled up into his hand (the grab's settle) instead of never being touched.
+            Vec3 palm_drawn = at;
+            if (cfg.pose_grab_from_controller && g_pose.hand_valid[side])
+            {
+                Vec3 hand_bone = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+                double held_back = length(g_pose.reach_target[side] - hand_bone);
+                if (held_back > cfg.pose_grab_controller_gap_cm && length(g_pose.raw_target[side] - hand_bone) <= cfg.pose_grab_controller_max_cm)
+                {
+                    at = at + (g_pose.raw_target[side] - hand_bone);
+                    HSVR_LOG("Grab: %s hand is held %.1f cm short of your hand by his reach: looking at your controller (%.0f %.0f %.0f)", hand, held_back, at.x,
+                             at.y, at.z);
+                }
+            }
             std::vector<UObject*> weapons, willies;
             UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
@@ -5863,8 +7385,9 @@ namespace
             if (!best && cfg.pose_grab_objects && grab_object(side, pawn, mesh, cfg, at)) continue;
             if (!best)
             {
-                // Nothing to take: the hand closes into a fist.
-                make_fist(side, pawn, cfg);
+                // Nothing to take: the hand closes into a fist (pose_fist_from_fingers: only when the
+                // whole hand closes, fists_from_fingers).
+                if (!cfg.pose_fist_from_fingers) make_fist(side, pawn, cfg);
                 HSVR_LOG("Grab: %s grip squeezed, no loose weapon within %.0f cm (%d loose of %d; nearest %ls at %.0f cm; hand at %.0f %.0f %.0f)", hand,
                          cfg.pose_grab_handles ? cfg.pose_grab_touch_cm : cfg.pose_grab_radius_cm, looked, (int)weapons.size(), nearest ? nearest->GetName().c_str() : STR("none"), nearest ? nearest_d : -1.0,
                          at.x, at.y, at.z);
@@ -5883,13 +7406,21 @@ namespace
                     const std::vector<Handle>& hs = item_handles(best, hb);
                     double t = 0.0, hd = 1e9;
                     int hi = nearest_handle(hs, w0_rot.inverse().rotate(at - w0_pos), t, hd);
+                    // B&S: a weapon is taken only by a handle (its grip, a haft stretch, a sword's blade);
+                    // shields (straps or anywhere on the rim) and bottles still go where the hand touched.
+                    if (cfg.pose_grab_weapon_handles_only && !(hi >= 0 && hd <= cfg.pose_grab_handle_cm) && grab_needs_handle(best))
+                    {
+                        HSVR_LOG("Grab: %s hand touched %ls off its handles (nearest %s %.1f cm away, needs %.0f): not taken", hand, best->GetName().c_str(),
+                                 hi >= 0 ? hs[hi].name.c_str() : "none", hd, cfg.pose_grab_handle_cm);
+                        continue;
+                    }
                     bool ok = give_hand_weapon(side, pawn, best);
                     UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
                     if (ok && now == best)
                     {
                         if (hi >= 0 && hd <= cfg.pose_grab_handle_cm)
                         {
-                            g_pending_free[side] = handle_grip(side, mesh, w0_pos, w0_rot, at, hs[hi], t);
+                            g_pending_free[side] = handle_grip(side, mesh, w0_pos, w0_rot, palm_drawn, hs[hi], t);
                             g_pending_item[side] = best;
                             g_pending_free[side].hold_at = cfg.pose_grab_settle_s > 0.0;
                             g_pending_free[side].at_pos = w0_pos;
@@ -5901,7 +7432,7 @@ namespace
                         }
                         else
                         {
-                            hold_where_touched(side, mesh, best, hb, w0_pos, w0_rot, at, touch, "spot where the hand touched it", nullptr, true);
+                            hold_where_touched(side, mesh, best, hb, w0_pos, w0_rot, palm_drawn, touch, "spot where the hand touched it", nullptr, true);
                             g_pending_free[side].grip_type = 5;
                         }
                     }
@@ -5944,6 +7475,7 @@ namespace
             HSVR_LOG("Grab: %s grip took %ls (%.1f cm from the hand): %s, hand now holds %ls", hand, best->GetName().c_str(), best_d,
                      ok ? "set up" : "set-up call missing", now ? now->GetName().c_str() : STR("nothing"));
         }
+        fists_from_fingers(cfg, state, pawn, menu_up);
     }
 
     // Where his hand goes while it holds a weapon. The hold sent the weapon (last tick) to where the
@@ -6095,10 +7627,18 @@ namespace
     // a part level with the step reaches out further than wide_cm from the axis. lo/hi = the last step on the weapon and not wide, each
     // way; wide_lo/hi say whether it stopped at a wide part (else at the weapon's end). False when
     // the grip itself is not inside the parts. Cached per weapon.
-    struct AxisMeasure { bool ok; double lo, hi; bool wide_lo, wide_hi; double at_z; };
+    struct AxisMeasure
+    {
+        bool ok;
+        double lo, hi;
+        bool wide_lo, wide_hi;
+        double at_z;
+        std::vector<std::pair<double, double>> extra; // further haft stretches above the first stop (hafted weapons)
+        bool guard_hi = false; // the first stop above the grip is a Guard part (a sword: its blade is a handle)
+    };
     std::unordered_map<UObject*, AxisMeasure> g_axis_measures;
     bool measure_weapon_axis(UObject* weapon, UObject* base, const hsvr::Vec3& pivot, double wide_cm, double tip, double& lo, double& hi, bool& wide_lo,
-                             bool& wide_hi)
+                             bool& wide_hi, std::vector<std::pair<double, double>>* extra = nullptr)
     {
         using namespace hsvr;
         auto cached = g_axis_measures.find(weapon);
@@ -6109,24 +7649,35 @@ namespace
             Quat br = component_rotation(base);
             Vec3 side[4] = {br.rotate({1, 0, 0}), br.rotate({-1, 0, 0}), br.rotate({0, 1, 0}), br.rotate({0, -1, 0})};
             const double out = 12.0, step = 2.0;
-            // 0 = on the weapon and narrow, 1 = wide, 2 = off the weapon
+            const Config& hc = hsvr::config();
+            // 0 = on the weapon and narrow, 1 = wide, 2 = off the weapon; width = how far the widest part
+            // level with the step reaches from the axis (cm), part = that part.
+            struct Probe { int state; double width; UObject* part; double off; };
             auto probe = [&](double z) {
                 Vec3 a = bp + br.rotate({pivot.x, pivot.y, pivot.z + z});
+                Probe r{0, 0.0, nullptr, 0.0};
                 double d = closest_on_weapon(weapon, a);
-                if (d < 0.0 || d > 3.0) return 2;
+                r.off = d;
+                if (d < 0.0 || d > 3.0) { r.state = 2; return r; }
                 // The nearest point of the parts seen from 12 cm out: wide only when that point is level
                 // with this step (a guard a few cm further along would otherwise read as wide here).
                 for (const Vec3& dir : side)
                 {
                     Vec3 q;
-                    double e = closest_on_weapon(weapon, a + dir * out, &q);
+                    UObject* part = nullptr;
+                    double e = closest_on_weapon(weapon, a + dir * out, &q, &part);
                     if (e < 0.0) continue;
                     Vec3 l = br.inverse().rotate(q - a);
-                    if (std::fabs(l.z) <= step * 0.75 && std::sqrt(l.x * l.x + l.y * l.y) > wide_cm) return 1;
+                    double w = std::sqrt(l.x * l.x + l.y * l.y);
+                    if (std::fabs(l.z) <= step * 0.75 && w > r.width) { r.width = w; r.part = part; }
                 }
-                return 0;
+                if (r.width > wide_cm) r.state = 1;
+                return r;
             };
-            if (probe(0.0) != 2)
+            auto part_name = [](UObject* p) { return p ? p->GetName() : std::wstring(STR("?")); };
+            double bottom = 0.0;
+            if (FProperty* bpz = weapon->GetPropertyByNameInChain(STR("Length to Bottom"))) bottom = number_property(weapon, bpz);
+            if (probe(0.0).state != 2)
             {
                 m.ok = true;
                 double limit = (std::max)(300.0, tip + 20.0);
@@ -6136,18 +7687,90 @@ namespace
                     bool wide = false;
                     for (double z = step; z <= limit; z += step)
                     {
-                        int r = probe(dirn * z);
-                        if (r != 0)
+                        Probe r = probe(dirn * z);
+                        if (r.state == 0)
                         {
-                            wide = r == 1;
-                            break;
+                            last = z;
+                            continue;
                         }
-                        last = z;
+                        // A short wide bit (a ring, a langet's end) or a short gap between parts, with narrow
+                        // haft past it, is crossed (pose_slide_ring_*); a guard, a rondel or a head is not.
+                        double run_w = r.state == 1 ? r.width : 0.0;
+                        UObject* run_part = r.part;
+                        bool any_off = r.state == 2, resumed = false;
+                        double z2 = z;
+                        double scan = (std::max)(hc.pose_slide_ring_max_len_cm, hc.pose_slide_gap_max_cm) + step;
+                        // Below the grip, the game's own bottom length says how far the weapon goes on.
+                        if (dirn < 0 && hc.pose_slide_butt_is_haft && bottom > z + step) scan = (std::max)(scan, (std::min)(bottom - z, 40.0));
+                        for (; z2 <= z + scan; z2 += step)
+                        {
+                            Probe r2 = z2 == z ? r : probe(dirn * z2);
+                            if (r2.state == 0) { resumed = true; break; }
+                            if (r2.state == 1 && r2.width > run_w) { run_w = r2.width; run_part = r2.part; }
+                            any_off |= r2.state == 2;
+                        }
+                        double run_len = z2 - z;
+                        bool hafted = last >= 30.0;
+                        bool rondel = hafted && run_part && part_name(run_part).find(STR("Guard")) != std::wstring::npos;
+                        bool butt = dirn < 0 && resumed && bottom > z2 && hc.pose_slide_butt_is_haft; // a pollaxe butt cap: 9 cm wide, haft past it
+                        bool cross = hc.pose_slide_ring_max_len_cm > 0.0 && resumed && !(rondel && hc.pose_slide_rondel_stops) &&
+                                     (butt || (run_len <= (any_off ? hc.pose_slide_gap_max_cm : hc.pose_slide_ring_max_len_cm) &&
+                                               run_w <= hc.pose_slide_ring_max_width_cm));
+                        if (cross)
+                        {
+                            HSVR_LOG("Haft: %ls %s %.0f..%.0f cm (%.0f cm long, %.1f cm from the axis, part %ls%s): crossed", weapon->GetName().c_str(),
+                                     any_off ? "gap" : "wide bit", dirn * z, dirn * z2, run_len, run_w, part_name(run_part).c_str(), butt ? ", butt end" : "");
+                            last = z2;
+                            z = z2;
+                            continue;
+                        }
+                        HSVR_LOG("Haft: %ls stops at %.0f cm: %s (%.1f cm from the axis, part %ls, %.0f cm long%s%s; parts nearest %.1f cm)",
+                                 weapon->GetName().c_str(), dirn * z, r.state == 1 ? "wide" : "off the parts", run_w, part_name(run_part).c_str(), run_len,
+                                 resumed ? ", narrow again past it" : "", rondel ? ", a rondel" : "", r.off);
+                        wide = r.state == 1;
+                        if (dirn > 0) m.guard_hi = wide && run_part && part_name(run_part).find(STR("Guard")) != std::wstring::npos;
+                        break;
                     }
                     // A wide part stops the hand at the part itself (its near edge, a step past the last narrow one).
                     if (dirn < 0) { m.lo = -(wide ? last + step * 0.5 : last); m.wide_lo = wide; }
                     else { m.hi = wide ? last + step * 0.5 : last; m.wide_hi = wide; }
                 }
+                // A hafted weapon (a grip stretch of 30 cm or more) goes on past its first stop: every further
+                // narrow stretch of 15 cm or more on its axis is haft too (a pollaxe above its rondel, a war
+                // staff above its fitting); the stops between them stay stops (B&S: grab only on a handle).
+                if (m.hi - m.lo >= 30.0)
+                {
+                    double z = m.hi + step;
+                    while (z <= limit)
+                    {
+                        while (z <= limit && probe(z).state != 0) z += step;
+                        if (z > limit) break;
+                        double s0 = z, last = z;
+                        while (z <= limit && probe(z).state == 0)
+                        {
+                            last = z;
+                            z += step;
+                        }
+                        // 15 cm: a pollaxe's top spike (14) and a halberd's (12) are not haft; nor is a stretch that
+                        // runs up to the weapon's tip (a spearhead, a top spike: heads are not handles).
+                        bool at_tip = tip > 0.0 && last + step * 0.5 >= tip - 10.0;
+                        if (at_tip) HSVR_LOG("Haft: %ls %.0f .. %.0f cm runs to its tip (%.0f): its head, not haft", weapon->GetName().c_str(), s0, last, tip);
+                        if (last - s0 >= 15.0 && !at_tip)
+                        {
+                            m.extra.push_back({s0 - step * 0.5, last + step * 0.5});
+                            HSVR_LOG("Haft: %ls more haft at %.0f .. %.0f cm", weapon->GetName().c_str(), s0 - step * 0.5, last + step * 0.5);
+                        }
+                    }
+                }
+            }
+            // A failed or zero-length measure (its parts not found yet) is not kept: asked again next time.
+            if (!m.ok || (m.lo == 0.0 && m.hi == 0.0))
+            {
+                lo = m.lo + m.at_z - pivot.z;
+                hi = m.hi + m.at_z - pivot.z;
+                wide_lo = m.wide_lo;
+                wide_hi = m.wide_hi;
+                return m.ok;
             }
             cached = g_axis_measures.emplace(weapon, m).first;
         }
@@ -6157,7 +7780,18 @@ namespace
         hi = m.hi + m.at_z - pivot.z;
         wide_lo = m.wide_lo;
         wide_hi = m.wide_hi;
+        if (extra)
+        {
+            extra->clear();
+            for (const auto& e : m.extra) extra->push_back({e.first + m.at_z - pivot.z, e.second + m.at_z - pivot.z});
+        }
         return m.ok;
+    }
+
+    bool weapon_has_guard(UObject* weapon)
+    {
+        auto f = g_axis_measures.find(weapon);
+        return f != g_axis_measures.end() && f->second.guard_hi;
     }
 
     std::unordered_map<UObject*, std::vector<Handle>> g_item_handles;
@@ -6170,6 +7804,7 @@ namespace
         const Config& cfg = hsvr::config();
         std::vector<Handle> hs;
         double half = cfg.pose_slide_hand_half_cm;
+        bool measured = true; // false: the weapon's parts were not found (yet)
         if (class_name_starts(item, STR("Shield")))
         {
             std::wstring cls = shield_class(item);
@@ -6186,12 +7821,26 @@ namespace
             double lo = 0.0, hi = 0.0, top = 0.0;
             bool wide_lo = false, wide_hi = false;
             if (FProperty* p = item->GetPropertyByNameInChain(STR("Length to Top R Default"))) top = number_property(item, p);
-            if (measure_weapon_axis(item, base, Vec3{}, cfg.pose_slide_wide_cm, top, lo, hi, wide_lo, wide_hi))
+            std::vector<std::pair<double, double>> extra;
+            bool ok = measure_weapon_axis(item, base, Vec3{}, cfg.pose_slide_wide_cm, top, lo, hi, wide_lo, wide_hi, &extra);
+            measured = ok && !(lo == 0.0 && hi == 0.0);
+            if (ok)
             {
                 double g0 = (std::min)(0.0, lo + half), g1 = (std::max)(0.0, hi - half);
                 hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, g1}, "grip", -1, 2});
-                double b0 = hi + half + cfg.pose_two_hand_blade_gap_cm, b1 = top - half;
-                if (wide_hi && top > 0.0 && b1 > b0 + 2.0) hs.push_back(Handle{Vec3{0, 0, b0}, Vec3{0, 0, b1}, "blade", 5, 5});
+                bool hafted = hi - lo >= 30.0;
+                if (hafted)
+                {
+                    // Every further haft stretch is a handle of its own; the head is not (B&S).
+                    for (const auto& e : extra)
+                        if (e.second - e.first > 2.0 * half + 1.0) hs.push_back(Handle{Vec3{0, 0, e.first + half}, Vec3{0, 0, e.second - half}, "haft", 2, 2});
+                }
+                else
+                {
+                    // Only a sword's blade (past a Guard) is a handle (half-swording); an axe's or a tool's head is not.
+                    double b0 = hi + half + cfg.pose_two_hand_blade_gap_cm, b1 = top - half;
+                    if (wide_hi && weapon_has_guard(item) && top > 0.0 && b1 > b0 + 2.0) hs.push_back(Handle{Vec3{0, 0, b0}, Vec3{0, 0, b1}, "blade", 5, 5});
+                }
             }
             else
                 hs.push_back(Handle{Vec3{}, Vec3{}, "grip", -1, 2});
@@ -6203,7 +7852,18 @@ namespace
             std::snprintf(one, sizeof(one), "%s%s (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f)", list.empty() ? "" : "; ", h.name.c_str(), h.a.x, h.a.y, h.a.z, h.b.x, h.b.y, h.b.z);
             list += one;
         }
-        HSVR_LOG("Handles: %ls: %s", item->GetName().c_str(), list.empty() ? "none (held where touched)" : list.c_str());
+        // A weapon whose parts were not found yet (spawned straight into the hand) is measured again next
+        // time, up to 40 times; a grip that is really this short (fists, a short dagger grip) is kept.
+        static std::unordered_map<UObject*, int> unsure_tries;
+        if (!measured && ++unsure_tries[item] <= 40)
+        {
+            if (unsure_tries[item] == 1)
+                HSVR_LOG("Handles: %ls: its parts are not found yet (%s), measuring again", item->GetName().c_str(), list.empty() ? "none" : list.c_str());
+            static std::unordered_map<UObject*, std::vector<Handle>> unsure;
+            return unsure[item] = std::move(hs);
+        }
+        HSVR_LOG("Handles: %ls: %s%s", item->GetName().c_str(), list.empty() ? "none (held where touched)" : list.c_str(),
+                 unsure_tries.count(item) ? " (measured again after its parts appeared)" : "");
         return g_item_handles.emplace(item, std::move(hs)).first->second;
     }
 
@@ -6370,6 +8030,13 @@ namespace
         h.zone_tip = top;
         HSVR_LOG("Slide: %ls grip zone %.1f .. %.1f cm from the game's grip (pommel end %.1f, top stop %.1f from the %s, tip %.1f)", weapon->GetName().c_str(),
                  h.zone_lo, h.zone_hi, -bottom, stop < 1e8 ? stop : 0.0, how, top);
+        // No room at all (a weapon spawned into the hand before its parts were listed): look again in a
+        // moment rather than keep a zero zone for as long as it is held (playtest 12:19, two-handed axe).
+        if (h.zone_hi - h.zone_lo < 1.0)
+        {
+            static std::unordered_map<UObject*, int> tries;
+            if (++tries[weapon] <= 20) h.zone_known = false;
+        }
     }
 
     // The slide (Matthew: hold the trigger and that hand slides along the shaft, B&S-style, either
@@ -6381,7 +8048,8 @@ namespace
     void slide_grip(int side, HoldState& h, UObject* weapon, UObject* base, const hsvr::Vec3& hand_point, const hsvr::Config& cfg, double dt)
     {
         using namespace hsvr;
-        if (!cfg.pose_slide || h.forearm) return;
+        // A fist (the game's invisible 13 cm sphere) has no handle to slide along.
+        if (!cfg.pose_slide || h.forearm || is_fist(weapon)) return;
         if (!h.zone_known) find_grip_zone(h, weapon, base, cfg);
         ControllerState st = controllers_state();
         float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : st.hand[side].trigger;
@@ -6433,18 +8101,56 @@ namespace
     // 1 for a fresh, healthy Willie of usual strength. Each part can be switched off for testing.
     struct BodyStrength
     {
-        double total = 1.0, strength = 1.0, injury = 1.0, stamina = 1.0;
+        double total = 1.0, strength = 1.0, injury = 1.0, stamina = 1.0, size = 1.0;
         double muscle_rate = -1.0, tonus = -1.0, consciousness = -1.0, stamina_value = -1.0;
     };
+
+    // His arm's mass against a default creator body's (Height 0.5 -> scale 0.9375, Weight 0.5 -> Mass Scale
+    // 1.125). Flat Half Sword's arm motors are the same for every body (acceleration-mode drives, CPA's
+    // strength ratio Mass Scale / GetMassScale = 1), so a weapon slows a light arm more than a heavy one:
+    // what differs between bodies is the arm's mass next to the weapon's. Arm mass = (upperarm 1.39 +
+    // lowerarm 1.22 kg, from their volume, so x scale^3) + hand 1 kg (a fixed override), all x Mass Scale
+    // (willie_physics_assets.md; Set Character Height: scale = MapRange(Height 0..1 -> 0.875..1);
+    // Mass Scale (Set in BP) = MapRange(Muscle Rate 0..1 -> 1..1.25)). Range 0.78 (min/min) .. 1.27 (max/max).
+    double body_size_factor(UObject* pawn)
+    {
+        static UObject* last_pawn = nullptr;
+        static double last = 1.0;
+        if (pawn == last_pawn) return last;
+        double scale = -1.0, mass_scale = -1.0;
+        if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Character Scale (Set in BP)")))
+        {
+            if (p->GetClass().GetName() == STR("StructProperty"))
+            {
+                double v[3] = {0, 0, 0};
+                read_three(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal(), p, v);
+                scale = v[0];
+            }
+        }
+        if (FProperty* p = pawn->GetPropertyByNameInChain(STR("Mass Scale (Set in BP)"))) mass_scale = number_property(pawn, p);
+        // Read too early (before the game sets them) they are 0: try again next time.
+        if (!(scale > 0.3 && scale < 3.0) || !(mass_scale > 0.1 && mass_scale < 5.0)) return 1.0;
+        auto arm = [](double sc, double ms) { return (2.61 * sc * sc * sc + 1.0) * ms; };
+        double f = arm(scale, mass_scale) / arm(0.9375, 1.125);
+        last_pawn = pawn;
+        last = f;
+        HSVR_LOG("Strength: body size: Character Scale %.4f, Mass Scale %.3f -> arm mass %.2f kg vs %.2f kg for a default body -> hold x%.2f", scale, mass_scale,
+                 arm(scale, mass_scale), arm(0.9375, 1.125), f);
+        return f;
+    }
     BodyStrength body_strength(UObject* pawn, int side, const hsvr::Config& cfg)
     {
         BodyStrength b;
         if (!cfg.pose_body_strength || !pawn) return b;
-        b.muscle_rate = read_number_variable(pawn, STR("Muscle Rate"));
+        // Muscle Rate can be negative (the creator's lowest weight is -1), so "not found" is asked of the
+        // property itself, not read off a -1 value (playtest 14:14: a weight -1 Willie got full grip strength).
+        FProperty* muscle = pawn->GetPropertyByNameInChain(STR("Muscle Rate"));
+        bool muscle_found = muscle != nullptr;
+        b.muscle_rate = muscle ? number_property(pawn, muscle) : 0.0;
         b.tonus = read_number_variable(pawn, side == 0 ? STR("Arm L Tonus") : STR("Arm R Tonus"));
         b.consciousness = read_number_variable(pawn, STR("Consciousness"));
         b.stamina_value = read_number_variable(pawn, STR("Stamina"));
-        if (b.muscle_rate >= 0.0) b.strength = (std::max)(0.5, 1.0 + 0.5 * b.muscle_rate) / 1.25;
+        if (muscle_found) b.strength = (std::max)(0.5, 1.0 + 0.5 * b.muscle_rate) / 1.25;
         if (b.tonus >= 0.0) b.injury = (std::min)(1.0, b.tonus);
         if (b.consciousness >= 0.0) b.injury *= (std::min)(1.0, b.consciousness / 100.0);
         if (b.stamina_value >= 0.0)
@@ -6455,13 +8161,20 @@ namespace
         // The arm's tonus already falls with exhaustion (the game caps it 1 -> 0.25 as Exhaustion rises,
         // which happens only once stamina is nearly gone), so stamina and tonus are not multiplied
         // (strength test 1: that counted it twice, 0.33 at stamina 0): the weaker of the two counts.
-        b.total = (std::max)(cfg.pose_body_strength_min, b.strength * (std::min)(b.injury, b.stamina));
+        // With the arm-mass factor on, Muscle Rate does not scale the hold: in flat Half Sword the arm motors
+        // are the same for every body and muscle acts through the arm's mass (already in size) and through
+        // the hand joint's slip threshold (x1..1.5). The mod has no force-based slip of its own (the game's
+        // reads its hand joint, which the hold leaves free), so that part is only logged. Off: as before.
+        if (cfg.pose_body_size_strength) b.size = body_size_factor(pawn);
+        double on_hold = cfg.pose_body_size_strength ? b.size : b.strength;
+        b.total = (std::max)(cfg.pose_body_strength_min, on_hold * (std::min)(b.injury, b.stamina));
         static bool reported = false;
         if (!reported)
         {
             reported = true;
-            HSVR_LOG("Strength: Muscle Rate %.2f, Arm %s Tonus %.3f, Consciousness %.0f, Stamina %.1f (-1 = not found) -> strength %.2f x injury %.2f x stamina %.2f = %.2f",
-                     b.muscle_rate, side == 0 ? "L" : "R", b.tonus, b.consciousness, b.stamina_value, b.strength, b.injury, b.stamina, b.total);
+            HSVR_LOG("Strength: Muscle Rate %.2f, Arm %s Tonus %.3f, Consciousness %.0f, Stamina %.1f (tonus, consciousness, stamina -1 = not found; Muscle Rate %s) -> grip (slip, logged only with size on) %.2f, size %.2f x injury %.2f x stamina %.2f = %.2f",
+                     b.muscle_rate, side == 0 ? "L" : "R", b.tonus, b.consciousness, b.stamina_value, muscle_found ? "found" : "not found", b.strength, b.size,
+                     b.injury, b.stamina, b.total);
         }
         return b;
     }
@@ -6838,7 +8551,14 @@ namespace
                 // first keeps its own target (bs_hold_measured.md §3).
                 {
                     double dtp = (std::min)(1.0 / 30.0, (std::max)(1.0 / 240.0, now - h.last_time));
-                    g_two.bs_vel = g_two.bs_valid && h.have_last ? (p2 - g_two.bs_p2) * (1.0 / dtp) : Vec3{};
+                    Vec3 raw_v = g_two.bs_valid && h.have_last ? (p2 - g_two.bs_p2) * (1.0 / dtp) : Vec3{};
+                    // Smoothed like the first hand's (pose_hold_target_vel_smooth_s): two noisy hands pulling one
+                    // weapon shook it most (playtest 14:37: halberd and sword in two hands 1.0-1.4 cm at ~10 Hz).
+                    double tau2 = hsvr::config().pose_hold_target_vel_smooth_s;
+                    if (tau2 > 1e-4 && g_two.bs_valid && h.have_last)
+                        g_two.bs_vel = g_two.bs_vel + (raw_v - g_two.bs_vel) * (1.0 - std::exp(-dtp / tau2));
+                    else
+                        g_two.bs_vel = raw_v;
                     if (length(g_two.bs_vel) > 3000.0) g_two.bs_vel = Vec3{};
                     g_two.bs_p2 = p2;
                     g_two.bs_local = local2;
@@ -6923,7 +8643,28 @@ namespace
             {
                 target_vel = (target_pivot - last_pivot) * (1.0 / dt);
                 target_ang = scaled_axis((target_rot * h.last_target_rot.inverse()).normalized()) * (1.0 / dt);
+                // Smoothed (pose_hold_target_vel_smooth_s): a frame-to-frame difference of a tracked hand
+                // turns its ~0.4 cm of tracking noise into ~35 cm/s of noise, and the dampers drove the weapon
+                // with it: held still, the weapon and the hand drawn on it shook 1.0-1.4 cm at ~10 Hz while
+                // the controller moved 0.3-0.6 cm (playtest 14:37, halberd / sword / axe).
+                double tau = cfg.pose_hold_target_vel_smooth_s;
+                if (tau > 1e-4 && h.vel_f_set)
+                {
+                    double a = 1.0 - std::exp(-dt / tau);
+                    h.vel_f = h.vel_f + (target_vel - h.vel_f) * a;
+                    h.ang_f = h.ang_f + (target_ang - h.ang_f) * a;
+                    target_vel = h.vel_f;
+                    target_ang = h.ang_f;
+                }
+                else
+                {
+                    h.vel_f = target_vel;
+                    h.ang_f = target_ang;
+                    h.vel_f_set = true;
+                }
             }
+            else
+                h.vel_f_set = false;
         }
         h.last_target_pos = target_pos;
         h.last_target_rot = target_rot;
@@ -7204,6 +8945,21 @@ namespace
                        rf = two ? cfg.pose_bs_two_rot_max : cfg.pose_hold_max_torque;
                 double st = (std::max)(0.0, cfg.pose_hold_strength);
                 double dst = (std::max)(1.0, st * 0.5);
+                // Dampers per weapon (pose_hold_damping_ratio): critical damping for this weapon's own mass and
+                // its inertia about the grip, so a long heavy one (war staff, 1.9 kg m^2 about a low grip) settles
+                // without bouncing and a short sword (0.04 kg m^2) doesn't trail the wrist and swing on past a stop
+                // (playtest 14:19 with fixed dampers tuned for the staff). 0 = the fixed dampers above.
+                if (cfg.pose_hold_damping_ratio > 0.0)
+                {
+                    Vec3 rp = pivot_now - com;
+                    double ig = (std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp); // kg cm^2
+                    double z = cfg.pose_hold_damping_ratio;
+                    double per_point = two ? mass * 0.5 : mass;
+                    pc = 2.0 * z * std::sqrt((std::max)(0.0, pk * st * per_point)) / dst;
+                    rc = 2.0 * z * std::sqrt((std::max)(0.0, rk * st * 1e4 * ig)) / (dst * 1e4);
+                    HSVR_LOG_EVERY(2.0, "Hold: %s dampers for %ls (%.2f kg, %.3f kg m^2 about the grip): position %.0f, turn %.1f", side == 0 ? "left" : "right",
+                                   weapon->GetName().c_str(), mass, ig / 1e4, pc * dst, rc * dst);
+                }
                 double draw_scale = 1.0;
                 if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body"))) draw_scale = (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
                 SoftPoint pts[2];
@@ -7234,14 +8990,32 @@ namespace
                 Vec3 vb = v_com_now + g * DT, wb = w_now; // gravity this frame, taken off again below (the physics adds it)
                 Vec3 ang;
                 Vec3 err_rot = scaled_axis((rot * target_rot.inverse()).normalized());
-                bs_solve(mass, invI, vb, wb, pts, n, err_rot, target_ang, rk * st * 1e4, rc * dst * 1e4, rf * st * body.total * 1e4 * draw_scale, DT,
+                // The wrist's end stop (Matthew 2026-11-19: with the turning limit at a real wrist's 30 N m,
+                // a short sword kept going past the hand when he stopped a swing, "the wrist hyperextends").
+                // Within pose_hold_wrist_free_deg of the hand the turn is limited to the wrist's strength (a
+                // long weapon held at its end droops); past it the limit rises to pose_hold_wrist_stop_torque
+                // by pose_hold_wrist_stop_deg, as a real wrist bottoms out and the forearm takes the load.
+                double tcap = rf * st * body.total * 1e4 * draw_scale;
+                {
+                    double bend = length(err_rot) * 57.2958;
+                    double f0 = cfg.pose_hold_wrist_free_deg, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_wrist_stop_deg);
+                    double hard = cfg.pose_hold_wrist_stop_torque * st * body.total * 1e4 * draw_scale;
+                    if (cfg.pose_hold_wrist_stop_torque > 0.0 && bend > f0 && hard > tcap)
+                    {
+                        double u = (std::min)(1.0, (bend - f0) / (f1 - f0));
+                        tcap = tcap + (hard - tcap) * u;
+                        HSVR_LOG_EVERY(0.5, "Hold: %s wrist bent %.0f deg from the hand: turning limit %.0f N m (wrist stop)", side == 0 ? "left" : "right", bend,
+                                       tcap / 1e4);
+                    }
+                }
+                bs_solve(mass, invI, vb, wb, pts, n, err_rot, target_ang, rk * st * 1e4, rc * dst * 1e4, tcap, DT,
                          (std::max)(1, cfg.pose_bs_iterations), ang);
                 exact_v = clamp_length(vb - g * DT, 2000.0);
                 w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
                 h.force_n = length(pts[0].acc) / DT / 100.0;
                 h.force_capped = length(pts[0].acc) >= pts[0].fmax * DT * 0.999;
                 h.torque_nm = length(ang) / DT / 1e4;
-                h.torque_capped = length(ang) >= rf * st * body.total * 1e4 * draw_scale * DT * 0.999;
+                h.torque_capped = length(ang) >= tcap * DT * 0.999;
                 HSVR_LOG_EVERY(0.5, "Hold: %s B&S hold%s: grip %.1f cm / %.0f deg off, %.0f N%s, turn %.1f N m%s%s", side == 0 ? "left" : "right",
                                two ? " (two hands)" : "", length(pts[0].err), length(err_rot) * 57.2958, h.force_n, h.force_capped ? " (cap)" : "", h.torque_nm,
                                h.torque_capped ? " (cap)" : "",
@@ -7456,6 +9230,406 @@ namespace
         HSVR_LOG("Force: watching %d engine physics functions for calls on his weapons and his body", hooked);
     }
 
+    // ---- Hit vibration (Blade & Sorcery's way) -------------------------------------------------
+    // B&S has no haptic effect for hits: the buzz is the hit sound (defaults\bs_haptics.md). Each
+    // hit sound layer has a volume from the hit's intensity (InverseLerp of the relative contact
+    // speed: 0.25-15 m/s, maces 6-16, punches 2-9) through its volumeIntensityCurve, layers under
+    // 0.05 are not played, and every frame a hand gets the sum of its sounds' amplitude envelopes x
+    // volume, clamped to 1, as a 1/30 s pulse (controllers_hit). Weapon and shield hits buzz every
+    // hand holding either item; a punch only the punching hand; a hit taken on the body, nothing.
+    // Contact that stays on (sliding) gives B&S's scrape ticks: 0.8 per 2 cm of slide.
+    // Here: our weapon's speed at the contact is the velocity the hold gave it last tick (the hit
+    // event comes after the physics step, when the speeds have already changed), the other body's
+    // is read at the point. A blow taken on a parked weapon or shield (its own speed ~0, the
+    // attacker's already slowed) also gets an intensity from the game's own impulse, so a block
+    // is felt by how hard it was hit.
+    struct HitCurveKey { float x, y; };
+    // Unity curve with flat tangents between keys (a smoothstep per segment).
+    double hit_curve(const HitCurveKey* k, int n, double x)
+    {
+        if (x <= k[0].x) return k[0].y;
+        for (int i = 1; i < n; ++i)
+            if (x <= k[i].x)
+            {
+                double u = (x - k[i - 1].x) / (std::max)(1e-6, (double)(k[i].x - k[i - 1].x));
+                u = u * u * (3.0 - 2.0 * u);
+                return k[i - 1].y + (k[i].y - k[i - 1].y) * u;
+            }
+        return k[n - 1].y;
+    }
+    // B&S envelopes (mean over each container's clips), sampled every 50 ms over 0.4 s.
+    struct HitEnvelopeDef { const char* name; float v[9]; };
+    const HitEnvelopeDef kEnvSword = {"HitSword1", {.66f, .71f, .63f, .37f, .16f, .09f, .09f, .09f, .02f}};
+    const HitEnvelopeDef kEnvSwordSoft = {"HitSwordSoft", {.85f, .47f, .29f, .08f, .03f, .03f, .02f, .00f, .00f}};
+    const HitEnvelopeDef kEnvSlashFlesh = {"HitSwordSlashOnFlesh", {.00f, .50f, .82f, .71f, .30f, .11f, .06f, .03f, .01f}};
+    const HitEnvelopeDef kEnvPierceFlesh = {"HitSwordPierceOnFlesh", {.06f, .60f, .96f, .64f, .27f, .15f, .08f, .04f, .03f}};
+    const HitEnvelopeDef kEnvMaceFlesh = {"HitMaceOnFlesh", {.19f, .89f, .61f, .26f, .08f, .08f, .01f, .00f, .00f}};
+    const HitEnvelopeDef kEnvPunch = {"Punch", {.02f, .90f, .39f, .10f, .03f, .01f, .00f, .00f, .00f}};
+    const HitEnvelopeDef kEnvPunchHeavy = {"PunchHeavy", {.15f, .91f, .81f, .39f, .20f, .10f, .02f, .02f, .01f}};
+    const HitEnvelopeDef kEnvMace = {"HitMace", {.09f, .86f, .65f, .24f, .05f, .02f, .01f, .01f, .00f}};
+    const HitEnvelopeDef kEnvTick = {"Scrape", {1.0f, .10f, .00f, .00f, .00f, .00f, .00f, .00f, .00f}};
+    const HitCurveKey kCurveSoft[] = {{0.0f, 0.0f}, {0.2f, 1.0f}, {1.0f, 0.0f}};
+    const HitCurveKey kCurveHard[] = {{0.0f, 0.0f}, {0.1f, 0.0f}, {1.0f, 1.0f}};
+    const HitCurveKey kCurveOnFlesh[] = {{0.0f, 0.2f}, {1.0f, 1.0f}};
+    const HitCurveKey kCurveOnPlate[] = {{0.0f, 0.5f}, {1.0f, 1.0f}};
+    const HitCurveKey kCurvePunch[] = {{0.0f, 0.0f}, {0.5f, 0.6f}, {1.0f, 0.0f}};
+    const HitCurveKey kCurvePunchHeavy[] = {{0.0f, 0.2f}, {1.0f, 0.6f}};
+
+    // One sound layer on a hand; returns the volume played (0 = culled).
+    double hit_layer(int hand, const HitEnvelopeDef& env, const HitCurveKey* curve, int keys, double intensity, double db_gain, double seconds = 0.4)
+    {
+        static const float t[9] = {0.0f, 0.125f, 0.25f, 0.375f, 0.5f, 0.625f, 0.75f, 0.875f, 1.0f};
+        double vol = hit_curve(curve, keys, intensity) * db_gain * hsvr::config().hit_buzz;
+        if (vol < 0.05) return 0.0;
+        hsvr::controllers_hit(hand, t, env.v, 9, seconds, (float)vol);
+        return vol;
+    }
+
+    // A weapon is blunt when none of its damage points (the game's Tips, tags sEdge### / sTip###)
+    // is sharp (both under 10): maces, hammers, flails, staffs. Cached per weapon.
+    bool weapon_is_blunt(UObject* weapon)
+    {
+        static std::map<UObject*, bool> cache;
+        if (!weapon) return false;
+        auto it = cache.find(weapon);
+        if (it != cache.end()) return it->second;
+        int sharp = 0;
+        bool any = false;
+        if (RawArray* tips = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Tips")); tips && tips->Data)
+            for (int32_t i = 0; i < tips->Num; ++i)
+                if (UObject* tp = static_cast<UObject*>(tips->Data[i]))
+                    if (RawArray* tags = tp->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")); tags && tags->Data)
+                        for (int32_t j = 0; j < tags->Num; ++j)
+                        {
+                            std::wstring s = reinterpret_cast<const FName*>(tags->Data)[j].ToString();
+                            if (s.size() > 5 && (s.rfind(STR("sEdge"), 0) == 0)) any = true, sharp = (std::max)(sharp, _wtoi(s.c_str() + 5));
+                            else if (s.size() > 4 && s.rfind(STR("sTip"), 0) == 0) any = true, sharp = (std::max)(sharp, _wtoi(s.c_str() + 4));
+                        }
+        bool blunt = any && sharp < 10;
+        if (cache.size() > 256) cache.clear();
+        cache[weapon] = blunt;
+        return blunt;
+    }
+
+    // The player's hands holding this item (bit 0 left, bit 1 right).
+    int hit_holders(UObject* pawn, UObject* item)
+    {
+        if (!item) return 0;
+        int m = 0;
+        if (g_hold[0].weapon == item || object_property(pawn, STR("Weapon L")) == item) m |= 1;
+        if (g_hold[1].weapon == item || object_property(pawn, STR("Weapon R")) == item) m |= 2;
+        if (g_two.active && g_two.weapon == item) m |= 3;
+        return m;
+    }
+
+    // The pre-hit speed of a held item at a point (cm/s): the velocity the hold set last tick.
+    bool hit_held_velocity(UObject* pawn, UObject* item, const hsvr::Vec3& at, hsvr::Vec3& out)
+    {
+        using namespace hsvr;
+        for (int side = 0; side < 2; ++side)
+        {
+            const HoldState& h = g_hold[side];
+            if (h.weapon != item || !h.have_last) continue;
+            UObject* base = object_property(item, STR("BaseMesh"));
+            if (!base) return false;
+            Call cm(base, STR("GetCenterOfMass"));
+            cm.run();
+            Vec3 r = at - cm.vec();
+            const Vec3& w = h.last_set_w;
+            out = h.last_set_v + Vec3{w.y * r.z - w.z * r.y, w.z * r.x - w.x * r.z, w.x * r.y - w.y * r.x};
+            return true;
+        }
+        return false;
+    }
+
+    hsvr::Vec3 hit_body_velocity(UObject* comp, FName bone, const hsvr::Vec3& at)
+    {
+        if (!comp) return {};
+        Call v(comp, STR("GetPhysicsLinearVelocityAtPoint"));
+        v.three(STR("Point"), at.x, at.y, at.z);
+        v.name(STR("BoneName"), bone);
+        v.run();
+        return v.vec();
+    }
+
+    // Recent contacts per hand: the same thing touched again within 0.2 s is the same contact
+    // (UE reports a touching pair every physics step) unless it is clearly harder.
+    struct HitContact
+    {
+        UObject* other = nullptr;
+        double last = -10.0, intensity = 0.0;
+        hsvr::Vec3 point;
+        double slid = 0.0;
+    };
+    HitContact g_hit_contact[2][4];
+
+    // Returns true when this is a new hit on that hand (and remembers it); scrape ticks for a
+    // contact that stays on and slides.
+    bool hit_is_new(int hand, UObject* other, double intensity, const hsvr::Vec3& point, double now)
+    {
+        hsvr::Config cfg = hsvr::config();
+        HitContact* slot = nullptr;
+        HitContact* oldest = &g_hit_contact[hand][0];
+        for (HitContact& c : g_hit_contact[hand])
+        {
+            if (c.other == other && now - c.last < 0.2) slot = &c;
+            if (c.last < oldest->last) oldest = &c;
+        }
+        if (slot)
+        {
+            double moved = hsvr::length(point - slot->point);
+            if (moved < 30.0) slot->slid += moved; // a jump this big is a new spot, not a slide
+            slot->point = point;
+            slot->last = now;
+            if (intensity > slot->intensity * 1.5 + 0.1)
+            {
+                slot->intensity = intensity;
+                slot->slid = 0.0;
+                return true;
+            }
+            slot->intensity = (std::max)(slot->intensity * 0.9, intensity);
+            if (cfg.hit_buzz_scrape > 0.0 && slot->slid >= 2.0)
+            {
+                slot->slid = std::fmod(slot->slid, 2.0);
+                hit_layer(hand, kEnvTick, kCurveOnPlate, 2, 1.0, 0.8 * cfg.hit_buzz_scrape, 0.06);
+            }
+            return false;
+        }
+        *oldest = HitContact{other, now, intensity, point, 0.0};
+        return true;
+    }
+
+    enum class HitSource { Blade, Blunt, Fist };
+    enum class HitTarget { Item, Flesh, Plate, World };
+
+    // Plays B&S's sound layers for one hit on the hands in `mask`; returns the summed peak volume.
+    double hit_play(int mask, HitSource src, HitTarget tgt, double intensity)
+    {
+        hsvr::Config cfg = hsvr::config();
+        double total = 0.0;
+        for (int hand = 0; hand < 2; ++hand)
+        {
+            if (!(mask & (1 << hand))) continue;
+            double v = 0.0;
+            if (src == HitSource::Fist)
+            {
+                v += hit_layer(hand, kEnvPunch, kCurvePunch, 3, intensity, 1.0);
+                v += hit_layer(hand, kEnvPunchHeavy, kCurvePunchHeavy, 2, intensity, 1.0);
+            }
+            else if (tgt == HitTarget::Item)
+            {
+                const HitEnvelopeDef& hard = src == HitSource::Blunt ? kEnvMace : kEnvSword;
+                v += hit_layer(hand, kEnvSwordSoft, kCurveSoft, 3, intensity, 1.0);
+                v += hit_layer(hand, hard, kCurveHard, 3, intensity, 1.0);
+            }
+            else if (tgt == HitTarget::Flesh)
+            {
+                if (src == HitSource::Blunt) v += hit_layer(hand, kEnvMaceFlesh, kCurveOnFlesh, 2, intensity, 1.26);
+                else v += hit_layer(hand, kEnvSlashFlesh, kCurveOnFlesh, 2, intensity, 1.0);
+            }
+            else if (tgt == HitTarget::Plate)
+            {
+                // B&S plays a blade on plate silently (only blunt damage passes its filter);
+                // hit_buzz_blade_on_plate gives it the metal-on-metal hard layer instead.
+                if (src == HitSource::Blunt) v += hit_layer(hand, kEnvMace, kCurveOnPlate, 2, intensity, 1.0);
+                else if (cfg.hit_buzz_blade_on_plate) v += hit_layer(hand, kEnvSword, kCurveHard, 3, intensity, 1.0);
+            }
+            total = (std::max)(total, v);
+        }
+        return total;
+    }
+
+    double inverse_lerp(double a, double b, double x) { return (std::max)(0.0, (std::min)(1.0, (x - a) / (b - a))); }
+
+    // The hit event's FHitResult, broken out (BreakHitResult): what was hit, its bone, our own bone
+    // (BoneName = Hit.MyBoneName) and the point.
+    struct HitInfo
+    {
+        UObject* comp = nullptr;
+        FName bone, my_bone;
+        hsvr::Vec3 point;
+        bool ok = false;
+    };
+    HitInfo break_hit(Unreal::UnrealScriptFunctionCallableContext& context, FProperty* hit_prop)
+    {
+        HitInfo r;
+        if (!hit_prop) return r;
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        Call b(gs, STR("BreakHitResult"));
+        FProperty* hp = b.param(STR("Hit"));
+        if (!hp) return r;
+        const uint8_t* src = context.TheStack.Locals() + hit_prop->GetOffset_Internal();
+        for (FOutParmRec* o = context.TheStack.OutParms(); o; o = o->NextOutParm)
+            if (o->Property == hit_prop && o->PropAddr)
+            {
+                src = o->PropAddr;
+                break;
+            }
+        std::memcpy(b.buffer.data() + hp->GetOffset_Internal(), src, (std::min)(hp->GetSize(), hit_prop->GetSize()));
+        b.run();
+        if (FProperty* c = b.param(STR("HitComponent"))) r.comp = *reinterpret_cast<UObject**>(b.buffer.data() + c->GetOffset_Internal());
+        if (FProperty* c = b.param(STR("HitBoneName"))) r.bone = *reinterpret_cast<FName*>(b.buffer.data() + c->GetOffset_Internal());
+        if (FProperty* c = b.param(STR("BoneName"))) r.my_bone = *reinterpret_cast<FName*>(b.buffer.data() + c->GetOffset_Internal());
+        r.point = b.vec(STR("ImpactPoint"));
+        r.ok = true;
+        return r;
+    }
+
+    bool hit_rate_ok(double now)
+    {
+        static double window = 0.0;
+        static int n = 0;
+        if (now - window >= 1.0) window = now, n = 0;
+        return ++n <= 120;
+    }
+
+    // A person's part: his skeletal mesh is flesh, anything else on him (armour pieces) plate.
+    HitTarget hit_target_kind(UObject* other_actor, UObject* comp)
+    {
+        if (!other_actor) return HitTarget::World;
+        if (is_a(other_actor, STR("ModularWeaponBP_C"))) return HitTarget::Item;
+        if (is_a(other_actor, STR("Willie_BP_C")))
+            return comp && is_a(comp, STR("SkeletalMeshComponent")) ? HitTarget::Flesh : HitTarget::Plate;
+        return HitTarget::World;
+    }
+
+    // ModularWeaponBP "Collision Hit" (before it runs): a weapon hits something. Ours hitting
+    // anything, or anyone's hitting an item we hold.
+    void hit_haptics_weapon(Unreal::UnrealScriptFunctionCallableContext& context, UFunction* fn)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        if (cfg.hit_buzz <= 0.0 || !fn) return;
+        UObject* weapon = context.Context;
+        UObject* pawn = live_posed_pawn();
+        uint8_t* locals = context.TheStack.Locals();
+        if (!weapon || !pawn || !locals) return;
+        UObject* other = nullptr;
+        UObject* other_comp = nullptr;
+        FProperty* hit_prop = nullptr;
+        double ni[3] = {0, 0, 0};
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            uint8_t* at = locals + p->GetOffset_Internal();
+            if (n == STR("OtherActor") || n == STR("Other Actor")) other = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("OtherComp") || n == STR("Other Comp")) other_comp = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("NormalImpulse") || n == STR("Normal Impulse")) read_three(at, p, ni);
+            else if (n == STR("Hit")) hit_prop = p;
+        }
+        if (other == pawn) return; // his own body (the game ignores it too)
+        int mine = hit_holders(pawn, weapon);
+        int theirs = other ? hit_holders(pawn, other) : 0;
+        int mask = mine | theirs;
+        if (!mask) return;
+        double now = now_seconds();
+        if (!hit_rate_ok(now)) return;
+        HitInfo hit = break_hit(context, hit_prop);
+        UObject* target_comp = hit.comp ? hit.comp : other_comp;
+        double impulse = length(Vec3{ni[0], ni[1], ni[2]});
+
+        // Relative contact speed (m/s): each side's velocity at the point, ours from the hold.
+        Vec3 va, vb;
+        if (!hit_held_velocity(pawn, weapon, hit.point, va))
+            if (UObject* base = object_property(weapon, STR("BaseMesh"))) va = hit_body_velocity(base, FName(), hit.point);
+        if (!other || !hit_held_velocity(pawn, other, hit.point, vb)) vb = hit_body_velocity(target_comp, hit.bone, hit.point);
+        double speed = length(va - vb) / 100.0;
+
+        // Who strikes: our weapon (its kind), or theirs on our item (its kind decides the sound).
+        bool fist = is_fist(weapon);
+        HitSource src = fist ? HitSource::Fist : weapon_is_blunt(weapon) ? HitSource::Blunt : HitSource::Blade;
+        HitTarget tgt = hit_target_kind(other, target_comp);
+        if (!mine) tgt = HitTarget::Item; // their weapon on the item we hold
+        double lo = 0.25, hi = 15.0;
+        if (src == HitSource::Fist) lo = 2.0, hi = 9.0;
+        else if (src == HitSource::Blunt) lo = 6.0, hi = 16.0;
+        double i_speed = inverse_lerp(lo, hi, speed);
+        double i_imp = src == HitSource::Fist ? 0.0 : inverse_lerp(15.0, (std::max)(16.0, cfg.hit_buzz_impulse_full), impulse);
+        double intensity = (std::max)(i_speed, i_imp);
+
+        UObject* key = mine ? other : weapon;
+        // B&S spawns no hit sound for a contact under its range's low end (intensity 0): a fist or
+        // blade resting against something is touch, not a hit (test hb-hits2: 0 m/s at volume 0.20).
+        if (tgt != HitTarget::World && intensity < cfg.hit_buzz_min_intensity)
+        {
+            for (int hand = 0; hand < 2; ++hand)
+                if (mask & (1 << hand)) hit_is_new(hand, key, intensity, hit.point, now);
+            return;
+        }
+        if (tgt == HitTarget::World)
+        {
+            // B&S: blades on stone and dirt make no hit buzz, only scrape ticks while sliding.
+            for (int hand = 0; hand < 2; ++hand)
+                if (mask & (1 << hand)) hit_is_new(hand, target_comp ? target_comp : other, 0.0, hit.point, now);
+            return;
+        }
+        int play = 0;
+        for (int hand = 0; hand < 2; ++hand)
+            if ((mask & (1 << hand)) && hit_is_new(hand, key, intensity, hit.point, now)) play |= 1 << hand;
+        // A punch: only the punching hand.
+        if (src == HitSource::Fist) play &= mine;
+        if (!play) return;
+        double vol = hit_play(play, src, tgt, intensity);
+        if (cfg.hit_buzz_log && vol > 0.0)
+            HSVR_LOG("Hit buzz: %ls %s %ls (%ls bone %ls) %s, %.1f m/s, impulse %.0f, intensity %.2f (speed %.2f, impulse %.2f), hands %s, volume %.2f",
+                     weapon->GetName().c_str(), mine ? "hit" : "hit our", other ? other->GetName().c_str() : STR("?"), target_comp ? target_comp->GetName().c_str() : STR("?"),
+                     hit.bone.ToString().c_str(),
+                     tgt == HitTarget::Item ? "item" : tgt == HitTarget::Flesh ? "flesh" : "plate", speed, impulse, intensity, i_speed, i_imp,
+                     play == 3 ? "both" : play == 1 ? "left" : "right", vol);
+    }
+
+    // Willie's mesh OnComponentHit, on the player's pawn: an open hand, forearm or arm (no fist
+    // weapon in it) landing on another person is a punch on that side (B&S Punch, 2-9 m/s).
+    void hit_haptics_body(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        if (cfg.hit_buzz <= 0.0) return;
+        UFunction* fn = static_cast<UFunction*>(custom_data);
+        UObject* pawn = live_posed_pawn();
+        uint8_t* locals = context.TheStack.Locals();
+        if (!fn || !pawn || context.Context != pawn || !locals) return;
+        UObject* other = nullptr;
+        UObject* other_comp = nullptr;
+        FProperty* hit_prop = nullptr;
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            uint8_t* at = locals + p->GetOffset_Internal();
+            if (n == STR("OtherActor")) other = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("OtherComp")) other_comp = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("Hit")) hit_prop = p;
+        }
+        if (!other || other == pawn || !is_a(other, STR("Willie_BP_C"))) return;
+        double now = now_seconds();
+        if (!hit_rate_ok(now)) return;
+        HitInfo hit = break_hit(context, hit_prop);
+        std::wstring bone = hit.my_bone.ToString();
+        bool arm = bone.find(STR("hand")) != std::wstring::npos || bone.find(STR("arm")) != std::wstring::npos || bone.find(STR("finger")) != std::wstring::npos ||
+                   bone.find(STR("thumb")) != std::wstring::npos || bone.find(STR("index")) != std::wstring::npos || bone.find(STR("middle")) != std::wstring::npos ||
+                   bone.find(STR("ring")) != std::wstring::npos || bone.find(STR("pinky")) != std::wstring::npos;
+        if (!arm || bone.size() < 2) return;
+        int side = bone.size() >= 2 && bone.substr(bone.size() - 2) == STR("_l") ? 0 : bone.substr(bone.size() - 2) == STR("_r") ? 1 : -1;
+        if (side < 0) return;
+        // A fist weapon in that hand reports its own hit (above).
+        if (is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))) return;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        Vec3 va = hit_body_velocity(mesh, hit.my_bone, hit.point);
+        Vec3 vb = hit_body_velocity(hit.comp ? hit.comp : other_comp, hit.bone, hit.point);
+        // The arm's speed against him at the contact (not the hand's world speed: walking into him
+        // with an arm on him is not a strike).
+        double speed = length(va - vb) / 100.0;
+        double intensity = inverse_lerp(2.0, 9.0, speed);
+        // An arm resting or leaning on him is touch: only a strike from hit_buzz_limb_min_ms counts
+        // (hb-hits2: arms on the foe buzzed faintly about once a second at 1.3-2.7 m/s).
+        bool strike = speed >= cfg.hit_buzz_limb_min_ms && intensity >= cfg.hit_buzz_min_intensity;
+        if (!hit_is_new(side, other, strike ? intensity : 0.0, hit.point, now) || !strike) return;
+        double vol = hit_play(1 << side, HitSource::Fist, HitTarget::Flesh, intensity);
+        if (cfg.hit_buzz_log && vol > 0.0)
+            HSVR_LOG("Hit buzz: %s %ls hit %ls (%ls bone %ls), %.1f m/s, intensity %.2f, volume %.2f", side == 0 ? "left" : "right", bone.c_str(), other->GetName().c_str(),
+                     hit.comp ? hit.comp->GetName().c_str() : STR("?"), hit.bone.ToString().c_str(), speed, intensity, vol);
+    }
+
     // ---- Stab log (read only) ------------------------------------------------------------------
     // Why VR stabs bounce (defaults\stabbing_and_ss_reference.md in the decompile folder): the game
     // sticks a blade only when CuttingRate * |NormalImpulse| >= 10000 (ModularWeaponBP @44253-@44512)
@@ -7551,6 +9725,8 @@ namespace
 
     void stab_hit_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
+        // Hit vibration first: it reads the game's own impulse before the stab assist may raise it.
+        hit_haptics_weapon(context, static_cast<UFunction*>(custom_data));
         {
             hsvr::Config c = hsvr::config();
             if (!c.stab_log && !c.stab_assist) return;
@@ -7808,6 +9984,25 @@ namespace
         HSVR_LOG("Stab: watching the weapons' Collision Hit (parameters %ls)", params.c_str());
     }
 
+    // Hit vibration needs the weapons' Collision Hit (shared with the stab log) and Willie's mesh hit.
+    void install_hit_haptics()
+    {
+        if (hsvr::config().hit_buzz <= 0.0) return;
+        install_stab_log();
+        static bool installed = false;
+        static double last_try = -10.0;
+        if (installed) return;
+        double now = hsvr::now_seconds();
+        if (now - last_try < 2.0) return;
+        last_try = now;
+        UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
+            nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:BndEvt__BP_ThirdPersonCharacter_Mesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"));
+        if (!fn) return;
+        installed = true;
+        UObjectGlobals::RegisterHook(fn, &hit_haptics_body, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+        HSVR_LOG("Hit buzz: watching the weapons' Collision Hit and Willie's mesh hits (B&S-style hit vibration)");
+    }
+
     // Who lets a stuck blade go (stab-test7: the game stuck thrusts, then let them go within 0.15 s).
     // Logs every call of the stuck joint's Release Constraint and the weapon's release functions for
     // a weapon in his hands, with the calling Blueprint function and bytecode offset (the "@" of the
@@ -7883,6 +10078,35 @@ namespace
                 ++n;
             }
         HSVR_LOG("Stab: watching %d release functions of the stuck joint and the weapon", n);
+    }
+
+    // After his tick, before the physics (where the weapons' hits happen): a weapon the mod holds is
+    // never "Being Rubber Banded". Willie sets that every tick unless BOTH hands' "Soft Not Attached"
+    // are true (UG @459904-@460309); the mod handles the left hand itself, so the game's left flag
+    // stays false and the right weapon was rubber-banded on 40% of his hits (playtest 2026-11-19:
+    // 475 of 1116, 644 of 1768). A rubber-banded weapon never sticks, deals x0.1 damage clamped to
+    // 1000 and needs a 100-1000 impulse to register a hit at all (ModularWeaponBP @38582-@42321):
+    // "poking him with a stick".
+    void stab_no_rubber_band(UObject* pawn)
+    {
+        if (!hsvr::config().stab_no_rubber_band || !pawn) return;
+        static int cleared[2] = {0, 0};
+        static double last_log = 0.0;
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (!weapon || g_hold[side].weapon != weapon) continue;
+            if (!bool_property(weapon, STR("Being Rubber Banded"))) continue;
+            set_variable(weapon, STR("Being Rubber Banded"), 0.0);
+            ++cleared[side];
+            double now = hsvr::now_seconds();
+            if (now - last_log >= 5.0)
+            {
+                last_log = now;
+                HSVR_LOG("Stab: rubber band taken off the held weapons (right %d, left %d ticks so far; his soft-not-attached R %d L %d)", cleared[1], cleared[0],
+                         (int)bool_property(pawn, STR("R Hand Soft Not Attached")), (int)bool_property(pawn, STR("L Hand Soft Not Attached")));
+            }
+        }
     }
 
     // Every tick after his: the controllers' velocity, and the deferred lines after a hit.
@@ -8728,8 +10952,52 @@ namespace
         hsvr::Vec3 hand_pos_local; // the hand bone in the scabbard's frame at the grab
         hsvr::Quat hand_rot_local;
         bool hand_set = false;
+        // Held as a handle (pose_scabbard_handle): its length along its own Z (z0..z1, measured from its
+        // collision), the palm in the hand's frame, and the trigger slide.
+        bool seg = false;
+        double z0 = 0.0, z1 = 0.0;
+        hsvr::Vec3 palm_h;
+        bool sliding = false;
+        double last_slide_t = -1.0;
     };
     ScabHold g_scab[2];
+
+    // A scabbard's length along its own Z, from its collision: the stretch of its axis within 3.5 cm of it.
+    bool scabbard_segment(UObject* scab, double len, double& z0, double& z1)
+    {
+        using namespace hsvr;
+        static std::unordered_map<UObject*, std::pair<double, double>> cache;
+        auto f = cache.find(scab);
+        if (f != cache.end())
+        {
+            z0 = f->second.first;
+            z1 = f->second.second;
+            return z1 > z0;
+        }
+        Vec3 sp = component_location(scab);
+        Quat sq = component_rotation(scab);
+        double lo = 1e9, hi = -1e9;
+        double reach = (std::max)(20.0, len + 10.0);
+        for (double z = -reach; z <= reach; z += 2.0)
+        {
+            Vec3 a = sp + sq.rotate(Vec3{0, 0, z});
+            Call cp(scab, STR("GetClosestPointOnCollision"));
+            cp.three(STR("Point"), a.x, a.y, a.z);
+            if (!cp.run()) return false;
+            double d = cp.number();
+            if (d >= 0.0 && d <= 3.5)
+            {
+                lo = (std::min)(lo, z);
+                hi = (std::max)(hi, z);
+            }
+        }
+        if (hi <= lo) return false;
+        cache[scab] = {lo, hi};
+        z0 = lo;
+        z1 = hi;
+        HSVR_LOG("Scabbard: %ls is a handle from %.0f to %.0f cm along it", scab->GetName().c_str(), lo, hi);
+        return true;
+    }
 
     // B&S (as for weapons, pose_hold_hand_follows): his hand holding a scabbard is drawn on the scabbard
     // where it took it, not on your controller (the scabbard is pinned to the belt and only turns).
@@ -8840,7 +11108,7 @@ namespace
     }
 
     void take_scabbard(int side, UObject* mesh, UObject* scab, const hsvr::Vec3& touch, const hsvr::Quat& hand_rot, const hsvr::Quat& turn, bool test,
-                       const hsvr::Config& cfg)
+                       const hsvr::Config& cfg, const hsvr::Vec3* palm_at = nullptr)
     {
         using namespace hsvr;
         ScabHold& s = g_scab[side];
@@ -8863,6 +11131,33 @@ namespace
             s.hand_pos_local = sq.inverse().rotate(g_pose.target[side] - sp);
             s.hand_rot_local = (sq.inverse() * g_pose.hand_rot[side]).normalized();
             s.hand_set = true;
+        }
+        // As a handle (B&S): it lines up with the hand's grip line (either way along it), and the hand sits
+        // on its axis where it closed (pose_scabbard_handle).
+        double z0 = 0.0, z1 = 0.0;
+        if (!test && palm_at && cfg.pose_scabbard_handle && g_pose.hand_valid[side] && scabbard_segment(scab, scabbard_length(scab), z0, z1))
+        {
+            Vec3 sp = component_location(scab);
+            Vec3 f = normalized(hand_rot.inverse().rotate(sq.rotate(Vec3{0, 0, 1}))), want = hand_grip_axis(side);
+            if (dot(f, want) < 0.0) want = want * -1.0;
+            Vec3 n = cross(f, want);
+            double sn = length(n), c = dot(f, want);
+            Quat line_up = sn > 1e-6 ? quat_axis_angle(n * (1.0 / sn), std::atan2(sn, c)) : Quat{};
+            s.rel = (line_up * hand_rot.inverse() * sq).normalized();
+            double half = cfg.pose_slide_hand_half_cm;
+            double lz = sq.inverse().rotate(*palm_at - sp).z;
+            double a = z0 + half, b = z1 - half;
+            if (b < a) a = b = (z0 + z1) * 0.5;
+            s.touch = Vec3{0, 0, (std::min)(b, (std::max)(a, lz))};
+            s.palm_h = hand_rot.inverse().rotate(*palm_at - g_pose.target[side]);
+            s.hand_rot_local = s.rel.inverse();
+            s.hand_pos_local = s.touch - s.hand_rot_local.rotate(s.palm_h);
+            s.hand_set = true;
+            s.seg = true;
+            s.z0 = a;
+            s.z1 = b;
+            HSVR_LOG("Scabbard: %s hand holds it as a handle at %.1f cm (handle %.0f .. %.0f), turned %.0f deg to lie along the hand's grip line",
+                     side == 0 ? "left" : "right", s.touch.z, z0, z1, std::atan2(sn, c) * 57.2958);
         }
         log_scabbard_pin(scab, "before");
         widen_scabbard_pin(scab, cfg.pose_scabbard_angle_deg);
@@ -8915,7 +11210,22 @@ namespace
             return false;
         }
         if (!g_pose.hand_valid[side]) return false;
-        take_scabbard(side, mesh, best, best_touch, g_pose.hand_rot[side], Quat{}, false, cfg);
+        // Only on its handle: within pose_grab_handle_cm of its axis, along its length.
+        if (cfg.pose_scabbard_handle)
+        {
+            double z0 = 0.0, z1 = 0.0;
+            if (scabbard_segment(best, scabbard_length(best), z0, z1))
+            {
+                Vec3 local = component_rotation(best).inverse().rotate(at - component_location(best));
+                double d = length(local - Vec3{0, 0, (std::min)(z1, (std::max)(z0, local.z))});
+                if (d > cfg.pose_grab_handle_cm)
+                {
+                    HSVR_LOG("Scabbard: %s hand squeezed %.1f cm from the handle of %ls (needs %.0f): not taken", hand, d, best->GetName().c_str(), cfg.pose_grab_handle_cm);
+                    return false;
+                }
+            }
+        }
+        take_scabbard(side, mesh, best, best_touch, g_pose.hand_rot[side], Quat{}, false, cfg, &at);
         controllers_buzz(side, 0.3f);
         HSVR_LOG("Scabbard: %s hand took %ls at %.1f cm along it (%.1f cm from the hand); it turns up to %.0f deg on the belt", hand, best->GetName().c_str(),
                  best_touch.z, best_d, cfg.pose_scabbard_angle_deg);
@@ -9000,6 +11310,32 @@ namespace
                     Vec3 v = scaled_axis((rest_w.inverse() * want).normalized());
                     double a = cfg.pose_scabbard_angle_deg * 3.14159265358979 / 180.0, vl = length(v);
                     if (vl > a) want = (rest_w * from_scaled_axis(v * (a / vl))).normalized();
+                }
+                // The trigger slides the hand along it (as on a weapon's handle), within its length.
+                if (s.seg && !s.test)
+                {
+                    ControllerState cs = controllers_state();
+                    float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : cs.hand[side].trigger;
+                    bool on = s.sliding ? trig > 0.15f : trig > 0.3f;
+                    if (on != s.sliding)
+                    {
+                        s.sliding = on;
+                        HSVR_LOG("Scabbard: %s hand %s at %.1f cm (%.0f .. %.0f)", hand, on ? "starts sliding" : "holds", s.touch.z, s.z0, s.z1);
+                    }
+                    double dt = s.last_slide_t > 0.0 ? (std::min)(1.0 / 30.0, (std::max)(1.0 / 240.0, now - s.last_slide_t)) : 1.0 / 72.0;
+                    s.last_slide_t = now;
+                    if (on)
+                    {
+                        Vec3 palm = g_pose.target[side] + hand_rot.rotate(s.palm_h);
+                        double wz = cur.inverse().rotate(palm - component_location(s.scab)).z;
+                        double k = cfg.pose_slide_rate_min +
+                                   (cfg.pose_slide_rate_max - cfg.pose_slide_rate_min) * (std::min)(1.0, (std::max)(0.0, (trig - 0.15) / 0.85));
+                        double step = (wz - s.touch.z) * (1.0 - std::exp(-k * dt));
+                        double most = cfg.pose_slide_max_cm_s * dt;
+                        double nz = (std::min)(s.z1, (std::max)(s.z0, s.touch.z + (std::min)(most, (std::max)(-most, step))));
+                        s.hand_pos_local.z += nz - s.touch.z;
+                        s.touch.z = nz;
+                    }
                 }
                 Vec3 spot = component_location(s.scab) + cur.rotate(s.touch);
                 double off = length(g_pose.target[side] - spot);
@@ -9915,10 +12251,15 @@ namespace
             crouch_after_tick(context);
             weapon_spring_after_tick(context);
             swing_speed_after_tick(context);
+            fist_flags_after_tick(context);
+            body_grab_after_tick(context);
+            body_hit_watch(context);
             thrown_tick(context);
             frames_tick(context);
         }
+        stab_no_rubber_band(context);
         stab_log_tick(context);
+        install_hit_haptics();
         grip_flip_tick(context);
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
@@ -9930,6 +12271,22 @@ namespace
         Vec3 moved{now_at.x - g_hold_location.x, now_at.y - g_hold_location.y, 0.0};
         double rise = now_at.z - g_hold_location.z;
         Vec3 keep{g_hold_location.x, g_hold_location.y, rise > 30.0 ? g_hold_location.z : now_at.z};
+        // Take the game's step term back out of the height (pose_capsule_no_step_offset): it bobbed the
+        // capsule ~3 cm down through every step and snapped it back up as each foot landed.
+        static double step_off_max = 0.0;
+        if (hsvr::config().pose_capsule_no_step_offset && g_step_h2_have && rise <= 30.0)
+        {
+            auto flag_on = [&](const TCHAR* name) {
+                FProperty* p = context->GetPropertyByNameInChain(name);
+                return p && number_property(context, p) > 0.5;
+            };
+            if (!flag_on(STR("Climbing In Air")) && !flag_on(STR("Jump Pressed")) && !flag_on(STR("Fallen")))
+            {
+                double off = (std::max)(-10.0, (std::min)(10.0, g_step_h2_pre));
+                keep.z -= off;
+                step_off_max = (std::max)(step_off_max, std::fabs(off));
+            }
+        }
         // Never sunk into the floor: when its foot traces miss (a foot posed under the floor) the
         // game drops the capsule ~77 cm (Willie @594860, crouch_ik.md). The capsule's centre is kept
         // at least its standing height above the floor under it, less 15 cm (the game's own step
@@ -9968,9 +12325,10 @@ namespace
                 std::snprintf(part, sizeof(part), ", %ls %.1f", name, p ? number_property(context, p) : -1.0);
                 values += part;
             }
-            HSVR_LOG("Capsule: the game moved it sideways up to %.1f cm in a tick (put back), height %.1f, climbs undone %d%s", moved_max, keep.z, climbs,
-                     values.c_str());
+            HSVR_LOG("Capsule: the game moved it sideways up to %.1f cm in a tick (put back), height %.1f, step offset taken out up to %.1f, climbs undone %d%s",
+                     moved_max, keep.z, step_off_max, climbs, values.c_str());
             moved_max = 0.0;
+            step_off_max = 0.0;
             climbs = 0;
         }
         if (length(moved) > 0.01 || keep.z != now_at.z)
@@ -10332,7 +12690,8 @@ namespace
     // in Half Sword), the way the menus do before a fight is opened. <Name> is the variable's name as
     // the Blueprint shows it, any case; a name the engine stores with a suffix ("<Name>_12_ABC...") also matches.
     // Yes/no, byte, enum and whole-number variables only.
-    void script_set_game_instance(const std::string& step)
+    // before_out (optional): the value it had, as text "<number>" the step can take back.
+    void script_set_game_instance(const std::string& step, std::string* before_out = nullptr)
     {
         size_t equals = step.find('=');
         if (equals == std::string::npos)
@@ -10386,6 +12745,7 @@ namespace
             bool value = value_text.find("true") != std::string::npos || atoi(value_text.c_str()) != 0;
             if (value) *byte |= flag->GetFieldMask();
             else *byte &= ~flag->GetFieldMask();
+            if (before_out) *before_out = before ? "1" : "0";
             HSVR_LOG("Script: game instance %ls (yes/no) was %d, now %d", found->GetName().c_str(), (int)before, (int)value);
             return;
         }
@@ -10401,6 +12761,7 @@ namespace
             int64_t before = size == 1 ? (int64_t)*address : (int64_t)*reinterpret_cast<int32_t*>(address);
             if (size == 1) *address = (uint8_t)value;
             else *reinterpret_cast<int32_t*>(address) = (int32_t)value;
+            if (before_out) *before_out = std::to_string((long long)before);
             HSVR_LOG("Script: game instance %ls (%ls) was %lld, now %lld", found->GetName().c_str(), type.c_str(), (long long)before, (long long)value);
             return;
         }
@@ -10888,6 +13249,645 @@ namespace
         }
     }
 
+    // ---- Passive foes (hsvr.passive_foe and the test room) ---------------------------------------
+    // A training dummy (passive_foe.md in the decompile folder): the foe's AI controller (AI_BP_C) is
+    // stopped - DED set, its tick off, its movement stopped - and the inputs it writes on its pawn
+    // cleared. The foe keeps its own physics, balance and get-up (those run in Willie_BP's tick), so
+    // it can be hit, grabbed and stuck into. It can still die. Only a zombie revive turns AI_BP on again.
+    bool make_foe_passive(UObject* ai, UObject* foe)
+    {
+        if (!ai || !foe) return false;
+        set_variable(ai, STR("DED"), 1.0);
+        Call tick(ai, STR("SetActorTickEnabled"));
+        tick.first_flag(false);
+        tick.run();
+        Call stop(ai, STR("StopMovement"));
+        stop.run();
+        std::wstring missing;
+        for (const TCHAR* v : {STR("R Hand Active"), STR("L Hand Active"), STR("R Down"), STR("L Down"), STR("Chain Attack"), STR("BobnWeave"), STR("Dodging"),
+                               STR("Alt Thrusting"), STR("AI In Combat"), STR("Is Crouched??")})
+            if (!set_variable(foe, v, 0.0)) missing += std::wstring(v) + STR(", ");
+        if (FProperty* p = foe->GetPropertyByNameInChain(STR("Aim Vector_0")))
+            write_three(reinterpret_cast<uint8_t*>(foe) + p->GetOffset_Internal(), p, 0.0, 0.0, 0.0);
+        HSVR_LOG("Passive: %ls (controller %ls) made passive%ls%ls", foe->GetName().c_str(), ai->GetName().c_str(), missing.empty() ? STR("") : STR("; not found: "),
+                 missing.c_str());
+        return true;
+    }
+
+    // ---- Test room (ini test_room=1) -------------------------------------------------------------
+    // Launching the game goes from the main menu straight into a Free Mode arena (test_room_map) with
+    // test_room_foes foes whose AI is stopped (make_foe_passive) and stood in an arc behind him, and
+    // two of the game's weapon tables in front of him stocked with one weapon of every kind through
+    // the game's own loot point (BP_Loot_Weapon: Generate Weapon from Weapon Type and Tier). Facts
+    // from the decompile: defaults\test_room.md.
+    //
+    // His save: the Free Mode settings are written to the game instance only, never saved by the mod.
+    // The arena's BP_GameManager calls GI_Settings "Load Game" on start, which would put the save's
+    // play/game/combat mode back, so a hook puts the test values back right after it. The game still
+    // saves during a fight (start, ~1 s, death, pause menu); every such write is undone at once by
+    // copying back the copy of GameProgress.sav made at boot (save_backups\ in the mod folder, one
+    // per launch, never deleted). Leaving the room map restores the save, loads it into the game
+    // instance and puts back every game-instance value the room changed. No room without that copy.
+    struct TestRoom
+    {
+        bool booted = false;    // the boot step ran and made the save copy
+        bool failed = false;    // no save copy: no room
+        bool armed = false;     // Load Game hook re-applies the test values
+        bool done = false;      // left the room; nothing more this launch
+        std::wstring map_path;  // /Game/Maps/Arenas/Map_Arena_Yard
+        std::wstring map_key;   // "/Map_Arena_Yard." as it appears in an object's full name
+        std::wstring save_path, backup_path;
+        FILETIME save_time{};   // the save file's write time after the mod's last copy back
+        bool save_time_known = false;
+        std::vector<std::string> values;                              // "Name=value" set at boot
+        std::vector<std::pair<std::string, std::string>> before;      // name, value before
+        bool entered = false;
+        UObject* pawn = nullptr; // the pawn the room was furnished for
+        double pawn_at = -1.0;
+        int stage = 0;           // per pawn: 0 waiting, 1 foes and tables placed, 2 weapons spawned
+        hsvr::Vec3 origin, forward;
+        std::vector<hsvr::Vec3> table_at;
+        double table_yaw = 0.0;
+        double next_sweep = 0.0, next_save_check = 0.0;
+        std::vector<UObject*> settling; // foe meshes moved with physics off (room_settle_foes)
+        double settle_at = 0.0;
+        bool settled = false;
+        double watch_from = 0.0, next_watch = 0.0;     // diagnostics after the weapons are put down
+        std::map<UObject*, hsvr::Vec3> watch_last;
+    };
+    TestRoom g_room;
+
+    std::wstring local_app_data()
+    {
+        wchar_t buf[MAX_PATH];
+        DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+        return (n > 0 && n < MAX_PATH) ? std::wstring(buf, n) : std::wstring();
+    }
+
+    bool file_time(const std::wstring& path, FILETIME& out)
+    {
+        WIN32_FILE_ATTRIBUTE_DATA info{};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) return false;
+        out = info.ftLastWriteTime;
+        return true;
+    }
+
+    // Puts the boot copy back over GameProgress.sav (only ever the copy made this launch).
+    void room_restore_save(const char* why)
+    {
+        if (g_room.backup_path.empty()) return;
+        if (!CopyFileW(g_room.backup_path.c_str(), g_room.save_path.c_str(), FALSE))
+        {
+            HSVR_LOG("TestRoom: could NOT put the save back (%s): error %lu", why, GetLastError());
+            return;
+        }
+        g_room.save_time_known = file_time(g_room.save_path, g_room.save_time);
+        HSVR_LOG("TestRoom: save put back from %ls (%s)", g_room.backup_path.c_str(), why);
+    }
+
+    UObject* game_instance_object()
+    {
+        UObject* viewport = object_property(g_engine, STR("GameViewport"));
+        return object_property(viewport, STR("GameInstance"));
+    }
+
+    void room_apply_values()
+    {
+        for (const std::string& v : g_room.values) script_set_game_instance(v);
+    }
+
+    void room_load_game_post(Unreal::UnrealScriptFunctionCallableContext&, void*)
+    {
+        if (!g_room.armed) return;
+        HSVR_LOG("TestRoom: the game loaded the save; test values put back");
+        room_apply_values();
+    }
+
+    void room_install_hook()
+    {
+        static bool installed = false;
+        if (installed) return;
+        UObject* gi = game_instance_object();
+        UFunction* fn = gi ? gi->GetFunctionByNameInChain(STR("Load Game")) : nullptr;
+        if (!fn)
+        {
+            HSVR_LOG("TestRoom: the game instance has no \"Load Game\"");
+            return;
+        }
+        installed = true;
+        UObjectGlobals::RegisterHook(fn, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, &room_load_game_post, nullptr);
+        HSVR_LOG("TestRoom: watching %ls", fn->GetFullName().c_str());
+    }
+
+    // Boot step (M+2 after the first menu): copy the save, set Free Mode in the game instance.
+    void room_boot(const hsvr::Config& cfg)
+    {
+        g_room.booted = true;
+        std::wstring lad = local_app_data();
+        g_room.save_path = lad + L"\\HalfswordUE5\\Saved\\SaveGames\\GameProgress.sav";
+        std::wstring dir = hsvr::mod_dir() + L"save_backups";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        SYSTEMTIME utc{};
+        GetSystemTime(&utc);
+        wchar_t name[96];
+        swprintf(name, 96, L"\\GameProgress.sav.%04d%02d%02d-%02d%02d%02dZ.bak", (int)utc.wYear, (int)utc.wMonth, (int)utc.wDay, (int)utc.wHour, (int)utc.wMinute,
+                 (int)utc.wSecond);
+        g_room.backup_path = dir + name;
+        if (lad.empty() || !CopyFileW(g_room.save_path.c_str(), g_room.backup_path.c_str(), TRUE))
+        {
+            HSVR_LOG("TestRoom: could not copy %ls to %ls (error %lu); no test room this launch", g_room.save_path.c_str(), g_room.backup_path.c_str(), GetLastError());
+            g_room.backup_path.clear();
+            g_room.failed = true;
+            return;
+        }
+        g_room.save_time_known = file_time(g_room.save_path, g_room.save_time);
+        HSVR_LOG("TestRoom: save copied to %ls", g_room.backup_path.c_str());
+
+        g_room.map_path.assign(cfg.test_room_map.begin(), cfg.test_room_map.end());
+        size_t slash = g_room.map_path.find_last_of(L'/');
+        g_room.map_key = L"/" + (slash == std::wstring::npos ? g_room.map_path : g_room.map_path.substr(slash + 1)) + L".";
+        int foes = (std::max)(1, (std::min)(10, cfg.test_room_foes));
+        int tier = cfg.test_room_tier;
+        g_room.values = {"Current Play Mode=1",        "Free Mode Activated=1",         "Current Game Mode Enum=1",       "Current Combat Mode=1",
+                         "Current Lose Condition=0",   "Free Mode Foes Amount=" + std::to_string(foes), "FreeMode Foes Amount Random=0",
+                         "Free Mode Tier=" + std::to_string(tier < 0 ? 0 : (std::min)(tier, 8)), std::string("FreeMode Tier Random=") + (tier < 0 ? "1" : "0"),
+                         "Free Mode Carnage=0",        "Free Mode Brawling=0",          "Free Mode Blossfechten=0",       "FreeMode Multiplayer=0"};
+        for (const std::string& v : g_room.values)
+        {
+            std::string before;
+            script_set_game_instance(v, &before);
+            if (!before.empty()) g_room.before.emplace_back(v.substr(0, v.find('=')), before);
+        }
+        room_install_hook();
+        g_room.armed = true;
+    }
+
+    // Leaving the room: the save back, loaded into the game instance, and the values before the room.
+    void room_leave()
+    {
+        g_room.armed = false;
+        g_room.done = true;
+        room_restore_save("left the room");
+        script_call_game_instance("Load Game");
+        for (const auto& b : g_room.before) script_set_game_instance(b.first + "=" + b.second);
+        HSVR_LOG("TestRoom: left the room; save and game settings as before it");
+    }
+
+    // Spawns an actor of a class (loaded if needed) with a transform; `before` runs before its
+    // BeginPlay (FinishSpawning), for ExposeOnSpawn variables.
+    template <typename F> UObject* room_spawn(const TCHAR* class_path, UObject* world_object, const hsvr::Vec3& at, const hsvr::Quat& q, F before)
+    {
+        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, class_path);
+        if (!cls)
+        {
+            std::wstring asset = class_path;
+            if (asset.size() > 2 && asset.substr(asset.size() - 2) == STR("_C")) asset.resize(asset.size() - 2);
+            load_asset_object(asset);
+            cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, class_path);
+        }
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        if (!cls || !gs)
+        {
+            HSVR_LOG("TestRoom: class %ls not found", class_path);
+            return nullptr;
+        }
+        auto fill = [&](Call& c) {
+            FProperty* p = c.param(STR("SpawnTransform"));
+            UScriptStruct* type = p ? struct_type(p) : nullptr;
+            if (!type) return;
+            uint8_t* tat = c.buffer.data() + p->GetOffset_Internal();
+            if (FProperty* r = struct_member(type, STR("Rotation")))
+            {
+                const double parts[4] = {q.x, q.y, q.z, q.w};
+                const TCHAR* names[4] = {STR("X"), STR("Y"), STR("Z"), STR("W")};
+                for (int i = 0; i < 4; ++i)
+                    if (FProperty* m = struct_member(struct_type(r), names[i]))
+                    {
+                        uint8_t* mat = tat + r->GetOffset_Internal() + m->GetOffset_Internal();
+                        if (m->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(mat) = parts[i];
+                        else *reinterpret_cast<float*>(mat) = (float)parts[i];
+                    }
+            }
+            if (FProperty* t = struct_member(type, STR("Translation"))) write_three(tat + t->GetOffset_Internal(), t, at.x, at.y, at.z);
+            if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(tat + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+        };
+        Call begin(gs, STR("BeginDeferredActorSpawnFromClass"));
+        begin.object(STR("WorldContextObject"), world_object);
+        begin.object(STR("ActorClass"), cls);
+        fill(begin);
+        begin.byte(STR("CollisionHandlingOverride"), 1); // always spawn
+        begin.run();
+        UObject* actor = begin.object_result();
+        if (!actor) return nullptr;
+        before(actor);
+        Call finish(gs, STR("FinishSpawningActor"));
+        finish.object(STR("Actor"), actor);
+        fill(finish);
+        finish.run();
+        return actor;
+    }
+
+    hsvr::Quat yaw_quat(double yaw_deg)
+    {
+        double h = yaw_deg * 3.14159265358979 / 360.0;
+        hsvr::Quat q;
+        q.z = std::sin(h);
+        q.w = std::cos(h);
+        return q;
+    }
+
+    // Foes: AI stopped, then stood in an arc behind him (2.2 m away), facing him.
+    void room_place_foes(UObject* player)
+    {
+        using hsvr::Vec3;
+        std::vector<UObject*> ais;
+        UObjectGlobals::FindAllOf(STR("AI_BP_C"), ais);
+        std::vector<UObject*> foes;
+        for (UObject* ai : ais)
+        {
+            if (!ai || ai->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            Call gp(ai, STR("K2_GetPawn"));
+            gp.run();
+            UObject* foe = gp.object_result();
+            if (!foe || foe == player) continue;
+            make_foe_passive(ai, foe);
+            foes.push_back(foe);
+        }
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        g_room.settling.clear();
+        g_room.settled = false;
+        int n = (int)foes.size();
+        for (int i = 0; i < n; ++i)
+        {
+            double a = (180.0 + (i - (n - 1) * 0.5) * 32.0) * 3.14159265358979 / 180.0;
+            Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+            Vec3 dir = g_room.forward * std::cos(a) + right * std::sin(a);
+            Vec3 at = g_room.origin + dir * 220.0;
+            double yaw = std::atan2(-dir.y, -dir.x) * 57.29577951308232;
+            UObject* foe = foes[i];
+            UObject* fm = object_property(foe, STR("Mesh"));
+            // A teleport of a simulating body throws him ~5 m (test 2026-11-19 16:31: the pose drives
+            // see a 10 m jump in one frame). His body stops simulating while he is moved, and comes
+            // back to physics 0.4 s later at rest (room_settle_foes).
+            if (fm)
+            {
+                Call sim(fm, STR("SetAllBodiesSimulatePhysics"));
+                sim.first_flag(false);
+                sim.run();
+            }
+            Call mv(foe, STR("K2_SetActorLocationAndRotation"));
+            mv.three(STR("NewLocation"), at.x, at.y, at.z);
+            mv.three(STR("NewRotation"), 0.0, yaw, 0.0);
+            mv.flag(STR("bTeleport"), true);
+            mv.run();
+            // His body moves with him (a teleport of the actor alone leaves the body where it lay).
+            if (fm)
+            {
+                Vec3 before = socket_location(fm, pelvis_bone);
+                Call off(fm, STR("K2_AddWorldOffset"));
+                off.three(STR("DeltaLocation"), at.x - before.x, at.y - before.y, 0.0);
+                off.flag(STR("bTeleport"), true);
+                off.run();
+                g_room.settling.push_back(fm);
+            }
+            HSVR_LOG("TestRoom: %ls stood at (%.0f, %.0f, %.0f), facing him", foe->GetName().c_str(), at.x, at.y, at.z);
+        }
+        g_room.settle_at = hsvr::now_seconds();
+        HSVR_LOG("TestRoom: %d passive foe(s)", n);
+    }
+
+    // Foes placed by room_place_foes: physics back on 0.4 s after the move, then held at rest
+    // (no velocity) for 1 s, so that they stand where they were put.
+    void room_settle_foes()
+    {
+        if (g_room.settling.empty()) return;
+        double since = hsvr::now_seconds() - g_room.settle_at;
+        if (since < 0.4) return;
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        for (UObject* fm : g_room.settling)
+        {
+            if (!g_room.settled)
+            {
+                Call sim(fm, STR("SetAllBodiesSimulatePhysics"));
+                sim.first_flag(true);
+                sim.run();
+            }
+            Call lin(fm, STR("SetAllPhysicsLinearVelocity"));
+            lin.three(STR("NewVel"), 0.0, 0.0, 0.0);
+            lin.run();
+            Call ang(fm, STR("SetAllPhysicsAngularVelocityInDegrees"));
+            ang.three(STR("NewAngVel"), 0.0, 0.0, 0.0);
+            ang.run();
+            if (since >= 1.4)
+            {
+                hsvr::Vec3 p = socket_location(fm, pelvis_bone);
+                HSVR_LOG("TestRoom: %ls settled, pelvis at (%.0f, %.0f, %.0f)", fm->GetFullName().c_str(), p.x, p.y, p.z);
+            }
+        }
+        if (!g_room.settled) HSVR_LOG("TestRoom: %d foe(s) back to physics", (int)g_room.settling.size());
+        g_room.settled = true;
+        if (since >= 1.4) g_room.settling.clear();
+    }
+
+    // Two weapon tables side by side, 1.1 m in front of him, long side across his view.
+    void room_place_tables(UObject* player)
+    {
+        using hsvr::Vec3;
+        double floor_z = g_room.origin.z;
+        if (UObject* capsule = object_property(player, STR("CapsuleComponent")))
+        {
+            Call hh(capsule, STR("GetScaledCapsuleHalfHeight"));
+            hh.run();
+            if (FProperty* p = hh.param(STR("ReturnValue")))
+            {
+                uint8_t* at = hh.buffer.data() + p->GetOffset_Internal();
+                double half = p->GetClass().GetName() == STR("DoubleProperty") ? *reinterpret_cast<double*>(at) : *reinterpret_cast<float*>(at);
+                floor_z -= half;
+            }
+        }
+        Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+        g_room.table_yaw = std::atan2(g_room.forward.y, g_room.forward.x) * 57.29577951308232;
+        g_room.table_at.clear();
+        int tier = hsvr::config().test_room_weapon_tier;
+        for (int t = 0; t < 2; ++t)
+        {
+            Vec3 at = g_room.origin + g_room.forward * 110.0 + right * (t == 0 ? -89.0 : 89.0);
+            at.z = floor_z + 1.0;
+            UObject* table = room_spawn(STR("/Game/Assets/Props/Blueprints/BP_Container_Weapon_Table_1.BP_Container_Weapon_Table_1_C"), player, at, yaw_quat(g_room.table_yaw),
+                                        [&](UObject* a) {
+                                            set_variable(a, STR("Tier"), tier < 0 ? 4.0 : (double)tier);
+                                            // None of the table's own loot: it lands on the same spots as
+                                            // the room's weapons and the overlap threw them (test 16:38).
+                                            set_variable(a, STR("Weapon Spawn Chance"), 0.0);
+                                            set_variable(a, STR("Armor Spawn Chance"), 0.0);
+                                            set_variable(a, STR("Treasure Spawn Chance"), 0.0);
+                                            set_variable(a, STR("Bolts Spawn Chance Modifier"), 0.0);
+                                        });
+            HSVR_LOG("TestRoom: weapon table %ls at (%.0f, %.0f, %.0f)", table ? table->GetName().c_str() : STR("NOT spawned"), at.x, at.y, at.z);
+            if (table) g_room.table_at.push_back(at);
+        }
+    }
+
+    // One weapon of every kind, lying along the tables (BaseMesh +Z, the blade, across his view),
+    // through BP_Loot_Weapon (Spawn Chance 1): 1H/2H swords, maces, hafted, polearm, a shield, a
+    // secondary. Each table also stocks one random piece of its own.
+    void room_spawn_weapons(UObject* player)
+    {
+        using hsvr::Vec3;
+        if (g_room.table_at.empty()) return;
+        struct Kind { int specific; int premade; const char* label; };
+        // Enum_WeaponType_Specific: 1 Swords 1H, 2 Swords 2H, 3 Maces 1H, 4 Maces 2H, 5 Hafted 1H,
+        // 6 Hafted 2H, 7 Polearms. Premade kinds (Enum_WeaponType): 2 Shield, 3 Secondary.
+        static const Kind kinds[] = {{1, -1, "sword 1H"}, {2, -1, "sword 2H"}, {3, -1, "mace 1H"}, {4, -1, "mace 2H"}, {2, 2, "shield"},
+                                     {5, -1, "hafted 1H"}, {6, -1, "hafted 2H"}, {7, -1, "polearm"}, {3, 3, "secondary"}};
+        int tier_cfg = hsvr::config().test_room_weapon_tier;
+        static unsigned seed = (unsigned)GetTickCount64();
+        Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+        // Lying: weapon +Z along `right`, its +X up.
+        hsvr::Quat lying = hsvr::quat_from_axes(Vec3{0, 0, 1}, hsvr::cross(right, Vec3{0, 0, 1}), right);
+        const int count = (int)(sizeof(kinds) / sizeof(kinds[0]));
+        for (int i = 0; i < count; ++i)
+        {
+            int t = (i < 5 || g_room.table_at.size() < 2) ? 0 : 1;
+            int row = t == 0 ? i : i - 5;
+            int rows = t == 0 ? 5 : count - 5;
+            // Along his forward, 16 cm apart (the top is 101 cm deep, +-50; at 20 cm the outer ones
+            // rolled off). Every other one lies 30 cm further along, so neighbouring heads and guards
+            // are never side by side and don't start inside each other.
+            double depth = (row - (rows - 1) * 0.5) * 16.0;
+            Vec3 base = g_room.table_at[t];
+            Vec3 at = base + g_room.forward * depth - right * (row % 2 ? 25.0 : 55.0);
+            if (kinds[i].premade == 2) at = base + g_room.forward * depth; // a shield lies in the middle
+            // The game's own weapon points are at 112 (top at 89-95 cm). Lower, a guard starts inside
+            // the top and the push-out threw the weapons and tipped the table (test 2026-11-19 16:36).
+            at.z = base.z + 112.0;
+            seed = seed * 1103515245u + 12345u;
+            int first = tier_cfg < 0 ? (int)((seed >> 16) % 8u) : (std::min)(tier_cfg, 8);
+            hsvr::Quat q = kinds[i].premade == 2 ? hsvr::quat_from_axes(right, hsvr::cross(Vec3{0, 0, 1}, right), Vec3{0, 0, 1}) : lying;
+            // The game's generator gives no weapon when a kind has none at that tier (Generate Weapon:
+            // the kind's types that the tier allows; mace 2H and secondary at tier 6 gave none in the
+            // test). Then the nearest other tiers are tried.
+            bool got = false;
+            int tier = first;
+            for (int k = 0; k < 17 && !got; ++k)
+            {
+                int d = (k + 1) / 2;
+                tier = k % 2 ? first - d : first + d;
+                if (k == 0) tier = first;
+                if (tier < 0 || tier > 8) continue;
+                UObject* loot = room_spawn(STR("/Game/Blueprints/Procedural/LootPoints/BP_Loot_Weapon.BP_Loot_Weapon_C"), player, at, q, [&](UObject* a) {
+                    set_variable(a, STR("Spawn Chance"), 1.0);
+                    set_variable(a, STR("Tier"), (double)tier);
+                    set_variable(a, STR("Premade"), kinds[i].premade >= 0 ? 1.0 : 0.0);
+                    if (kinds[i].premade >= 0) set_variable(a, STR("Weapon Type (Premade)"), (double)kinds[i].premade);
+                    else
+                    {
+                        set_variable(a, STR("Weapon Type"), (double)kinds[i].specific);
+                        // Enum_WeaponType of that kind (0 1H, 1 2H), which the generator also reads.
+                        int s = kinds[i].specific;
+                        set_variable(a, STR("Weapon Type (Premade)"), (s == 1 || s == 3 || s == 5) ? 0.0 : 1.0);
+                    }
+                });
+                // The loot point is destroyed in its BeginPlay but still readable this tick: its
+                // passport says which weapon class it spawned (none = nothing).
+                UObject* cls = nullptr;
+                if (loot)
+                    if (FProperty* pp = loot->GetPropertyByNameInChain(STR("Weapon Passport")))
+                        if (FProperty* wc = struct_member_prefix(struct_type(pp), STR("WeaponClass")))
+                            cls = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(loot) + pp->GetOffset_Internal() + wc->GetOffset_Internal());
+                got = cls != nullptr;
+                if (got)
+                    HSVR_LOG("TestRoom: %s (tier %d) spawned at (%.0f, %.0f, %.0f): %ls", kinds[i].label, tier, at.x, at.y, at.z, cls->GetName().c_str());
+                else
+                    HSVR_LOG("TestRoom: %s: the game has none at tier %d%s", kinds[i].label, tier, loot ? "" : " (no loot point)");
+            }
+            if (!got) HSVR_LOG("TestRoom: %s NOT spawned at any tier", kinds[i].label);
+        }
+    }
+
+    void test_room_tick(const hsvr::Config& cfg)
+    {
+        if (!g_room.booted || g_room.failed || g_room.done) return;
+        double now = hsvr::now_seconds();
+        // Any save the game writes while the room is up is undone.
+        if (g_room.armed && now >= g_room.next_save_check)
+        {
+            g_room.next_save_check = now + 0.25;
+            FILETIME t{};
+            if (file_time(g_room.save_path, t) && (!g_room.save_time_known || CompareFileTime(&t, &g_room.save_time) != 0)) room_restore_save("the game saved");
+        }
+        UObject* controller = find_player_controller();
+        if (!controller) return;
+        bool in_room = controller->GetFullName().find(g_room.map_key) != std::wstring::npos;
+        if (!in_room)
+        {
+            if (g_room.entered) room_leave();
+            return;
+        }
+        g_room.entered = true;
+        UObject* player = nullptr;
+        find_pawn_mesh(&player);
+        if (!player) return;
+        if (player != g_room.pawn)
+        {
+            g_room.pawn = player;
+            g_room.pawn_at = now;
+            g_room.stage = 0;
+            HSVR_LOG("TestRoom: in the room (%ls)", player->GetFullName().c_str());
+        }
+        // The arena clears weapons, tables and foes at BeginPlay and again at +1 s, then spawns the
+        // foes: the room is set up after that.
+        if (g_room.stage == 0 && now - g_room.pawn_at >= 3.0)
+        {
+            g_room.stage = 1;
+            g_room.origin = actor_location(player);
+            Call fw(player, STR("GetActorForwardVector"));
+            fw.run();
+            hsvr::Vec3 f = fw.vec();
+            f.z = 0.0;
+            double fl = hsvr::length(f);
+            g_room.forward = fl > 1e-3 ? f * (1.0 / fl) : hsvr::Vec3{1, 0, 0};
+            room_place_foes(player);
+            room_place_tables(player);
+            g_room.watch_from = now; // diagnostics: tables now, weapons at +1.5 s
+        }
+        if (g_room.stage == 1 && now - g_room.pawn_at >= 4.5)
+        {
+            g_room.stage = 2;
+            room_spawn_weapons(player);
+        }
+        room_settle_foes();
+        // Diagnostics: for 5 s from the tables (weapons at +1.5 s), every table or loose weapon near the
+        // tables that moves more than 3 cm between samples (20 a second).
+        if (g_room.watch_from > 0.0 && now - g_room.watch_from < 5.0 && now >= g_room.next_watch)
+        {
+            g_room.next_watch = now + 0.05;
+            std::vector<UObject*> items;
+            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), items);
+            std::vector<UObject*> tables;
+            UObjectGlobals::FindAllOf(STR("BP_Container_Master_C"), tables);
+            for (UObject* t : tables) items.push_back(t);
+            for (UObject* o : items)
+            {
+                if (!o || o->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                UObject* c = object_property(o, STR("BaseMesh"));
+                if (!c) c = object_property(o, STR("Box"));
+                if (!c) continue;
+                hsvr::Vec3 p = component_location(c);
+                if (p.x == 0.0 && p.y == 0.0 && p.z == 0.0) continue;
+                bool close_by = false;
+                for (const hsvr::Vec3& ta : g_room.table_at) close_by = close_by || hsvr::length(p - ta) < 400.0;
+                if (!close_by) continue;
+                auto it = g_room.watch_last.find(o);
+                if (it != g_room.watch_last.end() && hsvr::length(p - it->second) > 3.0)
+                    HSVR_LOG("TestRoom: watch +%.2f s: %ls moved %.0f cm to (%.0f, %.0f, %.0f)", now - g_room.watch_from, o->GetName().c_str(), hsvr::length(p - it->second), p.x,
+                             p.y, p.z);
+                g_room.watch_last[o] = p;
+            }
+        }
+        // Every foe's AI is stopped as soon as it is there (they spawn ~1 s in and would start
+        // fighting before the room is set up), and again if it comes back on (zombie revive).
+        if (now >= g_room.next_sweep)
+        {
+            g_room.next_sweep = now + 0.25;
+            std::vector<UObject*> ais;
+            UObjectGlobals::FindAllOf(STR("AI_BP_C"), ais);
+            for (UObject* ai : ais)
+            {
+                if (!ai || ai->GetName().rfind(STR("Default__"), 0) == 0 || bool_property(ai, STR("DED"))) continue;
+                Call gp(ai, STR("K2_GetPawn"));
+                gp.run();
+                UObject* foe = gp.object_result();
+                if (foe && foe != player) make_foe_passive(ai, foe);
+            }
+        }
+        (void)cfg;
+    }
+
+    // hsvr.test_room_report: where everything in the room is (unattended checks): him, every weapon
+    // table (and whether it still stands), every loose weapon (on which table, and where on its top
+    // in the table's own frame) and every foe (standing or down, AI off, what he holds).
+    void room_report()
+    {
+        using hsvr::Vec3;
+        UObject* player = nullptr;
+        find_pawn_mesh(&player);
+        if (!player)
+        {
+            HSVR_LOG("TestRoom: check: no player pawn");
+            return;
+        }
+        Vec3 me = actor_location(player);
+        HSVR_LOG("TestRoom: check: you at (%.0f, %.0f, %.0f), %s", me.x, me.y, me.z, bool_property(player, STR("DED")) ? "DEAD" : "alive");
+        struct Table { Vec3 at; hsvr::Quat q; };
+        std::vector<Table> tables;
+        std::vector<UObject*> containers;
+        UObjectGlobals::FindAllOf(STR("BP_Container_Master_C"), containers);
+        for (UObject* c : containers)
+        {
+            if (!c || c->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            UObject* box = object_property(c, STR("Box"));
+            if (!box) continue;
+            Table t{component_location(box), component_rotation(box)};
+            Vec3 up = t.q.rotate(Vec3{0, 0, 1});
+            HSVR_LOG("TestRoom: check: table %ls at (%.0f, %.0f, %.0f), its up (%.2f, %.2f, %.2f) - %s", c->GetName().c_str(), t.at.x, t.at.y, t.at.z, up.x, up.y, up.z,
+                     up.z > 0.95 ? "standing" : "TIPPED");
+            tables.push_back(t);
+        }
+        std::vector<UObject*> weapons, willies;
+        UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        int loose = 0, on_table = 0;
+        for (UObject* w : weapons)
+        {
+            if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || is_fist(w) || bool_property(w, STR("Is Sheathed"))) continue;
+            bool held = false;
+            for (UObject* c : willies)
+                if (c && (object_property(c, STR("Weapon R")) == w || object_property(c, STR("Weapon L")) == w)) held = true;
+            if (held) continue;
+            UObject* base = object_property(w, STR("BaseMesh"));
+            if (!base) continue;
+            Vec3 at = component_location(base);
+            // The generator's own throwaway weapons (destroyed, waiting for clean-up) sit at 0,0,0.
+            if (at.x == 0.0 && at.y == 0.0 && at.z == 0.0) continue;
+            ++loose;
+            int best = -1;
+            Vec3 local{};
+            double best_d = 1e9;
+            for (size_t i = 0; i < tables.size(); ++i)
+            {
+                Vec3 l = tables[i].q.inverse().rotate(at - tables[i].at);
+                double d = std::sqrt(l.x * l.x + l.y * l.y);
+                if (d < best_d) { best_d = d; best = (int)i; local = l; }
+            }
+            bool on = best >= 0 && std::fabs(local.x) < 55.0 && std::fabs(local.y) < 90.0 && local.z > 80.0 && local.z < 130.0;
+            if (on) ++on_table;
+            HSVR_LOG("TestRoom: check: weapon %ls at (%.0f, %.0f, %.0f); table %d frame (%.0f, %.0f, %.0f) - %s", w->GetName().c_str(), at.x, at.y, at.z, best, local.x,
+                     local.y, local.z, on ? "on the table" : (best >= 0 && local.z <= 80.0 ? "OFF the table (low)" : "OFF the table"));
+        }
+        int foes = 0, standing = 0, ai_on = 0;
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        for (UObject* f : willies)
+        {
+            if (!f || f == player || f->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            ++foes;
+            Vec3 at = actor_location(f);
+            UObject* m = object_property(f, STR("Mesh"));
+            Vec3 pe = m ? socket_location(m, pelvis_bone) : at;
+            UObject* ai = object_property(f, STR("Controller"));
+            bool ai_off = ai && bool_property(ai, STR("DED"));
+            if (ai && !ai_off) ++ai_on;
+            bool up = pe.z - me.z > -40.0;
+            if (up) ++standing;
+            UObject* wr = object_property(f, STR("Weapon R"));
+            HSVR_LOG("TestRoom: check: foe %ls at (%.0f, %.0f, %.0f) %.0f cm from you, pelvis %.0f cm above your capsule centre (%s), %s, AI %s, AI In Combat %d, holds %ls",
+                     f->GetName().c_str(), at.x, at.y, at.z, hsvr::length(at - me), pe.z - me.z, up ? "standing" : "down", bool_property(f, STR("DED")) ? "DEAD" : "alive",
+                     ai ? (ai_off ? "off" : "ON") : "none", (int)bool_property(f, STR("AI In Combat")), wr ? wr->GetName().c_str() : STR("nothing"));
+        }
+        HSVR_LOG("TestRoom: check: %d table(s), %d loose weapon(s) of which %d on a table, %d foe(s) of which %d standing and %d with AI on", (int)tables.size(), loose,
+                 on_table, foes, standing, ai_on);
+    }
+
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -10899,6 +13899,12 @@ namespace
             start = GetTickCount64();
             int n = parse_script_steps(cfg.dev_script, 0.0, entries);
             if (n > 0) HSVR_LOG("Script: %d timed step(s) from the settings file (dev_script)", n);
+            // ini test_room=1: from the first menu straight into the test room.
+            if (cfg.test_room)
+            {
+                parse_script_steps("M+2:hsvr.test_room_boot;M+4:hsvr.test_room_open", 0.0, entries);
+                HSVR_LOG("TestRoom: on (test_room=1); the game goes to %s from the first menu", cfg.test_room_map.c_str());
+            }
         }
         // Live steps: HalfSwordVR_commands.txt next to the ini, checked once a second. Each time it is
         // written, its steps are added with their times counted from that moment, so one game launch
@@ -10980,6 +13986,21 @@ namespace
             {
                 script_set_game_instance(entry.command.substr(9));
                 continue;
+            }
+            if (entry.command == "hsvr.test_room_boot")
+            {
+                room_boot(cfg);
+                continue;
+            }
+            if (entry.command == "hsvr.test_room_report")
+            {
+                room_report();
+                continue;
+            }
+            if (entry.command == "hsvr.test_room_open")
+            {
+                if (g_room.booted && !g_room.failed) run_console_command(std::string("open ") + cfg.test_room_map);
+                return;
             }
             if (entry.command == "hsvr.dump")
             {
@@ -11120,21 +14141,7 @@ namespace
                     gp.run();
                     UObject* foe = gp.object_result();
                     if (!foe || foe == player) continue;
-                    set_variable(ai, STR("DED"), 1.0);
-                    Call tick(ai, STR("SetActorTickEnabled"));
-                    tick.first_flag(false);
-                    tick.run();
-                    Call stop(ai, STR("StopMovement"));
-                    stop.run();
-                    std::wstring missing;
-                    for (const TCHAR* v : {STR("R Hand Active"), STR("L Hand Active"), STR("R Down"), STR("L Down"), STR("Chain Attack"), STR("BobnWeave"),
-                                           STR("Dodging"), STR("Alt Thrusting"), STR("AI In Combat"), STR("Is Crouched??")})
-                        if (!set_variable(foe, v, 0.0)) missing += std::wstring(v) + STR(", ");
-                    if (FProperty* p = foe->GetPropertyByNameInChain(STR("Aim Vector_0")))
-                        write_three(reinterpret_cast<uint8_t*>(foe) + p->GetOffset_Internal(), p, 0.0, 0.0, 0.0);
-                    ++stopped;
-                    HSVR_LOG("Script: hsvr.passive_foe: %ls (controller %ls) made passive%ls%ls", foe->GetName().c_str(), ai->GetName().c_str(),
-                             missing.empty() ? STR("") : STR("; not found: "), missing.c_str());
+                    if (make_foe_passive(ai, foe)) ++stopped;
                 }
                 HSVR_LOG("Script: hsvr.passive_foe: %d foe(s) made passive (%d AI controllers)", stopped, (int)ais.size());
                 continue;
@@ -11702,6 +14709,48 @@ namespace
                 HSVR_LOG("Script: hsvr.trigger %d %.2f", side, v);
                 continue;
             }
+            if (entry.command.rfind("hsvr.thumb ", 0) == 0)
+            {
+                int side = atoi(entry.command.c_str() + 11) != 0 ? 1 : 0;
+                size_t sp = entry.command.find(' ', 11);
+                float v = sp == std::string::npos ? -1.0f : (float)atof(entry.command.c_str() + sp + 1);
+                g_fake_thumb[side].store(v);
+                HSVR_LOG("Script: hsvr.thumb %d %.2f", side, v);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.fingers ", 0) == 0)
+            {
+                // hsvr.fingers <side> <thumb> <index> <middle> <ring> <little> (-1 = your hand), or hsvr.fingers log
+                if (entry.command == "hsvr.fingers log")
+                {
+                    g_finger_log_now.store(true);
+                    continue;
+                }
+                const char* at = entry.command.c_str() + 13;
+                char* end = nullptr;
+                int side = (int)std::strtol(at, &end, 10) != 0 ? 1 : 0;
+                float v[5];
+                for (int f = 0; f < 5; ++f)
+                {
+                    v[f] = end ? std::strtof(end, &end) : -1.0f;
+                    g_fake_fingers[side][f].store(v[f]);
+                }
+                g_finger_log_now.store(true);
+                HSVR_LOG("Script: hsvr.fingers %d %.2f %.2f %.2f %.2f %.2f", side, v[0], v[1], v[2], v[3], v[4]);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.fist_shape ", 0) == 0)
+            {
+                g_fist_shape_test.store(atoi(entry.command.c_str() + 16));
+                HSVR_LOG("Script: hsvr.fist_shape %d", g_fist_shape_test.load());
+                continue;
+            }
+            if (entry.command.rfind("hsvr.body_hold ", 0) == 0)
+            {
+                g_body_hold_test.store(atoi(entry.command.c_str() + 15));
+                HSVR_LOG("Script: hsvr.body_hold %d", g_body_hold_test.load());
+                continue;
+            }
             if (entry.command.rfind("hsvr.squeeze ", 0) == 0)
             {
                 int side = atoi(entry.command.c_str() + 13) != 0 ? 1 : 0;
@@ -11715,6 +14764,26 @@ namespace
             {
                 g_fake_stick_click.store(atoi(entry.command.c_str() + 17) != 0);
                 HSVR_LOG("Script: hsvr.stick_click %d", (int)g_fake_stick_click.load());
+                continue;
+            }
+            if (entry.command.rfind("hsvr.arm_to_item ", 0) == 0)
+            {
+                g_arm_floor[2] = atof(entry.command.c_str() + 17);
+                g_fake_arm_mode.store(15);
+                HSVR_LOG("Script: hsvr.arm_to_item %.0f cm above the nearest loose weapon's grip (right hand)", g_arm_floor[2]);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.fake_jitter ", 0) == 0)
+            {
+                g_fake_jitter_cm.store(atof(entry.command.c_str() + 17));
+                HSVR_LOG("Script: hsvr.fake_jitter %.2f cm", g_fake_jitter_cm.load());
+                continue;
+            }
+            if (entry.command.rfind("hsvr.arm_floor ", 0) == 0)
+            {
+                std::sscanf(entry.command.c_str() + 15, "%lf %lf %lf", &g_arm_floor[0], &g_arm_floor[1], &g_arm_floor[2]);
+                g_fake_arm_mode.store(14);
+                HSVR_LOG("Script: hsvr.arm_floor %.0f ahead, %.0f to the side, %.0f cm above the floor (right hand)", g_arm_floor[0], g_arm_floor[1], g_arm_floor[2]);
                 continue;
             }
             if (entry.command.rfind("hsvr.arm_park ", 0) == 0)
@@ -11744,6 +14813,28 @@ namespace
                          game_mode ? game_mode->GetFullName().c_str() : STR("missing"), (int)a, (int)bool_property(game_mode, STR("Match Won")), (int)b,
                          (int)bool_property(pawn, STR("Match Won (Player)")));
                 continue;
+            }
+            if (entry.command.rfind("hsvr.fake_head_wobble ", 0) == 0)
+            {
+                double a = 0, hz = 1;
+                sscanf(entry.command.c_str() + 22, "%lf %lf", &a, &hz);
+                g_fake_wobble_deg.store(a);
+                g_fake_wobble_hz.store(hz);
+                HSVR_LOG("Script: hsvr.fake_head_wobble %.0f deg at %.2f Hz", a, hz);
+            }
+            if (entry.command.rfind("hsvr.fake_head_pose ", 0) == 0)
+            {
+                g_fake_head_pose.store(atoi(entry.command.c_str() + 20) != 0);
+                HSVR_LOG("Script: hsvr.fake_head_pose %d (a still head at the view anchor when no headset is tracked)", g_fake_head_pose.load() ? 1 : 0);
+            }
+            if (entry.command.rfind("hsvr.fake_head_tilt ", 0) == 0)
+            {
+                double p = 0, r = 0, d = 0;
+                sscanf(entry.command.c_str() + 20, "%lf %lf %lf", &p, &r, &d);
+                g_fake_tilt_pitch.store(p);
+                g_fake_tilt_roll.store(r);
+                g_fake_tilt_drop.store(d);
+                HSVR_LOG("Script: hsvr.fake_head_tilt pitch %.0f roll %.0f drop %.0f cm", p, r, d);
             }
             if (entry.command.rfind("hsvr.fake_head_drop ", 0) == 0)
             {
@@ -11784,6 +14875,7 @@ namespace
             if (entry.command.rfind("hsvr.arm_move ", 0) == 0)
             {
                 g_fake_arm_mode.store(atoi(entry.command.c_str() + 14));
+                g_fake_arm_epoch.fetch_add(1);
                 int mode_arg = 0;
                 double a1 = 0, a2 = 0, a3 = 0;
                 int got = sscanf(entry.command.c_str() + 14, "%d %lf %lf %lf", &mode_arg, &a1, &a2, &a3);
@@ -12311,6 +15403,7 @@ namespace
             keep_clouds_correct(cfg);
             keep_light_samples(cfg);
             run_dev_script(cfg);
+            test_room_tick(cfg);
         }
         // The mod's keys count only while the game has the keyboard, so that Home or End typed in
         // another program does not move the view or hide the panel.
@@ -12383,6 +15476,7 @@ class HalfSwordVR : public CppUserModBase
         if (g_vr_started)
         {
             hsvr::stereo_set_anchor_provider(&provide_anchor);
+            hsvr::stereo_set_latch_callback(&helmet_on_latch);
             hsvr::vr_install_present_hook();
         }
         Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});
@@ -12390,6 +15484,7 @@ class HalfSwordVR : public CppUserModBase
         Hook::RegisterProcessEventPostCallback(&pose_after_anim_update, {false, false, STR("HalfSwordVR"), STR("PoseAfterAnim")});
         Hook::RegisterProcessEventPostCallback(&feet_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FeetAfterAnim")});
         Hook::RegisterProcessEventPostCallback(&fingers_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FingersAfterAnim")});
+        Hook::RegisterProcessEventPostCallback(&fingers_after_copy_update, {false, false, STR("HalfSwordVR"), STR("FingersAfterCopy")});
         Hook::RegisterEngineTickPreCallback(
                 [](auto&, UEngine* engine, float delta_seconds, bool) {
                     game_tick(reinterpret_cast<UObject*>(engine), delta_seconds);

@@ -137,6 +137,19 @@ namespace hsvr
         // moment the mod is ready. A command is an engine console command. Read once at the start.
         // Example: 20:open /Game/Maps/Arenas/Map_Arena_Slums;50:r.Fog 0;56:r.Fog 1
         std::string dev_script;
+        // Test room: 1 = from the first menu straight into a Free Mode arena (test_room_map) with
+        // test_room_foes foes (1-10) whose AI is off - they never fight back, keep full physics,
+        // fall and get up - stood behind you, and two weapon tables in front of you with one weapon
+        // of every kind. Your save is copied first (save_backups\ in the mod folder) and every
+        // write the game makes to it in the room is undone; leaving the room puts it all back.
+        // Read at launch. 0 = normal game.
+        bool test_room = false;
+        std::string test_room_map = "/Game/Maps/Arenas/Map_Arena_Yard";
+        int test_room_foes = 4;
+        // The foes' tier (armour and weapons): -1 = a random tier each, 0 Beggar .. 8 Lord.
+        int test_room_tier = -1;
+        // The table weapons' tier: -1 = random 0-7 each, 0 Beggar .. 8 Lord.
+        int test_room_weapon_tier = -1;
         int stereo_slot_offset = 0; // 0 = find automatically
 
         // ---- Phase 2: controllers (read only) and the player physics test ----
@@ -146,6 +159,8 @@ namespace hsvr
         std::string hand_bone_left = "hand_l";
         std::string hand_bone_right = "hand_r";
         // 1 = a short buzz on a controller each time its trigger is pulled all the way (checks vibration).
+        // Read SteamVR's hand skeleton (XR_EXT_hand_tracking) for finger curls when it offers one.
+        bool input_hand_tracking = true;
         bool haptics_test = false;
         // 1 = once a second, where your character's body, head and hands are.
         bool log_body = false;
@@ -169,6 +184,36 @@ namespace hsvr
         // has his neck reach (beyond that the neck would stretch visibly).
         bool pose_head_lock = true;
         double pose_head_lock_max_cm = 12.0;
+        // ---- Torso lean (Matthew 2026-11-19: armour blocked a third of the view looking down) ----
+        // The torso hangs from your neck and bends like Half Sword's own lean (LeftAlt + mouse,
+        // Anim_Add_Bob_AO): spine_02..spine_05 take equal shares, neck_01/neck_02 bend back 3/8 each
+        // (torso_lean_and_helmet.md). Your hips go back by as much as the bend carries the head
+        // forward, so your head stays at the headset and the chest moves in, out of view.
+        // Forward bend = (head pitch below the horizon - pose_lean_pitch_dead_deg) x pose_lean_pitch_gain,
+        // at most pose_lean_max_deg (the game's own lean reaches 60). Sideways = head roll likewise.
+        bool pose_lean = true;
+        double pose_lean_pitch_dead_deg = 10.0;
+        double pose_lean_pitch_gain = 0.7;
+        double pose_lean_max_deg = 60.0;
+        double pose_lean_roll_dead_deg = 5.0;
+        double pose_lean_roll_gain = 0.8;
+        double pose_lean_side_max_deg = 25.0;
+        double pose_lean_smooth_s = 0.08;
+        // A bend lowers his head; his hips can't rise above standing, so the bend is held to what your
+        // headset's drop (plus this much neck slack) allows.
+        double pose_lean_slack_cm = 4.0;
+        // 1 = the game's own forward bend from crouching (Root Height) and reaching for grabs (Lean
+        // Forward (Grabbing)) is taken out of his animation, so only your lean bends him.
+        bool pose_lean_cancel_game_bend = true;
+        // 1 = his body, head and worn armour animate every frame (no update-rate skipping).
+        bool pose_no_uro = true;
+        // 1 = your helmet (and his head) are moved to this frame's headset pose right when the view takes
+        // it, just before drawing. The body is posed from the headset pose of the frame before (the pose
+        // is read when the views are set up), so a helmet following his head trailed your view by one
+        // frame of head motion and slid around in front of your eyes.
+        bool pose_helmet_late = true;
+        // 1 = his visible body updates after his posed skeleton every frame (it copies its pose), never before.
+        bool pose_mesh_after_driver = true;
         bool pose_arms = true;
         bool pose_follow_room = true;
         // 1 = while posed, your character's capsule only moves when you walk: the game's own pull
@@ -224,8 +269,11 @@ namespace hsvr
         // the hand is drawn at the end of this frame's physics, limited only by the hand's strength
         // (pose_hold_max_force / max_torque). 0 = the spring below.
         bool pose_hold_exact = true;
-        double pose_hold_spring = 5000.0;
-        double pose_hold_damper = 100.0;
+        // Tuned in the headset 2026-11-19 (flat_hs_weight_vs_hold.md): half B&S's spring so a weapon trails
+        // the hand ~0.04-0.06 s (flat Half Sword's arm trails its aim by 0.1 s), and the dampers raised so a
+        // heavy, long weapon (war staff 2.38 kg, balance 108 cm up) settles without bouncing (damping ratio ~1).
+        double pose_hold_spring = 2500.0;
+        double pose_hold_damper = 150.0;
         double pose_hold_max_force = 3000.0;
         // While the held weapon is stuck in a body, the hold's force and torque caps are scaled by this.
         double pose_hold_stuck_force_scale = 0.15;
@@ -233,6 +281,8 @@ namespace hsvr
         // out (cm/s; B&S's held dampers with the hand's strength), x stab_wound_head_factor in the
         // head and neck; sideways and in turn it goes with the body.
         bool stab_wound_hold = true;
+        // A weapon the mod holds is never left "Being Rubber Banded" by the game (it then can't stick and hits at x0.1).
+        bool stab_no_rubber_band = true;
         // Reverse grip flip (S&S): a tap (shorter than grip_flip_tap_s) of the holding hand's B / Y
         // turns a one-handed weapon end for end at the same spot on its handle, gliding over grip_flip_s.
         bool grip_flip = true;
@@ -255,8 +305,24 @@ namespace hsvr
         double stab_wound_out_cms = 40.0;
         double stab_wound_head_factor = 0.35;
         double pose_hold_turn_spring = 1100.0;
-        double pose_hold_turn_damper = 45.0;
-        double pose_hold_max_torque = 250.0;
+        double pose_hold_turn_damper = 75.0;
+        // One hand's most turning force at the grip (N m, x his strength): a real wrist, not B&S's 250. A war
+        // staff held by its end (29 N m of weight) droops; one-handed swords (2-4 N m, hard swings ~20) stay free.
+        double pose_hold_max_torque = 30.0;
+        // The wrist's end stop: once the held item is bent more than pose_hold_wrist_free_deg from where
+        // the hand points it, the turning limit rises to pose_hold_wrist_stop_torque (N m, times his
+        // strength) by pose_hold_wrist_stop_deg, so a stopped swing does not carry the item on past the
+        // hand while a long weapon held at its end still droops. 0 = no stop.
+        double pose_hold_wrist_free_deg = 25.0;
+        double pose_hold_wrist_stop_deg = 50.0;
+        double pose_hold_wrist_stop_torque = 250.0;
+        // B&S hold dampers computed per weapon for this damping ratio (1 = critical: settles without
+        // bouncing, the least lag that does): from its mass and its inertia about the grip. 0 = the fixed
+        // pose_hold_damper / turn_damper / pose_bs_two_*_c values.
+        double pose_hold_damping_ratio = 1.0;
+        // The hand's velocity the hold's dampers follow, smoothed over this time (s): tracking noise
+        // differentiated frame to frame shook a held weapon ~1 cm at ~10 Hz. 0 = raw.
+        double pose_hold_target_vel_smooth_s = 0.05;
         // Weight: the hold's turn is limited by torque about the grip, not the centre of mass (heavy and
         // long weapons trail fast turns, B&S-style). torque_scale multiplies pose_hold_max_torque for it.
         bool pose_hold_weight = true;
@@ -271,8 +337,8 @@ namespace hsvr
         // the first hand turns it (2200/90/500), the second has no turning. Solved per frame as soft
         // constraints (pose_bs_iterations), all hands together.
         bool pose_hold_bs = true;
-        double pose_bs_two_pos_k = 10000.0, pose_bs_two_pos_c = 150.0, pose_bs_two_pos_max = 6000.0;
-        double pose_bs_two_rot_k = 2200.0, pose_bs_two_rot_c = 90.0, pose_bs_two_rot_max = 500.0;
+        double pose_bs_two_pos_k = 4000.0, pose_bs_two_pos_c = 200.0, pose_bs_two_pos_max = 6000.0;
+        double pose_bs_two_rot_k = 2200.0, pose_bs_two_rot_c = 120.0, pose_bs_two_rot_max = 500.0;
         int pose_bs_iterations = 8;
         double pose_bs_two_let_go_cm = 45.0; // B&S gaps reach 18 cm (p95) on fast two-hand swings
         bool pose_hold_ignore_body = true;   // the held weapon never collides with his own body (B&S)
@@ -323,6 +389,30 @@ namespace hsvr
         // polearm's hook or head, a wide pommel). 0 = the game's lengths and its Head module only.
         bool pose_slide_zone_measured = true;
         double pose_slide_wide_cm = 4.0;
+        // When his arm can't reach where your hand is (more than grab_controller_gap_cm short: reaching to the
+        // floor), a squeeze looks for items at your controller, and what it touches is pulled into his hand.
+        bool pose_grab_from_controller = true;
+        double pose_grab_controller_gap_cm = 4.0;
+        double pose_grab_controller_max_cm = 60.0; // not from farther than this (a jump, a teleport)
+        // A belt scabbard is a handle (B&S): taken only within pose_grab_handle_cm of its length, lined up
+        // with the hand's grip line, the trigger slides the hand along it. 0 = held where touched, as before.
+        bool pose_scabbard_handle = true;
+        // B&S: a weapon or tool is taken only by a handle (its grip, any haft stretch, a sword's blade), not
+        // anywhere the hand touched it (shields and bottles still are). 0 = anywhere, as before.
+        bool pose_grab_weapon_handles_only = true;
+        // The hold's force and torque caps x his arm mass against a default creator body's (height and
+        // weight/muscle; 0.78 smallest .. 1.27 biggest), as flat Half Sword's weapon-to-arm mass ratio.
+        bool pose_body_size_strength = true;
+        // Thin bits on a haft the hand slides over: a wide stretch no longer than ring_max_len_cm along the
+        // haft and reaching no more than ring_max_width_cm from its axis, or a gap between parts no longer
+        // than gap_max_cm, with narrow haft past it (ring_max_len_cm 0 = every wide bit stops the hand).
+        // rondel_stops: a Guard part on a haft (a pollaxe's rondel) stops the hand. butt_is_haft: below the
+        // grip, parts that carry on toward the game's own bottom length (a pollaxe's butt) count as haft.
+        double pose_slide_ring_max_len_cm = 2.5; // measured: war staff lug 2 cm; rondel and sword guards 6 cm
+        double pose_slide_ring_max_width_cm = 10.5; // war staff lug 10 cm; sword guards 11-12 cm
+        double pose_slide_gap_max_cm = 4.0;
+        bool pose_slide_rondel_stops = true;
+        bool pose_slide_butt_is_haft = true;
         double pose_slide_rate_min = 3.0;
         double pose_slide_rate_max = 40.0;
         double pose_slide_max_cm_s = 250.0; // fastest the hand runs along a weapon
@@ -459,6 +549,73 @@ namespace hsvr
         // Set the game's "Fist R/L Spawned" on a fist the mod makes (so the game's own removal rules
         // apply to it). 0 = the mod alone opens it (test switch while the first-fist loss is hunted).
         bool pose_fist_mark_spawned = false;
+        // Fists from your real hand (Matthew 2026-11-19): the hand is a fist while the grip, the trigger
+        // (and the thumb, only if pose_fist_thumb_on > 0) are closed, and opens
+        // when any of them opens. Finger curls (0 open .. 1 closed) come from SteamVR's hand skeleton
+        // (input_hand_tracking, XR_EXT_hand_tracking) when it gives one, else from the trigger, grip and
+        // touch sensors. index/grip/thumb_on: curls that close it; *_off: below these it opens.
+        // 0 = the old way (a squeeze with nothing in reach).
+        bool pose_fist_from_fingers = true;
+        double pose_fist_index_on = 0.65;
+        double pose_fist_index_off = 0.4;
+        double pose_fist_grip_on = 0.65;
+        double pose_fist_grip_off = 0.4;
+        // The thumb does not gate the fist (Matthew 2026-11-19: stick and button touch are unreliable);
+        // raise thumb_on above 0 to require it.
+        double pose_fist_thumb_on = 0.0;
+        double pose_fist_thumb_off = -1.0;
+        // Slaps: an open hand swung at the game's fist speed (Aim Swing Speed >= slap_ass, the game's own
+        // 30) carries the fist (fingers open) until keep_s after it slows.
+        bool pose_fist_slap = true;
+        double pose_fist_slap_ass = 30.0;
+        double pose_fist_slap_keep_s = 0.3;
+        // The fist's finger shape in his animation: -2 = the game's own, -1 = the animation's grab
+        // shape (its 'Grabbed' switch), 0..17 = that grip type, 100 = its guard fist ('Guarding' for
+        // that hand, with the swing speed its fist blend reads held at 75 in the animation only).
+        // Unattended test 2026-11-19 (fingertips to the hand bone, four-finger mean): open/-2/0 14.8 cm,
+        // -1 10.7, 1 9.0 (tightest), 5 and 9 9.1; 100 did not hold (one sample, then open).
+        int pose_fist_shape = 1;
+        // The game's own fist flags: 'Fist R/L Spawned' is hidden from Willie's tick (whose removal
+        // rule needs 'Hand Active', always 0 in VR) and set after it while the mod's fist exists (his
+        // punch rules read it on hits), and 'R/L Fisting Rate' (the punch stamina) is fed by the
+        // game's own formula from the swing speed.
+        bool pose_fist_game_flags = true;
+        // Each finger of a free hand (empty, or making a fist) follows yours: SteamVR's hand skeleton when it
+        // gives one, else the trigger, grip and touch sensors (the VR framework's empty-hand curls), with
+        // the framework's per-joint bends and spread, smoothed over tau_s. Written into the visible
+        // body's copy of the animated pose (ABP_CopyPose1), so gauntlets follow. 0 = the game's grip shapes.
+        bool pose_fingers_tracked = true;
+        double pose_fingers_tau_s = 0.05;
+        // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
+        bool log_fingers = true;
+        // Body grabs (a Willie's throat, arm...): what the game's grab joint feels, logged every 0.1 s.
+        bool log_body_grab = true;
+        // Every other Willie's body hits (impulse, health, consciousness, what hit him), when they change.
+        bool log_body_hits = true;
+        // 1 = the game's grab joint is made soft (a capped spring, B&S-like) 0.25 s after it latches, so
+        // the tracked hand no longer pulls on it without limit (the game lets go when the pull beats
+        // his grip strength). 0 = the game's own joint.
+        // Test 4 (2026-11-19): 2000/100 let a standing Willie go in 2.8 s; 20000/400 held like the game's
+        // joint. cap_per_t: the drive cap is this x his grip strength T (the game's slip threshold), so
+        // the force stays just under T (it levels off at about cap/500): his strength sets how hard he
+        // can drag a body, and the stretch rule lets go when it gets away. 0 = the fixed pose_grab_body_max.
+        // Test 5: the game's own joint (0) held an active Willie 15 s and choked him out; the capped spring
+        // let a standing one drift off (its force levels at ~cap/400 whatever the stretch). Every grab the
+        // game broke had HIS arm at tonus 0 / health 0 after hits (T = 0: the game's broken-arm rule).
+        int pose_grab_body_hold = 0;
+        double pose_grab_body_spring = 20000.0; // drive stiffness (acceleration mode)
+        double pose_grab_body_damper = 400.0;
+        double pose_grab_body_cap_per_t = 450.0;
+        double pose_grab_body_max = 250000.0;    // drive cap when cap_per_t is 0
+        double pose_grab_body_let_go_cm = 30.0; // hand this far from the grab point for 0.3 s lets go
+        // The game's grip-slip (joint force > his grip strength T for ~0.1 s) is made for a physical hand;
+        // a tracked hand's own motion trips it (Matthew's playtest 2026-11-19: all three throat grabs
+        // released by it in 0.6-0.7 s with a healthy arm). 1 = while a body is held, the game's own
+        // 'Hand Block Drop' (which it sets itself for the first 0.5 s of a grab) is kept on, and the hand
+        // lets go instead when pulled pose_grab_body_let_go_cm off its hold (B&S). His grip strength T
+        // still counts: below pose_grab_body_slip_below_t (a broken or numb arm) the game's slip applies.
+        bool pose_grab_body_no_slip = true;
+        double pose_grab_body_slip_below_t = 20.0;
         // Eating and drinking: grabbed food within pose_eat_cm of your mouth is bitten (the game's
         // Bite Event); a held bottle at your mouth with its neck below pose_drink_tip (the dot of its
         // axis with up) is drunk from, at most once a second.
@@ -526,6 +683,12 @@ namespace hsvr
         // traces miss).
         bool pose_crouch_keep_leg_ik = true;
         bool pose_capsule_floor_clamp = true;
+        // The game sets the capsule's height to (lower foot's step end) + half height + clamp(Step Height 2,
+        // +-10). Step Height 2 sinks to about -4 cm through each step and snaps back to 0 as a foot lands,
+        // so walking the capsule (and the view and his body on it) dropped and hopped ~2 times a second
+        // (walking_floor_loss.md). On: the mod takes that step term (read before his tick) back out, except
+        // while he climbs, jumps or is fallen.
+        bool pose_capsule_no_step_offset = true;
         // Where the wrist sits relative to the controller's grip, in the controller's frame
         // (forward, right, up, cm), and how the hand is turned relative to the controller (degrees).
         // Defaults: the wrist 8 cm from the palm centre back along the fingers and 2 cm toward the
@@ -558,6 +721,24 @@ namespace hsvr
         // alignment, cutting rate, rubber-band and stick state, and the controller's speed along the
         // blade. Read only; changes nothing in the game.
         bool stab_log = true;
+        // Hit vibration, Blade & Sorcery's way (defaults\bs_haptics.md): every weapon, shield or fist
+        // hit plays B&S's hit-sound envelopes on the controllers, sized by the contact speed (and,
+        // for a blow taken on a held item, the game's own impulse). This is the overall strength
+        // (0 off, 1 as B&S).
+        double hit_buzz = 1.0;
+        // B&S's scrape ticks while a contact slides (0.8 per 2 cm), x this (0 off).
+        double hit_buzz_scrape = 1.0;
+        // B&S makes no buzz for a blade on plate armour; 1 = give it the metal-on-metal layer.
+        bool hit_buzz_blade_on_plate = true;
+        // The game's impulse (kg cm/s) that counts as a full-strength blow on a held item.
+        double hit_buzz_impulse_full = 3000.0;
+        // Hits under this intensity (0..1 of B&S's speed range) are touch, not hits: no buzz.
+        double hit_buzz_min_intensity = 0.05;
+        // An open hand, forearm or arm on a person buzzes only when it strikes this fast (m/s,
+        // against him at the contact).
+        double hit_buzz_limb_min_ms = 3.0;
+        // Log every hit buzz ("Hit buzz:" lines).
+        bool hit_buzz_log = true;
         // Stab assist: the VR hold moves the weapon on its own (the game's hand joint is free), so a
         // tip meets flesh with only the weapon's mass behind it and the game's stick rule
         // (cutting rate x impulse >= 10000) rarely passes. On a hit of a piercing tip on a person's
