@@ -278,6 +278,7 @@ LAYOUT = [
         ("pose_shield_grab_rim", "1 = a shield can also be taken by its rim; 0 = straps and handles only."),
         ("pose_shield_rim_cm", "How near an outer edge the hand must be for a rim grab (cm)."),
         ("pose_shield_grab_face", "1 = a shield can be taken anywhere, flat faces too (old way)."),
+        ("pose_pavise_forearm", "1 = pavises strap onto the forearm (light: either arm; heavy: left arm), not held in the hand."),
     ]),
     ("Drawing, sheathing, belt", "", [
         ("pose_draw", ""),
@@ -321,6 +322,7 @@ LAYOUT = [
         ("stab_push_force_n", ""),
         ("stab_push_time_s", ""),
         ("stab_no_rubber_band", ""),
+        ("stab_pickup_grace_s", "The game's 2 s no-stick after picking a weapon up is cut to this (s); -1 = the game's."),
         ("stab_wound_hold", ""),
         ("stab_wound_in_cms", ""),
         ("stab_wound_out_cms", ""),

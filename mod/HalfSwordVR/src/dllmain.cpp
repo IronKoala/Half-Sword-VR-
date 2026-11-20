@@ -5789,6 +5789,8 @@ namespace
     bool class_name_starts(UObject* object, const TCHAR* prefix);
     // A shield touched away from its straps and handles: may the hand take it there (its rim, not a face)?
     bool shield_off_handle_ok(int side, UObject* shield, UObject* base, const hsvr::Vec3& hand, const hsvr::Config& cfg);
+    // A pavise that hand wears on its forearm (pose_pavise_forearm): the game's own strap grip for that hand.
+    bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg);
 
     // The grab button (Phase 4): squeezing a controller's grip with that hand empty picks up the
     // nearest loose weapon whose body is within pose_grab_radius_cm of the hand; letting go of the
@@ -6935,6 +6937,20 @@ namespace
         return axes[thin];
     }
 
+    // Pavises start locked to the forearm, like a real pavise (Matthew 2026-11-20). The game already
+    // straps a shield to the forearm for grip types 6 (Shield) and 7 (Shield_Heavy): its joint is to
+    // lowerarm_x at shield_x_socket (shield_grips.md). Pavise_Light is 6 for both hands (forearm through
+    // its lower strap, fist on its top handle); Pavise_Heavy is 7 for the left hand only (forearm
+    // through its long strap, fist on its side bar) and 8 (a handle in the hand) for the right; the
+    // Tower pavise is 8 for both and has no forearm strap on its mesh. So: the game's own forearm
+    // grip, kept (not moved into the hand), wherever the game has one for that hand.
+    bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg)
+    {
+        if (!cfg.pose_pavise_forearm || !shield || !class_name_starts(shield, STR("Shield_Pavise"))) return false;
+        double g = read_number_variable(shield, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default"));
+        return g == 6.0 || g == 7.0;
+    }
+
     // Away from its straps and handles a shield is taken only by its rim: the point the hand touched
     // is within pose_shield_rim_cm of an outer edge (a probe that far out from it, along the plate,
     // finds the shield's nearest point off to the side, past the edge). A flat face is never taken.
@@ -6986,6 +7002,11 @@ namespace
     {
         using namespace hsvr;
         const char* hand = side == 0 ? "left" : "right";
+        if (pavise_on_forearm(shield, side, cfg))
+        {
+            HSVR_LOG("Shield: %s hand took %ls: strapped on the forearm (the game's own strap grip, pose_pavise_forearm)", hand, shield->GetName().c_str());
+            return;
+        }
         std::wstring cls = shield_class(shield);
         Vec3 local = w0_rot.inverse().rotate(palm - w0_pos);
         Vec3 best_on;
@@ -8395,7 +8416,9 @@ namespace
                     if (!(hi >= 0 && hd <= cfg.pose_grab_handle_cm) && class_name_starts(best, STR("Shield")) && !shield_off_handle_ok(side, best, hb, at, cfg)) continue;
                     bool ok = give_hand_weapon(side, pawn, best);
                     UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
-                    if (ok && now == best)
+                    if (ok && now == best && pavise_on_forearm(best, side, cfg))
+                        HSVR_LOG("Grab: %s hand took %ls: strapped on the forearm (the game's own strap grip, pose_pavise_forearm)", hand, best->GetName().c_str());
+                    else if (ok && now == best)
                     {
                         if (hi >= 0 && hd <= cfg.pose_grab_handle_cm)
                         {
@@ -9403,7 +9426,7 @@ namespace
                                     : (forearm ? " (on the forearm: strap shield)" : ""));
             }
             h.forearm = forearm;
-            if (forearm && !h.free.set && !h.into_hand_tried && cfg.pose_shield_in_hand)
+            if (forearm && !h.free.set && !h.into_hand_tried && cfg.pose_shield_in_hand && !pavise_on_forearm(weapon, side, cfg))
             {
                 h.into_hand_tried = true;
                 FreeGrip g;

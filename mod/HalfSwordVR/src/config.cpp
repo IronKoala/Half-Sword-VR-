@@ -532,6 +532,7 @@ namespace hsvr
         flag("pose_shield_grab_rim", c.pose_shield_grab_rim);
         num("pose_shield_rim_cm", c.pose_shield_rim_cm);
         flag("pose_shield_grab_face", c.pose_shield_grab_face);
+        flag("pose_pavise_forearm", c.pose_pavise_forearm);
         flag("pose_two_hand", c.pose_two_hand);
         num("pose_two_hand_strength", c.pose_two_hand_strength);
         num("pose_two_hand_blade_gap_cm", c.pose_two_hand_blade_gap_cm);

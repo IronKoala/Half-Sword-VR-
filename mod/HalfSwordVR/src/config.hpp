@@ -536,6 +536,10 @@ namespace hsvr
         bool pose_shield_grab_rim = true;
         double pose_shield_rim_cm = 4.0;
         bool pose_shield_grab_face = false;
+        // Pavises start locked to the forearm like a real pavise (Matthew 2026-11-20): the game's own
+        // forearm strap grip is kept (not moved into the hand) where the game has one for that hand
+        // (light pavise both hands, heavy pavise left hand). Overrides pose_shield_in_hand for pavises.
+        bool pose_pavise_forearm = true;
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;
