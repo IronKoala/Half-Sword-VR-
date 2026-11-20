@@ -2716,6 +2716,12 @@ namespace
     UObject* g_helmet = nullptr;     // the worn piece tagged "Head 2" or "Head 1" (helmet, hood), or null
     UObject* g_helmet_pawn = nullptr;
     std::vector<UObject*> g_head_pieces; // every worn piece on the head, and his head (CharacterMesh_Head)
+    struct HeadWear
+    {
+        UObject* comp;
+        int slot; // 2: tagged "Head 2" (helmet), 1: "Head 1" (hood, coif, cap)
+    };
+    std::vector<HeadWear> g_head_wear; // worn pieces on the head only (helmet_view)
     void armour_scan(const hsvr::Config& cfg, UObject* pawn, UObject* mesh)
     {
         static double last = 0.0;
@@ -2743,6 +2749,7 @@ namespace
             }
         int tagged = 0;
         std::vector<UObject*> head_pieces;
+        std::vector<HeadWear> head_wear;
         if (UObject* head = object_property(pawn, STR("CharacterMesh_Head"))) head_pieces.push_back(head);
         for (UObject* c : parts)
             for (const TCHAR* tag : {STR("Head 2"), STR("Head 1")})
@@ -2755,6 +2762,7 @@ namespace
                 {
                     if (!helmet || tag[5] == L'2') helmet = c; // the helmet slot (Head 2) over a hood (Head 1)
                     head_pieces.push_back(c);
+                    head_wear.push_back(HeadWear{c, tag[5] == L'2' ? 2 : 1});
                     ++tagged;
                     break;
                 }
@@ -2768,6 +2776,7 @@ namespace
         }
         g_helmet = helmet;
         g_head_pieces = head_pieces;
+        g_head_wear = head_wear;
         if (cfg.pose_no_uro)
         {
             static int said = 0;
@@ -13753,6 +13762,34 @@ namespace
         shadow.run();
     }
 
+    // ---- Your worn helmet in your own view (helmet_view) ----------------------------------------
+    // Real helmets block most of the view. helmet_view 1 hides the helmet (the piece worn in the
+    // game's "Head 2" slot) from your view only, 2 hides everything worn on the head (helmet and
+    // the hood/coif/cap under it, "Head 1"). Owner-no-see, like your head: everyone else still sees
+    // it, its shadow stays, and it still protects you.
+    void helmet_view_update(const hsvr::Config& cfg, bool first_person)
+    {
+        static std::vector<UObject*> hidden;
+        static bool hidden_tracked = on_freed([] { hidden.erase(std::remove_if(hidden.begin(), hidden.end(), [](UObject* o) { return gone(o); }), hidden.end()); });
+        std::vector<UObject*> want;
+        if (first_person && cfg.helmet_view > 0)
+            for (const HeadWear& w : g_head_wear)
+                if (w.comp && !gone(w.comp) && (w.slot == 2 || cfg.helmet_view >= 2)) want.push_back(w.comp);
+        for (UObject* c : hidden)
+            if (std::find(want.begin(), want.end(), c) == want.end() && !gone(c))
+            {
+                set_owner_hidden(c, false);
+                HSVR_LOG("Helmet view: %ls shown in your view again", c->GetFullName().c_str());
+            }
+        for (UObject* c : want)
+            if (std::find(hidden.begin(), hidden.end(), c) == hidden.end())
+            {
+                set_owner_hidden(c, true);
+                HSVR_LOG("Helmet view: %ls hidden from your view (helmet_view %d; others still see it, shadow kept)", c->GetFullName().c_str(), cfg.helmet_view);
+            }
+        hidden = want;
+    }
+
     void hide_own_head(const hsvr::Config& cfg)
     {
         constexpr int N = 2;
@@ -13766,6 +13803,7 @@ namespace
         find_pawn_mesh(&pawn);
         bool willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
         bool want = cfg.hide_own_head && willie && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().stereo_installed.load();
+        helmet_view_update(cfg, willie && pawn == g_helmet_pawn && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().stereo_installed.load());
         UObject* parts[N] = {nullptr, nullptr};
         if (willie)
         {

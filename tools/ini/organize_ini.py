@@ -54,6 +54,7 @@ LAYOUT = [
         ("pose_lean", "1 = your torso leans when you look down/sideways, so armour stays out of view."),
         ("pose_lean_pitch_gain", "How much of your head's downward pitch the torso takes."),
         ("hide_own_head", "1 = your own head isn't drawn in your view (shadow and helmet stay)."),
+        ("helmet_view", "Your worn helmet in your view: 0 = drawn (blocks the view like a real one), 1 = helmet hidden from you, 2 = everything on your head hidden from you. Others still see it; it still protects you."),
         ("pose_wrist_forward_cm", "Hand placement on the controller: wrist forward (cm, controller frame)."),
         ("pose_wrist_right_cm", "...toward the back of the hand (cm)."),
         ("pose_wrist_up_cm", "...up (cm)."),
