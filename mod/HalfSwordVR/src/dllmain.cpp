@@ -4819,6 +4819,11 @@ namespace
         double zone_stop = 0.0, zone_tip = 0.0; // the guard (top stop) and the tip, from the game's grip point
         double body_strength = 1.0; // the game's stats on this hand's hold (strength x injury x stamina)
         bool into_hand_tried = false; // pose_shield_in_hand looked once
+        // The game's joint frames and bone, kept from the last tick it had a joint: the hold carries on
+        // from these if the game's hand joint goes while the hand still holds the weapon (dismemberment).
+        bool joint_frames_known = false;
+        std::string kept_bone2;
+        hsvr::Vec3 kept_pos1, kept_pos2, kept_pri1, kept_sec1, kept_pri2, kept_sec2;
         bool forearm = false;       // held on the forearm (strap shields: the game's joint is to the lower arm)
         std::string anchor_bone;    // the bone the game's joint holds it to
         bool sliding = false;
@@ -9421,7 +9426,8 @@ namespace
         // (shield_x_socket), and its frame there is in that bone's space (shield_grips.md). Reading
         // it as the hand's put the strap ~10 cm toward the fingers (playtest 2026-11-18).
         {
-            std::string bone2 = nested_name(joint, {STR("ConstraintInstance"), STR("ConstraintBone2")});
+            std::string bone2 = joint ? nested_name(joint, {STR("ConstraintInstance"), STR("ConstraintBone2")}) : h.kept_bone2;
+            if (joint) h.kept_bone2 = bone2;
             std::string lower = bone2;
             for (auto& ch : lower) ch = (char)tolower((unsigned char)ch);
             bool forearm = lower.rfind("lowerarm", 0) == 0;
@@ -9489,10 +9495,20 @@ namespace
             return std::isnan(x) ? 0.0 : x;
         };
         auto ax = [&](const TCHAR* v) { return Vec3{jn(v, STR("X")), jn(v, STR("Y")), jn(v, STR("Z"))}; };
-        Vec3 pivot = ax(STR("Pos1"));   // the point held, in the weapon's frame
-        Vec3 in_hand = ax(STR("Pos2")); // where the hand holds it, in the hand bone's frame
-        Quat f1 = quat_from_axes(ax(STR("PriAxis1")), ax(STR("SecAxis1")));
-        Quat f2 = quat_from_axes(ax(STR("PriAxis2")), ax(STR("SecAxis2")));
+        if (joint)
+        {
+            h.kept_pos1 = ax(STR("Pos1"));
+            h.kept_pos2 = ax(STR("Pos2"));
+            h.kept_pri1 = ax(STR("PriAxis1"));
+            h.kept_sec1 = ax(STR("SecAxis1"));
+            h.kept_pri2 = ax(STR("PriAxis2"));
+            h.kept_sec2 = ax(STR("SecAxis2"));
+            h.joint_frames_known = true;
+        }
+        Vec3 pivot = h.kept_pos1;   // the point held, in the weapon's frame
+        Vec3 in_hand = h.kept_pos2; // where the hand holds it, in the hand bone's frame
+        Quat f1 = quat_from_axes(h.kept_pri1, h.kept_sec1);
+        Quat f2 = quat_from_axes(h.kept_pri2, h.kept_sec2);
         h.handle_slide = false;
         if (cfg.pose_grab_handles && !h.free.set && !h.forearm && !is_fist(weapon))
         {
@@ -12830,7 +12846,31 @@ namespace
             // (Not the second hand's: it holds no weapon of its own, but must not collide with the one it holds too.)
             if (g_arm_ignore[side].weapon && g_arm_ignore[side].weapon != weapon && !(g_two.active && g_two.second == side && g_arm_ignore[side].weapon == g_two.weapon))
                 clear_arm_ignore(side);
-            if (!joint || !weapon) continue;
+            if (!weapon) continue;
+            if (!joint)
+            {
+                // The game's hand joint can go while the game still says that hand holds its weapon: a
+                // dismemberment (his right forearm cut off, playtest 2026-11-20 at 392.8 s) cleared both
+                // hand joints' links, and the game's cleanup freed the left one 13 s later while "Weapon L"
+                // stayed the pavise. The mod's hold stopped there and the pavise fell to the floor and lay
+                // there, still "held" ("it would kind of freeze in place"). The hold now carries on from the
+                // joint's frames it kept.
+                HoldState& hk = g_hold[side];
+                if (!hold_on || hk.weapon != weapon || !hk.joint_frames_known) continue;
+                if (bool_property(weapon, STR("Is Sheathed"))) continue;
+                UObject* kb = object_property(weapon, STR("BaseMesh"));
+                if (!kb) continue;
+                Call ks(kb, STR("IsSimulatingPhysics"));
+                ks.run();
+                FProperty* kp = ks.param(STR("ReturnValue"));
+                if (!kp || !*(ks.buffer.data() + kp->GetOffset_Internal())) continue;
+                Call km(kb, STR("GetMass"));
+                km.run();
+                HSVR_LOG_EVERY(2.0, "Hold: %s hand: the game's hand joint is gone but the hand still holds %ls; held on from the joint's kept frames",
+                               side == 0 ? "left" : "right", weapon->GetName().c_str());
+                hold_weapon(side, pawn, nullptr, kb, weapon, (std::max)(0.05, km.number()), cfg);
+                continue;
+            }
             // Only a seated weapon (the game first pulls a new weapon into the hand over a short distance).
             if (side == 1)
                 if (FProperty* p = prop_chain(pawn, STR("R Hand Soft Attach Distance")))
