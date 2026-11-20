@@ -11,7 +11,10 @@
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
+#include <functional>
 #include <map>
+#include <mutex>
+#include <unordered_set>
 #include <unordered_map>
 #include <string>
 #include <vector>
@@ -31,6 +34,7 @@
 #include <Unreal/UFunction.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/UObjectArray.hpp>
 
 #include "config.hpp"
 #include "controllers.hpp"
@@ -96,6 +100,79 @@ namespace
     bool g_install_failed = false;
     bool g_console_done = false;
     UObject* g_logged_pawn = nullptr;
+
+    // ---- Objects the game has freed -------------------------------------------------------------
+    // The mod keeps pointers to Willies, weapons and their parts from one frame to the next. Once the
+    // game destroys one (a corpse removed by the test room's respawn, a fist, a new fight) its memory
+    // is freed at the next garbage collection, and using the old pointer after that crashes (crash
+    // 2026-11-20 08:13: elbow_tick read a respawn-removed Willie's mesh). The engine tells us what it
+    // frees (a delete listener); every place that keeps a pointer is cleaned of those before it is
+    // used again: gc_sync() runs at the top of every entry point of the mod (the engine tick and every
+    // hook) and, when anything was freed, drops it from every holder (prune_freed and the holders
+    // that registered with track_freed / on_freed). gc_sync() is one atomic read when nothing was.
+    std::mutex g_freed_mutex;
+    std::unordered_set<const void*> g_freed_batch; // freed since the last gc_sync (any thread)
+    std::atomic<bool> g_freed_pending{false};
+    std::unordered_set<const void*> g_freed_now;   // the batch being pruned (game thread)
+    uint64_t g_gc_epoch = 0;                       // + 1 for each batch: local caches rebuild on a change
+    struct FreedListener : Unreal::FUObjectDeleteListener
+    {
+        void NotifyUObjectDeleted(const Unreal::UObjectBase* object, int32_t) override
+        {
+            std::lock_guard<std::mutex> lock(g_freed_mutex);
+            g_freed_batch.insert(object);
+            g_freed_pending.store(true, std::memory_order_release);
+        }
+        void OnUObjectArrayShutdown() override {}
+    };
+    FreedListener g_freed_listener;
+    std::vector<std::function<void()>> g_prune_hooks;
+    // True when p was freed in the batch being pruned (pointer compare only, never read).
+    bool gone(const void* p) { return p && g_freed_now.count(p) != 0; }
+    // A holder outside prune_freed (a function's own static) asks to be cleaned: f runs on each batch.
+    bool on_freed(std::function<void()> f)
+    {
+        g_prune_hooks.push_back(std::move(f));
+        return true;
+    }
+    bool track_freed(UObject** slot)
+    {
+        return on_freed([slot] {
+            if (gone(*slot)) *slot = nullptr;
+        });
+    }
+    template <typename M> void erase_gone_keys(M& m)
+    {
+        for (auto it = m.begin(); it != m.end();)
+            it = gone(it->first) ? m.erase(it) : std::next(it);
+    }
+    void erase_gone(std::vector<UObject*>& v)
+    {
+        v.erase(std::remove_if(v.begin(), v.end(), [](UObject* o) { return gone(o); }), v.end());
+    }
+    void prune_freed(); // after every global holder
+    void gc_sync()
+    {
+        if (!g_freed_pending.load(std::memory_order_acquire)) return;
+        {
+            std::lock_guard<std::mutex> lock(g_freed_mutex);
+            g_freed_now.clear();
+            g_freed_now.swap(g_freed_batch);
+            g_freed_pending.store(false, std::memory_order_release);
+        }
+        ++g_gc_epoch;
+        prune_freed();
+        for (auto& f : g_prune_hooks) f();
+        g_freed_now.clear();
+    }
+    // Still a live object: not being destroyed and not waiting for clean-up. Only for pointers that
+    // are not freed (taken this frame, or kept in a holder that gc_sync cleans).
+    bool object_alive(UObject* p)
+    {
+        if (!p) return false;
+        Unreal::FUObjectItem* item = Unreal::FUObjectArray::IndexToObject(p->GetInternalIndex());
+        return item && item->GetUObject() == p && !item->IsUnreachable() && !item->IsPendingKill();
+    }
 
     UObject* find_player_controller()
     {
@@ -486,6 +563,7 @@ namespace
     {
         UObject* driver = object_property(pawn, STR("DriverSkeleton"));
         static UObject* reported = nullptr;
+        static bool reported_tracked = track_freed(&reported);
         if (!driver && reported != pawn)
         {
             reported = pawn;
@@ -524,6 +602,7 @@ namespace
     void pose_probe(const hsvr::Config& cfg)
     {
         static UObject* logged_for = nullptr;
+        static bool logged_for_tracked = track_freed(&logged_for);
         static bool was_on = false;
         static std::vector<ModifyBoneNode> nodes;
         static uint8_t saved_mode = 0, saved_space = 0;
@@ -1382,6 +1461,7 @@ namespace
     std::atomic<double> g_pose_in_anim_at{-1.0};
     void pose_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
+        gc_sync();
         if (!context || !g_pose.instance || context != g_pose.instance || !function) return;
         if (g_anim_update) { if (function != g_anim_update) return; }
         else
@@ -1417,6 +1497,7 @@ namespace
 
     void fingers_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
+        gc_sync();
         if (!g_pose_active.load() || !context || context != g_pose.instance || !function) return;
         if (g_anim_update) { if (function != g_anim_update) return; }
         else
@@ -1470,6 +1551,7 @@ namespace
 
     void feet_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
+        gc_sync();
         using namespace hsvr;
         if (!g_feet_active.load() || !context || context != g_pose.instance || !function) return;
         if (g_anim_update) { if (function != g_anim_update) return; }
@@ -1872,6 +1954,7 @@ namespace
                 // Pickup test: the right controller this high above the grip point of the nearest loose
                 // weapon (one no one holds, not sheathed), as a hand reaching for it on the floor.
                 static UObject* item = nullptr;
+                static bool item_tracked = track_freed(&item);
                 static double found_at = -1.0;
                 if (!item || now - found_at > 1.0)
                 {
@@ -1944,6 +2027,7 @@ namespace
                 // 17: the right hand on the foe's neck_02 for 2 s, then pulls back toward him 30 cm
                 // over 1 s and holds there (a throat grab and pull).
                 static UObject* foe = nullptr;
+                static bool foe_tracked = track_freed(&foe);
                 static double found_at = -1.0, t0 = -1.0;
                 static int seen = -1;
                 if (seen != g_fake_arm_epoch.load()) t0 = now;
@@ -2347,6 +2431,7 @@ namespace
     void pose_tick_group(const hsvr::Config& cfg, UObject* driver, UObject* mesh)
     {
         static UObject* set_on[2] = {nullptr, nullptr};
+        static bool set_on_tracked = on_freed([] { for (UObject*& o : set_on) if (gone(o)) o = nullptr; });
         static bool set_post[2] = {false, false};
         bool want = cfg.pose_post_physics && cfg.pose_in_anim_update;
         UObject* comps[2] = {driver, mesh};
@@ -2366,6 +2451,7 @@ namespace
         }
         g_pose_post_physics.store(want && set_on[0] == driver && set_post[0]);
         static UObject* prereq_on = nullptr;
+        static bool prereq_on_tracked = track_freed(&prereq_on);
         if (cfg.pose_mesh_after_driver && mesh && driver && prereq_on != mesh)
         {
             Call add(mesh, STR("AddTickPrerequisiteComponent"));
@@ -3484,6 +3570,7 @@ namespace
 
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
+        gc_sync();
         // Test input runs in flat mode too (no posed body): the player's pawn's own tick.
         if ((!g_test_inputs.empty() || g_input_list_now) && context && function && function->GetName() == STR("ReceiveTick"))
         {
@@ -6077,6 +6164,7 @@ namespace
             }
         }
         static UObject* logged_pawn = nullptr;
+        static bool logged_pawn_tracked = track_freed(&logged_pawn);
         if (pawn != logged_pawn)
         {
             logged_pawn = pawn;
@@ -6664,6 +6752,7 @@ namespace
     // Watches every 'Deal Complex Damage' a Willie gets: the player's fist hits are learnt (and logged).
     void punch_watch_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
+        gc_sync();
         if (g_elbow_calling.load()) return;
         UFunction* fn = static_cast<UFunction*>(custom_data);
         uint8_t* locals = context.TheStack.Locals();
@@ -6744,6 +6833,7 @@ namespace
     // After his Deal Complex Damage: what the blow (or touch) did to him.
     void punch_watch_post(Unreal::UnrealScriptFunctionCallableContext& context, void*)
     {
+        gc_sync();
         if (!g_punch_victim || context.Context != g_punch_victim) return;
         UObject* w = g_punch_victim;
         g_punch_victim = nullptr;
@@ -7374,6 +7464,7 @@ namespace
     UFunction* g_copy_update_fn = nullptr;
     void fingers_after_copy_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
+        gc_sync();
         FingerRig& R = g_frig;
         if (!context || !function || !R.instance || context != R.instance || !g_pose_active.load()) return;
         if (g_copy_update_fn) { if (function != g_copy_update_fn) return; }
@@ -7610,6 +7701,7 @@ namespace
         // not posed this tick) keeps what each grip was doing: resetting it there read as a release and
         // a new squeeze on the next tick (fist-eat test 3: a fist made and opened every tick).
         static UObject* last_pawn = nullptr;
+        static bool last_pawn_tracked = track_freed(&last_pawn);
         if (pawn != last_pawn)
         {
             last_pawn = pawn;
@@ -8228,11 +8320,13 @@ namespace
         // A weapon whose parts were not found yet (spawned straight into the hand) is measured again next
         // time, up to 40 times; a grip that is really this short (fists, a short dagger grip) is kept.
         static std::unordered_map<UObject*, int> unsure_tries;
+        static bool unsure_tries_tracked = on_freed([] { erase_gone_keys(unsure_tries); });
         if (!measured && ++unsure_tries[item] <= 40)
         {
             if (unsure_tries[item] == 1)
                 HSVR_LOG("Handles: %ls: its parts are not found yet (%s), measuring again", item->GetName().c_str(), list.empty() ? "none" : list.c_str());
             static std::unordered_map<UObject*, std::vector<Handle>> unsure;
+            static bool unsure_tracked = on_freed([] { erase_gone_keys(unsure); });
             return unsure[item] = std::move(hs);
         }
         HSVR_LOG("Handles: %ls: %s%s", item->GetName().c_str(), list.empty() ? "none (held where touched)" : list.c_str(),
@@ -8408,6 +8502,7 @@ namespace
         if (h.zone_hi - h.zone_lo < 1.0)
         {
             static std::unordered_map<UObject*, int> tries;
+            static bool tries_tracked = on_freed([] { erase_gone_keys(tries); });
             if (++tries[weapon] <= 20) h.zone_known = false;
         }
     }
@@ -8488,6 +8583,7 @@ namespace
     double body_size_factor(UObject* pawn)
     {
         static UObject* last_pawn = nullptr;
+        static bool last_pawn_tracked = track_freed(&last_pawn);
         static double last = 1.0;
         if (pawn == last_pawn) return last;
         double scale = -1.0, mass_scale = -1.0;
@@ -9525,6 +9621,7 @@ namespace
     std::atomic<bool> g_force_watch{false};
     void force_watch_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
+        gc_sync();
         if (!g_force_watch.load()) return;
         UObject* target = context.Context;
         UFunction* hooked = static_cast<UFunction*>(custom_data);
@@ -9663,6 +9760,7 @@ namespace
     bool weapon_is_blunt(UObject* weapon)
     {
         static std::map<UObject*, bool> cache;
+        static bool cache_tracked = on_freed([] { erase_gone_keys(cache); });
         if (!weapon) return false;
         auto it = cache.find(weapon);
         if (it != cache.end()) return it->second;
@@ -9955,6 +10053,7 @@ namespace
     // weapon in it) landing on another person is a punch on that side (B&S Punch, 2-9 m/s).
     void hit_haptics_body(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
+        gc_sync();
         using namespace hsvr;
         Config cfg = config();
         if (cfg.hit_buzz <= 0.0) return;
@@ -10098,6 +10197,7 @@ namespace
 
     void stab_hit_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
+        gc_sync();
         // Hit vibration first: it reads the game's own impulse before the stab assist may raise it.
         hit_haptics_weapon(context, static_cast<UFunction*>(custom_data));
         {
@@ -10297,6 +10397,7 @@ namespace
 
     void stab_hit_post(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
+        gc_sync();
         using namespace hsvr;
         Config cfg = config();
         if (cfg.stab_start_depth_cm <= 0.0) return;
@@ -10382,6 +10483,7 @@ namespace
     // decompile), the stuck joint's own state and the hold's.
     void stab_release_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
+        gc_sync();
         UObject* self = context.Context;
         UObject* pawn = live_posed_pawn();
         if (!self || !pawn) return;
@@ -11340,6 +11442,7 @@ namespace
     {
         using namespace hsvr;
         static std::unordered_map<UObject*, std::pair<double, double>> cache;
+        static bool cache_tracked = on_freed([] { erase_gone_keys(cache); });
         auto f = cache.find(scab);
         if (f != cache.end())
         {
@@ -11818,6 +11921,7 @@ namespace
             UObject* joint = object_property(pawn, side == 0 ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand"));
             // Switching the spring off (ini, live) puts the game's own locked grip back on a joint we sprung.
             static UObject* sprung[2] = {nullptr, nullptr};
+            static bool sprung_tracked = on_freed([] { for (UObject*& o : sprung) if (gone(o)) o = nullptr; });
             if (!spring_on && !hold_on && joint && sprung[side] == joint)
             {
                 sprung[side] = nullptr;
@@ -11853,6 +11957,7 @@ namespace
                 }
                 // Override 2: write the spring once per weapon, then leave the joint alone.
                 static UObject* sprung_once[2] = {nullptr, nullptr};
+                static bool sprung_once_tracked = on_freed([] { for (UObject*& o : sprung_once) if (gone(o)) o = nullptr; });
                 if (spring_override == 2)
                 {
                     if (sprung_once[side] != weapon)
@@ -11879,6 +11984,7 @@ namespace
                     // Test (hsvr.break_joint 1): break the game's hand joint outright, so nothing links
                     // the hand and the weapon but the mod's hold (decoded default: a 50 cm linear limit).
                     static UObject* broken[2] = {nullptr, nullptr};
+                    static bool broken_tracked = on_freed([] { for (UObject*& o : broken) if (gone(o)) o = nullptr; });
                     if (g_break_joint.load() && broken[side] != joint)
                     {
                         broken[side] = joint;
@@ -11892,6 +11998,7 @@ namespace
                 else if (spring_on) spring_joint(joint, mass, cfg);
                 {
                     static UObject* typed = nullptr;
+                    static bool typed_tracked = track_freed(&typed);
                     if (side == 1 && typed != weapon)
                     {
                         typed = weapon;
@@ -11914,6 +12021,7 @@ namespace
                 // Anchor the weapon at its own handle marker instead of the game's anchor point.
                 {
                     static UObject* anchored[2] = {nullptr, nullptr};
+                    static bool anchored_tracked = on_freed([] { for (UObject*& o : anchored) if (gone(o)) o = nullptr; });
                     static bool anchored_marker[2] = {false, false};
                     static Vec3 game_pos1[2];
                     bool want = cfg.pose_grip_anchor_marker;
@@ -11949,6 +12057,7 @@ namespace
                 {
                     static int done_serial = 0;
                     static UObject* original_for = nullptr;
+                    static bool original_for_tracked = track_freed(&original_for);
                     static hsvr::Vec3 original;
                     if (original_for != joint)
                     {
@@ -11988,6 +12097,7 @@ namespace
                 {
                     static int applied = -1;
                     static UObject* applied_to = nullptr;
+                    static bool applied_to_tracked = track_freed(&applied_to);
                     if (applied != collision || applied_to != base)
                     {
                         applied = collision;
@@ -12021,6 +12131,7 @@ namespace
                     g_hold[side].weapon = nullptr;
                 if (show) HSVR_LOG("Grip: right joint after the mod's change: %s", joint_settings(joint).c_str());
                 static UObject* dumped[2] = {nullptr, nullptr};
+                static bool dumped_tracked = on_freed([] { for (UObject*& o : dumped) if (gone(o)) o = nullptr; });
                 if (dumped[side] != weapon)
                 {
                     dumped[side] = weapon;
@@ -12348,6 +12459,7 @@ namespace
     std::unordered_map<UFunction*, std::pair<double, int>> g_event_rate;
     void deep_event_cb(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void* parms)
     {
+        gc_sync();
         if (!g_events || !context || !function) return;
         UStruct* cls = context->GetClassPrivate();
         auto it = g_event_class.find(cls);
@@ -12617,6 +12729,7 @@ namespace
 
     void capsule_after_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
+        gc_sync();
         if (!is_receive_tick(context, function)) return;
         for (auto& pin : g_pawn_pins) set_variable(context, pin.first.c_str(), pin.second, nullptr, nullptr);
         if (g_pose_active.load())
@@ -12749,6 +12862,7 @@ namespace
     {
         constexpr int N = 2;
         static UObject* hidden[N] = {nullptr, nullptr};
+        static bool hidden_tracked = on_freed([] { for (UObject*& o : hidden) if (gone(o)) o = nullptr; });
         static double last = 0.0;
         double now = hsvr::now_seconds();
         if (now - last < 1.0) return;
@@ -12769,6 +12883,7 @@ namespace
         // hidden from you anyway.
         {
             static UObject* gore = nullptr;
+            static bool gore_tracked = track_freed(&gore);
             static std::string gore_bone;
             UObject* skeleton = willie ? object_property(pawn, STR("SK_Skeleton")) : nullptr;
             bool hide_gore = want && skeleton && !cfg.hide_own_gore_from.empty();
@@ -13742,6 +13857,7 @@ namespace
 
     void room_load_game_post(Unreal::UnrealScriptFunctionCallableContext&, void*)
     {
+        gc_sync();
         if (!g_room.armed) return;
         HSVR_LOG("TestRoom: the game loaded the save; test values put back");
         room_apply_values();
@@ -14001,11 +14117,13 @@ namespace
     int32_t g_room_count_before = 0;
     void room_count_pre(Unreal::UnrealScriptFunctionCallableContext& ctx, void*)
     {
+        gc_sync();
         int32_t* c = ctx.Context ? ctx.Context->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
         g_room_count_before = c ? *c : -1;
     }
     void room_count_post(Unreal::UnrealScriptFunctionCallableContext& ctx, void*)
     {
+        gc_sync();
         int32_t* c = ctx.Context ? ctx.Context->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
         HSVR_LOG("TestRoom: game mode %ls: Enemy Count %d -> %d, Match Won %d", ctx.TheStack.Node() ? ctx.TheStack.Node()->GetName().c_str() : STR("?"), g_room_count_before,
                  c ? *c : -1, (int)bool_property(ctx.Context, STR("Match Won")));
@@ -15575,6 +15693,7 @@ namespace
                 continue;
             }
             run_console_command(entry.command);
+            gc_sync(); // "obj gc" frees objects in the middle of this tick
             return; // one a tick
         }
     }
@@ -15746,6 +15865,7 @@ namespace
     void log_sliders()
     {
         static std::map<UObject*, std::string> last;
+        static bool last_tracked = on_freed([] { erase_gone_keys(last); });
         static int lines_left = 300;
         if (lines_left <= 0) return;
         bool button = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
@@ -15846,6 +15966,7 @@ namespace
         static const char* due_reason = "";
         static bool intro_done = false, was_paused = false;
         static UObject* last_pawn = nullptr;
+        static bool last_pawn_tracked = track_freed(&last_pawn);
         static double first_tick = hsvr::now_seconds();
         double now = hsvr::now_seconds();
         if (!intro_done && now - first_tick > 20.0)
@@ -16003,8 +16124,111 @@ namespace
                  (int)bool_property(pawn, STR("Player Match End")));
     }
 
+    // Drops every object the game has freed (the batch in g_freed_now) from the mod's global holders.
+    // A state whose object is gone is cleared as if it had ended: nothing is called on the object.
+    void prune_freed()
+    {
+        int dropped = 0;
+        auto clear = [&](const char* what) {
+            ++dropped;
+            HSVR_LOG("Freed: %s: its object was freed by the game; dropped", what);
+        };
+        if (gone(g_logged_pawn)) g_logged_pawn = nullptr;
+        if (gone(g_pose.pawn) || gone(g_pose.mesh) || gone(g_pose.driver) || gone(g_pose.instance))
+        {
+            g_pose = PoseState{}; // character gone: nothing to restore
+            feet_reset();
+            g_pose_anchor_fixed = false;
+            g_pose_room_moved_local = {};
+            clear("the posed character");
+        }
+        if (gone(g_helmet) || gone(g_helmet_pawn))
+        {
+            g_helmet = nullptr;
+            g_helmet_pawn = nullptr;
+            g_head_pieces.clear();
+        }
+        erase_gone(g_head_pieces);
+        if (gone(g_head_used.pawn)) g_head_used = HeadUsed{};
+        g_late_moved.erase(std::remove_if(g_late_moved.begin(), g_late_moved.end(), [](const MovedPiece& m) { return gone(m.comp); }), g_late_moved.end());
+        erase_gone_keys(g_sheath_fit);
+        for (auto it = g_sheath_fit.begin(); it != g_sheath_fit.end(); ++it)
+            if (gone(it->second.scab)) it->second.scab = nullptr;
+        for (int side = 0; side < 2; ++side)
+        {
+            if (gone(g_draw[side].weapon) || gone(g_draw[side].scabbard))
+            {
+                g_draw[side] = DrawState{};
+                clear("a draw / sheathe");
+            }
+            if (gone(g_grip_log[side].weapon_seen)) g_grip_log[side].weapon_seen = nullptr;
+            if (gone(g_arm_ignore[side].weapon)) g_arm_ignore[side] = ArmIgnore{};
+            erase_gone(g_arm_ignore[side].joints);
+            if (gone(g_pending_item[side])) g_pending_item[side] = nullptr;
+            if (gone(g_hold[side].weapon))
+            {
+                g_hold[side] = HoldState{};
+                clear(side == 0 ? "the left hand's hold" : "the right hand's hold");
+            }
+            if (gone(g_ghost[side].pawn) || gone(g_ghost[side].comp)) g_ghost[side] = Ghost{};
+            for (ComSample& c : g_com_hist[side])
+                if (gone(c.weapon)) c.weapon = nullptr;
+            if (gone(g_object_grab[side].component))
+            {
+                g_object_grab[side] = ObjectGrab{};
+                clear(side == 0 ? "the left hand's grab" : "the right hand's grab");
+            }
+            if (gone(g_body_grab[side].comp) || gone(g_body_grab[side].victim))
+            {
+                g_body_grab[side] = BodyGrab{};
+                clear(side == 0 ? "the left hand's body grab" : "the right hand's body grab");
+            }
+            if (gone(g_young_joint[side]))
+            {
+                g_young_joint[side] = nullptr;
+                g_young_since[side] = -1.0;
+            }
+            for (HitContact& h : g_hit_contact[side])
+                if (gone(h.other)) h = HitContact{};
+            if (gone(g_stab_watch[side].weapon))
+            {
+                g_stab_watch[side] = StabWatch{};
+                clear("a stab watch");
+            }
+            else if (gone(g_stab_watch[side].push_comp))
+                g_stab_watch[side].push_comp = nullptr;
+        }
+        g_thrown.erase(std::remove_if(g_thrown.begin(), g_thrown.end(), [](const Thrown& t) { return gone(t.weapon) || gone(t.base); }), g_thrown.end());
+        if (gone(g_bring)) g_bring = nullptr;
+        erase_gone_keys(g_item_track);
+        if (gone(g_two.weapon))
+        {
+            g_two = TwoHand{};
+            clear("the two-handed hold");
+        }
+        erase_gone_keys(g_weapon_parts);
+        for (auto& wp : g_weapon_parts) erase_gone(wp.second);
+        if (gone(g_punch_victim)) g_punch_victim = nullptr;
+        erase_gone_keys(g_axis_measures);
+        erase_gone_keys(g_item_handles);
+        erase_gone_keys(g_watch);
+        auto watched_gone = [](const WatchedVar& w) { return gone(w.owner); };
+        g_watched.erase(std::remove_if(g_watched.begin(), g_watched.end(), watched_gone), g_watched.end());
+        g_watch_previous.erase(std::remove_if(g_watch_previous.begin(), g_watch_previous.end(), watched_gone), g_watch_previous.end());
+        for (UObject*& o : g_watch_owners)
+            if (gone(o)) o = nullptr;
+        // The test room.
+        if (gone(g_room.pawn)) g_room.pawn = nullptr;
+        erase_gone(g_room.settling);
+        erase_gone_keys(g_room.watch_last);
+        for (TestRoom::Slot& s : g_room.slots)
+            if (gone(s.foe)) s.foe = nullptr; // counts as dead; a new one comes after the delay
+        if (dropped) HSVR_LOG("Freed: %d holder(s) cleared after the game freed %d object(s)", dropped, (int)g_freed_now.size());
+    }
+
     void game_tick(UObject* engine, float delta_seconds)
     {
+        gc_sync();
         g_engine = engine;
         hsvr::config_reload_if_changed();
         hsvr::stereo_begin_game_frame(delta_seconds);
@@ -16115,6 +16339,7 @@ class HalfSwordVR : public CppUserModBase
     auto on_unreal_init() -> void override
     {
         HSVR_LOG("Unreal initialised");
+        Unreal::FUObjectArray::AddUObjectDeleteListener(&g_freed_listener); // gc_sync: what the game frees
         g_vr_started = hsvr::vr_start();
         if (g_vr_started)
         {
