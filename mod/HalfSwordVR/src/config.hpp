@@ -287,6 +287,13 @@ namespace hsvr
         bool stab_wound_hold = true;
         // A weapon the mod holds is never left "Being Rubber Banded" by the game (it then can't stick and hits at x0.1).
         bool stab_no_rubber_band = true;
+        // A body with the weapon stuck in it is dragged by the hand (all its strength x
+        // stab_drag_force_scale across the wound) instead of the hand letting go; the weapon slips
+        // only after pulling at full strength with the grip past reach for stab_drag_grip_s x his
+        // strength. A yank (pull-out) counts only the hand's distance out along the wound.
+        bool stab_drag = true;
+        double stab_drag_force_scale = 1.0;
+        double stab_drag_grip_s = 2.0;
         // Reverse grip flip (S&S): a tap (shorter than grip_flip_tap_s) of the holding hand's B / Y
         // turns a one-handed weapon end for end at the same spot on its handle, gliding over grip_flip_s.
         bool grip_flip = true;
