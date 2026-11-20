@@ -7464,6 +7464,39 @@ namespace
         }
         UObject* mesh = g_pose.mesh;
         if (!pawn || !mesh || !config().player_stump_blood) return;
+        // For 5 s after a move, every 0.5 s: how far each moved blood is from its stump bone (it
+        // should stay put on the stump while the posed hand or foot moves on).
+        struct Follow
+        {
+            UObject* comp;
+            FName bone;
+            double until, next;
+        };
+        static std::vector<Follow> follows;
+        static bool follows_tracked = on_freed([] {
+            follows.erase(std::remove_if(follows.begin(), follows.end(), [](const Follow& f) { return gone(f.comp); }), follows.end());
+        });
+        (void)follows_tracked;
+        double now_s = now_seconds();
+        for (auto it = follows.begin(); it != follows.end();)
+        {
+            if (now_s > it->until || gone(it->comp))
+            {
+                it = follows.erase(it);
+                continue;
+            }
+            if (now_s >= it->next)
+            {
+                it->next = now_s + 0.5;
+                Call wl(it->comp, STR("K2_GetComponentLocation"));
+                wl.run();
+                Vec3 at_bone = socket_location(mesh, it->bone);
+                HSVR_LOG("Stump blood: %ls is %.1f cm from %ls (bone at %.0f %.0f %.0f), hand_l %.0f cm and foot_r %.0f cm from it", it->comp->GetName().c_str(),
+                         length(wl.vec() - at_bone), it->bone.ToString().c_str(), at_bone.x, at_bone.y, at_bone.z,
+                         length(socket_location(mesh, FName(STR("hand_l"), FNAME_Add)) - at_bone), length(socket_location(mesh, FName(STR("foot_r"), FNAME_Add)) - at_bone));
+            }
+            ++it;
+        }
         for (const TCHAR* list : {STR("Attached Blood Emitters"), STR("Running Blood Array")})
         {
             FProperty* p = prop_chain(pawn, list);
@@ -7534,8 +7567,132 @@ namespace
                 at_call.run();
                 HSVR_LOG("Stump blood: %ls on cut-off bone %ls moved %.0f cm to the stump at %ls (attached to %ls, %.0f cm from its origin)", item->GetName().c_str(),
                          bone.ToString().c_str(), length(stump - was), top.ToString().c_str(), at.ToString().c_str(), length(stump - socket_location(mesh, at)));
+                follows.push_back({comp, top, now_s + 5.0, now_s + 0.5});
             }
         }
+    }
+
+    // ---- Test only: cut off one of his own limbs the way a stuck blade does -----------------------
+    // dev_script "hsvr.player_dismember lowerarm_l|calf_r": Constraint_Weapon_Stuck_BP calls his
+    // Dismember Function Initiate(Mesh, Part, Farthest Overlap Marker, Overlapped Markers, VP box,
+    // VP box, Weapon, Bone), then 0.1 s later Dismember Function Delayed with the same markers. Here
+    // the markers are his own "DM Sphere <part> n" spheres in the middle of the part, the two VP boxes
+    // are the spheres either side of them, and the "weapon" is his capsule (only used to switch off
+    // collision with the cut-off piece).
+    struct DismemberTest
+    {
+        bool pending = false;
+        double at = 0.0;
+        UObject* pawn = nullptr;
+        uint8_t part = 0;
+        FName bone;
+        std::vector<UObject*> markers;
+        UObject* attach = nullptr;
+        UObject* vp1 = nullptr;
+        UObject* vp2 = nullptr;
+        UObject* weapon = nullptr;
+    } g_dismember_test;
+
+    void put_object_array(Call& c, const TCHAR* name, std::vector<UObject*>* items)
+    {
+        struct RawArray
+        {
+            UObject** data;
+            int32_t num;
+            int32_t max;
+        };
+        if (FProperty* p = c.param(name))
+        {
+            auto* arr = reinterpret_cast<RawArray*>(c.buffer.data() + p->GetOffset_Internal());
+            arr->data = items ? items->data() : nullptr;
+            arr->num = arr->max = items ? (int32_t)items->size() : 0;
+        }
+    }
+
+    void dismember_call(const TCHAR* function, bool initiate)
+    {
+        DismemberTest& t = g_dismember_test;
+        Call c(t.pawn, function);
+        if (!c.fn)
+        {
+            HSVR_LOG("Script: hsvr.player_dismember: no %ls on his Willie", function);
+            return;
+        }
+        c.object(STR("Master Mesh"), g_pose.mesh);
+        c.byte(STR("Dismembered Part"), t.part);
+        c.object(STR("Attach Marker"), t.attach);
+        put_object_array(c, STR("Overlapped Markers"), &t.markers);
+        c.object(STR("VP Box Collision 1"), t.vp1);
+        c.object(STR("VP Box Collision 2"), t.vp2);
+        c.object(STR("Dismember Weapon"), t.weapon);
+        if (initiate) c.name(STR("Dismember Bone Name"), t.bone);
+        c.run();
+        // The array points at our own storage: take it back out of the buffer.
+        put_object_array(c, STR("Overlapped Markers"), nullptr);
+        UObject* cut = object_property(t.pawn, STR("Currently Dismembered Mesh"));
+        HSVR_LOG("Script: hsvr.player_dismember: %ls(part %d, bone %ls, %d markers) called; Health %.1f, Currently Dismembered Mesh %ls", function, (int)t.part,
+                 t.bone.ToString().c_str(), (int)t.markers.size(), read_number_variable(t.pawn, STR("Health")), cut ? cut->GetName().c_str() : STR("none"));
+    }
+
+    void player_dismember_start(const std::string& arg)
+    {
+        DismemberTest& t = g_dismember_test;
+        UObject* pawn = g_pose.pawn;
+        if (!pawn || !g_pose.mesh)
+        {
+            HSVR_LOG("Script: hsvr.player_dismember: no posed player");
+            return;
+        }
+        const TCHAR* prefix = nullptr;
+        int count = 0;
+        if (arg == "lowerarm_l")
+        {
+            t.part = 7; // Spawn Bone lowerarm_l (Dismember Function Delayed @1472)
+            prefix = STR("DM Sphere Loweararm_L "); // sic: the game's spelling
+            count = 13;
+        }
+        else if (arg == "calf_r")
+        {
+            t.part = 10; // Spawn Bone calf_r
+            prefix = STR("DM Sphere Calf_R ");
+            count = 20;
+        }
+        else
+        {
+            HSVR_LOG("Script: hsvr.player_dismember: use lowerarm_l or calf_r (got '%s')", arg.c_str());
+            return;
+        }
+        auto marker = [&](int i) { return object_property(pawn, (std::wstring(prefix) + std::to_wstring(i)).c_str()); };
+        int mid = count / 2;
+        t.markers.clear();
+        for (int i : {mid, mid + 1})
+            if (UObject* m = marker(i)) t.markers.push_back(m);
+        t.attach = marker(mid + 1);
+        t.vp1 = marker(mid - 1);
+        t.vp2 = marker(mid + 2);
+        t.weapon = object_property(pawn, STR("CapsuleComponent"));
+        t.bone = FName(std::wstring(arg.begin(), arg.end()).c_str(), FNAME_Add);
+        t.pawn = pawn;
+        if (t.markers.size() < 2 || !t.attach || !t.vp1 || !t.vp2 || !t.weapon)
+        {
+            HSVR_LOG("Script: hsvr.player_dismember: markers missing (%d found, attach %d, boxes %d %d, capsule %d)", (int)t.markers.size(), t.attach != nullptr,
+                     t.vp1 != nullptr, t.vp2 != nullptr, t.weapon != nullptr);
+            return;
+        }
+        dismember_call(STR("Dismember Function Initiate"), true);
+        t.pending = true;
+        t.at = hsvr::now_seconds() + 0.1;
+    }
+
+    void player_dismember_tick(UObject* pawn)
+    {
+        DismemberTest& t = g_dismember_test;
+        if (!t.pending || hsvr::now_seconds() < t.at) return;
+        t.pending = false;
+        if (pawn != t.pawn || gone(t.pawn)) return;
+        for (UObject* m : t.markers)
+            if (gone(m)) return;
+        dismember_call(STR("Dismember Function Delayed"), false);
     }
 
     struct ElbowState
@@ -13802,6 +13959,7 @@ namespace
             { HSVR_SUB("after:elbow_tick"); elbow_tick(context); }
             { HSVR_SUB("after:install_player_damage"); install_player_damage(); }
             { HSVR_SUB("after:stump_blood_tick"); stump_blood_tick(context); }
+            { HSVR_SUB("after:player_dismember_tick"); player_dismember_tick(context); }
             { HSVR_SUB("after:thrown_tick"); thrown_tick(context); }
             { HSVR_SUB("after:frames_tick"); frames_tick(context); }
         }
@@ -15996,6 +16154,12 @@ namespace
                     c.run();
                 }
                 HSVR_LOG("Script: hsvr.gc: garbage collection asked for");
+                continue;
+            }
+            if (entry.command.rfind("hsvr.player_dismember", 0) == 0)
+            {
+                // Test: cut off one of his own limbs through the game's own dismember functions.
+                player_dismember_start(entry.command.size() > 22 ? entry.command.substr(22) : std::string());
                 continue;
             }
             if (entry.command.rfind("hsvr.test_room_kill", 0) == 0 || entry.command.rfind("hsvr.test_room_beat", 0) == 0)
