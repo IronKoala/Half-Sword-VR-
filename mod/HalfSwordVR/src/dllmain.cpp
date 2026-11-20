@@ -17822,17 +17822,14 @@ namespace
                 if (kv.second.calls) v.push_back(&kv.second);
             auto line = [&](const char* title, auto key, size_t top) {
                 std::sort(v.begin(), v.end(), [&](EvStat* a, EvStat* b) { return key(a) > key(b); });
-                std::string out;
+                HSVR_LOG("Perf events %s:", title); // one entry a line (the log line is capped at 2 KB)
                 for (size_t i = 0; i < v.size() && i < top; ++i)
                 {
                     double ms = key(v[i]) * ms_per_tick / frames;
                     if (ms < 0.02) break;
-                    char b[384];
-                    snprintf(b, sizeof b, "\n    %s %.2f ms (%.1f calls, %.3f ms each, worst %.2f; self %.2f)", v[i]->name.c_str(), ms, (double)v[i]->calls / frames,
+                    HSVR_LOG("Perf events     %s %.2f ms (%.1f calls, %.3f ms each, worst %.2f; self %.2f)", v[i]->name.c_str(), ms, (double)v[i]->calls / frames,
                              v[i]->incl * ms_per_tick / v[i]->calls, v[i]->worst * ms_per_tick, v[i]->excl * ms_per_tick / frames);
-                    out += b;
                 }
-                HSVR_LOG("Perf events %s:%s", title, out.c_str());
             };
             HSVR_LOG("Perf events: Blueprint calls from native code %.2f ms a frame (outermost, mod time taken out); %.0f timed calls, %.0f skipped (mod's own) a frame",
                      g_ev_outer_ticks * ms_per_tick / frames, (double)g_ev_calls / frames, (double)g_ev_skipped / frames);
@@ -17872,15 +17869,12 @@ namespace
                 HSVR_LOG("Perf sample: %llu samples (%llu failed); self time by module: %s", (unsigned long long)total, (unsigned long long)failed, mods.c_str());
                 auto line = [&](const char* title, bool self, size_t top) {
                     std::sort(v.begin(), v.end(), [&](auto& a, auto& b) { return (self ? a.second.self : a.second.incl) > (self ? b.second.self : b.second.incl); });
-                    std::string out;
+                    HSVR_LOG("Perf sample %s:", title); // one entry a line (the log line is capped at 2 KB)
                     for (size_t i = 0; i < v.size() && i < top; ++i)
                     {
                         uint64_t n = self ? v[i].second.self : v[i].second.incl;
-                        char b[200];
-                        snprintf(b, sizeof b, "\n    %s %.1f%%", module_rva(v[i].first).c_str(), 100.0 * n / total);
-                        out += b;
+                        HSVR_LOG("Perf sample     %s %.1f%%", module_rva(v[i].first).c_str(), 100.0 * n / total);
                     }
-                    HSVR_LOG("Perf sample %s:%s", title, out.c_str());
                 };
                 line("self (function running)", true, 30);
                 line("inclusive (on the stack)", false, 60);
