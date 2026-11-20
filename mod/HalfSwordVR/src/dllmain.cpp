@@ -9967,6 +9967,52 @@ namespace
     }
 
     // The player's hands holding this item (bit 0 left, bit 1 right).
+    // The hit hooks fire for EVERY weapon's Collision Hit and every Willie's mesh hit in the level,
+    // thousands a second once dropped weapons and bodies lie in contact (and more substeps as frames
+    // slow). Looking up the player controller, pawn and weapons by property name took 20-85 us a call:
+    // in perf1 (2026-11-20) 40 of a 76 ms frame after 10 minutes, the cause of the playtest's 63 -> 13
+    // fps slide. The game tick takes the pawn and his weapons once a frame; the hooks drop anything
+    // that is not his with a few pointer compares before any lookup.
+    struct HitFrame
+    {
+        UObject* pawn = nullptr;
+        UObject* weapon[2] = {nullptr, nullptr};
+        double hit_buzz = 0.0;
+    };
+    HitFrame g_hitf;
+    void hit_frame_refresh()
+    {
+        static bool tracked = track_freed(&g_hitf.pawn) && track_freed(&g_hitf.weapon[0]) && track_freed(&g_hitf.weapon[1]);
+        (void)tracked;
+        g_hitf.hit_buzz = hsvr::config().hit_buzz;
+        g_hitf.pawn = live_posed_pawn();
+        g_hitf.weapon[0] = g_hitf.pawn ? object_property(g_hitf.pawn, STR("Weapon L")) : nullptr;
+        g_hitf.weapon[1] = g_hitf.pawn ? object_property(g_hitf.pawn, STR("Weapon R")) : nullptr;
+    }
+    bool hit_is_his_item(UObject* x)
+    {
+        return x && (x == g_hitf.weapon[0] || x == g_hitf.weapon[1] || x == g_hold[0].weapon || x == g_hold[1].weapon || (g_two.active && x == g_two.weapon));
+    }
+    // The hooked function's OtherActor, from its locals (offset found once per function).
+    UObject* hit_other_actor(Unreal::UnrealScriptFunctionCallableContext& context, UFunction* fn)
+    {
+        static std::unordered_map<UFunction*, int> offsets;
+        uint8_t* locals = context.TheStack.Locals();
+        if (!fn || !locals) return nullptr;
+        auto it = offsets.find(fn);
+        if (it == offsets.end())
+        {
+            int off = -1;
+            for (FProperty* p : fn->ForEachProperty())
+            {
+                std::wstring n = p->GetName();
+                if (n == STR("OtherActor") || n == STR("Other Actor")) off = p->GetOffset_Internal();
+            }
+            it = offsets.emplace(fn, off).first;
+        }
+        return it->second >= 0 ? *reinterpret_cast<UObject**>(locals + it->second) : nullptr;
+    }
+
     int hit_holders(UObject* pawn, UObject* item)
     {
         if (!item) return 0;
@@ -10239,6 +10285,8 @@ namespace
     {
         gc_sync();
         HSVR_PROF(PerfHitBody);
+        // Only his own mesh's hits (every Willie's mesh hit comes through here).
+        if (!g_hitf.pawn || context.Context != g_hitf.pawn || g_hitf.hit_buzz <= 0.0) return;
         using namespace hsvr;
         Config cfg = config();
         if (cfg.hit_buzz <= 0.0) return;
@@ -10384,6 +10432,8 @@ namespace
     {
         gc_sync();
         HSVR_PROF(PerfStabHit);
+        // Only a weapon he holds, or something hitting one he holds (every weapon's hits come here).
+        if (!g_hitf.pawn || (!hit_is_his_item(context.Context) && !hit_is_his_item(hit_other_actor(context, static_cast<UFunction*>(custom_data))))) return;
         // Hit vibration first: it reads the game's own impulse before the stab assist may raise it.
         hit_haptics_weapon(context, static_cast<UFunction*>(custom_data));
         {
@@ -16655,6 +16705,7 @@ namespace
         perf_report(delta_seconds); // outside the tick's own scope: the census is not per-frame time
         HSVR_PROF(PerfTick);
         g_engine = engine;
+        hit_frame_refresh();
         hsvr::config_reload_if_changed();
         hsvr::stereo_begin_game_frame(delta_seconds);
         if (!g_vr_started) return;
