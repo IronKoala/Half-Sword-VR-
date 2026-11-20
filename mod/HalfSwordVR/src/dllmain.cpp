@@ -110,25 +110,40 @@ namespace
     // used again: gc_sync() runs at the top of every entry point of the mod (the engine tick and every
     // hook) and, when anything was freed, drops it from every holder (prune_freed and the holders
     // that registered with track_freed / on_freed). gc_sync() is one atomic read when nothing was.
-    std::mutex g_freed_mutex;
-    std::unordered_set<const void*> g_freed_batch; // freed since the last gc_sync (any thread)
+    // The listener only appends (one atomic add and a store; no lock, no hashing): the game frees
+    // every object at quit, on several threads, and a locked set made quitting take up to a minute
+    // (test 2026-11-20 02:53-03:01: 24-63 s against 9 s without it). Two buffers: writers append to
+    // the active one; gc_sync switches them, waits out writers already inside, and reads the old one.
+    constexpr size_t kFreedCap = size_t(1) << 20;
+    struct FreedBuffer
+    {
+        std::unique_ptr<const void*[]> slots{new const void*[kFreedCap]};
+        std::atomic<size_t> count{0};
+    };
+    FreedBuffer g_freed_buf[2];
+    std::atomic<int> g_freed_active{0};
+    std::atomic<int> g_freed_writers{0};
     std::atomic<bool> g_freed_pending{false};
-    std::unordered_set<const void*> g_freed_now;   // the batch being pruned (game thread)
-    uint64_t g_gc_epoch = 0;                       // + 1 for each batch: local caches rebuild on a change
+    std::unordered_set<const void*> g_freed_now; // the batch being pruned (game thread)
+    bool g_freed_all = false;                    // more freed than the buffer holds: treat every pointer as freed
+    uint64_t g_gc_epoch = 0;                     // + 1 for each batch: local caches rebuild on a change
     struct FreedListener : Unreal::FUObjectDeleteListener
     {
         void NotifyUObjectDeleted(const Unreal::UObjectBase* object, int32_t) override
         {
-            std::lock_guard<std::mutex> lock(g_freed_mutex);
-            g_freed_batch.insert(object);
+            g_freed_writers.fetch_add(1, std::memory_order_acq_rel);
+            FreedBuffer& b = g_freed_buf[g_freed_active.load(std::memory_order_acquire)];
+            size_t i = b.count.fetch_add(1, std::memory_order_relaxed);
+            if (i < kFreedCap) b.slots[i] = object;
             g_freed_pending.store(true, std::memory_order_release);
+            g_freed_writers.fetch_sub(1, std::memory_order_acq_rel);
         }
         void OnUObjectArrayShutdown() override {}
     };
     FreedListener g_freed_listener;
     std::vector<std::function<void()>> g_prune_hooks;
     // True when p was freed in the batch being pruned (pointer compare only, never read).
-    bool gone(const void* p) { return p && g_freed_now.count(p) != 0; }
+    bool gone(const void* p) { return p && (g_freed_all || g_freed_now.count(p) != 0); }
     // A holder outside prune_freed (a function's own static) asks to be cleaned: f runs on each batch.
     bool on_freed(std::function<void()> f)
     {
@@ -154,17 +169,27 @@ namespace
     void gc_sync()
     {
         if (!g_freed_pending.load(std::memory_order_acquire)) return;
+        g_freed_pending.store(false, std::memory_order_release);
+        int old = g_freed_active.load(std::memory_order_acquire);
+        g_freed_active.store(1 - old, std::memory_order_release);
+        while (g_freed_writers.load(std::memory_order_acquire) != 0) YieldProcessor();
+        FreedBuffer& b = g_freed_buf[old];
+        size_t n = b.count.load(std::memory_order_acquire);
+        g_freed_all = n > kFreedCap;
+        g_freed_now.clear();
+        if (!g_freed_all)
         {
-            std::lock_guard<std::mutex> lock(g_freed_mutex);
-            g_freed_now.clear();
-            g_freed_now.swap(g_freed_batch);
-            g_freed_pending.store(false, std::memory_order_release);
+            g_freed_now.reserve(n);
+            for (size_t k = 0; k < n; ++k) g_freed_now.insert(b.slots[k]);
         }
+        b.count.store(0, std::memory_order_release);
+        if (n == 0) return;
         ++g_gc_epoch;
-        HSVR_LOG("GC: the game freed %d object(s); dropping them from the mod's lists", (int)g_freed_now.size());
+        HSVR_LOG("GC: the game freed %zu object(s)%s; dropping them from the mod's lists", n, g_freed_all ? " (more than recorded: every kept pointer dropped)" : "");
         prune_freed();
         for (auto& f : g_prune_hooks) f();
         g_freed_now.clear();
+        g_freed_all = false;
     }
     // Still a live object: not destroyed and not waiting for clean-up (below, after Call). Only for
     // pointers that are not freed (taken this frame, or kept in a holder that gc_sync cleans).
