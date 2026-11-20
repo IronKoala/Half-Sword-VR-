@@ -232,6 +232,39 @@ namespace
     };
 #define HSVR_PROF(id) PerfScope perf_scope_(id)
 
+    // Finer timers inside the big entry points (Perf: line's "inside:" part), to find which step of
+    // the player's tick or the game tick costs the time. They do not change the totals above.
+    struct SubAcc
+    {
+        const char* name;
+        std::atomic<uint64_t> ticks{0}, calls{0};
+        uint64_t last_ticks = 0, last_calls = 0;
+    };
+    std::mutex g_sub_mutex;
+    std::vector<SubAcc*> g_subs;
+    SubAcc* sub_register(const char* name)
+    {
+        std::lock_guard<std::mutex> lock(g_sub_mutex);
+        SubAcc* a = new SubAcc;
+        a->name = name;
+        g_subs.push_back(a);
+        return a;
+    }
+    struct SubScope
+    {
+        SubAcc* acc;
+        uint64_t start;
+        explicit SubScope(SubAcc* a) : acc(a), start(perf_now()) {}
+        ~SubScope()
+        {
+            acc->ticks.fetch_add(perf_now() - start, std::memory_order_relaxed);
+            acc->calls.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+#define HSVR_SUB_CAT2(a, b) a##b
+#define HSVR_SUB_CAT(a, b) HSVR_SUB_CAT2(a, b)
+#define HSVR_SUB(label) static SubAcc* HSVR_SUB_CAT(sub_acc_, __LINE__) = sub_register(label); SubScope HSVR_SUB_CAT(sub_scope_, __LINE__)(HSVR_SUB_CAT(sub_acc_, __LINE__))
+
     // Still a live object: not destroyed and not waiting for clean-up (below, after Call). Only for
     // pointers that are not freed (taken this frame, or kept in a holder that gc_sync cleans).
     bool object_alive(UObject* p);
@@ -1559,6 +1592,7 @@ namespace
             HSVR_LOG("Pose: written inside his animation update (pose_in_anim_update)");
         }
         g_pose_in_anim_at.store(hsvr::now_seconds());
+        HSVR_SUB("anim:pose_body");
         pose_body(cfg);
     }
 
@@ -3687,17 +3721,17 @@ namespace
         }
         if (g_pose_active.load())
         {
-            log_joint_before_tick(context);
-            block_offhand_search_before_tick(context);
-            keep_player_off_knees(context, false);
-            turn_body_before_tick();
-            stick_walk_before_tick(context);
-            swing_speed_before_tick(context);
-            fist_flags_before_tick(context);
-            body_grab_before_tick(context);
+            { HSVR_SUB("before:log_joint_before_tick"); log_joint_before_tick(context); }
+            { HSVR_SUB("before:block_offhand_search_before_tick"); block_offhand_search_before_tick(context); }
+            { HSVR_SUB("before:keep_player_off_knees"); keep_player_off_knees(context, false); }
+            { HSVR_SUB("before:turn_body_before_tick"); turn_body_before_tick(); }
+            { HSVR_SUB("before:stick_walk_before_tick"); stick_walk_before_tick(context); }
+            { HSVR_SUB("before:swing_speed_before_tick"); swing_speed_before_tick(context); }
+            { HSVR_SUB("before:fist_flags_before_tick"); fist_flags_before_tick(context); }
+            { HSVR_SUB("before:body_grab_before_tick"); body_grab_before_tick(context); }
             for (int side = 0; side < 2; ++side)
                 if (g_draw[side].active) set_bool_property(context, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
-            scabbard_before_tick(context);
+            { HSVR_SUB("before:scabbard_before_tick"); scabbard_before_tick(context); }
         }
     }
 
@@ -13312,24 +13346,25 @@ namespace
         for (auto& pin : g_pawn_pins) set_variable(context, pin.first.c_str(), pin.second, nullptr, nullptr);
         if (g_pose_active.load())
         {
-            keep_player_off_knees(context, true);
-            crouch_after_tick(context);
-            weapon_spring_after_tick(context);
-            swing_speed_after_tick(context);
-            fist_flags_after_tick(context);
-            body_grab_after_tick(context);
-            body_hit_watch(context);
-            elbow_tick(context);
-            thrown_tick(context);
-            frames_tick(context);
+            { HSVR_SUB("after:keep_player_off_knees"); keep_player_off_knees(context, true); }
+            { HSVR_SUB("after:crouch_after_tick"); crouch_after_tick(context); }
+            { HSVR_SUB("after:weapon_spring_after_tick"); weapon_spring_after_tick(context); }
+            { HSVR_SUB("after:swing_speed_after_tick"); swing_speed_after_tick(context); }
+            { HSVR_SUB("after:fist_flags_after_tick"); fist_flags_after_tick(context); }
+            { HSVR_SUB("after:body_grab_after_tick"); body_grab_after_tick(context); }
+            { HSVR_SUB("after:body_hit_watch"); body_hit_watch(context); }
+            { HSVR_SUB("after:elbow_tick"); elbow_tick(context); }
+            { HSVR_SUB("after:thrown_tick"); thrown_tick(context); }
+            { HSVR_SUB("after:frames_tick"); frames_tick(context); }
         }
-        stab_no_rubber_band(context);
-        cut_through_tick(context);
-        stab_log_tick(context);
-        install_hit_haptics();
-        grip_flip_tick(context);
+        { HSVR_SUB("after:stab_no_rubber_band"); stab_no_rubber_band(context); }
+        { HSVR_SUB("after:cut_through_tick"); cut_through_tick(context); }
+        { HSVR_SUB("after:stab_log_tick"); stab_log_tick(context); }
+        { HSVR_SUB("after:install_hit_haptics"); install_hit_haptics(); }
+        { HSVR_SUB("after:grip_flip_tick"); grip_flip_tick(context); }
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
+        HSVR_SUB("after:capsule_hold");
         using namespace hsvr;
         Vec3 now_at = actor_location(context);
         // Sideways the capsule goes back where it was. Its height is the game's own: it sets it
@@ -17128,6 +17163,22 @@ namespace
             snprintf(b, sizeof b, ", %s %.2f (%.0f calls)", kPerfNames[i], ms, calls);
             parts += b;
         }
+        {
+            std::lock_guard<std::mutex> lock(g_sub_mutex);
+            std::string inside;
+            for (SubAcc* a : g_subs)
+            {
+                uint64_t t = a->ticks.load(), c = a->calls.load();
+                double ms = (t - a->last_ticks) * ms_per_tick / frames;
+                double calls = (double)(c - a->last_calls) / frames;
+                a->last_ticks = t, a->last_calls = c;
+                if (ms < 0.02) continue;
+                char b[128];
+                snprintf(b, sizeof b, "%s%s %.2f (%.1f)", inside.empty() ? "" : ", ", a->name, ms, calls);
+                inside += b;
+            }
+            if (!inside.empty()) HSVR_LOG("Perf inside (ms a frame, calls a frame): %s", inside.c_str());
+        }
         // What the game has, to tell a pile-up (bodies, decals, actors) from the mod's own time.
         uint64_t census_start = perf_now();
         auto count = [](const TCHAR* cls) {
@@ -17166,9 +17217,9 @@ namespace
         perf_report(delta_seconds); // outside the tick's own scope: the census is not per-frame time
         HSVR_PROF(PerfTick);
         g_engine = engine;
-        hit_frame_refresh();
-        hsvr::config_reload_if_changed();
-        hsvr::stereo_begin_game_frame(delta_seconds);
+        { HSVR_SUB("tick:hit_frame_refresh"); hit_frame_refresh(); }
+        { HSVR_SUB("tick:config_reload"); hsvr::config_reload_if_changed(); }
+        { HSVR_SUB("tick:stereo_begin_game_frame"); hsvr::stereo_begin_game_frame(delta_seconds); }
         if (!g_vr_started) return;
         auto& shared = hsvr::shared();
 
@@ -17189,25 +17240,25 @@ namespace
             HSVR_LOG("Applied VR console settings (vsync off, no frame cap, no motion blur, no depth of field)");
         }
 
-        watch_input();
+        { HSVR_SUB("tick:watch_input"); watch_input(); }
 
         hsvr::Config cfg = hsvr::config();
-        log_controllers(cfg);
-        body_log_tick(cfg);
-        pose_probe(cfg);
+        { HSVR_SUB("tick:log_controllers"); log_controllers(cfg); }
+        { HSVR_SUB("tick:body_log_tick"); body_log_tick(cfg); }
+        { HSVR_SUB("tick:pose_probe"); pose_probe(cfg); }
         // Inside his animation update when that runs (pose_after_anim_update); here otherwise (first
         // frames, menus, the switch off), so the pose still starts and releases.
-        if (!cfg.pose_in_anim_update || hsvr::now_seconds() - g_pose_in_anim_at.load() > 0.25) pose_body(cfg);
-        hide_own_head(cfg);
-        grab_button(cfg, hsvr::controllers_state(), shared.menu_up.load());
-        watch_vars_tick();
+        if (!cfg.pose_in_anim_update || hsvr::now_seconds() - g_pose_in_anim_at.load() > 0.25) { HSVR_SUB("tick:pose_body"); pose_body(cfg); }
+        { HSVR_SUB("tick:hide_own_head"); hide_own_head(cfg); }
+        { HSVR_SUB("tick:grab_button"); grab_button(cfg, hsvr::controllers_state(), shared.menu_up.load()); }
+        { HSVR_SUB("tick:watch_vars_tick"); watch_vars_tick(); }
         if (g_console_done)
         {
-            apply_picture_settings(cfg);
-            keep_clouds_correct(cfg);
-            keep_light_samples(cfg);
-            run_dev_script(cfg);
-            test_room_tick(cfg);
+            { HSVR_SUB("tick:apply_picture_settings"); apply_picture_settings(cfg); }
+            { HSVR_SUB("tick:keep_clouds_correct"); keep_clouds_correct(cfg); }
+            { HSVR_SUB("tick:keep_light_samples"); keep_light_samples(cfg); }
+            { HSVR_SUB("tick:run_dev_script"); run_dev_script(cfg); }
+            { HSVR_SUB("tick:test_room_tick"); test_room_tick(cfg); }
         }
         // The mod's keys count only while the game has the keyboard, so that Home or End typed in
         // another program does not move the view or hide the panel.
