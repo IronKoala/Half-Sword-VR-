@@ -6659,6 +6659,8 @@ namespace
     }
 
     std::atomic<bool> g_elbow_calling{false};
+    UObject* g_punch_victim = nullptr; // the blow being watched (punch_watch_post logs what it did)
+    double g_punch_c0 = 0.0, g_punch_h0 = 0.0;
     // Watches every 'Deal Complex Damage' a Willie gets: the player's fist hits are learnt (and logged).
     void punch_watch_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
@@ -6729,11 +6731,24 @@ namespace
         Vec3 nrm = normal_p ? read_param_vec(locals, normal_p) : Vec3{};
         double cos_ni = speed > 1.0 && length(ni) > 1e-6 ? dot(v, ni) / (speed * length(ni)) : 0.0;
         double cos_n = speed > 1.0 && length(nrm) > 1e-6 ? dot(v, nrm) / (speed * length(nrm)) : 0.0;
+        g_punch_victim = victim;
+        g_punch_c0 = read_number_variable(victim, STR("Consciousness"));
+        g_punch_h0 = read_number_variable(victim, STR("Health"));
         std::wstring b = bone ? reinterpret_cast<FName*>(locals + bone->GetOffset_Internal())->ToString() : STR("?");
         HSVR_LOG("Punch: %s fist %s %ls (%ls): velocity %.0f cm/s (hand %.0f), impulse %.0f, rigidity %.2f, cut %.2f, stab %.2f, kick %.2f, blunt %.0f, draw %.2f, "
                  "lower %d, parent %d, extra %d, cos(velocity, impulse) %.2f, cos(velocity, normal) %.2f; learnt from %d hits: rigidity %.2f, cut %.2f, impulse/velocity %.3f, velocity/hand %.2f",
                  side == 0 ? "left" : "right", blow ? "blow on" : "touch on", victim->GetName().c_str(), b.c_str(), speed, hand_speed, length(ni), r, c, s, P.kick, P.blunt_int, P.draw_cut,
                  (int)P.lower_threshold, (int)P.damage_parent, (int)P.extra_high, cos_ni, cos_n, P.n, P.rigidity, P.cut, P.impulse_per_v, P.v_per_speed);
+    }
+
+    // After his Deal Complex Damage: what the blow (or touch) did to him.
+    void punch_watch_post(Unreal::UnrealScriptFunctionCallableContext& context, void*)
+    {
+        if (!g_punch_victim || context.Context != g_punch_victim) return;
+        UObject* w = g_punch_victim;
+        g_punch_victim = nullptr;
+        HSVR_LOG("Punch: -> %ls health %.2f -> %.2f, consciousness %.2f -> %.2f", w->GetName().c_str(), g_punch_h0, read_number_variable(w, STR("Health")), g_punch_c0,
+                 read_number_variable(w, STR("Consciousness")));
     }
 
     void install_punch_watch()
@@ -6747,7 +6762,7 @@ namespace
         UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:Deal Complex Damage"));
         if (!fn) return;
         installed = true;
-        UObjectGlobals::RegisterHook(fn, &punch_watch_hook, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+        UObjectGlobals::RegisterHook(fn, &punch_watch_hook, &punch_watch_post, fn);
         HSVR_LOG("Punch: watching Willie's Deal Complex Damage");
     }
 
