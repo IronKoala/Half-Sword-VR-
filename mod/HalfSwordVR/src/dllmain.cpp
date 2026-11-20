@@ -14048,6 +14048,7 @@ namespace
             double yaw;
             UObject* foe;
             double dead_since; // < 0 = alive
+            std::vector<UObject*> gear; // what he has had in hand or sheathed (room_note_gear)
         };
         std::vector<Slot> slots;
         // Bodies of foes who are out, removed test_room_despawn_seconds later (not while in use).
@@ -14056,6 +14057,7 @@ namespace
             UObject* body;
             double out_at;
             bool waiting = false; // in use (room_body_in_use): removed later
+            std::vector<UObject*> gear; // his weapons and shield, removed with him
         };
         std::vector<Body> bodies;
         double next_respawn_check = 0.0;
@@ -14300,7 +14302,7 @@ namespace
                 off.run();
                 g_room.settling.push_back(fm);
             }
-            g_room.slots.push_back(TestRoom::Slot{at, yaw, foe, -1.0});
+            g_room.slots.push_back(TestRoom::Slot{at, yaw, foe, -1.0, {}});
             HSVR_LOG("TestRoom: %ls stood at (%.0f, %.0f, %.0f), facing him", foe->GetName().c_str(), at.x, at.y, at.z);
         }
         g_room.settle_at = hsvr::now_seconds();
@@ -14582,6 +14584,39 @@ namespace
         return foe && std::find(willies.begin(), willies.end(), foe) != willies.end() && !bool_property(foe, STR("DED")) && !bool_property(foe, STR("Give Up"));
     }
 
+    // A removed foe's weapons and shield stayed on the floor as physics bodies; with a foe out every
+    // minute or so they piled up and each one in contact adds hit events and solver work every substep
+    // (perf2 run 2026-11-20: 22 -> 31 weapons and 132 -> 172 simulating bodies in 10 min, 78 -> 52 fps).
+    // So what a room foe has held or sheathed goes with his body, unless you or a standing foe hold it.
+    void room_note_gear(UObject* foe, std::vector<UObject*>& gear)
+    {
+        if (!foe) return;
+        const TCHAR* vars[] = {STR("Weapon R"), STR("Weapon L"), STR("Weapon Slot R 1"), STR("Weapon Slot R 2"), STR("Weapon Slot L 1"), STR("Weapon Slot L 2"), STR("Weapon Slot Back")};
+        for (const TCHAR* v : vars)
+        {
+            UObject* item = object_property(foe, v);
+            if (!item || is_fist(item) || hit_is_his_item(item)) continue;
+            if (std::find(gear.begin(), gear.end(), item) == gear.end()) gear.push_back(item);
+        }
+    }
+    int room_clear_gear(std::vector<UObject*>& gear, const std::vector<UObject*>& willies, UObject* removed)
+    {
+        int n = 0;
+        for (UObject* item : gear)
+        {
+            if (!item || !object_alive(item) || hit_is_his_item(item)) continue;
+            bool held = false;
+            for (UObject* w : willies)
+                if (w && w != removed && w != g_hitf.pawn && (object_property(w, STR("Weapon R")) == item || object_property(w, STR("Weapon L")) == item)) held = true;
+            if (held) continue;
+            Call d(item, STR("K2_DestroyActor"));
+            d.run();
+            ++n;
+        }
+        gear.clear();
+        return n;
+    }
+
     void room_respawn_tick(UObject* player)
     {
         const hsvr::Config& cfg = hsvr::config();
@@ -14614,6 +14649,7 @@ namespace
             if (room_alive(s.foe, willies))
             {
                 s.dead_since = -1.0;
+                room_note_gear(s.foe, s.gear);
                 continue;
             }
             if (s.dead_since < 0.0)
@@ -14622,7 +14658,8 @@ namespace
                 bool body = s.foe && std::find(willies.begin(), willies.end(), s.foe) != willies.end();
                 HSVR_LOG("TestRoom: respawn: %ls is out; body removed in %.0f s, a new foe in %.0f s", body ? s.foe->GetName().c_str() : STR("a foe"),
                          cfg.test_room_despawn_seconds, cfg.test_room_respawn_seconds);
-                if (body) g_room.bodies.push_back(TestRoom::Body{s.foe, now});
+                if (body) g_room.bodies.push_back(TestRoom::Body{s.foe, now, false, std::move(s.gear)});
+                s.gear.clear();
                 s.foe = nullptr;
             }
         }
@@ -14649,7 +14686,9 @@ namespace
             }
             Call d(b.body, STR("Destroy Willie"));
             d.run();
-            HSVR_LOG("TestRoom: respawn: %ls removed (Destroy Willie), %.1f s after he was out", b.body->GetName().c_str(), now - b.out_at);
+            int cleared = room_clear_gear(b.gear, willies, b.body);
+            HSVR_LOG("TestRoom: respawn: %ls removed (Destroy Willie), %.1f s after he was out; %d of his dropped weapons and shields removed too",
+                     b.body->GetName().c_str(), now - b.out_at, cleared);
             g_room.bodies.erase(g_room.bodies.begin() + (std::ptrdiff_t)i);
         }
         // New foes. A body still lying within 80 cm of the slot (kept, or removal off) would throw a
@@ -16624,7 +16663,11 @@ namespace
         erase_gone(g_room.settling);
         erase_gone_keys(g_room.watch_last);
         for (TestRoom::Slot& s : g_room.slots)
+        {
             if (gone(s.foe)) s.foe = nullptr; // counts as dead; a new one comes after the delay
+            erase_gone(s.gear);
+        }
+        for (TestRoom::Body& b : g_room.bodies) erase_gone(b.gear);
         g_room.bodies.erase(std::remove_if(g_room.bodies.begin(), g_room.bodies.end(), [](const TestRoom::Body& b) { return gone(b.body); }), g_room.bodies.end());
         if (dropped) HSVR_LOG("Freed: %d holder(s) cleared after the game freed %d object(s)", dropped, (int)g_freed_now.size());
     }
