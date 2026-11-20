@@ -1521,6 +1521,7 @@ namespace
         double lift = 0.0;      // this frame's height above the ground (cm)
         double ground_z = 0.0;  // where the foot bone sits when the foot is down: the floor plus the ankle height
         bool have_ground = false;
+        double ground_t = -100.0; // when a trace last found the floor under this foot
         int steps = 0;
     };
     FootState g_feet[2];
@@ -1657,6 +1658,7 @@ namespace
             {
                 f.ground_z = floor_z + g_pose.ankle_height[side];
                 f.have_ground = true;
+                f.ground_t = hsvr::now_seconds();
             }
             // The foot points where it was put down, flat (the leg IK takes its turn from the hips otherwise).
             if (ModifyBoneNode* n = chain_node(side == 0 ? "foot_l" : "foot_r"))
@@ -13759,6 +13761,18 @@ namespace
             double floor_z = 0.0;
             double half = 90.0 * component_scale_z(g_pose.mesh);
             bool floor = ground_below(context, keep.x, keep.y, (std::max)(g_hold_location.z, keep.z) + 40.0, floor_z);
+            // The trace under his middle can miss among loose weapons and shields (it looks through
+            // only 5 of them): then the higher of the feet's floors (found within 0.25 s) is the floor.
+            // Only with neither is there no floor (a pit, a ledge) and he falls.
+            if (!floor)
+                for (int side = 0; side < 2; ++side)
+                {
+                    const FootState& f = g_feet[side];
+                    if (!f.have_ground || t_now - f.ground_t > 0.25) continue;
+                    double fz = f.ground_z - g_pose.ankle_height[side];
+                    if (!floor || fz > floor_z) floor_z = fz;
+                    floor = true;
+                }
             double standing = floor ? floor_z + half : -1e9;
             if (floor && keep.z < standing - 15.0)
             {
