@@ -721,6 +721,7 @@ namespace hsvr
         num("perf_log_seconds", c.perf_log_seconds);
         flag("perf_events", c.perf_events);
         flag("perf_sample", c.perf_sample);
+        flag("perf_bp_segments", c.perf_bp_segments);
         num("hit_buzz_min_intensity", c.hit_buzz_min_intensity);
         num("hit_buzz_limb_min_ms", c.hit_buzz_limb_min_ms);
         flag("stab_assist", c.stab_assist);

@@ -865,6 +865,9 @@ namespace hsvr
         // Troubleshooting: sample the game thread's stack ~1000 times a second ("Perf sample" lines,
         // logs\perf_samples.tsv). Read live; the sampling thread starts on first use.
         bool perf_sample = false;
+        // Troubleshooting: time Willie's event graph (his tick) by bytecode segment ("Perf segments"
+        // lines, logs\perf_segments.tsv), to map onto the decompile listing.
+        bool perf_bp_segments = false;
         // Stab assist: the VR hold moves the weapon on its own (the game's hand joint is free), so a
         // tip meets flesh with only the weapon's mass behind it and the game's stick rule
         // (cutting rate x impulse >= 10000) rarely passes. On a hit of a piercing tip on a person's

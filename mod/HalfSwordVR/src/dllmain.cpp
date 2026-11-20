@@ -17900,6 +17900,199 @@ namespace
         }
     }
 
+    // ---- perf_bp_segments: time inside Willie's event graph (ExecuteUbergraph_Willie_BP), by bytecode
+    // segment. Every flow opcode (jump, branch, sequence push/pop, return) is a segment boundary; the
+    // time from one boundary to the next in the same script frame goes to the segment that starts at
+    // the first one (its bytecode offset, as in the decompile listing ub_Willie_BP.txt). Calls made
+    // from inside a segment count in it. Done by wrapping those opcodes' entries in the engine's
+    // opcode table (GNatives), found by scanning the exe's writable data for a 256-entry table of
+    // code pointers in which most unused opcodes share one handler. Only measures.
+    using VmNative = void (*)(UObject*, void*, void*);
+    VmNative* g_gnatives = nullptr;
+    VmNative g_vm_orig[256] = {};
+    UFunction* g_seg_target = nullptr;
+    const uint8_t* g_seg_base = nullptr;
+    bool g_seg_bad = false;
+    struct SegStat
+    {
+        uint64_t ticks = 0, count = 0;
+    };
+    std::unordered_map<uint32_t, SegStat> g_seg_stats;
+    struct SegOpen
+    {
+        void* frame;
+        uint32_t off;
+        uint64_t t;
+    };
+    SegOpen g_seg_open[64];
+    int g_seg_open_n = 0;
+    bool g_seg_on = false;
+    // FFrame (UE 5.4): FOutputDevice (vtable + 2 bools = 16 bytes), then Node, Object, Code, Locals.
+    inline UFunction* frame_node(void* f) { return *reinterpret_cast<UFunction**>(static_cast<uint8_t*>(f) + 0x10); }
+    inline const uint8_t* frame_code(void* f) { return *reinterpret_cast<const uint8_t**>(static_cast<uint8_t*>(f) + 0x20); }
+
+    void seg_mark(void* frame, int op)
+    {
+        if (!g_seg_on || GetCurrentThreadId() != g_game_thread_id || frame_node(frame) != g_seg_target) return;
+        uint64_t now = perf_now();
+        const uint8_t* at = frame_code(frame) - 1; // Step has read the opcode byte
+        if (op == 0x4E && !g_seg_base) // EX_ComputedJump: the graph's entry, at offset 5
+        {
+            const uint8_t* base = at - 5;
+            if (base[0] != 0x4C || at[0] != 0x4E) // EX_PushExecutionFlow at 0
+            {
+                if (!g_seg_bad) HSVR_LOG("Perf segments: script layout not as expected (bytes %02x %02x); off", base[0], at[0]);
+                g_seg_bad = true;
+                g_seg_on = false;
+                return;
+            }
+            g_seg_base = base;
+            HSVR_LOG("Perf segments: Willie's event graph found, timing its segments");
+        }
+        if (!g_seg_base) return;
+        uint32_t off = (uint32_t)(at - g_seg_base);
+        int i = 0;
+        while (i < g_seg_open_n && g_seg_open[i].frame != frame) ++i;
+        if (i < g_seg_open_n && op != 0x4E)
+        {
+            SegStat& s = g_seg_stats[g_seg_open[i].off];
+            s.ticks += now - g_seg_open[i].t;
+            ++s.count;
+        }
+        if (op == 0x04) // EX_Return: frame done; frames it ran inside resume their segments now
+        {
+            if (i < g_seg_open_n) g_seg_open[i] = g_seg_open[--g_seg_open_n];
+            uint64_t t = perf_now();
+            for (int j = 0; j < g_seg_open_n; ++j) g_seg_open[j].t = t;
+            return;
+        }
+        if (i == g_seg_open_n)
+        {
+            if (g_seg_open_n >= 64) return;
+            // Another Willie's graph run from inside this one (a hit, damage): its time is its own,
+            // so the open segments stop counting until it returns.
+            for (int j = 0; j < g_seg_open_n; ++j)
+            {
+                g_seg_stats[g_seg_open[j].off].ticks += now - g_seg_open[j].t;
+                g_seg_open[j].t = now;
+            }
+            ++g_seg_open_n;
+        }
+        g_seg_open[i] = {frame, off, perf_now()};
+    }
+    template <int Op> void vm_wrap(UObject* context, void* frame, void* result)
+    {
+        seg_mark(frame, Op);
+        g_vm_orig[Op](context, frame, result);
+    }
+    VmNative* find_gnatives()
+    {
+        auto* mod = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + dos->e_lfanew);
+        IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+        uint8_t *text_lo = nullptr, *text_hi = nullptr;
+        for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+            if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)
+            {
+                uint8_t* lo = mod + sec[i].VirtualAddress;
+                if (!text_lo || lo < text_lo) text_lo = lo;
+                if (lo + sec[i].Misc.VirtualSize > text_hi) text_hi = lo + sec[i].Misc.VirtualSize;
+            }
+        VmNative* found = nullptr;
+        int candidates = 0;
+        for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+        {
+            if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE) || (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+            auto* p = reinterpret_cast<uint64_t*>(mod + sec[i].VirtualAddress);
+            size_t n = sec[i].Misc.VirtualSize / 8;
+            for (size_t k = 0; k + 256 <= n; ++k)
+            {
+                auto in_text = [&](uint64_t v) { return v >= (uint64_t)text_lo && v < (uint64_t)text_hi; };
+                if (!in_text(p[k]) || !in_text(p[k + 255]) || !in_text(p[k + 0x4C])) continue;
+                bool all = true;
+                for (int j = 0; j < 256 && all; ++j) all = in_text(p[k + j]);
+                if (!all) continue;
+                // The most common entry (execUndefined) fills the unused opcodes.
+                std::unordered_map<uint64_t, int> c;
+                for (int j = 0; j < 256; ++j) ++c[p[k + j]];
+                uint64_t common = 0;
+                int most = 0;
+                for (auto& kv : c)
+                    if (kv.second > most) most = kv.second, common = kv.first;
+                if (most < 30 || c.size() < 80) continue;
+                bool ours_defined = true;
+                for (int op : {0x04, 0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F}) ours_defined = ours_defined && p[k + op] != common;
+                if (!ours_defined) continue;
+                ++candidates;
+                if (!found) found = reinterpret_cast<VmNative*>(p + k);
+                k += 255;
+            }
+        }
+        if (found) HSVR_LOG("Perf segments: opcode table at exe+0x%llx (%d candidate%s)", (unsigned long long)(reinterpret_cast<uint8_t*>(found) - mod), candidates, candidates == 1 ? "" : "s");
+        return candidates == 1 ? found : nullptr;
+    }
+    // From the engine tick (no script running on the game thread).
+    void segments_tick()
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        g_seg_open_n = 0;
+        if (!cfg.perf_bp_segments || g_seg_bad)
+        {
+            g_seg_on = false;
+            return;
+        }
+        if (!g_seg_target)
+            g_seg_target = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:ExecuteUbergraph_Willie_BP"));
+        if (!g_seg_target) return;
+        if (!g_gnatives)
+        {
+            g_gnatives = find_gnatives();
+            if (!g_gnatives)
+            {
+                HSVR_LOG("Perf segments: opcode table not found (or not unique); off");
+                g_seg_bad = true;
+                return;
+            }
+            DWORD old = 0;
+            VirtualProtect(g_gnatives, 256 * sizeof(VmNative), PAGE_READWRITE, &old);
+#define HSVR_WRAP(op) g_vm_orig[op] = g_gnatives[op], g_gnatives[op] = &vm_wrap<op>
+            HSVR_WRAP(0x04);
+            HSVR_WRAP(0x06);
+            HSVR_WRAP(0x07);
+            HSVR_WRAP(0x4C);
+            HSVR_WRAP(0x4D);
+            HSVR_WRAP(0x4E);
+            HSVR_WRAP(0x4F);
+#undef HSVR_WRAP
+        }
+        g_seg_on = true;
+    }
+    void segments_report(uint64_t frames, double ms_per_tick)
+    {
+        if (!g_seg_on || !frames || g_seg_stats.empty()) return;
+        std::vector<std::pair<uint32_t, SegStat>> v(g_seg_stats.begin(), g_seg_stats.end());
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second.ticks > b.second.ticks; });
+        double total = 0.0;
+        for (auto& kv : v) total += kv.second.ticks * ms_per_tick / frames;
+        HSVR_LOG("Perf segments: Willie's event graph %.2f ms a frame in all; by segment (bytecode offset in ub_Willie_BP.txt):", total);
+        for (size_t i = 0; i < v.size() && i < 60; ++i)
+        {
+            double ms = v[i].second.ticks * ms_per_tick / frames;
+            if (ms < 0.01) break;
+            HSVR_LOG("Perf segments     @%u %.3f ms (%.1f a frame, %.4f ms each)", v[i].first, ms, (double)v[i].second.count / frames, v[i].second.ticks * ms_per_tick / v[i].second.count);
+        }
+        // Everything, for mapping onto the listing.
+        CreateDirectoryW((hsvr::mod_dir() + L"logs\\").c_str(), nullptr);
+        if (FILE* f = _wfopen((hsvr::mod_dir() + L"logs\\perf_segments.tsv").c_str(), L"ab"))
+        {
+            for (auto& kv : v)
+                fprintf(f, "%.1f\t%u\t%.4f\t%.2f\n", hsvr::now_seconds(), kv.first, kv.second.ticks * ms_per_tick / frames, (double)kv.second.count / frames);
+            fclose(f);
+        }
+        g_seg_stats.clear();
+    }
+
     void perf_report(float delta_seconds)
     {
         static double since = -1.0;
@@ -17982,6 +18175,7 @@ namespace
                  frames / (now - since), 1000.0 * dt_sum / frames, 1000.0 * dt_max, now - since, total, parts.c_str(), Unreal::UObjectArray::GetNumElements(), actors,
                  willies, weapons, ais, decals, (int)prims.size(), simulating, sim_skel, census_ms);
         probes_report(frames, ms_per_tick, now - since);
+        segments_report(frames, ms_per_tick);
         since = now;
         frames = 0, dt_sum = 0.0, dt_max = 0.0;
     }
@@ -17992,6 +18186,7 @@ namespace
         g_ev_active = false; // the census below calls the game; not the game's own time
         perf_report(delta_seconds); // outside the tick's own scope: the census is not per-frame time
         probes_tick();
+        segments_tick();
         HSVR_PROF(PerfTick);
         g_engine = engine;
         { HSVR_SUB("tick:hit_frame_refresh"); hit_frame_refresh(); }
