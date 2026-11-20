@@ -17955,7 +17955,7 @@ namespace
     {
         if (!g_seg_on || GetCurrentThreadId() != g_game_thread_id || frame_node(frame) != g_seg_target) return;
         uint64_t now = perf_now();
-        const uint8_t* at = frame_code(frame) - 1; // Step has read the opcode byte
+        const uint8_t* at = frame_code(frame) - (op == 0x04 ? 0 : 1); // Step has read the opcode byte (0x04: seg_after, at the return)
         if (op == 0x4E && !g_seg_base) // EX_ComputedJump: the graph's entry, at offset 5
         {
             const uint8_t* base = at - 5;
@@ -18000,10 +18000,18 @@ namespace
         }
         g_seg_open[i] = {frame, off, perf_now()};
     }
+    // The script loop stops at EX_Return itself (it never goes through the table), so a frame's
+    // last segment ends at the flow opcode that lands on the return.
+    void seg_after(void* frame)
+    {
+        if (!g_seg_on || !g_seg_base || frame_node(frame) != g_seg_target || *frame_code(frame) != 0x04) return;
+        seg_mark(frame, 0x04);
+    }
     template <int Op> void vm_wrap(UObject* context, void* frame, void* result)
     {
         seg_mark(frame, Op);
         g_vm_orig[Op](context, frame, result);
+        seg_after(frame);
     }
     VmNative* find_gnatives()
     {
@@ -18056,7 +18064,7 @@ namespace
                     best_in = in, best_most = most, best_distinct = c.size(), best_at = (uint64_t)(reinterpret_cast<uint8_t*>(p + k) - mod);
                 if (most < 30 || c.size() < 60) continue;
                 bool ours_defined = true;
-                for (int op : {0x04, 0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F}) ours_defined = ours_defined && p[k + op] != common;
+                for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F}) ours_defined = ours_defined && p[k + op] != common;
                 if (!ours_defined) continue;
                 ++candidates;
                 if (!found) found = reinterpret_cast<VmNative*>(p + k);
@@ -18111,7 +18119,7 @@ namespace
         for (auto& kv : c)
             if (kv.second > most) most = kv.second, common = kv.first;
         std::string ours;
-        for (int op : {0x04, 0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
+        for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
         {
             char b[48];
             snprintf(b, sizeof b, " %02X=%s", op, (uint64_t)t[op] == common ? "common" : (t[op] ? "own" : "null"));
@@ -18119,7 +18127,7 @@ namespace
         }
         HSVR_LOG("Perf segments: UE4SS's GNatives at exe+0x%llx: most common entry %d times, %zu distinct, %d null; flow opcodes%s", (unsigned long long)(v - (uint64_t)mod),
                  most, c.size(), nulls, ours.c_str());
-        for (int op : {0x04, 0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
+        for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
             if (!t[op] || (uint64_t)t[op] == common) return nullptr;
         return t;
     }
@@ -18149,7 +18157,6 @@ namespace
             DWORD old = 0;
             VirtualProtect(g_gnatives, 256 * sizeof(VmNative), PAGE_READWRITE, &old);
 #define HSVR_WRAP(op) g_vm_orig[op] = g_gnatives[op], g_gnatives[op] = &vm_wrap<op>
-            HSVR_WRAP(0x04);
             HSVR_WRAP(0x06);
             HSVR_WRAP(0x07);
             HSVR_WRAP(0x4C);
