@@ -3482,8 +3482,13 @@ namespace
 
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
+        // Test input runs in flat mode too (no posed body): the player's pawn's own tick.
+        if ((!g_test_inputs.empty() || g_input_list_now) && context && function && function->GetName() == STR("ReceiveTick"))
+        {
+            UObject* pc = find_player_controller();
+            if (pc && object_property(pc, STR("Pawn")) == context) input_before_tick(context);
+        }
         if (!is_receive_tick(context, function)) return;
-        input_before_tick(context);
         g_hold_location = actor_location(context);
         g_hold_have = true;
         {
