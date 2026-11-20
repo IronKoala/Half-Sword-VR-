@@ -3432,9 +3432,58 @@ namespace
     void fist_flags_after_tick(UObject* pawn);
     void body_grab_after_tick(UObject* pawn);
     void body_hit_watch(UObject* pawn);
+    // ---- Test input: the pawn's own input events, as the mouse and keys call them ------------------
+    // hsvr.input <name part> <value> <seconds>: every tick for that long, each of the pawn's
+    // InpAxisEvt_/InpActEvt_ functions whose name contains <name part> is called with AxisValue =
+    // <value> (seconds 0 = once). hsvr.input_list logs their names. For flat-mode punch measurements.
+    struct TestInput { std::wstring part; double value = 0.0; double until = 0.0; bool once = false; };
+    std::vector<TestInput> g_test_inputs;
+    bool g_input_list_now = false;
+    void input_before_tick(UObject* pawn)
+    {
+        if (!pawn) return;
+        if (g_input_list_now)
+        {
+            g_input_list_now = false;
+            std::wstring names;
+            for (UStruct* level = static_cast<UStruct*>(pawn->GetClassPrivate()); level; level = level->GetSuperStruct())
+                for (UFunction* f : level->ForEachFunction())
+                {
+                    std::wstring n = f->GetName();
+                    if (n.rfind(STR("InpAxisEvt_"), 0) == 0 || n.rfind(STR("InpActEvt_"), 0) == 0) names += n + STR("; ");
+                }
+            HSVR_LOG("Input: the pawn's input events: %ls", names.c_str());
+        }
+        if (g_test_inputs.empty()) return;
+        double now = hsvr::now_seconds();
+        for (auto it = g_test_inputs.begin(); it != g_test_inputs.end();)
+        {
+            for (UStruct* level = static_cast<UStruct*>(pawn->GetClassPrivate()); level; level = level->GetSuperStruct())
+                for (UFunction* f : level->ForEachFunction())
+                {
+                    std::wstring n = f->GetName();
+                    if (n.rfind(STR("InpAxisEvt_"), 0) != 0 && n.rfind(STR("InpActEvt_"), 0) != 0) continue;
+                    if (n.find(it->part) == std::wstring::npos) continue;
+                    std::vector<uint8_t> buf = param_block(f);
+                    for (FProperty* p : f->ForEachProperty())
+                        if (p->GetName() == STR("AxisValue"))
+                        {
+                            auto kind = p->GetClass().GetName();
+                            if (kind == STR("FloatProperty")) *reinterpret_cast<float*>(buf.data() + p->GetOffset_Internal()) = (float)it->value;
+                            else if (kind == STR("DoubleProperty")) *reinterpret_cast<double*>(buf.data() + p->GetOffset_Internal()) = it->value;
+                        }
+                    pawn->ProcessEvent(f, buf.data());
+                    if (it->once) HSVR_LOG("Input: called %ls (%.2f)", n.c_str(), it->value);
+                }
+            if (it->once || now >= it->until) it = g_test_inputs.erase(it);
+            else ++it;
+        }
+    }
+
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         if (!is_receive_tick(context, function)) return;
+        input_before_tick(context);
         g_hold_location = actor_location(context);
         g_hold_have = true;
         {
@@ -15018,6 +15067,29 @@ namespace
                 float v = sp == std::string::npos ? -1.0f : (float)atof(entry.command.c_str() + sp + 1);
                 g_fake_thumb[side].store(v);
                 HSVR_LOG("Script: hsvr.thumb %d %.2f", side, v);
+                continue;
+            }
+            if (entry.command == "hsvr.input_list")
+            {
+                g_input_list_now = true;
+                continue;
+            }
+            if (entry.command.rfind("hsvr.input ", 0) == 0)
+            {
+                // hsvr.input <name part, spaces as _> <value> <seconds>
+                std::string rest = entry.command.substr(11);
+                size_t a = rest.find(' ');
+                std::string part = rest.substr(0, a);
+                for (char& ch : part) if (ch == '_') ch = ' ';
+                double value = 0.0, secs = 0.0;
+                if (a != std::string::npos) std::sscanf(rest.c_str() + a, "%lf %lf", &value, &secs);
+                TestInput t;
+                t.part = std::wstring(part.begin(), part.end());
+                t.value = value;
+                t.once = secs <= 0.0;
+                t.until = hsvr::now_seconds() + secs;
+                g_test_inputs.push_back(t);
+                HSVR_LOG("Script: hsvr.input '%s' %.2f for %.2f s", part.c_str(), value, secs);
                 continue;
             }
             if (entry.command.rfind("hsvr.fingers ", 0) == 0)
