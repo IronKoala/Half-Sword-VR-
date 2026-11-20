@@ -295,6 +295,7 @@ namespace hsvr
         integer("test_room_weapon_tier", c.test_room_weapon_tier);
         flag("test_room_respawn", c.test_room_respawn);
         num("test_room_respawn_seconds", c.test_room_respawn_seconds);
+        num("test_room_despawn_seconds", c.test_room_despawn_seconds);
         flag("log_controllers", c.log_controllers);
         text("hand_bone_left", c.hand_bone_left);
         text("hand_bone_right", c.hand_bone_right);

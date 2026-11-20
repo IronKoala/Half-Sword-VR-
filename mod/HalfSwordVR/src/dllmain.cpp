@@ -161,6 +161,7 @@ namespace
             g_freed_pending.store(false, std::memory_order_release);
         }
         ++g_gc_epoch;
+        HSVR_LOG("GC: the game freed %d object(s); dropping them from the mod's lists", (int)g_freed_now.size());
         prune_freed();
         for (auto& f : g_prune_hooks) f();
         g_freed_now.clear();
@@ -13838,9 +13839,16 @@ namespace
             double yaw;
             UObject* foe;
             double dead_since; // < 0 = alive
-            bool waiting = false; // his body is in use (room_body_in_use): no new foe yet
         };
         std::vector<Slot> slots;
+        // Bodies of foes who are out, removed test_room_despawn_seconds later (not while in use).
+        struct Body
+        {
+            UObject* body;
+            double out_at;
+            bool waiting = false; // in use (room_body_in_use): removed later
+        };
+        std::vector<Body> bodies;
         double next_respawn_check = 0.0;
         double watch_from = 0.0, next_watch = 0.0;     // diagnostics after the weapons are put down
         std::map<UObject*, hsvr::Vec3> watch_last;
@@ -14328,6 +14336,8 @@ namespace
                 HSVR_LOG("TestRoom: respawn: every foe is out; one comes back now");
             }
         }
+        // A foe out of the fight leaves his slot: his body goes on the body list (removed after
+        // test_room_despawn_seconds), and the slot gets a new foe after test_room_respawn_seconds.
         for (TestRoom::Slot& s : g_room.slots)
         {
             if (room_alive(s.foe, willies))
@@ -14335,29 +14345,66 @@ namespace
                 s.dead_since = -1.0;
                 continue;
             }
-            bool body = s.foe && std::find(willies.begin(), willies.end(), s.foe) != willies.end();
             if (s.dead_since < 0.0)
             {
                 s.dead_since = now;
-                HSVR_LOG("TestRoom: respawn: %ls is dead; a new foe in %.0f s", body ? s.foe->GetName().c_str() : STR("a foe"), cfg.test_room_respawn_seconds);
+                bool body = s.foe && std::find(willies.begin(), willies.end(), s.foe) != willies.end();
+                HSVR_LOG("TestRoom: respawn: %ls is out; body removed in %.0f s, a new foe in %.0f s", body ? s.foe->GetName().c_str() : STR("a foe"),
+                         cfg.test_room_despawn_seconds, cfg.test_room_respawn_seconds);
+                if (body) g_room.bodies.push_back(TestRoom::Body{s.foe, now});
+                s.foe = nullptr;
             }
-            if (now - s.dead_since < cfg.test_room_respawn_seconds) continue;
-            // The body goes first: a new foe spawned into it would be thrown. Not while you use it.
-            if (const char* why = body ? room_body_in_use(s.foe, player) : nullptr)
+        }
+        // Bodies: removed the way the arena removes Willies, but never one you are using.
+        for (size_t i = 0; i < g_room.bodies.size();)
+        {
+            TestRoom::Body& b = g_room.bodies[i];
+            if (!b.body || std::find(willies.begin(), willies.end(), b.body) == willies.end())
             {
-                if (!s.waiting)
-                    HSVR_LOG("TestRoom: respawn: %ls stays for now: %s", s.foe->GetName().c_str(), why);
-                s.waiting = true;
+                g_room.bodies.erase(g_room.bodies.begin() + (std::ptrdiff_t)i);
                 continue;
             }
-            s.waiting = false;
-            if (body)
+            if (cfg.test_room_despawn_seconds <= 0.0 || now - b.out_at < cfg.test_room_despawn_seconds)
             {
-                Call d(s.foe, STR("Destroy Willie"));
-                d.run();
-                HSVR_LOG("TestRoom: respawn: %ls removed (Destroy Willie)", s.foe->GetName().c_str());
+                ++i;
+                continue;
             }
-            s.foe = room_spawn_foe(player, s);
+            if (const char* why = room_body_in_use(b.body, player))
+            {
+                if (!b.waiting) HSVR_LOG("TestRoom: respawn: %ls stays for now: %s", b.body->GetName().c_str(), why);
+                b.waiting = true;
+                ++i;
+                continue;
+            }
+            Call d(b.body, STR("Destroy Willie"));
+            d.run();
+            HSVR_LOG("TestRoom: respawn: %ls removed (Destroy Willie), %.1f s after he was out", b.body->GetName().c_str(), now - b.out_at);
+            g_room.bodies.erase(g_room.bodies.begin() + (std::ptrdiff_t)i);
+        }
+        // New foes. A body still lying within 80 cm of the slot (kept, or removal off) would throw a
+        // foe spawned into it: then he stands 1 m further back.
+        for (TestRoom::Slot& s : g_room.slots)
+        {
+            if (s.foe || s.dead_since < 0.0 || now - s.dead_since < cfg.test_room_respawn_seconds) continue;
+            TestRoom::Slot at = s;
+            static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+            for (const TestRoom::Body& b : g_room.bodies)
+            {
+                UObject* bm = object_property(b.body, STR("Mesh"));
+                hsvr::Vec3 p = bm ? socket_location(bm, pelvis_bone) : actor_location(b.body);
+                hsvr::Vec3 d = p - s.at;
+                d.z = 0.0;
+                if (hsvr::length(d) < 80.0)
+                {
+                    hsvr::Vec3 out = s.at - g_room.origin;
+                    out.z = 0.0;
+                    double ol = hsvr::length(out);
+                    if (ol > 1.0) at.at = s.at + out * (100.0 / ol);
+                    HSVR_LOG("TestRoom: respawn: a body lies on slot %d; the new foe stands 1 m further back", (int)(&s - &g_room.slots[0]));
+                    break;
+                }
+            }
+            s.foe = room_spawn_foe(player, at);
             s.dead_since = s.foe ? -1.0 : now; // no foe: tried again after the delay
         }
     }
@@ -14384,7 +14431,7 @@ namespace
         int tier = hsvr::config().test_room_weapon_tier;
         for (int t = 0; t < 2; ++t)
         {
-            Vec3 at = g_room.origin + g_room.forward * 110.0 + right * (t == 0 ? -89.0 : 89.0);
+            Vec3 at = g_room.origin + g_room.forward * 110.0 + right * (t == 0 ? -104.0 : 104.0); // 35 cm between them (Matthew 2026-11-20)
             at.z = floor_z + 1.0;
             UObject* table = room_spawn(STR("/Game/Assets/Props/Blueprints/BP_Container_Weapon_Table_1.BP_Container_Weapon_Table_1_C"), player, at, yaw_quat(g_room.table_yaw),
                                         [&](UObject* a) {
@@ -16294,6 +16341,7 @@ namespace
         erase_gone_keys(g_room.watch_last);
         for (TestRoom::Slot& s : g_room.slots)
             if (gone(s.foe)) s.foe = nullptr; // counts as dead; a new one comes after the delay
+        g_room.bodies.erase(std::remove_if(g_room.bodies.begin(), g_room.bodies.end(), [](const TestRoom::Body& b) { return gone(b.body); }), g_room.bodies.end());
         if (dropped) HSVR_LOG("Freed: %d holder(s) cleared after the game freed %d object(s)", dropped, (int)g_freed_now.size());
     }
 

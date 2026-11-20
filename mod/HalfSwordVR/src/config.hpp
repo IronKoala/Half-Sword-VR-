@@ -150,10 +150,13 @@ namespace hsvr
         int test_room_tier = -1;
         // The table weapons' tier: -1 = random 0-7 each, 0 Beggar .. 8 Lord.
         int test_room_weapon_tier = -1;
-        // A foe killed in the room comes back (a new one, passive, in his place) this many seconds
-        // later, so the room keeps test_room_foes of them. 0 = the dead stay dead.
+        // A foe out of the fight (killed, or beaten and given up) gets a new one, passive, in his place
+        // test_room_respawn_seconds later, so the room keeps test_room_foes of them. 0 = no new foes.
         bool test_room_respawn = true;
-        double test_room_respawn_seconds = 5.0;
+        double test_room_respawn_seconds = 10.0;
+        // His body is removed this many seconds after he was out (never while you hold or grab him,
+        // or a weapon in your hand is stuck in him). 0 = bodies stay.
+        double test_room_despawn_seconds = 7.0;
         int stereo_slot_offset = 0; // 0 = find automatically
 
         // ---- Phase 2: controllers (read only) and the player physics test ----
