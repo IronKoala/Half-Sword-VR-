@@ -9689,6 +9689,7 @@ namespace
                 double st = (std::max)(0.0, cfg.pose_hold_strength);
                 double dst = (std::max)(1.0, st * 0.5);
                 bool arm_lag = cfg.pose_hold_arm_lag && cfg.pose_hold_arm_lag_s > 0.0;
+                double arm_fcap = -1.0; // N per held point, from the shoulder's strength (-1 = none)
                 if (arm_lag)
                 {
                     // Flat Half Sword's arm (flat_hs_weight_vs_hold.md, weak_willie_weight.md): the same pull for
@@ -9713,6 +9714,14 @@ namespace
                     pc = 2.0 * z * per_point * om / dst;
                     rk = (ig / 1e4) * om * om / (std::max)(1e-3, st);
                     rc = 2.0 * z * (ig / 1e4) * om / dst;
+                    if (cfg.pose_hold_shoulder_torque > 0.0)
+                    {
+                        double tau = cfg.pose_hold_shoulder_torque * (std::max)(0.0, body.total) + (two ? cfg.pose_hold_shoulder_torque * (std::max)(0.0, s2b.total) : 0.0);
+                        double a_max = tau * L / (std::max)(0.01, A + W); // m/s^2 at the grip
+                        arm_fcap = per_point * a_max;
+                        HSVR_LOG_EVERY(2.0, "Hold: %s shoulder %.0f N m for %ls%s: at most %.0f m/s^2 at the grip (%.0f N a hand)", side == 0 ? "left" : "right", tau,
+                                       weapon->GetName().c_str(), two ? " (two hands)" : "", a_max, arm_fcap);
+                    }
                     HSVR_LOG_EVERY(2.0, "Hold: %s arm lag for %ls (%.2f kg, %.3f kg m^2 about the grip%s): arm %.2f + weapon %.2f kg m^2 about the shoulder, fit %.2f -> lag %.3f s "
                                    "(spring %.0f N/m, turn %.1f N m/rad)", side == 0 ? "left" : "right", weapon->GetName().c_str(), mass, ig / 1e4,
                                    two ? ", two hands" : "", A, W, fit, lag, pk * st, rk * st);
@@ -9758,6 +9767,8 @@ namespace
                     p.c = pc * dst;
                     p.fmax = pf * st * s2b.total * 100.0 * draw_scale;
                 }
+                if (arm_fcap >= 0.0)
+                    for (int i = 0; i < n; ++i) pts[i].fmax = (std::min)(pts[i].fmax, arm_fcap * 100.0 * draw_scale);
                 Mat3 invI = about_com.inverse();
                 Vec3 vb = v_com_now + g * DT, wb = w_now; // gravity this frame, taken off again below (the physics adds it)
                 if (arm_lag)
@@ -9779,8 +9790,9 @@ namespace
                 // long weapon held at its end droops); past it the limit rises to pose_hold_wrist_stop_torque
                 // by pose_hold_wrist_stop_deg, as a real wrist bottoms out and the forearm takes the load.
                 double tpow = cfg.pose_hold_torque_strength_power > 0.0 ? cfg.pose_hold_torque_strength_power : 1.0;
-                double tbody = std::pow((std::max)(0.0, body.total), tpow);
-                if (two) tbody = 0.5 * (tbody + std::pow((std::max)(0.0, s2b.total), tpow));
+                auto tpw = [&](double t) { t = (std::max)(0.0, t); return t < 1.0 ? std::pow(t, tpow) : t; };
+                double tbody = tpw(body.total);
+                if (two) tbody = 0.5 * (tbody + tpw(s2b.total));
                 double tcap = rf * st * tbody * 1e4 * draw_scale;
                 {
                     double bend = length(err_rot) * 57.2958;

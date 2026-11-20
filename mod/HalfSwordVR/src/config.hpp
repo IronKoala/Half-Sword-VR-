@@ -344,7 +344,7 @@ namespace hsvr
         double pose_hold_wrist_stop_spin = 2.0;
         // His strength on the turning limits (wrist and stop) is raised to this power: a wrist is weaker in
         // proportion than the whole arm (min/min Willie x0.58 -> x0.34, biggest x1.27 -> x1.6). 1 = as the force.
-        double pose_hold_torque_strength_power = 2.0;
+        double pose_hold_torque_strength_power = 2.0; // below a default body only: above it, x strength as the force
         // B&S hold dampers computed per weapon for this damping ratio (1 = critical: settles without
         // bouncing, the least lag that does): from its mass and its inertia about the grip. 0 = the fixed
         // pose_hold_damper / turn_damper / pose_bs_two_*_c values.
@@ -444,6 +444,11 @@ namespace hsvr
         double pose_hold_arm_lag_s = 0.04;
         double pose_hold_arm_lag_max_s = 0.25;
         double pose_hold_arm_reach_cm = 55.0;
+        // His shoulder's strength (N m, for a default fresh body; x his strength, injury and stamina; both arms
+        // add): the arm-lag hold can't speed arm + weapon about the shoulder faster than this allows, so the
+        // grip's pull on the weapon is capped at its mass x this torque x reach / (arm + weapon inertia).
+        // A two-hander in one hand trails and won't whip round like a one-hander (Matthew 2026-11-20). 0 = off.
+        double pose_hold_shoulder_torque = 150.0;
         // Thin bits on a haft the hand slides over: a wide stretch no longer than ring_max_len_cm along the
         // haft and reaching no more than ring_max_width_cm from its axis, or a gap between parts no longer
         // than gap_max_cm, with narrow haft past it (ring_max_len_cm 0 = every wide bit stops the hand).
