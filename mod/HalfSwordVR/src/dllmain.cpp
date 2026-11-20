@@ -13827,6 +13827,7 @@ namespace
             double yaw;
             UObject* foe;
             double dead_since; // < 0 = alive
+            bool waiting = false; // his body is in use (room_body_in_use): no new foe yet
         };
         std::vector<Slot> slots;
         double next_respawn_check = 0.0;
@@ -14251,6 +14252,38 @@ namespace
         return foe;
     }
 
+    // Respawn never removes a body you are using: one of your hands grabs him (or a piece of him),
+    // you hold one of his weapons, or a weapon in your hand is stuck in a body within 150 cm of him
+    // (the game does not say whose body a stuck weapon is in). The new foe waits for it.
+    const char* room_body_in_use(UObject* corpse, UObject* player)
+    {
+        if (!corpse || !player) return nullptr;
+        for (int side = 0; side < 2; ++side)
+        {
+            if (g_body_grab[side].victim == corpse) return "your hand grabs him";
+            if (UObject* c = g_object_grab[side].component)
+            {
+                Call owner(c, STR("GetOwner"));
+                owner.run();
+                if (owner.object_result() == corpse) return "your hand holds a piece of him";
+            }
+        }
+        UObject* his[2] = {object_property(corpse, STR("Weapon L")), object_property(corpse, STR("Weapon R"))};
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        UObject* cm = object_property(corpse, STR("Mesh"));
+        hsvr::Vec3 body = cm ? socket_location(cm, pelvis_bone) : actor_location(corpse);
+        for (const TCHAR* hand : {STR("Weapon L"), STR("Weapon R")})
+        {
+            UObject* w = object_property(player, hand);
+            if (!w || !object_alive(w)) continue;
+            if (w == his[0] || w == his[1]) return "you hold his weapon";
+            if (!bool_property(w, STR("Stuck In Body"))) continue;
+            UObject* base = object_property(w, STR("BaseMesh"));
+            if (base && hsvr::length(component_location(base) - body) < 150.0) return "a weapon in your hand is stuck in him";
+        }
+        return nullptr;
+    }
+
     bool room_alive(UObject* foe, const std::vector<UObject*>& willies)
     {
         // Out of the fight = dead (DED) or beaten ("Give Up": Health under 5 -> Dying, he gives up and
@@ -14298,7 +14331,15 @@ namespace
                 HSVR_LOG("TestRoom: respawn: %ls is dead; a new foe in %.0f s", body ? s.foe->GetName().c_str() : STR("a foe"), cfg.test_room_respawn_seconds);
             }
             if (now - s.dead_since < cfg.test_room_respawn_seconds) continue;
-            // The body goes first: a new foe spawned into it would be thrown.
+            // The body goes first: a new foe spawned into it would be thrown. Not while you use it.
+            if (const char* why = body ? room_body_in_use(s.foe, player) : nullptr)
+            {
+                if (!s.waiting)
+                    HSVR_LOG("TestRoom: respawn: %ls stays for now: %s", s.foe->GetName().c_str(), why);
+                s.waiting = true;
+                continue;
+            }
+            s.waiting = false;
             if (body)
             {
                 Call d(s.foe, STR("Destroy Willie"));
