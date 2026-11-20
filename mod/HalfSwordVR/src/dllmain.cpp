@@ -18001,34 +18001,57 @@ namespace
             }
         VmNative* found = nullptr;
         int candidates = 0;
+        // Best near-miss, logged when nothing qualifies.
+        size_t best_in = 0, best_most = 0, best_distinct = 0;
+        uint64_t best_at = 0;
+        auto in_text = [&](uint64_t v) { return v >= (uint64_t)text_lo && v < (uint64_t)text_hi; };
         for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
         {
             if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE) || (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
             auto* p = reinterpret_cast<uint64_t*>(mod + sec[i].VirtualAddress);
             size_t n = sec[i].Misc.VirtualSize / 8;
+            if (n < 256) continue;
+            // Sliding count of entries pointing into the exe's code; mods (UE4SS) may have repointed
+            // a few opcodes into their own dlls, so up to 16 others are allowed if not null.
+            size_t in = 0;
+            for (size_t j = 0; j < 256; ++j) in += in_text(p[j]);
             for (size_t k = 0; k + 256 <= n; ++k)
             {
-                auto in_text = [&](uint64_t v) { return v >= (uint64_t)text_lo && v < (uint64_t)text_hi; };
-                if (!in_text(p[k]) || !in_text(p[k + 255]) || !in_text(p[k + 0x4C])) continue;
-                bool all = true;
-                for (int j = 0; j < 256 && all; ++j) all = in_text(p[k + j]);
-                if (!all) continue;
-                // The most common entry (execUndefined) fills the unused opcodes.
+                if (k)
+                {
+                    in -= in_text(p[k - 1]);
+                    in += in_text(p[k + 255]);
+                }
+                if (in < 240) continue;
+                bool nonnull = true;
+                for (int j = 0; j < 256 && nonnull; ++j) nonnull = p[k + j] != 0;
+                if (!nonnull) continue;
                 std::unordered_map<uint64_t, int> c;
                 for (int j = 0; j < 256; ++j) ++c[p[k + j]];
                 uint64_t common = 0;
                 int most = 0;
                 for (auto& kv : c)
                     if (kv.second > most) most = kv.second, common = kv.first;
-                if (most < 30 || c.size() < 80) continue;
+                if (in > best_in || (in == best_in && (size_t)most > best_most))
+                    best_in = in, best_most = most, best_distinct = c.size(), best_at = (uint64_t)(reinterpret_cast<uint8_t*>(p + k) - mod);
+                if (most < 30 || c.size() < 60) continue;
                 bool ours_defined = true;
                 for (int op : {0x04, 0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F}) ours_defined = ours_defined && p[k + op] != common;
                 if (!ours_defined) continue;
                 ++candidates;
                 if (!found) found = reinterpret_cast<VmNative*>(p + k);
-                k += 255;
+                // skip past this table
+                for (size_t j = 1; j < 256 && k + 1 + 256 <= n; ++j)
+                {
+                    ++k;
+                    in -= in_text(p[k - 1]);
+                    in += in_text(p[k + 255]);
+                }
             }
         }
+        if (!found)
+            HSVR_LOG("Perf segments: no opcode table; closest at exe+0x%llx: %zu of 256 entries in exe code, most common entry %zu times, %zu distinct",
+                     (unsigned long long)best_at, best_in, best_most, best_distinct);
         if (found) HSVR_LOG("Perf segments: opcode table at exe+0x%llx (%d candidate%s)", (unsigned long long)(reinterpret_cast<uint8_t*>(found) - mod), candidates, candidates == 1 ? "" : "s");
         return candidates == 1 ? found : nullptr;
     }
