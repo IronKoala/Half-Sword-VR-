@@ -13555,12 +13555,24 @@ namespace
             run_console_command(std::string(command));
             HSVR_LOG("Picture: %s", command);
         }
-        if (cfg.screen_percentage >= 0.0 && cfg.screen_percentage != applied_percentage)
+        // The game sets its own r.ScreenPercentage (55) again when the hub or an arena loads, so the
+        // value is checked every frame and put back, the same way light_samples is.
+        if (cfg.screen_percentage >= 0.0)
         {
-            applied_percentage = cfg.screen_percentage;
-            snprintf(command, sizeof(command), "r.ScreenPercentage %.0f", cfg.screen_percentage);
-            run_console_command(std::string(command));
-            HSVR_LOG("Picture: %s", command);
+            float now = console_variable(STR("r.ScreenPercentage"));
+            bool changed = cfg.screen_percentage != applied_percentage;
+            if (changed || (now > -900.0f && std::fabs((double)now - cfg.screen_percentage) > 0.5))
+            {
+                snprintf(command, sizeof(command), "r.ScreenPercentage %.0f", cfg.screen_percentage);
+                run_console_command(std::string(command));
+                static int lines_left = 20;
+                if (changed || lines_left > 0)
+                {
+                    if (!changed) --lines_left;
+                    HSVR_LOG("Picture: %s (it read %g)", command, (double)now);
+                }
+                applied_percentage = cfg.screen_percentage;
+            }
         }
         if (cfg.extra_commands != applied_commands)
         {
