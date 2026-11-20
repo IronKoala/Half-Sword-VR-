@@ -192,6 +192,46 @@ namespace
         g_freed_now.clear();
         g_freed_all = false;
     }
+    // ---- Where the mod's time goes (Perf: lines) -------------------------------------------------
+    // Every entry point of the mod times itself (QueryPerformanceCounter, self time only: a hook that
+    // runs inside another's call is taken out of the outer one). game_tick writes the totals every
+    // perf_log_seconds with the frame rate and how many objects the game has, so a session that gets
+    // slower shows whether the mod's own time or the game's grew (playtest 2026-11-20 10:05Z: 63 fps
+    // fell to 13-25 fps over 7 minutes).
+    enum PerfId
+    {
+        PerfTick, PerfDeepEvent, PerfCapsuleBefore, PerfCapsuleAfter, PerfPoseAnim, PerfFingersAnim, PerfFeetAnim, PerfFingersCopy,
+        PerfHitBody, PerfStabHit, PerfStabPost, PerfStabRelease, PerfForceWatch, PerfPunchPre, PerfPunchPost, PerfRoomHooks, PerfCount
+    };
+    const char* const kPerfNames[PerfCount] = {"tick", "events", "before tick", "after tick", "pose", "fingers", "feet", "finger copy",
+                                               "body hit", "weapon hit", "weapon hit post", "stab release", "force watch", "punch", "punch post", "room hooks"};
+    struct PerfAcc
+    {
+        std::atomic<uint64_t> ticks{0}, calls{0};
+    };
+    PerfAcc g_perf[PerfCount];
+    thread_local uint64_t t_perf_child = 0;
+    inline uint64_t perf_now()
+    {
+        LARGE_INTEGER c;
+        QueryPerformanceCounter(&c);
+        return (uint64_t)c.QuadPart;
+    }
+    struct PerfScope
+    {
+        PerfId id;
+        uint64_t start, saved;
+        explicit PerfScope(PerfId i) : id(i), start(perf_now()), saved(t_perf_child) { t_perf_child = 0; }
+        ~PerfScope()
+        {
+            uint64_t all = perf_now() - start;
+            g_perf[id].ticks.fetch_add(all - (std::min)(all, t_perf_child), std::memory_order_relaxed);
+            g_perf[id].calls.fetch_add(1, std::memory_order_relaxed);
+            t_perf_child = saved + all;
+        }
+    };
+#define HSVR_PROF(id) PerfScope perf_scope_(id)
+
     // Still a live object: not destroyed and not waiting for clean-up (below, after Call). Only for
     // pointers that are not freed (taken this frame, or kept in a holder that gc_sync cleans).
     bool object_alive(UObject* p);
@@ -1502,6 +1542,7 @@ namespace
     void pose_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         gc_sync();
+        HSVR_PROF(PerfPoseAnim);
         if (!context || !g_pose.instance || context != g_pose.instance || !function) return;
         if (g_anim_update) { if (function != g_anim_update) return; }
         else
@@ -1538,6 +1579,7 @@ namespace
     void fingers_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         gc_sync();
+        HSVR_PROF(PerfFingersAnim);
         if (!g_pose_active.load() || !context || context != g_pose.instance || !function) return;
         if (g_anim_update) { if (function != g_anim_update) return; }
         else
@@ -1592,6 +1634,7 @@ namespace
     void feet_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         gc_sync();
+        HSVR_PROF(PerfFeetAnim);
         using namespace hsvr;
         if (!g_feet_active.load() || !context || context != g_pose.instance || !function) return;
         if (g_anim_update) { if (function != g_anim_update) return; }
@@ -3611,6 +3654,7 @@ namespace
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         gc_sync();
+        HSVR_PROF(PerfCapsuleBefore);
         // Test input runs in flat mode too (no posed body): the player's pawn's own tick.
         if ((!g_test_inputs.empty() || g_input_list_now) && context && function && function->GetName() == STR("ReceiveTick"))
         {
@@ -6804,6 +6848,7 @@ namespace
     void punch_watch_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
         gc_sync();
+        HSVR_PROF(PerfPunchPre);
         if (g_elbow_calling.load()) return;
         UFunction* fn = static_cast<UFunction*>(custom_data);
         uint8_t* locals = context.TheStack.Locals();
@@ -6885,6 +6930,7 @@ namespace
     void punch_watch_post(Unreal::UnrealScriptFunctionCallableContext& context, void*)
     {
         gc_sync();
+        HSVR_PROF(PerfPunchPost);
         if (!g_punch_victim || context.Context != g_punch_victim) return;
         UObject* w = g_punch_victim;
         g_punch_victim = nullptr;
@@ -7538,6 +7584,7 @@ namespace
     void fingers_after_copy_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         gc_sync();
+        HSVR_PROF(PerfFingersCopy);
         FingerRig& R = g_frig;
         if (!context || !function || !R.instance || context != R.instance || !g_pose_active.load()) return;
         if (g_copy_update_fn) { if (function != g_copy_update_fn) return; }
@@ -9758,6 +9805,7 @@ namespace
     void force_watch_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
         gc_sync();
+        HSVR_PROF(PerfForceWatch);
         if (!g_force_watch.load()) return;
         UObject* target = context.Context;
         UFunction* hooked = static_cast<UFunction*>(custom_data);
@@ -10190,6 +10238,7 @@ namespace
     void hit_haptics_body(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
         gc_sync();
+        HSVR_PROF(PerfHitBody);
         using namespace hsvr;
         Config cfg = config();
         if (cfg.hit_buzz <= 0.0) return;
@@ -10334,6 +10383,7 @@ namespace
     void stab_hit_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
         gc_sync();
+        HSVR_PROF(PerfStabHit);
         // Hit vibration first: it reads the game's own impulse before the stab assist may raise it.
         hit_haptics_weapon(context, static_cast<UFunction*>(custom_data));
         {
@@ -10534,6 +10584,7 @@ namespace
     void stab_hit_post(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
         gc_sync();
+        HSVR_PROF(PerfStabPost);
         using namespace hsvr;
         Config cfg = config();
         if (cfg.stab_start_depth_cm <= 0.0) return;
@@ -10620,6 +10671,7 @@ namespace
     void stab_release_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
         gc_sync();
+        HSVR_PROF(PerfStabRelease);
         UObject* self = context.Context;
         UObject* pawn = live_posed_pawn();
         if (!self || !pawn) return;
@@ -12596,6 +12648,7 @@ namespace
     void deep_event_cb(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void* parms)
     {
         gc_sync();
+        HSVR_PROF(PerfDeepEvent);
         if (!g_events || !context || !function) return;
         UStruct* cls = context->GetClassPrivate();
         auto it = g_event_class.find(cls);
@@ -12866,6 +12919,7 @@ namespace
     void capsule_after_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         gc_sync();
+        HSVR_PROF(PerfCapsuleAfter);
         if (!is_receive_tick(context, function)) return;
         for (auto& pin : g_pawn_pins) set_variable(context, pin.first.c_str(), pin.second, nullptr, nullptr);
         if (g_pose_active.load())
@@ -14002,6 +14056,7 @@ namespace
     void room_load_game_post(Unreal::UnrealScriptFunctionCallableContext&, void*)
     {
         gc_sync();
+        HSVR_PROF(PerfRoomHooks);
         if (!g_room.armed) return;
         HSVR_LOG("TestRoom: the game loaded the save; test values put back");
         room_apply_values();
@@ -14262,12 +14317,14 @@ namespace
     void room_count_pre(Unreal::UnrealScriptFunctionCallableContext& ctx, void*)
     {
         gc_sync();
+        HSVR_PROF(PerfRoomHooks);
         int32_t* c = ctx.Context ? ctx.Context->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
         g_room_count_before = c ? *c : -1;
     }
     void room_count_post(Unreal::UnrealScriptFunctionCallableContext& ctx, void*)
     {
         gc_sync();
+        HSVR_PROF(PerfRoomHooks);
         int32_t* c = ctx.Context ? ctx.Context->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
         HSVR_LOG("TestRoom: game mode %ls: Enemy Count %d -> %d, Match Won %d", ctx.TheStack.Node() ? ctx.TheStack.Node()->GetName().c_str() : STR("?"), g_room_count_before,
                  c ? *c : -1, (int)bool_property(ctx.Context, STR("Match Won")));
@@ -14289,6 +14346,7 @@ namespace
     void room_winscreen_post(Unreal::UnrealScriptFunctionCallableContext& context, void*)
     {
         gc_sync();
+        HSVR_PROF(PerfRoomHooks);
         if (!g_room.entered || g_room.done || !hsvr::config().test_room_respawn) return;
         UObject* w = context.Context;
         if (!w) return;
@@ -16521,9 +16579,81 @@ namespace
         if (dropped) HSVR_LOG("Freed: %d holder(s) cleared after the game freed %d object(s)", dropped, (int)g_freed_now.size());
     }
 
+    // The Perf: line (see PerfScope). Object counts come from the engine's class hash tables.
+    void perf_report(float delta_seconds)
+    {
+        static double since = -1.0;
+        static uint64_t frames = 0;
+        static double dt_sum = 0.0, dt_max = 0.0;
+        static uint64_t last_ticks[PerfCount] = {}, last_calls[PerfCount] = {};
+        double period = hsvr::config().perf_log_seconds;
+        double now = hsvr::now_seconds();
+        if (period <= 0.0) return;
+        ++frames;
+        dt_sum += delta_seconds;
+        dt_max = (std::max)(dt_max, (double)delta_seconds);
+        if (since < 0.0)
+        {
+            since = now;
+            frames = 0, dt_sum = 0.0, dt_max = 0.0;
+            for (int i = 0; i < PerfCount; ++i) last_ticks[i] = g_perf[i].ticks.load(), last_calls[i] = g_perf[i].calls.load();
+            return;
+        }
+        if (now - since < period || frames == 0) return;
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        double ms_per_tick = 1000.0 / (double)f.QuadPart;
+        double total = 0.0;
+        std::string parts;
+        for (int i = 0; i < PerfCount; ++i)
+        {
+            uint64_t t = g_perf[i].ticks.load(), c = g_perf[i].calls.load();
+            double ms = (t - last_ticks[i]) * ms_per_tick / frames;
+            double calls = (double)(c - last_calls[i]) / frames;
+            last_ticks[i] = t, last_calls[i] = c;
+            total += ms;
+            if (ms < 0.005 && calls < 0.5) continue;
+            char b[96];
+            snprintf(b, sizeof b, ", %s %.2f (%.0f calls)", kPerfNames[i], ms, calls);
+            parts += b;
+        }
+        // What the game has, to tell a pile-up (bodies, decals, actors) from the mod's own time.
+        uint64_t census_start = perf_now();
+        auto count = [](const TCHAR* cls) {
+            std::vector<UObject*> v;
+            UObjectGlobals::FindAllOf(cls, v);
+            return (int)v.size();
+        };
+        int actors = count(STR("Actor")), willies = count(STR("Willie_BP_C")), weapons = count(STR("ModularWeaponBP_C")), ais = count(STR("AI_BP_C"));
+        int decals = count(STR("DecalComponent"));
+        std::vector<UObject*> prims;
+        UObjectGlobals::FindAllOf(STR("PrimitiveComponent"), prims);
+        int simulating = 0, sim_skel = 0;
+        for (UObject* p : prims)
+        {
+            if (!p || p->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            UFunction* fn = p->GetFunctionByNameInChain(STR("IsSimulatingPhysics"));
+            if (!fn) continue;
+            IsSimulatingParams q{};
+            p->ProcessEvent(fn, &q);
+            if (!q.ReturnValue) continue;
+            ++simulating;
+            if (is_a(p, STR("SkeletalMeshComponent"))) ++sim_skel;
+        }
+        double census_ms = (perf_now() - census_start) * ms_per_tick;
+        HSVR_LOG("Perf: %.1f fps (frame %.1f ms mean, %.0f worst) over %.0f s; mod %.2f ms a frame%s; game has %d objects, %d actors, %d Willies, %d weapons, %d AIs, "
+                 "%d decals, %d primitives (%d simulating, %d of them skeletal); counted in %.1f ms",
+                 frames / (now - since), 1000.0 * dt_sum / frames, 1000.0 * dt_max, now - since, total, parts.c_str(), Unreal::UObjectArray::GetNumElements(), actors,
+                 willies, weapons, ais, decals, (int)prims.size(), simulating, sim_skel, census_ms);
+        since = now;
+        frames = 0, dt_sum = 0.0, dt_max = 0.0;
+    }
+
     void game_tick(UObject* engine, float delta_seconds)
     {
         gc_sync();
+        perf_report(delta_seconds); // outside the tick's own scope: the census is not per-frame time
+        HSVR_PROF(PerfTick);
         g_engine = engine;
         hsvr::config_reload_if_changed();
         hsvr::stereo_begin_game_frame(delta_seconds);
