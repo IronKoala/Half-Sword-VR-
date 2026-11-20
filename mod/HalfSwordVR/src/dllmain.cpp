@@ -11367,6 +11367,17 @@ namespace
         {
             UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             if (!weapon || g_hold[side].weapon != weapon) continue;
+            // "Just Picked Up" blocks sticking for 2 s after any equip (ModularWeaponBP @42292); in VR
+            // a weapon is in the hand within 0.1 s and stabbed with at once (playtest 2026-11-20d:
+            // 10% of hits, e.g. a head thrust at cutting 79 x impulse 2799 refused). Cleared once it
+            // has been held stab_pickup_grace_s.
+            if (hsvr::config().stab_pickup_grace_s >= 0.0 && g_hold[side].started > 0.0 &&
+                hsvr::now_seconds() - g_hold[side].started >= hsvr::config().stab_pickup_grace_s && bool_property(weapon, STR("Just Picked Up")))
+            {
+                set_variable(weapon, STR("Just Picked Up"), 0.0);
+                HSVR_LOG_EVERY(2.0, "Stab: %s %ls: Just Picked Up cleared after %.2f s in the hand", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                               hsvr::now_seconds() - g_hold[side].started);
+            }
             if (!bool_property(weapon, STR("Being Rubber Banded"))) continue;
             set_variable(weapon, STR("Being Rubber Banded"), 0.0);
             ++cleared[side];
