@@ -892,6 +892,15 @@ namespace hsvr
         // still protects you.
         int helmet_view = 0;
         double helmet_window_cm = 7.0;
+        // helmet_view 4 (experiment): the helmet half see-through for you. helmet_see_through is how
+        // much you see through (0..1). helmet_see_through_mode 0 = screen door through the helmet
+        // material's texture parameter helmet_see_through_param (our own render target, dithered;
+        // helmet_see_through_test 1 fills it white, 2 black, to find what drives the opacity mask),
+        // 1 = the helmet hidden from you on alternate frames.
+        double helmet_see_through = 0.5;
+        int helmet_see_through_mode = 0;
+        std::string helmet_see_through_param = "RT_Damage";
+        int helmet_see_through_test = 0;
         // The gore skeleton under his skin (skull, jaw, teeth, throat) would show from inside the
         // hidden head: it is hidden from this bone up. Empty = not hidden. Wounds elsewhere still
         // show their bones.

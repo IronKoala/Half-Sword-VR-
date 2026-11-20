@@ -13809,12 +13809,211 @@ namespace
         hidden = want;
     }
 
+    // ---- helmet_view 4 (experiment): the helmet half see-through for you -------------------------
+    // The armour master (M_Armor_Layered_Material_Master) is Masked and has the texture parameters
+    // RT_Damage / RT_Blood (default the canvas render target CRT_DamageMask); the game never sets them
+    // on armour. Mode 0 points one of them (helmet_see_through_param) at our own render target, filled
+    // white / black (test 1 / 2, to find out what drives the opacity mask) or with an ordered dither
+    // (test 0, density = helmet_see_through), and logs what each slot had. Mode 1 hides the helmet
+    // from you on alternate frames instead.
+    void put_raw(Call& c, const TCHAR* name, const void* data, size_t n)
+    {
+        if (FProperty* p = c.param(name)) std::memcpy(c.buffer.data() + p->GetOffset_Internal(), data, (std::min)(n, (size_t)p->GetSize()));
+    }
+    void put_vec2(Call& c, const TCHAR* name, double x, double y)
+    {
+        FProperty* p = c.param(name);
+        if (!p) return;
+        if (p->GetSize() >= 16) { double v[2] = {x, y}; put_raw(c, name, v, sizeof v); }
+        else { float v[2] = {(float)x, (float)y}; put_raw(c, name, v, sizeof v); }
+    }
+    void put_int(Call& c, const TCHAR* name, int32_t v)
+    {
+        put_raw(c, name, &v, sizeof v);
+    }
+    struct SeeThroughSlot
+    {
+        UObject* comp;
+        UObject* mid;
+        std::wstring param;
+        UObject* original;
+    };
+    std::vector<SeeThroughSlot> g_see_slots;
+    UObject* g_see_rt = nullptr;
+    std::string g_see_key; // what the render target holds now
+
+    void see_through_restore()
+    {
+        for (const SeeThroughSlot& s : g_see_slots)
+        {
+            if (!s.mid || gone(s.mid) || gone(s.comp) || !object_alive(s.mid)) continue;
+            Call set(s.mid, STR("SetTextureParameterValue"));
+            set.name(STR("ParameterName"), FName(s.param.c_str(), FNAME_Add));
+            set.object(STR("Value"), s.original);
+            set.run();
+        }
+        if (!g_see_slots.empty()) HSVR_LOG("Helmet see-through: %zu material slot(s) given back their own texture", g_see_slots.size());
+        g_see_slots.clear();
+    }
+
+    // Fills our render target: test 1 white, 2 black, 0 an ordered (4x4 Bayer) dither in 8-texel cells
+    // where a white cell is drawn with probability 1 - see_through.
+    bool see_through_paint(UObject* world_ctx, const hsvr::Config& cfg)
+    {
+        static UObject* krl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
+        if (!krl) { HSVR_LOG("Helmet see-through: no KismetRenderingLibrary"); return false; }
+        constexpr int size = 256, cell = 8;
+        if (!g_see_rt || gone(g_see_rt) || !object_alive(g_see_rt))
+        {
+            Call mk(krl, STR("CreateRenderTarget2D"));
+            mk.object(STR("WorldContextObject"), world_ctx);
+            put_int(mk, STR("Width"), size);
+            put_int(mk, STR("Height"), size);
+            mk.byte(STR("Format"), 2); // RTF_RGBA8
+            float black[4] = {0, 0, 0, 1};
+            put_raw(mk, STR("ClearColor"), black, sizeof black);
+            mk.run();
+            g_see_rt = mk.object_result();
+            if (!g_see_rt) { HSVR_LOG("Helmet see-through: CreateRenderTarget2D gave nothing"); return false; }
+            g_see_rt->SetRootSet();
+            g_see_key.clear();
+            HSVR_LOG("Helmet see-through: render target %ls made (%dx%d)", g_see_rt->GetFullName().c_str(), size, size);
+        }
+        char key[64];
+        std::snprintf(key, sizeof key, "%d/%.3f", cfg.helmet_see_through_test, cfg.helmet_see_through);
+        if (g_see_key == key) return true;
+        g_see_key = key;
+        float fill[4] = {0, 0, 0, 1};
+        if (cfg.helmet_see_through_test == 1) fill[0] = fill[1] = fill[2] = 1.0f;
+        Call clear(krl, STR("ClearRenderTarget2D"));
+        clear.object(STR("WorldContextObject"), world_ctx);
+        clear.object(STR("TextureRenderTarget"), g_see_rt);
+        put_raw(clear, STR("ClearColor"), fill, sizeof fill);
+        clear.run();
+        int drawn = 0;
+        if (cfg.helmet_see_through_test == 0)
+        {
+            static const int bayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+            double keep = 1.0 - (std::clamp)(cfg.helmet_see_through, 0.0, 1.0);
+            Call begin(krl, STR("BeginDrawCanvasToRenderTarget"));
+            begin.object(STR("WorldContextObject"), world_ctx);
+            begin.object(STR("TextureRenderTarget"), g_see_rt);
+            begin.run();
+            UObject* canvas = begin.object_result(STR("Canvas"));
+            if (canvas)
+            {
+                Call draw(canvas, STR("K2_DrawTexture"));
+                for (int y = 0; y < size / cell; ++y)
+                    for (int x = 0; x < size / cell; ++x)
+                    {
+                        if ((bayer[(y % 4) * 4 + (x % 4)] + 0.5) / 16.0 >= keep) continue;
+                        std::fill(draw.buffer.begin(), draw.buffer.end(), uint8_t{0});
+                        put_vec2(draw, STR("ScreenPosition"), x * cell, y * cell);
+                        put_vec2(draw, STR("ScreenSize"), cell, cell);
+                        put_vec2(draw, STR("CoordinateSize"), 1, 1);
+                        float white[4] = {1, 1, 1, 1};
+                        put_raw(draw, STR("RenderColor"), white, sizeof white);
+                        draw.byte(STR("BlendMode"), 0); // opaque
+                        draw.run();
+                        ++drawn;
+                    }
+            }
+            Call end(krl, STR("EndDrawCanvasToRenderTarget"));
+            end.object(STR("WorldContextObject"), world_ctx);
+            if (FProperty* from = begin.param(STR("Context")))
+                put_raw(end, STR("Context"), begin.buffer.data() + from->GetOffset_Internal(), from->GetSize());
+            end.run();
+            if (!canvas) HSVR_LOG("Helmet see-through: BeginDrawCanvasToRenderTarget gave no canvas");
+        }
+        constexpr int cells = (size / cell) * (size / cell);
+        HSVR_LOG("Helmet see-through: render target filled (%s; %d of %d cells white)",
+                 cfg.helmet_see_through_test == 1 ? "all white" : cfg.helmet_see_through_test == 2 ? "all black" : "dither",
+                 cfg.helmet_see_through_test == 1 ? cells : drawn, cells);
+        return true;
+    }
+
+    void helmet_see_through_update(const hsvr::Config& cfg, bool first_person, UObject* pawn)
+    {
+        bool want = first_person && cfg.helmet_view == 4 && cfg.helmet_see_through_mode == 0;
+        std::wstring param(cfg.helmet_see_through_param.begin(), cfg.helmet_see_through_param.end());
+        std::vector<UObject*> comps;
+        if (want)
+            for (const HeadWear& w : g_head_wear)
+                if (w.comp && !gone(w.comp)) comps.push_back(w.comp);
+        // Start over when the pieces worn, the parameter or the mode change.
+        bool same = want && !g_see_slots.empty() && g_see_slots.front().param == param;
+        if (same)
+            for (const SeeThroughSlot& s : g_see_slots)
+                if (gone(s.comp) || std::find(comps.begin(), comps.end(), s.comp) == comps.end()) same = false;
+        if (same)
+            for (UObject* c : comps)
+                if (std::none_of(g_see_slots.begin(), g_see_slots.end(), [&](const SeeThroughSlot& s) { return s.comp == c; })) same = false;
+        if (!same) see_through_restore();
+        if (!want || comps.empty() || !pawn) return;
+        if (!see_through_paint(pawn, cfg)) return;
+        if (same) return;
+        FName pname(param.c_str(), FNAME_Add);
+        for (UObject* c : comps)
+        {
+            Call nm(c, STR("GetNumMaterials"));
+            nm.run();
+            int n = nm.integer();
+            for (int i = 0; i < n && i < 16; ++i)
+            {
+                Call gm(c, STR("GetMaterial"));
+                put_int(gm, STR("ElementIndex"), i);
+                gm.run();
+                UObject* m = gm.object_result();
+                if (!m) continue;
+                UObject* mid = m;
+                bool made = false;
+                if (m->GetClassPrivate()->GetName().find(STR("MaterialInstanceDynamic")) == std::wstring::npos)
+                {
+                    Call cd(c, STR("CreateDynamicMaterialInstance"));
+                    put_int(cd, STR("ElementIndex"), i);
+                    cd.object(STR("SourceMaterial"), m);
+                    cd.run();
+                    mid = cd.object_result();
+                    made = true;
+                }
+                if (!mid) continue;
+                Call get(mid, STR("K2_GetTextureParameterValue"));
+                get.name(STR("ParameterName"), pname);
+                get.run();
+                UObject* had = get.object_result();
+                Call set(mid, STR("SetTextureParameterValue"));
+                set.name(STR("ParameterName"), pname);
+                set.object(STR("Value"), g_see_rt);
+                set.run();
+                g_see_slots.push_back({c, mid, param, had});
+                HSVR_LOG("Helmet see-through: %ls slot %d %ls%ls: %ls was %ls, now our render target", c->GetName().c_str(), i, mid->GetName().c_str(),
+                         made ? STR(" (new dynamic instance)") : STR(""), param.c_str(), had ? had->GetFullName().c_str() : STR("none"));
+            }
+        }
+    }
+
+    // Mode 1: the head pieces hidden from you on every other frame (called every frame).
+    void helmet_alternate_frames(const hsvr::Config& cfg, bool first_person)
+    {
+        static bool was = false;
+        static uint64_t frame = 0;
+        bool want = first_person && cfg.helmet_view == 4 && cfg.helmet_see_through_mode == 1;
+        if (!want && !was) return;
+        bool hide = want && (++frame % 2 == 0);
+        for (const HeadWear& w : g_head_wear)
+            if (w.comp && !gone(w.comp)) set_owner_hidden(w.comp, hide);
+        if (want != was) HSVR_LOG("Helmet see-through: alternate-frame hiding %s", want ? "on" : "off");
+        was = want;
+    }
+
     void hide_own_head(const hsvr::Config& cfg)
     {
         constexpr int N = 2;
         static UObject* hidden[N] = {nullptr, nullptr};
         static bool hidden_tracked = on_freed([] { for (UObject*& o : hidden) if (gone(o)) o = nullptr; });
         static double last = 0.0;
+        static bool see_fp = false; // first person, as of the last once-a-second check
+        helmet_alternate_frames(cfg, see_fp);
         double now = hsvr::now_seconds();
         if (now - last < 1.0) return;
         last = now;
@@ -13822,7 +14021,9 @@ namespace
         find_pawn_mesh(&pawn);
         bool willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
         bool want = cfg.hide_own_head && willie && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().stereo_installed.load();
-        helmet_view_update(cfg, willie && pawn == g_helmet_pawn && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().stereo_installed.load());
+        see_fp = willie && pawn == g_helmet_pawn && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().stereo_installed.load();
+        helmet_view_update(cfg, see_fp);
+        helmet_see_through_update(cfg, see_fp, pawn);
         UObject* parts[N] = {nullptr, nullptr};
         if (willie)
         {
