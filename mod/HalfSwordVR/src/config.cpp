@@ -470,6 +470,14 @@ namespace hsvr
         flag("stab_drag", c.stab_drag);
         num("stab_drag_force_scale", c.stab_drag_force_scale);
         num("stab_drag_grip_s", c.stab_drag_grip_s);
+        num("stab_drag_reach_slack_cm", c.stab_drag_reach_slack_cm);
+        num("stab_drag_reach_s", c.stab_drag_reach_s);
+        flag("hit_assist", c.hit_assist);
+        num("hit_arm_mass_kg", c.hit_arm_mass_kg);
+        num("hit_assist_min_cms", c.hit_assist_min_cms);
+        flag("cut_follow_through", c.cut_follow_through);
+        num("cut_release_cm", c.cut_release_cm);
+        num("cut_release_after_s", c.cut_release_after_s);
         flag("grip_flip", c.grip_flip);
         num("stab_yank_cm", c.stab_yank_cm);
         num("stab_yank_s", c.stab_yank_s);
@@ -484,6 +492,7 @@ namespace hsvr
         num("stab_wound_in_cms", c.stab_wound_in_cms);
         num("stab_wound_out_cms", c.stab_wound_out_cms);
         num("stab_wound_head_factor", c.stab_wound_head_factor);
+        num("stab_wound_head_in_factor", c.stab_wound_head_in_factor);
         flag("pose_sheathe", c.pose_sheathe);
         num("pose_sheathe_mouth_cm", c.pose_sheathe_mouth_cm);
         num("pose_sheathe_angle_deg", c.pose_sheathe_angle_deg);

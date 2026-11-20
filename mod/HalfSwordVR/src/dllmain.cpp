@@ -1798,6 +1798,7 @@ namespace
     std::atomic<bool> g_contact_log{true};
 
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
+    bool stuck_is_thrust(UObject* weapon);
     bool two_hand_pose(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool hand_on_scabbard(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     std::atomic<bool> g_hold_reach_clamp{true};
@@ -8191,24 +8192,26 @@ namespace
             double from_shoulder = length(grip_at - shoulder) - length(h.in_hand);
             double from_hand = length(grip_at - hand_point);
             bool out = from_shoulder > reach + 2.0 || (!in_body && from_hand > reach);
-            if (in_body && cfg.stab_drag)
+            if (in_body && !stuck_is_thrust(h.weapon)) out = false; // a lodged cut: cut_through_tick decides
+            if (in_body && cfg.stab_drag && stuck_is_thrust(h.weapon))
             {
                 // Dragging a body: the weapon stays in the hand; it slips out only when the hand has
                 // pulled with all its strength, the grip still past arm's length, for longer than the
                 // grip holds (stab_drag_grip_s x his strength: tired, hurt or weak hands let go sooner).
                 out = false;
                 double tn = now_seconds();
-                if (h.drag_capped && from_shoulder > reach + 2.0)
+                // Past what his arm can follow: the blade comes out of the body and stays in the hand
+                // (Matthew 2026-11-20: a stuck weapon must never fly off away from his hand).
+                if (from_shoulder > reach + cfg.stab_drag_reach_slack_cm)
                 {
                     if (h.drag_slip_since < 0.0) h.drag_slip_since = tn;
-                    double hold_s = cfg.stab_drag_grip_s * (std::max)(0.05, h.body_strength);
-                    if (tn - h.drag_slip_since >= hold_s)
+                    if (tn - h.drag_slip_since >= cfg.stab_drag_reach_s)
                     {
-                        HSVR_LOG("Hold: %s hand's grip gives: %ls dragged out of it after %.1f s at full strength (strength %.0f%%, grip past reach by %.0f cm)",
-                                 side == 0 ? "left" : "right", h.weapon->GetName().c_str(), tn - h.drag_slip_since, h.body_strength * 100.0, from_shoulder - reach);
+                        HSVR_LOG("Hold: %s hand pulls %ls out at arm's length (grip %.0f cm past reach, strength %.0f%%)", side == 0 ? "left" : "right",
+                                 h.weapon->GetName().c_str(), from_shoulder - reach, h.body_strength * 100.0);
                         h.drag_slip_since = -1.0;
-                        drop_weapon(side, g_pose.pawn);
-                        return false;
+                        Call r(h.weapon, STR("Release All Jammed Bones"));
+                        r.run();
                     }
                 }
                 else
@@ -8976,6 +8979,14 @@ namespace
     // weapon the hand holds it and how the weapon sits in the hand); `base` the weapon's BaseMesh.
     std::wstring stab_name_var(UObject* owner, const TCHAR* name);
     double g_wound_since[2] = {-1.0, -1.0}; // when each hand's weapon went into a wound
+    // Is the weapon stuck by a thrust (the game's stuck joint "Thrust?"), not a lodged cut?
+    bool stuck_is_thrust(UObject* weapon)
+    {
+        if (!weapon) return false;
+        RawArray* joints = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
+        UObject* cs = joints && joints->Data && joints->Num > 0 ? static_cast<UObject*>(joints->Data[joints->Num - 1]) : nullptr;
+        return cs && bool_property(cs, STR("Thrust?"));
+    }
     UObject* g_young_joint[2] = {nullptr, nullptr}; // a stick still held open (stab_hold_keep)
     double g_young_since[2] = {-1.0, -1.0};
     int g_young_trace_ok[2] = {0, 0}; // ticks in a row the normal 3 cm keep trace found the stuck bone
@@ -9409,7 +9420,7 @@ namespace
             max_torque *= (std::max)(0.0, draw_scale_cfg);
         }
         double max_force_unstuck = max_force; // the hand's whole strength (drag, below)
-        if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body")))
+        if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon))
         {
             max_force *= (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
             max_torque *= (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
@@ -9555,7 +9566,7 @@ namespace
             // sideways and in turn it goes with him (the game's stuck joint holds it in a 15 deg
             // cone). Pulling back far enough draws it out; the game lets go once the tip box leaves
             // the body (stab-test9).
-            bool in_wound = cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body"));
+            bool in_wound = cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon);
             bool drag = false;
             Vec3 wound_axis;
             static bool was_in_wound[2] = {false, false};
@@ -9581,7 +9592,10 @@ namespace
                 if (g_wound_since[side] < 0.0) g_wound_since[side] = now;
                 bool settling = now - g_wound_since[side] < cfg.stab_wound_settle_s || g_young_joint[side] != nullptr;
                 double out_most = settling ? 0.0 : cfg.stab_wound_out_cms * k;
-                double ax = (std::min)(cfg.stab_wound_in_cms * k, (std::max)(-out_most, need_ax));
+                // Going deeper is easier than coming out (S&S: a plunge follows the hand; pulling out
+                // of a skull takes ~3x the effort): the head factor slows only the way out fully.
+                double k_in = head ? cfg.stab_wound_head_in_factor : 1.0;
+                double ax = (std::min)(cfg.stab_wound_in_cms * k_in, (std::max)(-out_most, need_ax));
                 // Going in: the game sticks a blade at the skin (stab-test13: its keep trace found the
                 // tip 1.2 cm inside, then outside), so for the first moments it is carried in at
                 // stab_wound_entry_cms whatever the hand does, as the arm's momentum would.
@@ -9733,7 +9747,7 @@ namespace
                                    weapon->GetName().c_str(), mass, ig / 1e4, pc * dst, rc * dst);
                 }
                 double draw_scale = 1.0;
-                if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body"))) draw_scale = (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
+                if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon)) draw_scale = (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
                 SoftPoint pts[2];
                 int n = 0;
                 {
@@ -10718,6 +10732,42 @@ namespace
             boosted = (std::max)(ni_len, cfg.stab_arm_mass_kg * v);
             write_three(locals + ni_prop->GetOffset_Internal(), ni_prop, -tip_fwd.x * boosted, -tip_fwd.y * boosted, -tip_fwd.z * boosted);
         }
+        else if (cfg.hit_assist && ni_prop && ni_len > 1.0 && h.weapon == weapon && !stuck)
+        {
+            // Every other hit on a person (cuts, blunt blows, armour): the game reads the blow from
+            // the contact impulse (its hit velocity is the larger of the weapon's speed and that
+            // impulse, ModularWeaponBP @40497; a lodge needs cutting rate x impulse >= 10000). In
+            // the flat game the arm is jointed behind the weapon and adds its mass to that impulse;
+            // the VR hold leaves only the weapon's own (playtest 2026-11-20: a 1.3 kg mace's median
+            // impulse 129 on flesh, 46 on a helmet). So his arm's mass, times his strength, is added
+            // at the speed the struck point closes on the surface.
+            UObject* base = object_property(weapon, STR("BaseMesh"));
+            Vec3 n{ni[0] / ni_len, ni[1] / ni_len, ni[2] / ni_len};
+            double closing = 0.0;
+            if (base)
+            {
+                Call va(base, STR("GetPhysicsLinearVelocityAtPoint"));
+                va.three(STR("Point"), impact.x, impact.y, impact.z);
+                va.run();
+                Vec3 vp = va.vec();
+                closing = std::fabs(dot(vp, n));
+                if (closing < 1e-3)
+                {
+                    Call lv(base, STR("GetPhysicsLinearVelocity"));
+                    lv.run();
+                    closing = std::fabs(dot(lv.vec(), n));
+                }
+            }
+            if (closing >= cfg.hit_assist_min_cms)
+            {
+                double strength = (std::max)(0.05, h.body_strength);
+                boosted = ni_len + cfg.hit_arm_mass_kg * strength * closing;
+                write_three(locals + ni_prop->GetOffset_Internal(), ni_prop, n.x * boosted, n.y * boosted, n.z * boosted);
+                HSVR_LOG("Stab: hit assist: %s %ls on %ls %ls: impulse %.0f -> %.0f (struck point closing at %.0f cm/s, arm %.1f kg x strength %.0f%%)",
+                         side == 0 ? "left" : "right", weapon->GetName().c_str(), victim_comp ? victim_comp->GetName().c_str() : STR("?"), bone_s.c_str(), ni_len, boosted,
+                         closing, cfg.hit_arm_mass_kg, strength * 100.0);
+            }
+        }
 
         w.weapon = weapon;
         w.id = ++g_stab_count;
@@ -10747,6 +10797,7 @@ namespace
     {
         hsvr::Config cfg = hsvr::config();
         if (!cfg.stab_wound_hold || cfg.stab_wound_settle_s <= 0.0) return;
+        if (on && !stuck_is_thrust(weapon)) return; // a lodged cut goes through (cut_follow_through)
         if (on)
         {
             RawArray* joints = weapon->GetValuePtrByPropertyNameInChain<RawArray>(STR("Stuck Constraints Array"));
@@ -10959,6 +11010,38 @@ namespace
                 last_log = now;
                 HSVR_LOG("Stab: rubber band taken off the held weapons (right %d, left %d ticks so far; his soft-not-attached R %d L %d)", cleared[1], cleared[0],
                          (int)bool_property(pawn, STR("R Hand Soft Not Attached")), (int)bool_property(pawn, STR("L Hand Soft Not Attached")));
+            }
+        }
+    }
+
+    // A cut that lodges goes through when the hand carries on (Matthew 2026-11-20: "the sword just
+    // doesn't follow through, it stays stuck in the enemy's body but my hand's somewhere else"). In
+    // the flat game his arm keeps pulling on the lodged edge until the stuck joint gives or the
+    // blade slides out; under the VR hold the joint never feels that pull (its force reads 0), so
+    // a lodged edge (not a thrust) is let go once the hand is cut_release_cm past it.
+    void cut_through_tick(UObject* pawn)
+    {
+        hsvr::Config cfg = hsvr::config();
+        if (!cfg.cut_follow_through || !pawn) return;
+        static double since[2] = {-1.0, -1.0};
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (!weapon || g_hold[side].weapon != weapon || !bool_property(weapon, STR("Stuck In Body")) || stuck_is_thrust(weapon))
+            {
+                since[side] = -1.0;
+                continue;
+            }
+            double now = hsvr::now_seconds();
+            if (since[side] < 0.0) since[side] = now;
+            double lag = g_hold[side].lag;
+            if (lag >= cfg.cut_release_cm && now - since[side] >= cfg.cut_release_after_s)
+            {
+                Call r(weapon, STR("Release All Jammed Bones"));
+                r.run();
+                HSVR_LOG("Stab: %s cut goes through: %ls let out of %ls after %.2f s, hand %.0f cm past it", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                         stab_name_var(weapon, STR("Hit Bone Name")).c_str(), now - since[side], lag);
+                since[side] = -1.0;
             }
         }
     }
@@ -13127,6 +13210,7 @@ namespace
             frames_tick(context);
         }
         stab_no_rubber_band(context);
+        cut_through_tick(context);
         stab_log_tick(context);
         install_hit_haptics();
         grip_flip_tick(context);

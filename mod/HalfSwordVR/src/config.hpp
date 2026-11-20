@@ -303,7 +303,18 @@ namespace hsvr
         // strength. A yank (pull-out) counts only the hand's distance out along the wound.
         bool stab_drag = true;
         double stab_drag_force_scale = 1.0;
-        double stab_drag_grip_s = 2.0;
+        double stab_drag_grip_s = 2.0; // (unused since the arm's-length pull-out)
+        double stab_drag_reach_slack_cm = 8.0; // a stuck thrust past arm's length by this much ...
+        double stab_drag_reach_s = 0.15;       // ... this long comes out of the body (stays in the hand)
+        // Every other hit of a held weapon on a person gets his arm's mass behind it (kg, times his
+        // strength), at the speed the struck point closes on the surface (from hit_assist_min_cms).
+        bool hit_assist = true;
+        double hit_arm_mass_kg = 3.0;
+        double hit_assist_min_cms = 150.0;
+        // A lodged cut (not a thrust) is let go once the hand is cut_release_cm past it.
+        bool cut_follow_through = true;
+        double cut_release_cm = 10.0;
+        double cut_release_after_s = 0.03;
         // Reverse grip flip (S&S): a tap (shorter than grip_flip_tap_s) of the holding hand's B / Y
         // turns a one-handed weapon end for end at the same spot on its handle, gliding over grip_flip_s.
         bool grip_flip = true;
@@ -315,14 +326,15 @@ namespace hsvr
         double grip_flip_tap_s = 0.4;
         double stab_wound_settle_s = 0.2; // no pulling out for this long after it goes in
         double stab_wound_settle_max_s = 0.8; // a young stick is held open until the game's own keep trace passes, at most this long
-        double stab_wound_entry_cms = 40.0; // ...and it is carried in at this speed meanwhile (8 cm over 0.2 s)
+        double stab_wound_entry_cms = 70.0; // ...and it is carried in at this speed meanwhile (8 cm over 0.2 s)
         // A blade the game has just stuck is set this far into the wound along its tip (cm), plus
         // stab_start_depth_per_ms cm for each cm/s of the controller along it, at most _max_cm
         // (the game's stuck joint lets the blade slide 5 cm along a thrust).
         double stab_start_depth_cm = 0.0; // 0 = off (stab-test11: a teleport into the wound made it let go)
         double stab_start_depth_per_ms = 0.01;
         double stab_start_depth_max_cm = 4.5;
-        double stab_wound_in_cms = 50.0;
+        double stab_wound_in_cms = 120.0; // (was 50: daggers needed pushing and pushing, playtest 2026-11-20)
+        double stab_wound_head_in_factor = 0.6;
         double stab_wound_out_cms = 40.0;
         double stab_wound_head_factor = 0.35;
         double pose_hold_turn_spring = 1100.0;
