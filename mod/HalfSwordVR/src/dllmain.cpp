@@ -3156,13 +3156,17 @@ namespace
                 {
                     double d = length(delta);
                     if (d > radius) stepping = true;
-                    else if (d < 2.0) stepping = false;
                     double keep = 1.0; // share of the offset kept as lean
                     if (stepping)
                     {
                         double tau = cfg.pose_lean_walk_catchup_s;
                         keep = (tau > 1e-3 && dtn > 0.0 && dtn < 0.2) ? std::exp(-dtn / tau) : 0.0;
                         if (d * keep > radius) keep = radius / d; // never further out than the radius
+                        // At least 0.6 cm a frame, so the step ends under your neck: the last few cm moved
+                        // less than the 0.3 cm move threshold a frame, and the step never ended (test
+                        // 17:40 local: stuck 3.3 cm out, and the next lean stepped instead of leaning).
+                        if (d > 1e-6 && d * (1.0 - keep) < 0.6) keep = (std::max)(0.0, 1.0 - 0.6 / d);
+                        if (d < 0.6) stepping = false;
                     }
                     follow = delta * (1.0 - keep);
                 }
