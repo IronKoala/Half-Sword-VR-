@@ -63,6 +63,8 @@ namespace hsvr
         std::atomic<bool> game_wants_pointer{false};
         // View from the game's own (third-person) camera instead of the character's head.
         std::atomic<bool> third_person{false};
+        // helmet_view 3: the eyes' near clip while a helmet is worn (cm; 0 = the normal near_clip_cm).
+        std::atomic<double> helmet_window_cm{0.0};
         // Set by a key to flip between full-resolution mode and the fallback while playing:
         // -1 = follow the settings file, 0 = fallback, 1 = full resolution.
         std::atomic<int> separate_override{-1};
