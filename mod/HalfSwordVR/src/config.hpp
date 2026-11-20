@@ -709,6 +709,13 @@ namespace hsvr
         // than 15 cm below its standing height over the floor (the game drops it ~77 cm when its foot
         // traces miss).
         bool pose_crouch_keep_leg_ik = true;
+        // No knockdowns for your player: the game's kneel never takes his legs. While the body is posed,
+        // his own R/L Kneel and R/L Kneel Falling are kept off and Legs Tonus Far Step kept at 1, just
+        // before and just after his tick. In VR the game read a bent, leaning pose as kneel-falling, fired
+        // its Kneel Event, and while kneeling it cuts leg tonus to 0 once the feet are 1 m from its last
+        // step spot (always, with the feet posed): the pelvis drive went to 0 and the body sank 60 cm for
+        // good (playtest 2026-11-20 11:20Z). Enemies are not touched; leg injuries still cut leg tonus.
+        bool pose_player_no_kneel = true;
         bool pose_capsule_floor_clamp = true;
         // The game sets the capsule's height to (lower foot's step end) + half height + clamp(Step Height 2,
         // +-10). Step Height 2 sinks to about -4 cm through each step and snaps back to 0 as a foot lands,

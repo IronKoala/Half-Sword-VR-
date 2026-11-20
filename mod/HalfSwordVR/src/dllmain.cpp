@@ -3447,6 +3447,7 @@ namespace
     void log_joint_before_tick(UObject* pawn);
 
     void block_offhand_search_before_tick(UObject* pawn);
+    void keep_player_off_knees(UObject* pawn, bool after);
     // Test: hsvr.pawn_pin <variable> <value> holds a number variable of his pawn at a value every tick,
     // after his tick and before the hold reads it (e.g. Stamina 10, Arm R Tonus 0.25); "off" clears all.
     std::vector<std::pair<std::wstring, double>> g_pawn_pins;
@@ -3673,6 +3674,7 @@ namespace
         {
             log_joint_before_tick(context);
             block_offhand_search_before_tick(context);
+            keep_player_off_knees(context, false);
             turn_body_before_tick();
             stick_walk_before_tick(context);
             swing_speed_before_tick(context);
@@ -4686,6 +4688,79 @@ namespace
     }
 
     double hand_on_weapon_amount(int side) { return g_hold[side].on_weapon; }
+
+    // ---- No knockdowns for the player ------------------------------------------------------------
+    // The game's kneel (Willie_BP UG @616819/@618028 Kneel Falling: a knee within ~6 cm of the floor
+    // once Consciousness + All Body Tonus drops under 200 and he leans forward; UG @620739 fires Kneel
+    // Event from it, from a crouch under 60 cm, or from a weak pelvis drive) is a fall for an AI body.
+    // For a posed player it is a trap: while R/L Kneel is on, Legs Tonus Far Step goes to 0 when the
+    // nearer foot is 1 m from Last Step Location (UG @397262), which leg tonus and Root Linear
+    // Constraint Power (UG @427425) are multiplied by, and the body sinks with nothing to get it up.
+    // So for the player the flags are kept off and Far Step at 1, before and after his tick. The
+    // properties are found once per class; the cost is a few byte writes a tick.
+    void keep_player_off_knees(UObject* pawn, bool after)
+    {
+        if (!pawn || !hsvr::config().pose_player_no_kneel) return;
+        static UClass* looked_for = nullptr;
+        static FProperty* flags[4] = {};
+        static FProperty* far_step = nullptr;
+        static const TCHAR* flag_names[4] = {STR("R Kneel"), STR("L Kneel"), STR("R Kneel Falling"), STR("L Kneel Falling")};
+        UClass* cls = pawn->GetClassPrivate();
+        if (cls != looked_for)
+        {
+            looked_for = cls;
+            std::string missing;
+            for (int i = 0; i < 4; ++i)
+            {
+                FProperty* p = pawn->GetPropertyByNameInChain(flag_names[i]);
+                flags[i] = p && p->GetClass().GetName() == STR("BoolProperty") ? p : nullptr;
+                if (!flags[i]) { missing += " "; for (const TCHAR* c = flag_names[i]; *c; ++c) missing += (char)*c; }
+            }
+            FProperty* p = pawn->GetPropertyByNameInChain(STR("Legs Tonus Far Step"));
+            far_step = p && p->GetClass().GetName() == STR("DoubleProperty") ? p : nullptr;
+            if (!far_step) missing += " Legs Tonus Far Step";
+            HSVR_LOG("Knees: your player's kneel and kneel-fall kept off, leg tonus far-step kept at 1 (pose_player_no_kneel)%s%s",
+                     missing.empty() ? "" : "; NOT FOUND:", missing.c_str());
+        }
+        uint8_t* base = reinterpret_cast<uint8_t*>(pawn);
+        unsigned was = 0;
+        for (int i = 0; i < 4; ++i)
+        {
+            if (!flags[i]) continue;
+            auto* flag = static_cast<FBoolProperty*>(flags[i]);
+            uint8_t* byte = base + flags[i]->GetOffset_Internal() + flag->GetByteOffset();
+            if (*byte & flag->GetFieldMask()) was |= 1u << i;
+            *byte &= (uint8_t)~flag->GetFieldMask();
+        }
+        double far_now = 1.0; // ("far" is a Windows macro)
+        if (far_step)
+        {
+            double* v = reinterpret_cast<double*>(base + far_step->GetOffset_Internal());
+            far_now = *v;
+            *v = 1.0;
+        }
+        if (was || far_now < 0.999)
+        {
+            static double last_line = -10.0;
+            static unsigned seen = 0;
+            static double far_low = 1.0;
+            seen |= was;
+            far_low = (std::min)(far_low, far_now);
+            double now = hsvr::now_seconds();
+            if (now - last_line >= 1.0)
+            {
+                std::string names;
+                for (int i = 0; i < 4; ++i)
+                    if (seen & (1u << i)) { names += " "; for (const TCHAR* c = flag_names[i]; *c; ++c) names += (char)*c; }
+                HSVR_LOG("Knees: the game wanted your player down (found %s his tick):%s; far-step low %.2f; kept up (Leg R Tonus %.2f, Root Linear Constraint Power %.2f)",
+                         after ? "after" : "before", names.empty() ? " -" : names.c_str(), far_low, read_number_variable(pawn, STR("Leg R Tonus")),
+                         read_number_variable(pawn, STR("Root Linear Constraint Power")));
+                last_line = now;
+                seen = 0;
+                far_low = 1.0;
+            }
+        }
+    }
 
     // ---- The ghost hand ------------------------------------------------------------------------
     // While his hand stays on a stopped weapon, a see-through hand shows where your real hand is
@@ -12974,6 +13049,7 @@ namespace
         for (auto& pin : g_pawn_pins) set_variable(context, pin.first.c_str(), pin.second, nullptr, nullptr);
         if (g_pose_active.load())
         {
+            keep_player_off_knees(context, true);
             crouch_after_tick(context);
             weapon_spring_after_tick(context);
             swing_speed_after_tick(context);
@@ -15239,6 +15315,21 @@ namespace
                 else if (w == "fist_l") value = is_fist(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
                 else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
                 else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
+                else if (w == "actor_z") value = pawn ? actor_location(pawn).z : 0.0;
+                else if (w.rfind("var:", 0) == 0 && pawn)
+                {
+                    // var:<pawn variable>, '_' for spaces (var:Leg_R_Tonus); a variable named with '_' is tried as written first
+                    std::wstring n(w.begin() + 4, w.end());
+                    FProperty* p = pawn->GetPropertyByNameInChain(n.c_str());
+                    if (!p)
+                    {
+                        for (auto& ch : n)
+                            if (ch == L'_') ch = L' ';
+                        p = pawn->GetPropertyByNameInChain(n.c_str());
+                    }
+                    if (p) value = number_property(pawn, p);
+                    else known = false;
+                }
                 else known = false;
                 std::string o = op;
                 bool pass = false;

@@ -568,6 +568,7 @@ namespace hsvr
         flag("kick_on_a", c.kick_on_a);
         num("kick_tap_s", c.kick_tap_s);
         flag("pose_crouch_keep_leg_ik", c.pose_crouch_keep_leg_ik);
+        flag("pose_player_no_kneel", c.pose_player_no_kneel);
         flag("pose_capsule_floor_clamp", c.pose_capsule_floor_clamp);
         flag("pose_capsule_no_step_offset", c.pose_capsule_no_step_offset);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);
