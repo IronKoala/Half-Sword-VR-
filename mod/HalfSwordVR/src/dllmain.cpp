@@ -2982,8 +2982,21 @@ namespace
         {
             double h = (std::max)(20.0, g_lean.pts[6].z - g_lean.pts[0].z);
             auto as = [](double v, double lo, double hi) { return std::asin((std::max)(lo, (std::min)(hi, v))) * kRadToDeg; };
-            g_lean.off_fwd = as(g_lean.offset.x / h, -0.34, 0.95); // back at most 20 degrees
-            g_lean.off_side = as(g_lean.offset.y / h, -0.7, 0.7);
+            double of = as(g_lean.offset.x / h, -0.34, 0.95), os = as(g_lean.offset.y / h, -0.7, 0.7); // back at most 20 degrees
+            // The neck bends back against the spine, so the head goes less far than h sin(bend): scale the
+            // bends until the head is carried by your offset, or his hips end off the capsule (test: 11 deg
+            // carried the head 7 cm of an 11 cm offset).
+            for (int it = 0; it < 3; ++it)
+            {
+                Quat tq[6];
+                Vec3 mm = lean_fk(of, os, 0.0, tq);
+                if (std::fabs(mm.x) > 0.5 && std::fabs(g_lean.offset.x) > 0.5) of *= g_lean.offset.x / mm.x;
+                if (std::fabs(mm.y) > 0.5 && std::fabs(g_lean.offset.y) > 0.5) os *= g_lean.offset.y / mm.y;
+                of = (std::max)(-20.0, (std::min)(72.0, of));
+                os = (std::max)(-44.0, (std::min)(44.0, os));
+            }
+            g_lean.off_fwd = of;
+            g_lean.off_side = os;
             // With the head's own bends: the same way, the larger one; opposite ways, both.
             auto merge = [](double a, double b) { return a * b > 0.0 ? (std::fabs(a) > std::fabs(b) ? a : b) : a + b; };
             want_f = (std::min)(cfg.pose_lean_max_deg, merge(want_f, g_lean.off_fwd));
@@ -3115,28 +3128,34 @@ namespace
                 Vec3 total = base.inverse().rotate(Vec3{neck_now.x - neck_then.x, neck_now.y - neck_then.y, 0.0});
                 total.z = 0.0;
                 Vec3 delta = total - g_pose_room_moved_local;
-                // Lean first, step after: the capsule follows only the part of your neck's offset beyond
-                // pose_lean_step_radius_cm; the rest is his torso leaning (lean_update). Walking pulls it in.
+                // Lean first, step after: while your neck stays within pose_lean_step_radius_cm of where his
+                // hips stand, the capsule stays put and his torso leans to put his head there (lean_update).
+                // Once it goes past the radius he steps: the hips come back under your neck over
+                // pose_lean_walk_catchup_s and stay with you (walking) until they are under it again.
+                // (64ae2ba also caught up whenever the neck moved faster than 50 cm/s; any quick lean did
+                // that, and the hips followed half of a 20 cm lean. Test 2026-11-20 17:06 local.)
                 Vec3 follow = delta;
                 double radius = cfg.pose_lean && g_lean.calibrated ? (std::min)(40.0, (std::max)(0.0, cfg.pose_lean_step_radius_cm)) : 0.0;
+                static bool stepping = false;
+                static double last_t = 0.0;
+                double tn = now_seconds(), dtn = tn - last_t;
+                last_t = tn;
                 if (radius > 0.0)
                 {
-                    static Vec3 last_neck;
-                    static double last_t = 0.0, speed = 0.0;
-                    double tn = now_seconds(), dtn = tn - last_t;
-                    if (dtn > 0.0 && dtn < 0.2)
-                    {
-                        double v = length(Vec3{neck_now.x - last_neck.x, neck_now.y - last_neck.y, 0.0}) / dtn;
-                        speed += (v - speed) * (1.0 - std::exp(-dtn / 0.1));
-                    }
-                    last_neck = neck_now;
-                    last_t = tn;
                     double d = length(delta);
-                    double keep = d > radius ? radius / d : 1.0; // share of the offset kept as lean
-                    if (speed > cfg.pose_lean_walk_speed_cms && dtn > 0.0 && dtn < 0.2 && cfg.pose_lean_walk_catchup_s > 1e-3)
-                        keep *= std::exp(-dtn / cfg.pose_lean_walk_catchup_s);
+                    if (d > radius) stepping = true;
+                    else if (d < 2.0) stepping = false;
+                    double keep = 1.0; // share of the offset kept as lean
+                    if (stepping)
+                    {
+                        double tau = cfg.pose_lean_walk_catchup_s;
+                        keep = (tau > 1e-3 && dtn > 0.0 && dtn < 0.2) ? std::exp(-dtn / tau) : 0.0;
+                        if (d * keep > radius) keep = radius / d; // never further out than the radius
+                    }
                     follow = delta * (1.0 - keep);
                 }
+                else
+                    stepping = false;
                 if (length(delta) > 50.0 + radius)
                 {
                     g_pose_room_moved_local = total; // recentred or tracking jumped: take it as the new start

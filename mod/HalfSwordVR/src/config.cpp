@@ -413,7 +413,6 @@ namespace hsvr
         num("pose_lean_smooth_s", c.pose_lean_smooth_s);
         num("pose_lean_slack_cm", c.pose_lean_slack_cm);
         num("pose_lean_step_radius_cm", c.pose_lean_step_radius_cm);
-        num("pose_lean_walk_speed_cms", c.pose_lean_walk_speed_cms);
         num("pose_lean_walk_catchup_s", c.pose_lean_walk_catchup_s);
         flag("pose_lean_cancel_game_bend", c.pose_lean_cancel_game_bend);
         flag("pose_no_uro", c.pose_no_uro);
