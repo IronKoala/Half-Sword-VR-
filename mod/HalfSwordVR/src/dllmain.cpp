@@ -15845,6 +15845,57 @@ namespace
                 }
                 continue;
             }
+            if (entry.command.rfind("hsvr.foe_at_hand ", 0) == 0)
+            {
+                // Fist-clear tests: "hsvr.foe_at_hand <side> <cm>": every foe put facing him with his
+                // pelvis under that hand's grab point, moved <cm> further away from him (0 = the hand
+                // on his centre line), so the hand is inside his body whatever way the body faces.
+                using hsvr::Vec3;
+                int side = std::atoi(entry.command.c_str() + 17) != 0 ? 1 : 0;
+                size_t sp = entry.command.find(' ', 17);
+                double cm = sp != std::string::npos ? std::atof(entry.command.c_str() + sp + 1) : 0.0;
+                UObject* player = nullptr;
+                UObject* pm = find_pawn_mesh(&player);
+                if (!player || !pm) continue;
+                Vec3 hand = hand_grab_point(pm, side);
+                Vec3 me = actor_location(player);
+                Vec3 f{hand.x - me.x, hand.y - me.y, 0.0};
+                double fl = hsvr::length(f);
+                if (fl < 1e-3) continue;
+                f = f * (1.0 / fl);
+                double yaw = std::atan2(-f.y, -f.x) * 57.29577951308232;
+                std::vector<UObject*> foes;
+                UObjectGlobals::FindAllOf(STR("Willie_BP_C"), foes);
+                static const FName pelvis_bone2(STR("pelvis"), FNAME_Add);
+                for (UObject* foe : foes)
+                {
+                    if (!foe || foe == player || foe->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                    Vec3 al = actor_location(foe);
+                    Vec3 at{hand.x + f.x * cm, hand.y + f.y * cm, al.z};
+                    Call mv(foe, STR("K2_SetActorLocationAndRotation"));
+                    mv.three(STR("NewLocation"), at.x, at.y, at.z);
+                    mv.three(STR("NewRotation"), 0.0, yaw, 0.0);
+                    mv.flag(STR("bTeleport"), true);
+                    mv.run();
+                    UObject* fm = object_property(foe, STR("Mesh"));
+                    Vec3 after;
+                    if (fm)
+                    {
+                        Vec3 before = socket_location(fm, pelvis_bone2);
+                        Call off(fm, STR("K2_AddWorldOffset"));
+                        off.three(STR("DeltaLocation"), at.x - before.x, at.y - before.y, 0.0);
+                        off.flag(STR("bTeleport"), true);
+                        off.run();
+                        Call still(fm, STR("SetAllPhysicsLinearVelocity"));
+                        still.three(STR("NewVel"), 0.0, 0.0, 0.0);
+                        still.run();
+                        after = socket_location(fm, pelvis_bone2);
+                    }
+                    HSVR_LOG("Script: hsvr.foe_at_hand %d %.0f: %ls pelvis now (%.0f, %.0f, %.0f), hand at (%.0f, %.0f, %.0f), yaw %.0f", side, cm, foe->GetName().c_str(),
+                             after.x, after.y, after.z, hand.x, hand.y, hand.z, yaw);
+                }
+                continue;
+            }
             if (entry.command.rfind("hsvr.foe_front ", 0) == 0)
             {
                 // Stab tests: every foe stood in front of him, facing him: "hsvr.foe_front <cm>" from
