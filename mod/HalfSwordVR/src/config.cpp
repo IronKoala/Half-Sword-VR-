@@ -695,6 +695,7 @@ namespace hsvr
         flag("pose_crouch_keep_leg_ik", c.pose_crouch_keep_leg_ik);
         flag("pose_player_no_kneel", c.pose_player_no_kneel);
         flag("pose_capsule_floor_clamp", c.pose_capsule_floor_clamp);
+        flag("pose_capsule_keep_on_floor", c.pose_capsule_keep_on_floor);
         flag("pose_capsule_no_step_offset", c.pose_capsule_no_step_offset);
         num("pose_wrist_forward_cm", c.pose_wrist_forward_cm);
         num("pose_wrist_right_cm", c.pose_wrist_right_cm);
@@ -733,6 +734,12 @@ namespace hsvr
         num("stab_push_force_n", c.stab_push_force_n);
         num("stab_push_time_s", c.stab_push_time_s);
         flag("hide_own_head", c.hide_own_head);
+        integer("helmet_view", c.helmet_view);
+        num("helmet_window_cm", c.helmet_window_cm);
+        num("helmet_see_through", c.helmet_see_through);
+        integer("helmet_see_through_mode", c.helmet_see_through_mode);
+        text("helmet_see_through_param", c.helmet_see_through_param);
+        integer("helmet_see_through_test", c.helmet_see_through_test);
         text("hide_own_gore_from", c.hide_own_gore_from);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;

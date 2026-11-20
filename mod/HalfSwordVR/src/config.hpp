@@ -807,6 +807,9 @@ namespace hsvr
         // good (playtest 2026-11-20 11:20Z). Enemies are not touched; leg injuries still cut leg tonus.
         bool pose_player_no_kneel = true;
         bool pose_capsule_floor_clamp = true;
+        // Every tick: the capsule never more than 15 cm under standing height over the floor (one trace),
+        // and above it he falls with gravity (pits, ledges). Stops the running sink-into-the-floor collapse.
+        bool pose_capsule_keep_on_floor = true;
         // The game sets the capsule's height to (lower foot's step end) + half height + clamp(Step Height 2,
         // +-10). Step Height 2 sinks to about -4 cm through each step and snaps back to 0 as a foot lands,
         // so walking the capsule (and the view and his body on it) dropped and hopped ~2 times a second
@@ -893,6 +896,21 @@ namespace hsvr
         // it; it still casts its shadow and is there for the game (hits, other characters). Helmets
         // and other headwear stay visible.
         bool hide_own_head = true;
+        // Your worn helmet in your own view: 0 drawn (real, blocks the view), 1 the helmet hidden from
+        // you, 2 everything on your head hidden from you (helmet and hood/coif/cap), 3 a clear window:
+        // the parts within helmet_window_cm of your eyes aren't drawn. Others still see it and it
+        // still protects you.
+        int helmet_view = 0;
+        double helmet_window_cm = 7.0;
+        // helmet_view 4 (experiment): the helmet half see-through for you. helmet_see_through is how
+        // much you see through (0..1). helmet_see_through_mode 0 = screen door through the helmet
+        // material's texture parameter helmet_see_through_param (our own render target, dithered;
+        // helmet_see_through_test 1 fills it white, 2 black, to find what drives the opacity mask),
+        // 1 = the helmet hidden from you on alternate frames.
+        double helmet_see_through = 0.5;
+        int helmet_see_through_mode = 0;
+        std::string helmet_see_through_param = "RT_Damage";
+        int helmet_see_through_test = 0;
         // The gore skeleton under his skin (skull, jaw, teeth, throat) would show from inside the
         // hidden head: it is hidden from this bone up. Empty = not hidden. Wounds elsewhere still
         // show their bones.
