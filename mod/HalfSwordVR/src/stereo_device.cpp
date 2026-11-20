@@ -38,6 +38,9 @@ namespace hsvr
             double base_yaw = 0.0; // world heading that "straight ahead" maps to
             Recenter recenter;
             double cm_per_metre = 100.0; // world centimetres per real metre (last seen)
+            Vec3 eye_at[2];              // each eye as the engine last drew it (world), for the helmet probe
+            Quat eye_rot[2];
+            bool eye_valid[2] = {false, false};
         };
         FrameView g_view;
         bool g_have_smoothed = false;
@@ -256,6 +259,12 @@ namespace hsvr
                 ViewRotation.Pitch = rotation.pitch;
                 ViewRotation.Yaw = rotation.yaw;
                 ViewRotation.Roll = rotation.roll;
+                if (ViewIndex >= 0 && ViewIndex < 2)
+                {
+                    g_view.eye_at[ViewIndex] = location;
+                    g_view.eye_rot[ViewIndex] = (base * relative_rotation).normalized();
+                    g_view.eye_valid[ViewIndex] = true;
+                }
             }
 
             ue::FMatrix GetStereoProjectionMatrix(const int32_t ViewIndex) const override
@@ -398,6 +407,14 @@ namespace hsvr
     {
         if (!g_view.valid) return false;
         return current_anchor(anchor, base_yaw); // the same anchor stereo_tracking_to_world places things from
+    }
+
+    bool stereo_last_eye(int index, Vec3& location, Quat& rotation)
+    {
+        if (index < 0 || index > 1 || !g_view.eye_valid[index]) return false;
+        location = g_view.eye_at[index];
+        rotation = g_view.eye_rot[index];
+        return true;
     }
 
     bool stereo_separate_target()

@@ -328,6 +328,7 @@ namespace
     };
     PerfAcc g_perf[PerfCount];
     thread_local uint64_t t_perf_child = 0;
+    thread_local int t_perf_depth = 0; // mod scopes open on this thread (game-cost probes skip calls the mod makes)
     inline uint64_t perf_now()
     {
         LARGE_INTEGER c;
@@ -338,9 +339,14 @@ namespace
     {
         PerfId id;
         uint64_t start, saved;
-        explicit PerfScope(PerfId i) : id(i), start(perf_now()), saved(t_perf_child) { t_perf_child = 0; }
+        explicit PerfScope(PerfId i) : id(i), start(perf_now()), saved(t_perf_child)
+        {
+            t_perf_child = 0;
+            ++t_perf_depth;
+        }
         ~PerfScope()
         {
+            --t_perf_depth;
             uint64_t all = perf_now() - start;
             g_perf[id].ticks.fetch_add(all - (std::min)(all, t_perf_child), std::memory_order_relaxed);
             g_perf[id].calls.fetch_add(1, std::memory_order_relaxed);
@@ -2760,7 +2766,12 @@ namespace
                 }
             }
         if (helmet != g_helmet)
-            HSVR_LOG("Helmet: %ls (%d skeletal pieces on his body, %d on the head)", helmet ? helmet->GetFullName().c_str() : STR("none worn"), (int)parts.size(), tagged);
+        {
+            UObject* sk = helmet ? object_property(helmet, STR("SkeletalMesh")) : nullptr;
+            if (helmet && !sk) sk = object_property(helmet, STR("SkeletalMeshAsset"));
+            HSVR_LOG("Helmet: %ls, mesh %ls (%d skeletal pieces on his body, %d on the head)", helmet ? helmet->GetFullName().c_str() : STR("none worn"),
+                     sk ? sk->GetName().c_str() : STR("-"), (int)parts.size(), tagged);
+        }
         g_helmet = helmet;
         g_head_pieces = head_pieces;
         if (cfg.pose_no_uro)
@@ -5764,6 +5775,10 @@ namespace
         hsvr::Vec3 a, b;
         std::string name;
         int grip_r = -1, grip_l = -1; // finger shape for that hand (-1 = the game's own)
+        // A fixed grip (a one-handed sword's): touching anywhere on a..b takes it, but the hand always
+        // holds it at a + (b - a) * fixed_t and never slides along it.
+        bool fixed = false;
+        double fixed_t = 0.0;
     };
     const std::vector<Handle>& item_handles(UObject* item, UObject* base);
     // Weapons and tools are taken only by a handle; shields and bottles anywhere.
@@ -5782,6 +5797,11 @@ namespace
     FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t);
     int clamp_grip_type(int side, int g);
     double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out = nullptr, UObject** out_part = nullptr);
+    bool class_name_starts(UObject* object, const TCHAR* prefix);
+    // A shield touched away from its straps and handles: may the hand take it there (its rim, not a face)?
+    bool shield_off_handle_ok(int side, UObject* shield, UObject* base, const hsvr::Vec3& hand, const hsvr::Config& cfg);
+    // A pavise that hand wears on its forearm (pose_pavise_forearm): the game's own strap grip for that hand.
+    bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg);
 
     // The grab button (Phase 4): squeezing a controller's grip with that hand empty picks up the
     // nearest loose weapon whose body is within pose_grab_radius_cm of the hand; letting go of the
@@ -6079,6 +6099,7 @@ namespace
                      weapon->GetName().c_str(), hi >= 0 ? hs[hi].name.c_str() : "none", hd);
             return false;
         }
+        if (!on_handle && class_name_starts(weapon, STR("Shield")) && !shield_off_handle_ok(side, weapon, base, at, cfg)) return false;
         Vec3 spot = local;
         if (!on_handle)
         {
@@ -6891,6 +6912,94 @@ namespace
         return cls;
     }
 
+    // A shield's plate normal in its BaseMesh frame: the local axis with the least collision across it
+    // (asked from 200 cm out each way, as hsvr.bring_object's rim test), found once per class.
+    hsvr::Vec3 shield_plate_normal(UObject* shield, UObject* base)
+    {
+        using namespace hsvr;
+        static std::unordered_map<std::wstring, Vec3> known;
+        std::wstring cls = shield_class(shield);
+        auto f = known.find(cls);
+        if (f != known.end()) return f->second;
+        Vec3 centre = component_location(base);
+        Quat rot = component_rotation(base);
+        const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        double across[3];
+        bool ok = true;
+        for (int a = 0; a < 3; ++a)
+        {
+            across[a] = 0.0;
+            for (double sgn : {1.0, -1.0})
+            {
+                Vec3 dir = rot.rotate(axes[a] * sgn), p;
+                if (closest_on_weapon(shield, centre + dir * 200.0, &p) < 0.0)
+                {
+                    ok = false;
+                    p = centre;
+                }
+                across[a] += dot(p - centre, dir);
+            }
+        }
+        int thin = 0;
+        for (int a = 1; a < 3; ++a)
+            if (across[a] < across[thin]) thin = a;
+        HSVR_LOG("Shield: %ls across its local X %.1f, Y %.1f, Z %.1f cm: plate faces along %c", cls.c_str(), across[0], across[1], across[2], "XYZ"[thin]);
+        if (ok) known[cls] = axes[thin];
+        return axes[thin];
+    }
+
+    // Pavises start locked to the forearm, like a real pavise (Matthew 2026-11-20). The game already
+    // straps a shield to the forearm for grip types 6 (Shield) and 7 (Shield_Heavy): its joint is to
+    // lowerarm_x at shield_x_socket (shield_grips.md). Pavise_Light is 6 for both hands (forearm through
+    // its lower strap, fist on its top handle); Pavise_Heavy is 7 for the left hand only (forearm
+    // through its long strap, fist on its side bar) and 8 (a handle in the hand) for the right; the
+    // Tower pavise is 8 for both and has no forearm strap on its mesh. So: the game's own forearm
+    // grip, kept (not moved into the hand), wherever the game has one for that hand.
+    bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg)
+    {
+        if (!cfg.pose_pavise_forearm || !shield || !class_name_starts(shield, STR("Shield_Pavise"))) return false;
+        double g = read_number_variable(shield, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default"));
+        return g == 6.0 || g == 7.0;
+    }
+
+    // Away from its straps and handles a shield is taken only by its rim: the point the hand touched
+    // is within pose_shield_rim_cm of an outer edge (a probe that far out from it, along the plate,
+    // finds the shield's nearest point off to the side, past the edge). A flat face is never taken.
+    bool shield_off_handle_ok(int side, UObject* shield, UObject* base, const hsvr::Vec3& hand, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (cfg.pose_shield_grab_face) return true;
+        const char* hname = side == 0 ? "left" : "right";
+        if (!cfg.pose_shield_grab_rim)
+        {
+            HSVR_LOG("Grab: %s hand touched %ls off its straps and handles: not taken (pose_shield_grab_rim 0)", hname, shield->GetName().c_str());
+            return false;
+        }
+        Vec3 touch;
+        if (closest_on_weapon(shield, hand, &touch) < 0.0) return false;
+        Quat rot = component_rotation(base);
+        Vec3 n = normalized(rot.rotate(shield_plate_normal(shield, base)));
+        // Two directions along the plate, and eight probes round the touch point.
+        Vec3 u = cross(n, Vec3{0, 0, 1});
+        if (length(u) < 0.2) u = cross(n, Vec3{1, 0, 0});
+        u = normalized(u);
+        Vec3 v = cross(n, u);
+        double r = cfg.pose_shield_rim_cm, most = 0.0;
+        for (int i = 0; i < 8; ++i)
+        {
+            double ang = i * 3.14159265358979 / 4.0;
+            Vec3 probe = touch + (u * std::cos(ang) + v * std::sin(ang)) * r, p;
+            if (closest_on_weapon(shield, probe, &p) < 0.0) continue;
+            Vec3 off = p - probe;
+            off = off - n * dot(off, n); // along the plate only (a curved face sits a little behind)
+            most = (std::max)(most, length(off));
+        }
+        bool rim = most > 1.0;
+        HSVR_LOG("Grab: %s hand touched %ls off its straps and handles: %s (an edge %s %.0f cm; probes reached %.1f cm past it)", hname, shield->GetName().c_str(),
+                 rim ? "by the rim, taken" : "on a flat face, not taken", rim ? "within" : "not within", r, most);
+        return rim;
+    }
+
     // A shield taken with the grip button. The hand point, in the shield's frame from before the
     // game's set-up moves it, is matched against its fittings: the nearest within
     // pose_shield_point_cm wins. One of the game's own for that hand keeps the game's grip (bucklers
@@ -6904,6 +7013,11 @@ namespace
     {
         using namespace hsvr;
         const char* hand = side == 0 ? "left" : "right";
+        if (pavise_on_forearm(shield, side, cfg))
+        {
+            HSVR_LOG("Shield: %s hand took %ls: strapped on the forearm (the game's own strap grip, pose_pavise_forearm)", hand, shield->GetName().c_str());
+            return;
+        }
         std::wstring cls = shield_class(shield);
         Vec3 local = w0_rot.inverse().rotate(palm - w0_pos);
         Vec3 best_on;
@@ -8310,9 +8424,12 @@ namespace
                                  hi >= 0 ? hs[hi].name.c_str() : "none", hd, cfg.pose_grab_handle_cm);
                         continue;
                     }
+                    if (!(hi >= 0 && hd <= cfg.pose_grab_handle_cm) && class_name_starts(best, STR("Shield")) && !shield_off_handle_ok(side, best, hb, at, cfg)) continue;
                     bool ok = give_hand_weapon(side, pawn, best);
                     UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
-                    if (ok && now == best)
+                    if (ok && now == best && pavise_on_forearm(best, side, cfg))
+                        HSVR_LOG("Grab: %s hand took %ls: strapped on the forearm (the game's own strap grip, pose_pavise_forearm)", hand, best->GetName().c_str());
+                    else if (ok && now == best)
                     {
                         if (hi >= 0 && hd <= cfg.pose_grab_handle_cm)
                         {
@@ -8749,6 +8866,12 @@ namespace
                 Vec3 c{f.cx, f.cy, f.cz}, a = normalized(Vec3{f.ax, f.ay, f.az});
                 double h = (std::max)(0.0, f.length * 0.5 - half);
                 hs.push_back(Handle{c - a * h, c + a * h, f.name, 5, 5});
+                if (cfg.pose_shield_fixed_grip)
+                {
+                    // Fixed (Matthew 2026-11-20): held at its middle, any angle round it, never slid.
+                    hs.back().fixed = true;
+                    hs.back().fixed_t = 0.5;
+                }
             }
         }
         else
@@ -8764,6 +8887,21 @@ namespace
                 double g0 = (std::min)(0.0, lo + half), g1 = (std::max)(0.0, hi - half);
                 hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, g1}, "grip", -1, 2});
                 bool hafted = hi - lo >= 30.0;
+                // One-handed sword (a Guard, a blade past it, not hafted) by the game's own grip type, which
+                // ModularWeaponBP copies from its grip module (UG @19423 Grip R Hand Default = Spawned Weapon
+                // Grip.Grip R Hand Default). The game two-hands only types 10-16 (Willie_BP UG @494280 maps
+                // them to one-handed types; 0-9 and 17 stay as they are; grip_type_flow.md section 3).
+                double grip_type = read_number_variable(item, STR("Grip R Hand Default"));
+                bool two_hand_type = grip_type >= 10.0 && grip_type <= 16.0;
+                bool sword = !hafted && wide_hi && weapon_has_guard(item);
+                if (sword)
+                    HSVR_LOG("Handles: %ls: sword, game grip type %.0f (%s), grip %.1f..%.1f cm", item->GetName().c_str(), grip_type,
+                             grip_type < 0.0 ? "not found" : two_hand_type ? "two-handed: grip slides" : "one-handed", g0, g1);
+                if (sword && cfg.pose_slide_fixed_1h_sword && grip_type >= 0.0 && !two_hand_type && g1 - g0 > 1e-3)
+                {
+                    hs.back().fixed = true;
+                    hs.back().fixed_t = (std::min)(1.0, (std::max)(0.0, (0.0 - g0) / (g1 - g0))); // the game's grip point
+                }
                 if (hafted)
                 {
                     // Every further haft stretch is a handle of its own; the head is not (B&S).
@@ -8784,7 +8922,8 @@ namespace
         for (const Handle& h : hs)
         {
             char one[160];
-            std::snprintf(one, sizeof(one), "%s%s (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f)", list.empty() ? "" : "; ", h.name.c_str(), h.a.x, h.a.y, h.a.z, h.b.x, h.b.y, h.b.z);
+            std::snprintf(one, sizeof(one), "%s%s (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f)%s", list.empty() ? "" : "; ", h.name.c_str(), h.a.x, h.a.y, h.a.z, h.b.x, h.b.y, h.b.z,
+                          h.fixed ? " fixed, no slide" : "");
             list += one;
         }
         // A weapon whose parts were not found yet (spawned straight into the hand) is measured again next
@@ -8832,11 +8971,12 @@ namespace
     FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t)
     {
         using namespace hsvr;
+        if (hd.fixed) t = hd.fixed_t;
         Vec3 local = hd.a + (hd.b - hd.a) * t;
         Vec3 axis_local = length(hd.b - hd.a) > 1e-3 ? normalized(hd.b - hd.a) : Vec3{0, 0, 1};
         Vec3 axis = w0_rot.rotate(axis_local);
         FreeGrip g = make_free_grip(side, mesh, w0_pos, w0_rot, palm, w0_pos + w0_rot.rotate(local), &axis, hd.name.c_str());
-        g.has_handle = length(hd.b - hd.a) > 1e-3;
+        g.has_handle = length(hd.b - hd.a) > 1e-3 && !hd.fixed; // no slide on a fixed grip
         g.ha = hd.a;
         g.hb = hd.b;
         g.t = t;
@@ -9300,7 +9440,7 @@ namespace
                                     : (forearm ? " (on the forearm: strap shield)" : ""));
             }
             h.forearm = forearm;
-            if (forearm && !h.free.set && !h.into_hand_tried && cfg.pose_shield_in_hand)
+            if (forearm && !h.free.set && !h.into_hand_tried && cfg.pose_shield_in_hand && !pavise_on_forearm(weapon, side, cfg))
             {
                 h.into_hand_tried = true;
                 FreeGrip g;
@@ -9368,7 +9508,14 @@ namespace
             const std::vector<Handle>& hs = item_handles(weapon, base);
             double t = 0.0, d = 1e9;
             int hi = nearest_handle(hs, pivot, t, d);
-            if (hi >= 0 && d <= 4.0 && length(hs[hi].b - hs[hi].a) > 1e-3)
+            if (hi >= 0 && d <= 4.0 && hs[hi].fixed)
+            {
+                // A one-handed sword: held at its fixed spot (the game's grip point), no slide.
+                g.handle = hs[hi].name;
+                g.t = hs[hi].fixed_t;
+                g.pivot = hs[hi].a + (hs[hi].b - hs[hi].a) * g.t;
+            }
+            else if (hi >= 0 && d <= 4.0 && length(hs[hi].b - hs[hi].a) > 1e-3)
             {
                 g.has_handle = true;
                 g.ha = hs[hi].a;
@@ -9380,8 +9527,8 @@ namespace
                 g.pivot = g.ha + ab * g.t;
             }
             h.free = g;
-            HSVR_LOG("Hold: %s hand holds %ls by the game's grip%s%s", side == 0 ? "left" : "right", weapon->GetName().c_str(), g.has_handle ? ", on its " : " (no handle near)",
-                     g.has_handle ? g.handle.c_str() : "");
+            HSVR_LOG("Hold: %s hand holds %ls by the game's grip%s%s", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                     g.has_handle ? ", on its " : !g.handle.empty() ? ", at its " : " (no handle near)", g.handle.c_str());
         }
         if (h.free.set && h.free.has_handle && cfg.pose_slide && cfg.pose_hold_exact)
         {
@@ -11282,6 +11429,17 @@ namespace
         {
             UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             if (!weapon || g_hold[side].weapon != weapon) continue;
+            // "Just Picked Up" blocks sticking for 2 s after any equip (ModularWeaponBP @42292); in VR
+            // a weapon is in the hand within 0.1 s and stabbed with at once (playtest 2026-11-20d:
+            // 10% of hits, e.g. a head thrust at cutting 79 x impulse 2799 refused). Cleared once it
+            // has been held stab_pickup_grace_s.
+            if (hsvr::config().stab_pickup_grace_s >= 0.0 && g_hold[side].started > 0.0 &&
+                hsvr::now_seconds() - g_hold[side].started >= hsvr::config().stab_pickup_grace_s && bool_property(weapon, STR("Just Picked Up")))
+            {
+                set_variable(weapon, STR("Just Picked Up"), 0.0);
+                HSVR_LOG_EVERY(2.0, "Stab: %s %ls: Just Picked Up cleared after %.2f s in the hand", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                               hsvr::now_seconds() - g_hold[side].started);
+            }
             if (!bool_property(weapon, STR("Being Rubber Banded"))) continue;
             set_variable(weapon, STR("Being Rubber Banded"), 0.0);
             ++cleared[side];
@@ -15546,6 +15704,18 @@ namespace
         }
     }
 
+    bool g_script_player_immortal = false;
+    void script_immortal_tick()
+    {
+        static double last = -10.0;
+        if (!g_script_player_immortal) return;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        if (pawn && !set_bool_property(pawn, STR("Immortal"), true)) HSVR_LOG_EVERY(30.0, "Script: hsvr.player_immortal: no Immortal variable on the player");
+    }
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -15643,6 +15813,14 @@ namespace
             if (entry.command.rfind("hsvr.set ", 0) == 0)
             {
                 script_set_game_instance(entry.command.substr(9));
+                continue;
+            }
+            if (entry.command == "hsvr.player_immortal")
+            {
+                // Test: the player's Willie gets the game's own Immortal flag (kept on about once a
+                // second, also across respawns), so an unattended fight stays a fight.
+                g_script_player_immortal = true;
+                HSVR_LOG("Script: hsvr.player_immortal: on");
                 continue;
             }
             if (entry.command == "hsvr.test_room_boot")
@@ -16284,6 +16462,176 @@ namespace
                 UObject* pawn = nullptr;
                 find_pawn_mesh(&pawn);
                 if (pawn) weapon_dump(entry.command.size() > 17 && entry.command[17] == '0' ? 0 : 1, pawn);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.wear ", 0) == 0)
+            {
+                // hsvr.wear <armour class path>: he puts that armour piece on the way the game does when he
+                // picks one up (Willie's "Equip Armor" with an armour actor, armor_equip.md). The class
+                // default passport is empty, so the spawned actor's passport gets its class, slot and an
+                // ID first. For unattended tests: the scripted Free Mode start has no helmet.
+                std::string rest = entry.command.substr(10);
+                while (!rest.empty() && rest.back() == ' ') rest.pop_back();
+                std::wstring path(rest.begin(), rest.end());
+                UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
+                if (!cls)
+                {
+                    std::wstring asset = path;
+                    if (asset.size() > 2 && asset.substr(asset.size() - 2) == STR("_C")) asset.resize(asset.size() - 2);
+                    load_asset_object(asset);
+                    cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
+                }
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+                if (!cls || !mesh || !gs || !func_chain(pawn, STR("Equip Armor")))
+                {
+                    HSVR_LOG("Script: hsvr.wear: %s (class %s, character %s)", rest.c_str(), cls ? "found" : "NOT FOUND", mesh ? "found" : "none");
+                    continue;
+                }
+                hsvr::Vec3 at = component_location(mesh) + hsvr::Vec3{0, 0, 300.0};
+                auto fill_transform = [&](Call& c) {
+                    FProperty* p = c.param(STR("SpawnTransform"));
+                    UScriptStruct* type = p ? struct_type(p) : nullptr;
+                    if (!type) return;
+                    uint8_t* tat = c.buffer.data() + p->GetOffset_Internal();
+                    if (FProperty* r = struct_member(type, STR("Rotation")))
+                        if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                        {
+                            uint8_t* wat = tat + r->GetOffset_Internal() + w->GetOffset_Internal();
+                            if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                            else *reinterpret_cast<float*>(wat) = 1.0f;
+                        }
+                    if (FProperty* t = struct_member(type, STR("Translation"))) write_three(tat + t->GetOffset_Internal(), t, at.x, at.y, at.z);
+                    if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(tat + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+                };
+                Call begin(gs, STR("BeginDeferredActorSpawnFromClass"));
+                begin.object(STR("WorldContextObject"), pawn);
+                begin.object(STR("ActorClass"), cls);
+                fill_transform(begin);
+                begin.byte(STR("CollisionHandlingOverride"), 1);
+                begin.run();
+                UObject* actor = begin.object_result();
+                if (!actor)
+                {
+                    HSVR_LOG("Script: hsvr.wear: %s NOT spawned", rest.c_str());
+                    continue;
+                }
+                FProperty* pp = class_member(actor, STR("Armor Passport"));
+                UScriptStruct* pt = struct_type(pp);
+                FProperty* core = struct_member_prefix(pt, STR("ArmorCore_"));
+                FProperty* slot = struct_member_prefix(pt, STR("Slot_"));
+                FProperty* id = struct_member_prefix(pt, STR("ID_"));
+                double armor_slot = read_number_variable(actor, STR("Armor Slot"));
+                if (pp && core && slot && id && armor_slot >= 0.0)
+                {
+                    uint8_t* base = reinterpret_cast<uint8_t*>(actor) + pp->GetOffset_Internal();
+                    *reinterpret_cast<UClass**>(base + core->GetOffset_Internal()) = cls;
+                    *(base + slot->GetOffset_Internal()) = (uint8_t)armor_slot;
+                    *reinterpret_cast<int32_t*>(base + id->GetOffset_Internal()) = 4000 + (int32_t)armor_slot;
+                }
+                Call finish(gs, STR("FinishSpawningActor"));
+                finish.object(STR("Actor"), actor);
+                fill_transform(finish);
+                finish.run();
+                Call equip(pawn, STR("Equip Armor"));
+                equip.object(STR("Armor Actor"), actor);
+                equip.run();
+                FProperty* picked = equip.param(STR("Picked Up"));
+                bool ok = picked && (equip.buffer[picked->GetOffset_Internal()] & static_cast<FBoolProperty*>(picked)->GetFieldMask()) != 0;
+                HSVR_LOG("Script: hsvr.wear: %s, slot %d, passport %s, equipped: %s", rest.c_str(), (int)armor_slot,
+                         (pp && core && slot && id) ? "set" : "NOT SET (members not found)", ok ? "yes" : "no");
+                g_helmet_pawn = nullptr; // look for head pieces again now
+                continue;
+            }
+            if (entry.command.rfind("hsvr.helmet_probe", 0) == 0)
+            {
+                // hsvr.helmet_probe: what you see a helmet from (the see-through hunt, playtest 2026-11-20):
+                // each piece on his head with its mesh, its visibility flags and its materials (two-sided or
+                // not), and where each eye and the game's flat first-person camera are in the helmet's own
+                // head-bone frame (x, y forward, z up as the meshes are made), plus the near clip.
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                if (!pawn || !mesh) continue;
+                hsvr::Config pcfg = hsvr::config();
+                UObject* ref = g_helmet ? g_helmet : mesh;
+                hsvr::Vec3 hb = socket_location(ref, bone_fname("head"));
+                // The meshes' own frame at the head: the component's rotation (the head bone is unrotated
+                // in the reference pose), turned with the head bone's pose against the body.
+                hsvr::Quat hr = socket_rotation(ref, bone_fname("head"));
+                auto local = [&](const hsvr::Vec3& w) { return hr.inverse().rotate(w - hb); };
+                HSVR_LOG("Probe helmet: near clip %.2f cm, eye offset fwd %.1f up %.1f; head bone of %ls", pcfg.near_clip_cm, pcfg.eye_forward_cm, pcfg.eye_up_cm, ref->GetName().c_str());
+                for (int e = 0; e < 2; ++e)
+                {
+                    hsvr::Vec3 at;
+                    hsvr::Quat r;
+                    if (!hsvr::stereo_last_eye(e, at, r)) continue;
+                    hsvr::Vec3 l = local(at), f = hr.inverse().rotate(r.rotate(hsvr::Vec3{1, 0, 0}));
+                    HSVR_LOG("Probe helmet: eye %d at (%.2f, %.2f, %.2f) in the head frame, looking (%.2f, %.2f, %.2f)", e, l.x, l.y, l.z, f.x, f.y, f.z);
+                }
+                for (const TCHAR* cam : {STR("First Person Camera"), STR("Camera Scene FP"), STR("CameraBoomFP")})
+                    if (UObject* c = object_property(pawn, cam))
+                    {
+                        hsvr::Vec3 l = local(component_location(c));
+                        hsvr::Vec3 f = hr.inverse().rotate(component_rotation(c).rotate(hsvr::Vec3{1, 0, 0}));
+                        HSVR_LOG("Probe helmet: flat %ls at (%.2f, %.2f, %.2f) in the head frame, facing (%.2f, %.2f, %.2f)", cam, l.x, l.y, l.z, f.x, f.y, f.z);
+                    }
+                {
+                    double v[3] = {0, 0, 0};
+                    if (FProperty* fp = prop_chain(pawn, STR("Helmet FPV Offset"))) read_three(reinterpret_cast<uint8_t*>(pawn) + fp->GetOffset_Internal(), fp, v);
+                    HSVR_LOG("Probe helmet: Helmet FPV Offset (%.2f, %.2f, %.2f)", v[0], v[1], v[2]);
+                }
+                for (UObject* c : g_head_pieces)
+                {
+                    if (!c) continue;
+                    UObject* sk = object_property(c, STR("SkeletalMesh"));
+                    if (!sk) sk = object_property(c, STR("SkeletalMeshAsset"));
+                    auto flag = [&](const TCHAR* n) {
+                        FProperty* p = prop_chain(c, n);
+                        return p ? number_property(c, p) : -1.0;
+                    };
+                    Call vis(c, STR("IsVisible"));
+                    vis.run();
+                    FProperty* vr = vis.param(STR("ReturnValue"));
+                    bool visible = vr && (vis.buffer[vr->GetOffset_Internal()] & static_cast<FBoolProperty*>(vr)->GetFieldMask()) != 0;
+                    Call lb(c, STR("GetLocalBounds"));
+                    lb.run();
+                    hsvr::Vec3 mn = lb.vec(STR("Min")), mx = lb.vec(STR("Max"));
+                    HSVR_LOG("Probe helmet: piece %ls mesh %ls visible %d ownerNoSee %.0f hiddenInGame %.0f bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f)", c->GetName().c_str(),
+                             sk ? sk->GetName().c_str() : STR("?"), visible ? 1 : 0, flag(STR("bOwnerNoSee")), flag(STR("bHiddenInGame")), mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
+                    Call nm(c, STR("GetNumMaterials"));
+                    nm.run();
+                    int n = nm.integer();
+                    for (int i = 0; i < n && i < 16; ++i)
+                    {
+                        Call gm(c, STR("GetMaterial"));
+                        if (FProperty* ip = gm.param(STR("ElementIndex"))) *reinterpret_cast<int32_t*>(gm.buffer.data() + ip->GetOffset_Internal()) = i;
+                        gm.run();
+                        UObject* m = gm.object_result();
+                        if (!m) continue;
+                        Call bm(m, STR("GetBaseMaterial"));
+                        bm.run();
+                        UObject* b = bm.object_result();
+                        double two = -1.0, over = -1.0, over_two = -1.0;
+                        if (b)
+                            if (FProperty* tp = prop_chain(b, STR("TwoSided"))) two = number_property(b, tp);
+                        if (FProperty* bo = prop_chain(m, STR("BasePropertyOverrides")))
+                        {
+                            UScriptStruct* t = struct_type(bo);
+                            uint8_t* mat = reinterpret_cast<uint8_t*>(m) + bo->GetOffset_Internal();
+                            auto rb = [&](const TCHAR* n) {
+                                FProperty* f = struct_member(t, n);
+                                if (!f) return -1.0;
+                                auto* fb = static_cast<FBoolProperty*>(f);
+                                return (mat[f->GetOffset_Internal() + fb->GetByteOffset()] & fb->GetFieldMask()) ? 1.0 : 0.0;
+                            };
+                            over = rb(STR("bOverride_TwoSided"));
+                            over_two = rb(STR("TwoSided"));
+                        }
+                        HSVR_LOG("Probe helmet:   material %d %ls (base %ls): base two-sided %.0f, instance override %.0f -> %.0f", i, m->GetName().c_str(),
+                                 b ? b->GetName().c_str() : STR("?"), two, over, over_two);
+                    }
+                }
                 continue;
             }
             if (entry.command.rfind("hsvr.spawn ", 0) == 0)
@@ -17259,6 +17607,609 @@ namespace
     }
 
     // The Perf: line (see PerfScope). Object counts come from the engine's class hash tables.
+    // ---- Game-thread cost probes (perf_events, perf_sample), for "where do the game's 18 ms a frame go
+    // in a 9-foe fight". Both only measure; they change nothing in the game.
+    //
+    // perf_events: every ProcessEvent the game makes on its game thread (native code calling a
+    // Blueprint: actor ReceiveTick, anim BlueprintUpdateAnimation, timers, delegates, hit events),
+    // timed per class and function, with the mod's own time inside taken out. Calls the mod itself
+    // makes are skipped. Pre is registered after the mod's own pre callbacks and post before its post
+    // callbacks, so those sit outside the timed span.
+    //
+    // perf_sample: a thread that stops the game thread about 1000 times a second, walks its stack
+    // with the exe's unwind tables and counts each function (by start address) once per sample:
+    // "self" = the function running, "incl" = anywhere on the stack. Addresses are module+RVA, to
+    // look up in Ghidra.
+    DWORD g_game_thread_id = 0;
+    HANDLE g_game_thread = nullptr;
+    bool g_ev_active = false; // changed only from the engine tick (no ProcessEvent open), so pre/post pair up
+    struct EvKey
+    {
+        const void* cls;
+        const void* fn;
+        bool operator==(const EvKey& o) const { return cls == o.cls && fn == o.fn; }
+    };
+    struct EvKeyHash
+    {
+        size_t operator()(const EvKey& k) const { return std::hash<const void*>{}(k.cls) * 31u ^ std::hash<const void*>{}(k.fn); }
+    };
+    struct EvStat
+    {
+        std::string name;
+        uint64_t incl = 0, excl = 0, outer = 0, calls = 0, worst = 0;
+    };
+    std::unordered_map<EvKey, EvStat, EvKeyHash> g_ev_stats;
+    struct EvFrame
+    {
+        EvStat* st;
+        uint64_t start, child, mod_at;
+    };
+    EvFrame g_ev_stack[512];
+    int g_ev_depth = 0;
+    uint64_t g_ev_outer_ticks = 0, g_ev_calls = 0, g_ev_skipped = 0;
+    bool g_ev_naming = false;
+
+    void ev_pre(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        if (!g_ev_active || GetCurrentThreadId() != g_game_thread_id) return;
+        if (g_ev_depth >= 512) { ++g_ev_depth; return; }
+        EvFrame& f = g_ev_stack[g_ev_depth++];
+        f.st = nullptr;
+        f.child = 0;
+        f.mod_at = t_perf_child;
+        f.start = 0;
+        if (t_perf_depth > 0 || g_ev_naming || !context || !function)
+        {
+            ++g_ev_skipped;
+            return;
+        }
+        EvKey k{context->GetClassPrivate(), function};
+        auto it = g_ev_stats.find(k);
+        if (it == g_ev_stats.end())
+        {
+            g_ev_naming = true; // naming can run script (ToString); do not time ourselves
+            EvStat st;
+            UStruct* cls = context->GetClassPrivate();
+            st.name = (cls ? narrow(cls->GetName()) : std::string("?")) + "." + narrow(function->GetName());
+            g_ev_naming = false;
+            it = g_ev_stats.emplace(k, std::move(st)).first;
+        }
+        f.st = &it->second;
+        f.mod_at = t_perf_child;
+        f.start = perf_now();
+    }
+    void ev_post(Hook::TCallbackIterationData<void>&, UObject*, UFunction*, void*)
+    {
+        if (!g_ev_active || GetCurrentThreadId() != g_game_thread_id || g_ev_depth <= 0) return;
+        if (g_ev_depth > 512) { --g_ev_depth; return; }
+        EvFrame f = g_ev_stack[--g_ev_depth];
+        if (!f.st) return;
+        uint64_t all = perf_now() - f.start, mod = t_perf_child - f.mod_at;
+        uint64_t incl = all - (std::min)(all, mod);
+        f.st->incl += incl;
+        f.st->excl += incl - (std::min)(incl, f.child);
+        f.st->worst = (std::max)(f.st->worst, incl);
+        ++f.st->calls;
+        ++g_ev_calls;
+        if (g_ev_depth > 0)
+            g_ev_stack[g_ev_depth - 1].child += incl;
+        else
+        {
+            f.st->outer += incl;
+            g_ev_outer_ticks += incl;
+        }
+    }
+
+    // Sampler.
+    struct SampleCount
+    {
+        uint64_t self = 0, incl = 0;
+    };
+    std::mutex g_sample_mutex;
+    std::unordered_map<uint64_t, SampleCount> g_samples, g_samples_all;
+    uint64_t g_sample_total = 0, g_sample_total_all = 0, g_sample_failed = 0;
+    std::atomic<bool> g_sampler_running{false}, g_sample_on{false};
+
+    // Walks the suspended thread's stack. No allocation, no locks of ours: the game thread may hold
+    // the heap lock while it is stopped. Returns how many frames; fn[i] = function start (or the
+    // address itself when it has no unwind entry).
+    int sample_walk(HANDLE thread, uint64_t* fn, int max)
+    {
+        CONTEXT ctx{};
+        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if (!GetThreadContext(thread, &ctx)) return -1;
+        int n = 0;
+        __try
+        {
+            while (n < max && ctx.Rip)
+            {
+                DWORD64 base = 0;
+                PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(ctx.Rip, &base, nullptr);
+                if (!rf)
+                {
+                    fn[n++] = ctx.Rip;
+                    if (n > 1) break; // code without unwind data mid-stack (hook stubs): stop
+                    ctx.Rip = *reinterpret_cast<DWORD64*>(ctx.Rsp); // leaf: return address on top
+                    ctx.Rsp += 8;
+                    continue;
+                }
+                fn[n++] = base + rf->BeginAddress;
+                void* handler_data = nullptr;
+                DWORD64 establisher = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, rf, &ctx, &handler_data, &establisher, nullptr);
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        return n;
+    }
+    DWORD WINAPI sampler_thread(void*)
+    {
+        HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /*CREATE_WAITABLE_TIMER_HIGH_RESOLUTION*/, TIMER_ALL_ACCESS);
+        if (!timer) timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+        uint64_t fn[96];
+        while (g_sampler_running.load())
+        {
+            LARGE_INTEGER due;
+            due.QuadPart = -10000; // 1 ms
+            SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
+            WaitForSingleObject(timer, 20);
+            HANDLE h = g_game_thread;
+            if (!h || !g_sample_on.load()) continue;
+            if (SuspendThread(h) == (DWORD)-1) continue;
+            int n = sample_walk(h, fn, 96);
+            ResumeThread(h);
+            std::lock_guard<std::mutex> lock(g_sample_mutex);
+            if (n <= 0)
+            {
+                ++g_sample_failed;
+                continue;
+            }
+            ++g_sample_total, ++g_sample_total_all;
+            for (int i = 0; i < n; ++i)
+            {
+                bool seen = false;
+                for (int j = 0; j < i && !seen; ++j) seen = fn[j] == fn[i];
+                if (seen) continue;
+                SampleCount& c = g_samples[fn[i]];
+                SampleCount& a = g_samples_all[fn[i]];
+                ++c.incl, ++a.incl;
+                if (i == 0) ++c.self, ++a.self;
+            }
+        }
+        CloseHandle(timer);
+        return 0;
+    }
+    std::string module_rva(uint64_t addr)
+    {
+        HMODULE m = nullptr;
+        char b[300];
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(addr), &m) || !m)
+        {
+            snprintf(b, sizeof b, "?+0x%llx", (unsigned long long)addr);
+            return b;
+        }
+        wchar_t path[MAX_PATH];
+        DWORD len = GetModuleFileNameW(m, path, MAX_PATH);
+        std::wstring w(path, len);
+        size_t slash = w.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) w = w.substr(slash + 1);
+        snprintf(b, sizeof b, "%s+0x%llx", narrow(w).c_str(), (unsigned long long)(addr - reinterpret_cast<uint64_t>(m)));
+        return b;
+    }
+    // Every probe's game-thread setup, from the engine tick (no ProcessEvent open there).
+    void probes_tick()
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        if (!g_game_thread_id)
+        {
+            g_game_thread_id = GetCurrentThreadId();
+            g_game_thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, g_game_thread_id);
+        }
+        g_ev_depth = 0;
+        g_ev_active = cfg.perf_events;
+        g_sample_on = cfg.perf_sample;
+        if (cfg.perf_sample && !g_sampler_running.load())
+        {
+            g_sampler_running = true;
+            HANDLE t = CreateThread(nullptr, 0, &sampler_thread, nullptr, 0, nullptr);
+            if (t)
+            {
+                SetThreadPriority(t, THREAD_PRIORITY_TIME_CRITICAL);
+                CloseHandle(t);
+                HSVR_LOG("Perf sample: sampling the game thread about 1000 times a second");
+            }
+            else
+                g_sampler_running = false;
+        }
+    }
+    // The probes' part of the Perf report; frames = engine ticks in the period.
+    void probes_report(uint64_t frames, double ms_per_tick, double seconds)
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        if (g_game_thread)
+        {
+            static uint64_t last_cpu = 0;
+            FILETIME c, e, k, u;
+            if (GetThreadTimes(g_game_thread, &c, &e, &k, &u))
+            {
+                uint64_t cpu = ((uint64_t)k.dwHighDateTime << 32 | k.dwLowDateTime) + ((uint64_t)u.dwHighDateTime << 32 | u.dwLowDateTime);
+                if (last_cpu && frames)
+                    HSVR_LOG("Perf game thread: %.2f ms CPU a frame (%.0f%% busy)", (cpu - last_cpu) / 1e4 / frames, (cpu - last_cpu) / 1e5 / seconds);
+                last_cpu = cpu;
+            }
+        }
+        if (cfg.perf_events && frames && !g_ev_stats.empty())
+        {
+            std::vector<EvStat*> v;
+            for (auto& kv : g_ev_stats)
+                if (kv.second.calls) v.push_back(&kv.second);
+            auto line = [&](const char* title, auto key, size_t top) {
+                std::sort(v.begin(), v.end(), [&](EvStat* a, EvStat* b) { return key(a) > key(b); });
+                HSVR_LOG("Perf events %s:", title); // one entry a line (the log line is capped at 2 KB)
+                for (size_t i = 0; i < v.size() && i < top; ++i)
+                {
+                    double ms = key(v[i]) * ms_per_tick / frames;
+                    if (ms < 0.02) break;
+                    HSVR_LOG("Perf events     %s %.2f ms (%.1f calls, %.3f ms each, worst %.2f; self %.2f)", v[i]->name.c_str(), ms, (double)v[i]->calls / frames,
+                             v[i]->incl * ms_per_tick / v[i]->calls, v[i]->worst * ms_per_tick, v[i]->excl * ms_per_tick / frames);
+                }
+            };
+            HSVR_LOG("Perf events: Blueprint calls from native code %.2f ms a frame (outermost, mod time taken out); %.0f timed calls, %.0f skipped (mod's own) a frame",
+                     g_ev_outer_ticks * ms_per_tick / frames, (double)g_ev_calls / frames, (double)g_ev_skipped / frames);
+            line("by outermost time (ms a frame)", [](EvStat* s) { return s->outer; }, 25);
+            line("by self time (ms a frame)", [](EvStat* s) { return s->excl; }, 25);
+            for (auto& kv : g_ev_stats) kv.second.incl = kv.second.excl = kv.second.outer = kv.second.calls = kv.second.worst = 0;
+            g_ev_outer_ticks = g_ev_calls = g_ev_skipped = 0;
+        }
+        if (cfg.perf_sample)
+        {
+            std::vector<std::pair<uint64_t, SampleCount>> v, all;
+            uint64_t total, total_all, failed;
+            {
+                std::lock_guard<std::mutex> lock(g_sample_mutex);
+                v.assign(g_samples.begin(), g_samples.end());
+                all.assign(g_samples_all.begin(), g_samples_all.end());
+                total = g_sample_total, total_all = g_sample_total_all, failed = g_sample_failed;
+                g_samples.clear();
+                g_sample_total = 0, g_sample_failed = 0;
+            }
+            if (total)
+            {
+                std::map<std::string, uint64_t> modules;
+                for (auto& kv : v)
+                    if (kv.second.self)
+                    {
+                        std::string r = module_rva(kv.first);
+                        modules[r.substr(0, r.find('+'))] += kv.second.self;
+                    }
+                std::string mods;
+                for (auto& kv : modules)
+                {
+                    char b[160];
+                    snprintf(b, sizeof b, "%s%s %.1f%%", mods.empty() ? "" : ", ", kv.first.c_str(), 100.0 * kv.second / total);
+                    mods += b;
+                }
+                HSVR_LOG("Perf sample: %llu samples (%llu failed); self time by module: %s", (unsigned long long)total, (unsigned long long)failed, mods.c_str());
+                auto line = [&](const char* title, bool self, size_t top) {
+                    std::sort(v.begin(), v.end(), [&](auto& a, auto& b) { return (self ? a.second.self : a.second.incl) > (self ? b.second.self : b.second.incl); });
+                    HSVR_LOG("Perf sample %s:", title); // one entry a line (the log line is capped at 2 KB)
+                    for (size_t i = 0; i < v.size() && i < top; ++i)
+                    {
+                        uint64_t n = self ? v[i].second.self : v[i].second.incl;
+                        HSVR_LOG("Perf sample     %s %.1f%%", module_rva(v[i].first).c_str(), 100.0 * n / total);
+                    }
+                };
+                line("self (function running)", true, 30);
+                line("inclusive (on the stack)", false, 60);
+            }
+            // Everything since start, for Ghidra lookups.
+            if (total_all)
+            {
+                std::sort(all.begin(), all.end(), [](auto& a, auto& b) { return a.second.incl > b.second.incl; });
+                CreateDirectoryW((hsvr::mod_dir() + L"logs\\").c_str(), nullptr);
+                FILE* f = _wfopen((hsvr::mod_dir() + L"logs\\perf_samples.tsv").c_str(), L"wb");
+                if (f)
+                {
+                    fprintf(f, "address\tself_pct\tincl_pct\tself\tincl\t(total %llu samples)\n", (unsigned long long)total_all);
+                    for (auto& kv : all)
+                    {
+                        if (kv.second.incl * 2000 < total_all) break; // under 0.05%
+                        fprintf(f, "%s\t%.2f\t%.2f\t%llu\t%llu\n", module_rva(kv.first).c_str(), 100.0 * kv.second.self / total_all, 100.0 * kv.second.incl / total_all,
+                                (unsigned long long)kv.second.self, (unsigned long long)kv.second.incl);
+                    }
+                    fclose(f);
+                }
+            }
+        }
+    }
+
+    // ---- perf_bp_segments: time inside Willie's event graph (ExecuteUbergraph_Willie_BP), by bytecode
+    // segment. Every flow opcode (jump, branch, sequence push/pop, return) is a segment boundary; the
+    // time from one boundary to the next in the same script frame goes to the segment that starts at
+    // the first one (its bytecode offset, as in the decompile listing ub_Willie_BP.txt). Calls made
+    // from inside a segment count in it. Done by wrapping those opcodes' entries in the engine's
+    // opcode table (GNatives), found by scanning the exe's writable data for a 256-entry table of
+    // code pointers in which most unused opcodes share one handler. Only measures.
+    using VmNative = void (*)(UObject*, void*, void*);
+    VmNative* g_gnatives = nullptr;
+    VmNative g_vm_orig[256] = {};
+    UFunction* g_seg_target = nullptr;
+    const uint8_t* g_seg_base = nullptr;
+    bool g_seg_bad = false;
+    struct SegStat
+    {
+        uint64_t ticks = 0, count = 0;
+    };
+    std::unordered_map<uint32_t, SegStat> g_seg_stats;
+    struct SegOpen
+    {
+        void* frame;
+        uint32_t off;
+        uint64_t t;
+    };
+    SegOpen g_seg_open[64];
+    int g_seg_open_n = 0;
+    bool g_seg_on = false;
+    // FFrame (UE 5.4): FOutputDevice (vtable + 2 bools = 16 bytes), then Node, Object, Code, Locals.
+    inline UFunction* frame_node(void* f) { return *reinterpret_cast<UFunction**>(static_cast<uint8_t*>(f) + 0x10); }
+    inline const uint8_t* frame_code(void* f) { return *reinterpret_cast<const uint8_t**>(static_cast<uint8_t*>(f) + 0x20); }
+
+    // A segment is keyed by where execution LANDS after a flow opcode (the jump target, the popped
+    // sequence pin, or the next statement when a branch is not taken), so its time is that code's.
+    // The flow opcode's own condition (which can call functions) counts in the segment it opens.
+    constexpr uint32_t kSegPending = 0xFFFFFFFFu;
+    int seg_find(void* frame)
+    {
+        int i = 0;
+        while (i < g_seg_open_n && g_seg_open[i].frame != frame) ++i;
+        return i;
+    }
+    // Before a flow opcode runs: close the segment that ran up to it.
+    void seg_mark(void* frame, int op)
+    {
+        if (!g_seg_on || GetCurrentThreadId() != g_game_thread_id || frame_node(frame) != g_seg_target) return;
+        uint64_t now = perf_now();
+        const uint8_t* at = frame_code(frame) - 1; // Step has read the opcode byte
+        if (op == 0x4E && !g_seg_base) // EX_ComputedJump: the graph's entry, at offset 5
+        {
+            const uint8_t* base = at - 5;
+            if (base[0] != 0x4C || at[0] != 0x4E) // EX_PushExecutionFlow at 0
+            {
+                if (!g_seg_bad) HSVR_LOG("Perf segments: script layout not as expected (bytes %02x %02x); off", base[0], at[0]);
+                g_seg_bad = true;
+                g_seg_on = false;
+                return;
+            }
+            g_seg_base = base;
+            HSVR_LOG("Perf segments: Willie's event graph found, timing its segments");
+        }
+        if (!g_seg_base) return;
+        int i = seg_find(frame);
+        if (i < g_seg_open_n && op != 0x4E && g_seg_open[i].off != kSegPending)
+        {
+            SegStat& s = g_seg_stats[g_seg_open[i].off];
+            s.ticks += now - g_seg_open[i].t;
+            ++s.count;
+        }
+        if (i == g_seg_open_n)
+        {
+            if (g_seg_open_n >= 64) return;
+            // Another Willie's graph run from inside this one (a hit, damage): its time is its own,
+            // so the open segments stop counting until it returns.
+            for (int j = 0; j < g_seg_open_n; ++j)
+            {
+                if (g_seg_open[j].off != kSegPending) g_seg_stats[g_seg_open[j].off].ticks += now - g_seg_open[j].t;
+                g_seg_open[j].t = now;
+            }
+            ++g_seg_open_n;
+        }
+        g_seg_open[i] = {frame, kSegPending, now};
+    }
+    // After it ran: open the segment where execution landed, or end the frame at the return (the
+    // script loop stops at EX_Return itself; it never goes through the table).
+    void seg_after(void* frame)
+    {
+        if (!g_seg_on || !g_seg_base || GetCurrentThreadId() != g_game_thread_id || frame_node(frame) != g_seg_target) return;
+        int i = seg_find(frame);
+        if (i == g_seg_open_n) return;
+        const uint8_t* code = frame_code(frame);
+        if (*code == 0x04)
+        {
+            g_seg_open[i] = g_seg_open[--g_seg_open_n];
+            uint64_t t = perf_now();
+            for (int j = 0; j < g_seg_open_n; ++j) g_seg_open[j].t = t;
+            return;
+        }
+        g_seg_open[i].off = (uint32_t)(code - g_seg_base);
+    }
+    template <int Op> void vm_wrap(UObject* context, void* frame, void* result)
+    {
+        seg_mark(frame, Op);
+        g_vm_orig[Op](context, frame, result);
+        seg_after(frame);
+    }
+
+    VmNative* find_gnatives()
+    {
+        auto* mod = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + dos->e_lfanew);
+        IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+        uint8_t *text_lo = nullptr, *text_hi = nullptr;
+        for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+            if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)
+            {
+                uint8_t* lo = mod + sec[i].VirtualAddress;
+                if (!text_lo || lo < text_lo) text_lo = lo;
+                if (lo + sec[i].Misc.VirtualSize > text_hi) text_hi = lo + sec[i].Misc.VirtualSize;
+            }
+        VmNative* found = nullptr;
+        int candidates = 0;
+        // Best near-miss, logged when nothing qualifies.
+        size_t best_in = 0, best_most = 0, best_distinct = 0;
+        uint64_t best_at = 0;
+        auto in_text = [&](uint64_t v) { return v >= (uint64_t)text_lo && v < (uint64_t)text_hi; };
+        for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+        {
+            if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE) || (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+            auto* p = reinterpret_cast<uint64_t*>(mod + sec[i].VirtualAddress);
+            size_t n = sec[i].Misc.VirtualSize / 8;
+            if (n < 256) continue;
+            // Sliding count of entries pointing into the exe's code; mods (UE4SS) may have repointed
+            // a few opcodes into their own dlls, so up to 16 others are allowed if not null.
+            size_t in = 0;
+            for (size_t j = 0; j < 256; ++j) in += in_text(p[j]);
+            for (size_t k = 0; k + 256 <= n; ++k)
+            {
+                if (k)
+                {
+                    in -= in_text(p[k - 1]);
+                    in += in_text(p[k + 255]);
+                }
+                if (in < 240) continue;
+                bool nonnull = true;
+                for (int j = 0; j < 256 && nonnull; ++j) nonnull = p[k + j] != 0;
+                if (!nonnull) continue;
+                std::unordered_map<uint64_t, int> c;
+                for (int j = 0; j < 256; ++j) ++c[p[k + j]];
+                uint64_t common = 0;
+                int most = 0;
+                for (auto& kv : c)
+                    if (kv.second > most) most = kv.second, common = kv.first;
+                if (in > best_in || (in == best_in && (size_t)most > best_most))
+                    best_in = in, best_most = most, best_distinct = c.size(), best_at = (uint64_t)(reinterpret_cast<uint8_t*>(p + k) - mod);
+                if (most < 30 || c.size() < 60) continue;
+                bool ours_defined = true;
+                for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F}) ours_defined = ours_defined && p[k + op] != common;
+                if (!ours_defined) continue;
+                ++candidates;
+                if (!found) found = reinterpret_cast<VmNative*>(p + k);
+                // skip past this table
+                for (size_t j = 1; j < 256 && k + 1 + 256 <= n; ++j)
+                {
+                    ++k;
+                    in -= in_text(p[k - 1]);
+                    in += in_text(p[k + 255]);
+                }
+            }
+        }
+        if (!found)
+            HSVR_LOG("Perf segments: no opcode table; closest at exe+0x%llx: %zu of 256 entries in exe code, most common entry %zu times, %zu distinct",
+                     (unsigned long long)best_at, best_in, best_most, best_distinct);
+        if (found) HSVR_LOG("Perf segments: opcode table at exe+0x%llx (%d candidate%s)", (unsigned long long)(reinterpret_cast<uint8_t*>(found) - mod), candidates, candidates == 1 ? "" : "s");
+        return candidates == 1 ? found : nullptr;
+    }
+    // UE4SS finds the table itself by signature and logs "[PS] Found GNatives: 0x..." in UE4SS.log
+    // (this launch's log, next to UE4SS.dll). Read it from there; checked against the exe's data.
+    VmNative* gnatives_from_ue4ss_log()
+    {
+        HMODULE ue4ss = GetModuleHandleW(L"UE4SS.dll");
+        if (!ue4ss) return nullptr;
+        wchar_t path[MAX_PATH];
+        DWORD len = GetModuleFileNameW(ue4ss, path, MAX_PATH);
+        std::wstring w(path, len);
+        w = w.substr(0, w.find_last_of(L"\\/") + 1) + L"UE4SS.log";
+        HANDLE h = CreateFileW(w.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return nullptr;
+        std::string text;
+        char buf[65536];
+        DWORD got = 0;
+        while (text.size() < (64u << 20) && ReadFile(h, buf, sizeof buf, &got, nullptr) && got) text.append(buf, got);
+        CloseHandle(h);
+        size_t at = text.rfind("Found GNatives: 0x");
+        if (at == std::string::npos) return nullptr;
+        uint64_t v = strtoull(text.c_str() + at + 18, nullptr, 16);
+        auto* mod = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + reinterpret_cast<IMAGE_DOS_HEADER*>(mod)->e_lfanew);
+        if (v < (uint64_t)mod || v + 256 * 8 > (uint64_t)mod + nt->OptionalHeader.SizeOfImage)
+        {
+            HSVR_LOG("Perf segments: UE4SS's GNatives 0x%llx is outside the exe; not used", (unsigned long long)v);
+            return nullptr;
+        }
+        auto* t = reinterpret_cast<VmNative*>(v);
+        std::unordered_map<uint64_t, int> c;
+        int nulls = 0;
+        for (int j = 0; j < 256; ++j) ++c[(uint64_t)t[j]], nulls += t[j] == nullptr;
+        int most = 0;
+        uint64_t common = 0;
+        for (auto& kv : c)
+            if (kv.second > most) most = kv.second, common = kv.first;
+        std::string ours;
+        for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
+        {
+            char b[48];
+            snprintf(b, sizeof b, " %02X=%s", op, (uint64_t)t[op] == common ? "common" : (t[op] ? "own" : "null"));
+            ours += b;
+        }
+        HSVR_LOG("Perf segments: UE4SS's GNatives at exe+0x%llx: most common entry %d times, %zu distinct, %d null; flow opcodes%s", (unsigned long long)(v - (uint64_t)mod),
+                 most, c.size(), nulls, ours.c_str());
+        for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
+            if (!t[op] || (uint64_t)t[op] == common) return nullptr;
+        return t;
+    }
+    // From the engine tick (no script running on the game thread).
+    void segments_tick()
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        g_seg_open_n = 0;
+        if (!cfg.perf_bp_segments || g_seg_bad)
+        {
+            g_seg_on = false;
+            return;
+        }
+        if (!g_seg_target)
+            g_seg_target = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:ExecuteUbergraph_Willie_BP"));
+        if (!g_seg_target) return;
+        if (!g_gnatives)
+        {
+            g_gnatives = gnatives_from_ue4ss_log();
+            if (!g_gnatives) g_gnatives = find_gnatives();
+            if (!g_gnatives)
+            {
+                HSVR_LOG("Perf segments: opcode table not found (or not unique); off");
+                g_seg_bad = true;
+                return;
+            }
+            DWORD old = 0;
+            VirtualProtect(g_gnatives, 256 * sizeof(VmNative), PAGE_READWRITE, &old);
+#define HSVR_WRAP(op) g_vm_orig[op] = g_gnatives[op], g_gnatives[op] = &vm_wrap<op>
+            HSVR_WRAP(0x06);
+            HSVR_WRAP(0x07);
+            HSVR_WRAP(0x4C);
+            HSVR_WRAP(0x4D);
+            HSVR_WRAP(0x4E);
+            HSVR_WRAP(0x4F);
+#undef HSVR_WRAP
+        }
+        g_seg_on = true;
+    }
+    void segments_report(uint64_t frames, double ms_per_tick)
+    {
+        if (!g_seg_on || !frames || g_seg_stats.empty()) return;
+        std::vector<std::pair<uint32_t, SegStat>> v(g_seg_stats.begin(), g_seg_stats.end());
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second.ticks > b.second.ticks; });
+        double total = 0.0;
+        for (auto& kv : v) total += kv.second.ticks * ms_per_tick / frames;
+        HSVR_LOG("Perf segments: Willie's event graph %.2f ms a frame in all; by segment (offset in ub_Willie_BP.txt where the code runs from, after a jump/branch/sequence pin):", total);
+        for (size_t i = 0; i < v.size() && i < 60; ++i)
+        {
+            double ms = v[i].second.ticks * ms_per_tick / frames;
+            if (ms < 0.01) break;
+            HSVR_LOG("Perf segments     @%u %.3f ms (%.1f a frame, %.4f ms each)", v[i].first, ms, (double)v[i].second.count / frames, v[i].second.ticks * ms_per_tick / v[i].second.count);
+        }
+        // Everything, for mapping onto the listing.
+        CreateDirectoryW((hsvr::mod_dir() + L"logs\\").c_str(), nullptr);
+        if (FILE* f = _wfopen((hsvr::mod_dir() + L"logs\\perf_segments.tsv").c_str(), L"ab"))
+        {
+            for (auto& kv : v)
+                fprintf(f, "%.1f\t%u\t%.4f\t%.2f\n", hsvr::now_seconds(), kv.first, kv.second.ticks * ms_per_tick / frames, (double)kv.second.count / frames);
+            fclose(f);
+        }
+        g_seg_stats.clear();
+    }
+
     void perf_report(float delta_seconds)
     {
         static double since = -1.0;
@@ -17340,6 +18291,8 @@ namespace
                  "%d decals, %d primitives (%d simulating, %d of them skeletal); counted in %.1f ms",
                  frames / (now - since), 1000.0 * dt_sum / frames, 1000.0 * dt_max, now - since, total, parts.c_str(), Unreal::UObjectArray::GetNumElements(), actors,
                  willies, weapons, ais, decals, (int)prims.size(), simulating, sim_skel, census_ms);
+        probes_report(frames, ms_per_tick, now - since);
+        segments_report(frames, ms_per_tick);
         since = now;
         frames = 0, dt_sum = 0.0, dt_max = 0.0;
     }
@@ -17347,7 +18300,10 @@ namespace
     void game_tick(UObject* engine, float delta_seconds)
     {
         gc_sync();
+        g_ev_active = false; // the census below calls the game; not the game's own time
         perf_report(delta_seconds); // outside the tick's own scope: the census is not per-frame time
+        probes_tick();
+        segments_tick();
         HSVR_PROF(PerfTick);
         g_engine = engine;
         { HSVR_SUB("tick:hit_frame_refresh"); hit_frame_refresh(); }
@@ -17390,7 +18346,7 @@ namespace
             { HSVR_SUB("tick:apply_picture_settings"); apply_picture_settings(cfg); }
             { HSVR_SUB("tick:keep_clouds_correct"); keep_clouds_correct(cfg); }
             { HSVR_SUB("tick:keep_light_samples"); keep_light_samples(cfg); }
-            { HSVR_SUB("tick:run_dev_script"); run_dev_script(cfg); }
+            { HSVR_SUB("tick:run_dev_script"); run_dev_script(cfg); script_immortal_tick(); }
             { HSVR_SUB("tick:test_room_tick"); test_room_tick(cfg); }
         }
         // The mod's keys count only while the game has the keyboard, so that Home or End typed in
@@ -17478,6 +18434,9 @@ class HalfSwordVR : public CppUserModBase
             hsvr::vr_install_present_hook();
         }
         Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});
+        // Cost probe: pre after the mod's pre callbacks, post before its post callbacks (perf_events).
+        Hook::RegisterProcessEventPreCallback(&ev_pre, {false, false, STR("HalfSwordVR"), STR("CostProbePre")});
+        Hook::RegisterProcessEventPostCallback(&ev_post, {false, false, STR("HalfSwordVR"), STR("CostProbePost")});
         Hook::RegisterProcessEventPostCallback(&capsule_after_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleAfter")});
         Hook::RegisterProcessEventPostCallback(&pose_after_anim_update, {false, false, STR("HalfSwordVR"), STR("PoseAfterAnim")});
         Hook::RegisterProcessEventPostCallback(&feet_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FeetAfterAnim")});

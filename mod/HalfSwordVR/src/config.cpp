@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstddef>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -119,6 +120,80 @@ namespace hsvr
         fclose(f);
     }
 
+    // The key on an ini line ("" for comments, section headers and blank lines).
+    static std::string line_key(const std::string& line)
+    {
+        std::string t = trim(line);
+        if (t.empty() || t[0] == ';' || t[0] == '#' || t[0] == '[') return {};
+        size_t eq = t.find('=');
+        return eq == std::string::npos ? std::string() : trim(t.substr(0, eq));
+    }
+
+    struct MissingSetting
+    {
+        std::string key;
+        std::string line;  // key=default
+        std::string after; // the setting it goes under ("" = none in the file)
+    };
+
+    // Puts each missing setting on the line after the setting it follows in the reading order (its
+    // last line, as the last one counts), so it lands in that setting's section. One with nothing
+    // to follow goes at the end, under a note, as before.
+    static void add_missing_settings(const std::vector<MissingSetting>& missing)
+    {
+        std::vector<std::string> lines;
+        if (FILE* f = _wfopen(ini_path().c_str(), L"r"))
+        {
+            char chunk[512];
+            std::string line;
+            while (fgets(chunk, sizeof(chunk), f))
+            {
+                line += chunk;
+                if (line.back() != '\n') continue;
+                lines.push_back(line);
+                line.clear();
+            }
+            if (!line.empty()) lines.push_back(line + "\n");
+            fclose(f);
+        }
+        else
+            return;
+        std::vector<std::string> tail;
+        int placed = 0;
+        for (const MissingSetting& m : missing)
+        {
+            bool found = false;
+            size_t at = 0;
+            if (!m.after.empty())
+                for (size_t i = lines.size(); i-- > 0;)
+                    if (line_key(lines[i]) == m.after)
+                    {
+                        found = true;
+                        at = i + 1;
+                        break;
+                    }
+            if (!found)
+            {
+                tail.push_back(m.line + "\n");
+                continue;
+            }
+            lines.insert(lines.begin() + (std::ptrdiff_t)at, m.line + "\n");
+            ++placed;
+        }
+        if (!tail.empty())
+        {
+            lines.push_back("\n; Added by HalfSwordVR: settings from a newer version, at their defaults (see the docs for what each does).\n");
+            lines.insert(lines.end(), tail.begin(), tail.end());
+        }
+        if (FILE* out = _wfopen(ini_path().c_str(), L"w"))
+        {
+            for (const std::string& l : lines) std::fputs(l.c_str(), out);
+            fclose(out);
+            HSVR_LOG("Settings: added %d new settings to the ini at their defaults (%d next to their section, %d at the end)",
+                     (int)missing.size(), placed, (int)tail.size());
+        }
+    }
+
     // Writes one setting into the ini (replacing its line, or adding it), for values the mod measures
     // itself (your arm length). The 1 s reload then picks it up.
     void config_set(const std::string& key, const std::string& value)
@@ -209,12 +284,22 @@ namespace hsvr
         Config c;
         // Settings added in newer versions are missing from an older file: they get added at their
         // defaults (test switches, dev_*, are left out), so every setting can be found in the file.
-        std::vector<std::string> missing;
+        // Each goes in right under the setting read just before it below (the one that is in the file),
+        // so it lands in that setting's section of the organized ini: read a new setting next to the
+        // ones it belongs with.
+        std::vector<MissingSetting> missing;
+        std::string last_in_file;
         auto note_missing = [&](const char* key, const std::string& value) {
-            if (kv.find(key) != kv.end() || std::strncmp(key, "dev_", 4) == 0) return;
-            for (const std::string& m : missing)
-                if (m.compare(0, std::strlen(key) + 1, std::string(key) + "=") == 0) return;
-            missing.push_back(std::string(key) + "=" + value);
+            if (kv.find(key) != kv.end())
+            {
+                last_in_file = key;
+                return;
+            }
+            if (std::strncmp(key, "dev_", 4) == 0) return;
+            for (const MissingSetting& m : missing)
+                if (m.key == key) return;
+            missing.push_back({key, std::string(key) + "=" + value, last_in_file});
+            last_in_file = key;
         };
         auto num = [&](const char* key, double& out) {
             auto it = kv.find(key);
@@ -424,6 +509,7 @@ namespace hsvr
         num("pose_slide_gap_max_cm", c.pose_slide_gap_max_cm);
         flag("pose_slide_rondel_stops", c.pose_slide_rondel_stops);
         flag("pose_slide_butt_is_haft", c.pose_slide_butt_is_haft);
+        flag("pose_slide_fixed_1h_sword", c.pose_slide_fixed_1h_sword);
         num("pose_slide_rate_min", c.pose_slide_rate_min);
         num("pose_slide_rate_max", c.pose_slide_rate_max);
         num("pose_slide_max_cm_s", c.pose_slide_max_cm_s);
@@ -443,6 +529,11 @@ namespace hsvr
         num("pose_shield_point_cm", c.pose_shield_point_cm);
         flag("pose_shield_in_hand", c.pose_shield_in_hand);
         num("pose_shield_hand_grip_type", c.pose_shield_hand_grip_type);
+        flag("pose_shield_fixed_grip", c.pose_shield_fixed_grip);
+        flag("pose_shield_grab_rim", c.pose_shield_grab_rim);
+        num("pose_shield_rim_cm", c.pose_shield_rim_cm);
+        flag("pose_shield_grab_face", c.pose_shield_grab_face);
+        flag("pose_pavise_forearm", c.pose_pavise_forearm);
         flag("pose_two_hand", c.pose_two_hand);
         num("pose_two_hand_strength", c.pose_two_hand_strength);
         num("pose_two_hand_blade_gap_cm", c.pose_two_hand_blade_gap_cm);
@@ -472,6 +563,7 @@ namespace hsvr
         num("pose_hold_stuck_force_scale", c.pose_hold_stuck_force_scale);
         flag("stab_wound_hold", c.stab_wound_hold);
         flag("stab_no_rubber_band", c.stab_no_rubber_band);
+        num("stab_pickup_grace_s", c.stab_pickup_grace_s);
         flag("stab_drag", c.stab_drag);
         num("stab_drag_force_scale", c.stab_drag_force_scale);
         num("stab_drag_grip_s", c.stab_drag_grip_s);
@@ -627,6 +719,9 @@ namespace hsvr
         num("hit_buzz_impulse_full", c.hit_buzz_impulse_full);
         flag("hit_buzz_log", c.hit_buzz_log);
         num("perf_log_seconds", c.perf_log_seconds);
+        flag("perf_events", c.perf_events);
+        flag("perf_sample", c.perf_sample);
+        flag("perf_bp_segments", c.perf_bp_segments);
         num("hit_buzz_min_intensity", c.hit_buzz_min_intensity);
         num("hit_buzz_limb_min_ms", c.hit_buzz_limb_min_ms);
         flag("stab_assist", c.stab_assist);
@@ -645,16 +740,7 @@ namespace hsvr
             std::lock_guard<std::mutex> lock(g_cfg_mutex);
             g_cfg = c;
         }
-        if (!missing.empty())
-        {
-            if (FILE* out = _wfopen(ini_path().c_str(), L"a"))
-            {
-                std::fputs("\n; Added by HalfSwordVR: settings from a newer version, at their defaults (see the docs for what each does).\n", out);
-                for (const std::string& m : missing) std::fprintf(out, "%s\n", m.c_str());
-                fclose(out);
-                HSVR_LOG("Settings: added %d new settings to the ini at their defaults", (int)missing.size());
-            }
-        }
+        if (!missing.empty()) add_missing_settings(missing);
         HSVR_LOG("Settings loaded: render_scale=%.2f world_scale=%.2f anchor=%s head_bone=%s eye_fwd=%.1f eye_up=%.1f smoothing=%.3f "
                  "near=%.1f gamma=%d ui_panel=%d separate_rt=%d",
                  c.render_scale, c.world_scale, c.anchor.c_str(), c.head_bone.c_str(), c.eye_forward_cm, c.eye_up_cm,
