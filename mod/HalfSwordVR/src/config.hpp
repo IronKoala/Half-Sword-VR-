@@ -773,6 +773,9 @@ namespace hsvr
         double hit_buzz_limb_min_ms = 3.0;
         // Log every hit buzz ("Hit buzz:" lines).
         bool hit_buzz_log = true;
+        // Every this many seconds a "Perf:" line: frame rate, the mod's own time per frame by part, and
+        // how many objects, actors and simulating bodies the game has (0 = off).
+        double perf_log_seconds = 10.0;
         // Stab assist: the VR hold moves the weapon on its own (the game's hand joint is free), so a
         // tip meets flesh with only the weapon's mass behind it and the game's stick rule
         // (cutting rate x impulse >= 10000) rarely passes. On a hit of a piercing tip on a person's
