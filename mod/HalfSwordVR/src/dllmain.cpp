@@ -17951,11 +17951,22 @@ namespace
     inline UFunction* frame_node(void* f) { return *reinterpret_cast<UFunction**>(static_cast<uint8_t*>(f) + 0x10); }
     inline const uint8_t* frame_code(void* f) { return *reinterpret_cast<const uint8_t**>(static_cast<uint8_t*>(f) + 0x20); }
 
+    // A segment is keyed by where execution LANDS after a flow opcode (the jump target, the popped
+    // sequence pin, or the next statement when a branch is not taken), so its time is that code's.
+    // The flow opcode's own condition (which can call functions) counts in the segment it opens.
+    constexpr uint32_t kSegPending = 0xFFFFFFFFu;
+    int seg_find(void* frame)
+    {
+        int i = 0;
+        while (i < g_seg_open_n && g_seg_open[i].frame != frame) ++i;
+        return i;
+    }
+    // Before a flow opcode runs: close the segment that ran up to it.
     void seg_mark(void* frame, int op)
     {
         if (!g_seg_on || GetCurrentThreadId() != g_game_thread_id || frame_node(frame) != g_seg_target) return;
         uint64_t now = perf_now();
-        const uint8_t* at = frame_code(frame) - (op == 0x04 ? 0 : 1); // Step has read the opcode byte (0x04: seg_after, at the return)
+        const uint8_t* at = frame_code(frame) - 1; // Step has read the opcode byte
         if (op == 0x4E && !g_seg_base) // EX_ComputedJump: the graph's entry, at offset 5
         {
             const uint8_t* base = at - 5;
@@ -17970,21 +17981,12 @@ namespace
             HSVR_LOG("Perf segments: Willie's event graph found, timing its segments");
         }
         if (!g_seg_base) return;
-        uint32_t off = (uint32_t)(at - g_seg_base);
-        int i = 0;
-        while (i < g_seg_open_n && g_seg_open[i].frame != frame) ++i;
-        if (i < g_seg_open_n && op != 0x4E)
+        int i = seg_find(frame);
+        if (i < g_seg_open_n && op != 0x4E && g_seg_open[i].off != kSegPending)
         {
             SegStat& s = g_seg_stats[g_seg_open[i].off];
             s.ticks += now - g_seg_open[i].t;
             ++s.count;
-        }
-        if (op == 0x04) // EX_Return: frame done; frames it ran inside resume their segments now
-        {
-            if (i < g_seg_open_n) g_seg_open[i] = g_seg_open[--g_seg_open_n];
-            uint64_t t = perf_now();
-            for (int j = 0; j < g_seg_open_n; ++j) g_seg_open[j].t = t;
-            return;
         }
         if (i == g_seg_open_n)
         {
@@ -17993,19 +17995,29 @@ namespace
             // so the open segments stop counting until it returns.
             for (int j = 0; j < g_seg_open_n; ++j)
             {
-                g_seg_stats[g_seg_open[j].off].ticks += now - g_seg_open[j].t;
+                if (g_seg_open[j].off != kSegPending) g_seg_stats[g_seg_open[j].off].ticks += now - g_seg_open[j].t;
                 g_seg_open[j].t = now;
             }
             ++g_seg_open_n;
         }
-        g_seg_open[i] = {frame, off, perf_now()};
+        g_seg_open[i] = {frame, kSegPending, now};
     }
-    // The script loop stops at EX_Return itself (it never goes through the table), so a frame's
-    // last segment ends at the flow opcode that lands on the return.
+    // After it ran: open the segment where execution landed, or end the frame at the return (the
+    // script loop stops at EX_Return itself; it never goes through the table).
     void seg_after(void* frame)
     {
-        if (!g_seg_on || !g_seg_base || frame_node(frame) != g_seg_target || *frame_code(frame) != 0x04) return;
-        seg_mark(frame, 0x04);
+        if (!g_seg_on || !g_seg_base || GetCurrentThreadId() != g_game_thread_id || frame_node(frame) != g_seg_target) return;
+        int i = seg_find(frame);
+        if (i == g_seg_open_n) return;
+        const uint8_t* code = frame_code(frame);
+        if (*code == 0x04)
+        {
+            g_seg_open[i] = g_seg_open[--g_seg_open_n];
+            uint64_t t = perf_now();
+            for (int j = 0; j < g_seg_open_n; ++j) g_seg_open[j].t = t;
+            return;
+        }
+        g_seg_open[i].off = (uint32_t)(code - g_seg_base);
     }
     template <int Op> void vm_wrap(UObject* context, void* frame, void* result)
     {
@@ -18013,6 +18025,7 @@ namespace
         g_vm_orig[Op](context, frame, result);
         seg_after(frame);
     }
+
     VmNative* find_gnatives()
     {
         auto* mod = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
@@ -18174,7 +18187,7 @@ namespace
         std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second.ticks > b.second.ticks; });
         double total = 0.0;
         for (auto& kv : v) total += kv.second.ticks * ms_per_tick / frames;
-        HSVR_LOG("Perf segments: Willie's event graph %.2f ms a frame in all; by segment (bytecode offset in ub_Willie_BP.txt):", total);
+        HSVR_LOG("Perf segments: Willie's event graph %.2f ms a frame in all; by segment (offset in ub_Willie_BP.txt where the code runs from, after a jump/branch/sequence pin):", total);
         for (size_t i = 0; i < v.size() && i < 60; ++i)
         {
             double ms = v[i].second.ticks * ms_per_tick / frames;
