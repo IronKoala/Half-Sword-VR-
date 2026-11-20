@@ -166,6 +166,7 @@ LAYOUT = [
         ("pose_move_bodies", ""),
         ("pose_teleport_above_cm", ""),
         ("pose_capsule_floor_clamp", ""),
+        ("pose_capsule_keep_on_floor", ""),
         ("pose_capsule_no_step_offset", ""),
     ]),
     ("Arms, hands and fingers", "Hand placement and arm length are in Quick settings.", [
