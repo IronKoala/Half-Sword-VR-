@@ -468,14 +468,14 @@ namespace hsvr
         // lever is not. Replaces the B&S springs and dampers; the caps stay. pose_hold_arm_reach_cm: the
         // grip's distance from the shoulder for a default body (scaled with his size).
         bool pose_hold_arm_lag = true;
-        double pose_hold_arm_lag_s = 0.04;
+        double pose_hold_arm_lag_s = 0.05;
         double pose_hold_arm_lag_max_s = 0.25;
         double pose_hold_arm_reach_cm = 55.0;
         // His shoulder's strength (N m, for a default fresh body; x his strength, injury and stamina; both arms
         // add): the arm-lag hold can't speed arm + weapon about the shoulder faster than this allows, so the
         // grip's pull on the weapon is capped at its mass x this torque x reach / (arm + weapon inertia).
         // A two-hander in one hand trails and won't whip round like a one-hander (Matthew 2026-11-20). 0 = off.
-        double pose_hold_shoulder_torque = 150.0;
+        double pose_hold_shoulder_torque = 110.0;
         // The shoulder limit fades out as the grip trails the hand from shoulder_fade_from_cm to shoulder_fade_to_cm
         // (the hand is on the weapon: it can't trail far), so a big jump or a hard swing never trails it far
         // enough for the stuck rule to let go (unattended test: a longsword 53 cm behind was dropped).
