@@ -6910,10 +6910,11 @@ namespace
                     if (object_alive(w)) foes.push_back(w);
                     else ++skipped;
                 }
-            static int skipped_logged = 0;
-            if (skipped != skipped_logged)
-                HSVR_LOG("Elbow: %d Willie(s) being destroyed left off the foe list (%d on it)", skipped, (int)foes.size());
+            static int skipped_logged = 0, count_logged = -1;
+            if (skipped != skipped_logged || (int)foes.size() != count_logged)
+                HSVR_LOG("Elbow: %d foe(s) on the list, %d Willie(s) being destroyed left off", (int)foes.size(), skipped);
             skipped_logged = skipped;
+            count_logged = (int)foes.size();
         }
         for (int side = 0; side < 2; ++side)
         {
