@@ -2760,7 +2760,12 @@ namespace
                 }
             }
         if (helmet != g_helmet)
-            HSVR_LOG("Helmet: %ls (%d skeletal pieces on his body, %d on the head)", helmet ? helmet->GetFullName().c_str() : STR("none worn"), (int)parts.size(), tagged);
+        {
+            UObject* sk = helmet ? object_property(helmet, STR("SkeletalMesh")) : nullptr;
+            if (helmet && !sk) sk = object_property(helmet, STR("SkeletalMeshAsset"));
+            HSVR_LOG("Helmet: %ls, mesh %ls (%d skeletal pieces on his body, %d on the head)", helmet ? helmet->GetFullName().c_str() : STR("none worn"),
+                     sk ? sk->GetName().c_str() : STR("-"), (int)parts.size(), tagged);
+        }
         g_helmet = helmet;
         g_head_pieces = head_pieces;
         if (cfg.pose_no_uro)
@@ -16256,6 +16261,176 @@ namespace
                 UObject* pawn = nullptr;
                 find_pawn_mesh(&pawn);
                 if (pawn) weapon_dump(entry.command.size() > 17 && entry.command[17] == '0' ? 0 : 1, pawn);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.wear ", 0) == 0)
+            {
+                // hsvr.wear <armour class path>: he puts that armour piece on the way the game does when he
+                // picks one up (Willie's "Equip Armor" with an armour actor, armor_equip.md). The class
+                // default passport is empty, so the spawned actor's passport gets its class, slot and an
+                // ID first. For unattended tests: the scripted Free Mode start has no helmet.
+                std::string rest = entry.command.substr(10);
+                while (!rest.empty() && rest.back() == ' ') rest.pop_back();
+                std::wstring path(rest.begin(), rest.end());
+                UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
+                if (!cls)
+                {
+                    std::wstring asset = path;
+                    if (asset.size() > 2 && asset.substr(asset.size() - 2) == STR("_C")) asset.resize(asset.size() - 2);
+                    load_asset_object(asset);
+                    cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
+                }
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+                if (!cls || !mesh || !gs || !func_chain(pawn, STR("Equip Armor")))
+                {
+                    HSVR_LOG("Script: hsvr.wear: %s (class %s, character %s)", rest.c_str(), cls ? "found" : "NOT FOUND", mesh ? "found" : "none");
+                    continue;
+                }
+                hsvr::Vec3 at = component_location(mesh) + hsvr::Vec3{0, 0, 300.0};
+                auto fill_transform = [&](Call& c) {
+                    FProperty* p = c.param(STR("SpawnTransform"));
+                    UScriptStruct* type = p ? struct_type(p) : nullptr;
+                    if (!type) return;
+                    uint8_t* tat = c.buffer.data() + p->GetOffset_Internal();
+                    if (FProperty* r = struct_member(type, STR("Rotation")))
+                        if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                        {
+                            uint8_t* wat = tat + r->GetOffset_Internal() + w->GetOffset_Internal();
+                            if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                            else *reinterpret_cast<float*>(wat) = 1.0f;
+                        }
+                    if (FProperty* t = struct_member(type, STR("Translation"))) write_three(tat + t->GetOffset_Internal(), t, at.x, at.y, at.z);
+                    if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(tat + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+                };
+                Call begin(gs, STR("BeginDeferredActorSpawnFromClass"));
+                begin.object(STR("WorldContextObject"), pawn);
+                begin.object(STR("ActorClass"), cls);
+                fill_transform(begin);
+                begin.byte(STR("CollisionHandlingOverride"), 1);
+                begin.run();
+                UObject* actor = begin.object_result();
+                if (!actor)
+                {
+                    HSVR_LOG("Script: hsvr.wear: %s NOT spawned", rest.c_str());
+                    continue;
+                }
+                FProperty* pp = class_member(actor, STR("Armor Passport"));
+                UScriptStruct* pt = struct_type(pp);
+                FProperty* core = struct_member_prefix(pt, STR("ArmorCore_"));
+                FProperty* slot = struct_member_prefix(pt, STR("Slot_"));
+                FProperty* id = struct_member_prefix(pt, STR("ID_"));
+                double armor_slot = read_number_variable(actor, STR("Armor Slot"));
+                if (pp && core && slot && id && armor_slot >= 0.0)
+                {
+                    uint8_t* base = reinterpret_cast<uint8_t*>(actor) + pp->GetOffset_Internal();
+                    *reinterpret_cast<UClass**>(base + core->GetOffset_Internal()) = cls;
+                    *(base + slot->GetOffset_Internal()) = (uint8_t)armor_slot;
+                    *reinterpret_cast<int32_t*>(base + id->GetOffset_Internal()) = 4000 + (int32_t)armor_slot;
+                }
+                Call finish(gs, STR("FinishSpawningActor"));
+                finish.object(STR("Actor"), actor);
+                fill_transform(finish);
+                finish.run();
+                Call equip(pawn, STR("Equip Armor"));
+                equip.object(STR("Armor Actor"), actor);
+                equip.run();
+                FProperty* picked = equip.param(STR("Picked Up"));
+                bool ok = picked && (equip.buffer[picked->GetOffset_Internal()] & static_cast<FBoolProperty*>(picked)->GetFieldMask()) != 0;
+                HSVR_LOG("Script: hsvr.wear: %s, slot %d, passport %s, equipped: %s", rest.c_str(), (int)armor_slot,
+                         (pp && core && slot && id) ? "set" : "NOT SET (members not found)", ok ? "yes" : "no");
+                g_helmet_pawn = nullptr; // look for head pieces again now
+                continue;
+            }
+            if (entry.command.rfind("hsvr.helmet_probe", 0) == 0)
+            {
+                // hsvr.helmet_probe: what you see a helmet from (the see-through hunt, playtest 2026-11-20):
+                // each piece on his head with its mesh, its visibility flags and its materials (two-sided or
+                // not), and where each eye and the game's flat first-person camera are in the helmet's own
+                // head-bone frame (x, y forward, z up as the meshes are made), plus the near clip.
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                if (!pawn || !mesh) continue;
+                hsvr::Config pcfg = hsvr::config();
+                UObject* ref = g_helmet ? g_helmet : mesh;
+                hsvr::Vec3 hb = socket_location(ref, bone_fname("head"));
+                // The meshes' own frame at the head: the component's rotation (the head bone is unrotated
+                // in the reference pose), turned with the head bone's pose against the body.
+                hsvr::Quat hr = socket_rotation(ref, bone_fname("head"));
+                auto local = [&](const hsvr::Vec3& w) { return hr.inverse().rotate(w - hb); };
+                HSVR_LOG("Probe helmet: near clip %.2f cm, eye offset fwd %.1f up %.1f; head bone of %ls", pcfg.near_clip_cm, pcfg.eye_forward_cm, pcfg.eye_up_cm, ref->GetName().c_str());
+                for (int e = 0; e < 2; ++e)
+                {
+                    hsvr::Vec3 at;
+                    hsvr::Quat r;
+                    if (!hsvr::stereo_last_eye(e, at, r)) continue;
+                    hsvr::Vec3 l = local(at), f = hr.inverse().rotate(r.rotate(hsvr::Vec3{1, 0, 0}));
+                    HSVR_LOG("Probe helmet: eye %d at (%.2f, %.2f, %.2f) in the head frame, looking (%.2f, %.2f, %.2f)", e, l.x, l.y, l.z, f.x, f.y, f.z);
+                }
+                for (const TCHAR* cam : {STR("First Person Camera"), STR("Camera Scene FP"), STR("CameraBoomFP")})
+                    if (UObject* c = object_property(pawn, cam))
+                    {
+                        hsvr::Vec3 l = local(component_location(c));
+                        hsvr::Vec3 f = hr.inverse().rotate(component_rotation(c).rotate(hsvr::Vec3{1, 0, 0}));
+                        HSVR_LOG("Probe helmet: flat %ls at (%.2f, %.2f, %.2f) in the head frame, facing (%.2f, %.2f, %.2f)", cam, l.x, l.y, l.z, f.x, f.y, f.z);
+                    }
+                {
+                    double v[3] = {0, 0, 0};
+                    if (FProperty* fp = prop_chain(pawn, STR("Helmet FPV Offset"))) read_three(reinterpret_cast<uint8_t*>(pawn) + fp->GetOffset_Internal(), fp, v);
+                    HSVR_LOG("Probe helmet: Helmet FPV Offset (%.2f, %.2f, %.2f)", v[0], v[1], v[2]);
+                }
+                for (UObject* c : g_head_pieces)
+                {
+                    if (!c) continue;
+                    UObject* sk = object_property(c, STR("SkeletalMesh"));
+                    if (!sk) sk = object_property(c, STR("SkeletalMeshAsset"));
+                    auto flag = [&](const TCHAR* n) {
+                        FProperty* p = prop_chain(c, n);
+                        return p ? number_property(c, p) : -1.0;
+                    };
+                    Call vis(c, STR("IsVisible"));
+                    vis.run();
+                    FProperty* vr = vis.param(STR("ReturnValue"));
+                    bool visible = vr && (vis.buffer[vr->GetOffset_Internal()] & static_cast<FBoolProperty*>(vr)->GetFieldMask()) != 0;
+                    Call lb(c, STR("GetLocalBounds"));
+                    lb.run();
+                    hsvr::Vec3 mn = lb.vec(STR("Min")), mx = lb.vec(STR("Max"));
+                    HSVR_LOG("Probe helmet: piece %ls mesh %ls visible %d ownerNoSee %.0f hiddenInGame %.0f bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f)", c->GetName().c_str(),
+                             sk ? sk->GetName().c_str() : STR("?"), visible ? 1 : 0, flag(STR("bOwnerNoSee")), flag(STR("bHiddenInGame")), mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
+                    Call nm(c, STR("GetNumMaterials"));
+                    nm.run();
+                    int n = nm.integer();
+                    for (int i = 0; i < n && i < 16; ++i)
+                    {
+                        Call gm(c, STR("GetMaterial"));
+                        if (FProperty* ip = gm.param(STR("ElementIndex"))) *reinterpret_cast<int32_t*>(gm.buffer.data() + ip->GetOffset_Internal()) = i;
+                        gm.run();
+                        UObject* m = gm.object_result();
+                        if (!m) continue;
+                        Call bm(m, STR("GetBaseMaterial"));
+                        bm.run();
+                        UObject* b = bm.object_result();
+                        double two = -1.0, over = -1.0, over_two = -1.0;
+                        if (b)
+                            if (FProperty* tp = prop_chain(b, STR("TwoSided"))) two = number_property(b, tp);
+                        if (FProperty* bo = prop_chain(m, STR("BasePropertyOverrides")))
+                        {
+                            UScriptStruct* t = struct_type(bo);
+                            uint8_t* mat = reinterpret_cast<uint8_t*>(m) + bo->GetOffset_Internal();
+                            auto rb = [&](const TCHAR* n) {
+                                FProperty* f = struct_member(t, n);
+                                if (!f) return -1.0;
+                                auto* fb = static_cast<FBoolProperty*>(f);
+                                return (mat[f->GetOffset_Internal() + fb->GetByteOffset()] & fb->GetFieldMask()) ? 1.0 : 0.0;
+                            };
+                            over = rb(STR("bOverride_TwoSided"));
+                            over_two = rb(STR("TwoSided"));
+                        }
+                        HSVR_LOG("Probe helmet:   material %d %ls (base %ls): base two-sided %.0f, instance override %.0f -> %.0f", i, m->GetName().c_str(),
+                                 b ? b->GetName().c_str() : STR("?"), two, over, over_two);
+                    }
+                }
                 continue;
             }
             if (entry.command.rfind("hsvr.spawn ", 0) == 0)

@@ -35,7 +35,10 @@ namespace hsvr
         // Controllers and headset placed in the world from the view anchor as it will be this frame
         // (where he is now), not as it was set up for the frame before (hands shook while walking).
         bool tracking_current_anchor = true;
-        double near_clip_cm = 4.0;
+        // Near clip plane of the eyes, cm. Helmet walls sit 2.3-4.6 cm from your eyes (measured on every
+        // helmet mesh, helmet_see_through.md), and off to the side their depth along the view is even
+        // less: at 4 cm the sides of closed helmets were cut away and you saw the world through them.
+        double near_clip_cm = 1.0;
         // 0 = auto (decode sRGB unless the engine target is a float format), 1 = always decode, 2 = never.
         int gamma_mode = 0;
         // Show the game's flat picture (menus, HUD) on a floating panel.
