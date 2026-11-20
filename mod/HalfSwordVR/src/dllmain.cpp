@@ -17015,8 +17015,17 @@ class HalfSwordVR : public CppUserModBase
     auto on_unreal_init() -> void override
     {
         HSVR_LOG("Unreal initialised");
-        Unreal::FUObjectArray::AddUObjectDeleteListener(&g_freed_listener); // gc_sync: what the game frees
         g_vr_started = hsvr::vr_start();
+        if (!g_vr_started)
+        {
+            // No VR this session (SteamVR closed at launch with vr_auto=1, enabled=0, or no headset):
+            // stay out of the game entirely, so it plays flat as if the mod weren't installed. No
+            // hooks, no engine-tick work, no test room (that is driven from the tick).
+            HSVR_LOG("Mod off for this session: no hooks installed, the game runs unmodified");
+            Output::send<LogLevel::Verbose>(STR("[HalfSwordVR] off this session (no VR), see HalfSwordVR.log\n"));
+            return;
+        }
+        Unreal::FUObjectArray::AddUObjectDeleteListener(&g_freed_listener); // gc_sync: what the game frees
         if (g_vr_started)
         {
             hsvr::stereo_set_anchor_provider(&provide_anchor);

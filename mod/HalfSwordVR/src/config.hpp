@@ -8,7 +8,14 @@ namespace hsvr
     struct Config
     {
         bool enabled = true;
-        // Only start VR when SteamVR is already running, so the game still starts flat without it.
+        // vr_auto=1: VR (and everything else the mod does, test room included) only when SteamVR is
+        // already running as the game starts (one of vr_auto_processes). Without it the mod stays out
+        // of the way: no OpenXR (so SteamVR is never opened), no hooks, the game plays flat as if the
+        // mod weren't installed. vr_auto=0: always start VR (OpenXR opens SteamVR if it is closed).
+        int vr_auto = 1;
+        // Comma-separated process names that count as "SteamVR is running".
+        std::string vr_auto_processes = "vrserver.exe,vrmonitor.exe";
+        // Older name of the same switch: require_steamvr_running=0 is the same as vr_auto=0.
         bool require_steamvr_running = true;
         // Fraction of the headset's recommended per-eye resolution the engine renders at.
         double render_scale = 0.75;
