@@ -8426,7 +8426,10 @@ namespace
             Vec3 hand_point = target + hand_rot.rotate(h.in_hand);
             double from_shoulder = length(grip_at - shoulder) - length(h.in_hand);
             double from_hand = length(grip_at - hand_point);
-            bool out = from_shoulder > reach + 2.0 || (!in_body && from_hand > reach);
+            // With the arm-lag hold a swing trails the hand by a few cm more, so the grip may be a little past
+            // reach without being stuck (playtest 2026-11-20: a flail let go with your hand 20 cm from it).
+            double reach_slack = cfg.pose_hold_arm_lag ? (std::max)(2.0, cfg.pose_hold_let_go_reach_slack_cm) : 2.0;
+            bool out = from_shoulder > reach + reach_slack || (!in_body && from_hand > reach);
             if (in_body && !stuck_is_thrust(h.weapon)) out = false; // a lodged cut: cut_through_tick decides
             if (in_body && cfg.stab_drag && stuck_is_thrust(h.weapon))
             {
@@ -9959,10 +9962,30 @@ namespace
                     double om = 2.0 / lag;
                     double z = cfg.pose_hold_damping_ratio > 0.0 ? cfg.pose_hold_damping_ratio : 1.0;
                     double per_point = two ? mass * 0.5 : mass;
+                    // Far behind the hand (a big jump, or pushed back by something) the hold stiffens back to the
+                    // B&S springs over pose_hold_shoulder_fade_from..to_cm (or 30..60 deg turned away): the hand is
+                    // on the weapon and can't be half a metre from it. The soft arm spring alone let weapons trail
+                    // 40-120 cm and the stuck rule dropped them (playtest 2026-11-20 18:30 UTC, max-strength Willie).
+                    double pk_o = pk, rk_o = rk;
+                    double pc_o = 2.0 * z * std::sqrt((std::max)(0.0, pk_o * st * per_point)) / dst;
+                    double rc_o = 2.0 * z * std::sqrt((std::max)(0.0, rk_o * st * 1e4 * ig)) / (dst * 1e4);
+                    double f0 = cfg.pose_hold_shoulder_fade_from_cm, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_shoulder_fade_to_cm);
+                    double e_cm = length(pivot_now - target_pivot);
+                    double e_deg = length(scaled_axis((rot * target_rot.inverse()).normalized())) * 57.2958;
+                    double stiff = (std::max)((std::min)(1.0, (std::max)(0.0, (e_cm - f0) / (f1 - f0))), (std::min)(1.0, (std::max)(0.0, (e_deg - 30.0) / 30.0)));
                     pk = per_point * om * om / (std::max)(1e-3, st);
                     pc = 2.0 * z * per_point * om / dst;
                     rk = (ig / 1e4) * om * om / (std::max)(1e-3, st);
                     rc = 2.0 * z * (ig / 1e4) * om / dst;
+                    if (stiff > 0.0)
+                    {
+                        pk += (std::max)(0.0, pk_o - pk) * stiff;
+                        pc += (std::max)(0.0, pc_o - pc) * stiff;
+                        rk += (std::max)(0.0, rk_o - rk) * stiff;
+                        rc += (std::max)(0.0, rc_o - rc) * stiff;
+                        HSVR_LOG_EVERY(0.5, "Hold: %s %ls %.0f cm / %.0f deg behind: arm spring stiffened %.0f%% toward the hand's", side == 0 ? "left" : "right",
+                                       weapon->GetName().c_str(), e_cm, e_deg, stiff * 100.0);
+                    }
                     if (cfg.pose_hold_shoulder_torque > 0.0)
                     {
                         double tau = cfg.pose_hold_shoulder_torque * (std::max)(0.0, body.total) + (two ? cfg.pose_hold_shoulder_torque * (std::max)(0.0, s2b.total) : 0.0);

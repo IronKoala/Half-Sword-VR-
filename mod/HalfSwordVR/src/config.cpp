@@ -416,6 +416,7 @@ namespace hsvr
         num("pose_hold_shoulder_torque", c.pose_hold_shoulder_torque);
         num("pose_hold_shoulder_fade_from_cm", c.pose_hold_shoulder_fade_from_cm);
         num("pose_hold_shoulder_fade_to_cm", c.pose_hold_shoulder_fade_to_cm);
+        num("pose_hold_let_go_reach_slack_cm", c.pose_hold_let_go_reach_slack_cm);
         num("pose_hold_wrist_stop_spin", c.pose_hold_wrist_stop_spin);
         num("pose_hold_torque_strength_power", c.pose_hold_torque_strength_power);
         num("pose_slide_ring_max_len_cm", c.pose_slide_ring_max_len_cm);
