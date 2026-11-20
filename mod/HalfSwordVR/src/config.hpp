@@ -878,9 +878,11 @@ namespace hsvr
         // and other headwear stay visible.
         bool hide_own_head = true;
         // Your worn helmet in your own view: 0 drawn (real, blocks the view), 1 the helmet hidden from
-        // you, 2 everything on your head hidden from you (helmet and hood/coif/cap). Others still see
-        // it and it still protects you.
+        // you, 2 everything on your head hidden from you (helmet and hood/coif/cap), 3 a clear window:
+        // the parts within helmet_window_cm of your eyes aren't drawn. Others still see it and it
+        // still protects you.
         int helmet_view = 0;
+        double helmet_window_cm = 7.0;
         // The gore skeleton under his skin (skull, jaw, teeth, throat) would show from inside the
         // hidden head: it is hidden from this bone up. Empty = not hidden. Wounds elsewhere still
         // show their bones.

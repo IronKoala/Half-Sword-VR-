@@ -13772,9 +13772,22 @@ namespace
         static std::vector<UObject*> hidden;
         static bool hidden_tracked = on_freed([] { hidden.erase(std::remove_if(hidden.begin(), hidden.end(), [](UObject* o) { return gone(o); }), hidden.end()); });
         std::vector<UObject*> want;
-        if (first_person && cfg.helmet_view > 0)
+        bool any_worn = false;
+        for (const HeadWear& w : g_head_wear)
+            if (w.comp && !gone(w.comp)) any_worn = true;
+        if (first_person && (cfg.helmet_view == 1 || cfg.helmet_view == 2))
             for (const HeadWear& w : g_head_wear)
-                if (w.comp && !gone(w.comp) && (w.slot == 2 || cfg.helmet_view >= 2)) want.push_back(w.comp);
+                if (w.comp && !gone(w.comp) && (w.slot == 2 || cfg.helmet_view == 2)) want.push_back(w.comp);
+        // 3: a clear window. The eyes' near clip moves out to helmet_window_cm while something is
+        // worn on the head, so the walls right around your eyes (visor, cheek plates: 2-6 cm away)
+        // aren't drawn while the brim and shell further out still are. Anything else that close to
+        // your eyes (food at your mouth) is cut too.
+        double window = first_person && cfg.helmet_view == 3 && any_worn ? cfg.helmet_window_cm : 0.0;
+        if (window != hsvr::shared().helmet_window_cm.load())
+        {
+            hsvr::shared().helmet_window_cm.store(window);
+            HSVR_LOG("Helmet view: near clip %s", window > 0.0 ? "moved out to helmet_window_cm (clear window around your eyes)" : "back to near_clip_cm");
+        }
         for (UObject* c : hidden)
             if (std::find(want.begin(), want.end(), c) == want.end() && !gone(c))
             {

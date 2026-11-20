@@ -729,6 +729,7 @@ namespace hsvr
         num("stab_push_time_s", c.stab_push_time_s);
         flag("hide_own_head", c.hide_own_head);
         integer("helmet_view", c.helmet_view);
+        num("helmet_window_cm", c.helmet_window_cm);
         text("hide_own_gore_from", c.hide_own_gore_from);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
