@@ -5764,6 +5764,10 @@ namespace
         hsvr::Vec3 a, b;
         std::string name;
         int grip_r = -1, grip_l = -1; // finger shape for that hand (-1 = the game's own)
+        // A fixed grip (a one-handed sword's): touching anywhere on a..b takes it, but the hand always
+        // holds it at a + (b - a) * fixed_t and never slides along it.
+        bool fixed = false;
+        double fixed_t = 0.0;
     };
     const std::vector<Handle>& item_handles(UObject* item, UObject* base);
     // Weapons and tools are taken only by a handle; shields and bottles anywhere.
@@ -8761,6 +8765,21 @@ namespace
                 double g0 = (std::min)(0.0, lo + half), g1 = (std::max)(0.0, hi - half);
                 hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, g1}, "grip", -1, 2});
                 bool hafted = hi - lo >= 30.0;
+                // One-handed sword (a Guard, a blade past it, not hafted) by the game's own grip type, which
+                // ModularWeaponBP copies from its grip module (UG @19423 Grip R Hand Default = Spawned Weapon
+                // Grip.Grip R Hand Default). The game two-hands only types 10-16 (Willie_BP UG @494280 maps
+                // them to one-handed types; 0-9 and 17 stay as they are; grip_type_flow.md section 3).
+                double grip_type = read_number_variable(item, STR("Grip R Hand Default"));
+                bool two_hand_type = grip_type >= 10.0 && grip_type <= 16.0;
+                bool sword = !hafted && wide_hi && weapon_has_guard(item);
+                if (sword)
+                    HSVR_LOG("Handles: %ls: sword, game grip type %.0f (%s), grip %.1f..%.1f cm", item->GetName().c_str(), grip_type,
+                             grip_type < 0.0 ? "not found" : two_hand_type ? "two-handed: grip slides" : "one-handed", g0, g1);
+                if (sword && cfg.pose_slide_fixed_1h_sword && grip_type >= 0.0 && !two_hand_type && g1 - g0 > 1e-3)
+                {
+                    hs.back().fixed = true;
+                    hs.back().fixed_t = (std::min)(1.0, (std::max)(0.0, (0.0 - g0) / (g1 - g0))); // the game's grip point
+                }
                 if (hafted)
                 {
                     // Every further haft stretch is a handle of its own; the head is not (B&S).
@@ -8781,7 +8800,8 @@ namespace
         for (const Handle& h : hs)
         {
             char one[160];
-            std::snprintf(one, sizeof(one), "%s%s (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f)", list.empty() ? "" : "; ", h.name.c_str(), h.a.x, h.a.y, h.a.z, h.b.x, h.b.y, h.b.z);
+            std::snprintf(one, sizeof(one), "%s%s (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f)%s", list.empty() ? "" : "; ", h.name.c_str(), h.a.x, h.a.y, h.a.z, h.b.x, h.b.y, h.b.z,
+                          h.fixed ? " fixed, no slide" : "");
             list += one;
         }
         // A weapon whose parts were not found yet (spawned straight into the hand) is measured again next
@@ -8829,11 +8849,12 @@ namespace
     FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t)
     {
         using namespace hsvr;
+        if (hd.fixed) t = hd.fixed_t;
         Vec3 local = hd.a + (hd.b - hd.a) * t;
         Vec3 axis_local = length(hd.b - hd.a) > 1e-3 ? normalized(hd.b - hd.a) : Vec3{0, 0, 1};
         Vec3 axis = w0_rot.rotate(axis_local);
         FreeGrip g = make_free_grip(side, mesh, w0_pos, w0_rot, palm, w0_pos + w0_rot.rotate(local), &axis, hd.name.c_str());
-        g.has_handle = length(hd.b - hd.a) > 1e-3;
+        g.has_handle = length(hd.b - hd.a) > 1e-3 && !hd.fixed; // no slide on a fixed grip
         g.ha = hd.a;
         g.hb = hd.b;
         g.t = t;
@@ -9365,7 +9386,14 @@ namespace
             const std::vector<Handle>& hs = item_handles(weapon, base);
             double t = 0.0, d = 1e9;
             int hi = nearest_handle(hs, pivot, t, d);
-            if (hi >= 0 && d <= 4.0 && length(hs[hi].b - hs[hi].a) > 1e-3)
+            if (hi >= 0 && d <= 4.0 && hs[hi].fixed)
+            {
+                // A one-handed sword: held at its fixed spot (the game's grip point), no slide.
+                g.handle = hs[hi].name;
+                g.t = hs[hi].fixed_t;
+                g.pivot = hs[hi].a + (hs[hi].b - hs[hi].a) * g.t;
+            }
+            else if (hi >= 0 && d <= 4.0 && length(hs[hi].b - hs[hi].a) > 1e-3)
             {
                 g.has_handle = true;
                 g.ha = hs[hi].a;
@@ -9377,8 +9405,8 @@ namespace
                 g.pivot = g.ha + ab * g.t;
             }
             h.free = g;
-            HSVR_LOG("Hold: %s hand holds %ls by the game's grip%s%s", side == 0 ? "left" : "right", weapon->GetName().c_str(), g.has_handle ? ", on its " : " (no handle near)",
-                     g.has_handle ? g.handle.c_str() : "");
+            HSVR_LOG("Hold: %s hand holds %ls by the game's grip%s%s", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                     g.has_handle ? ", on its " : !g.handle.empty() ? ", at its " : " (no handle near)", g.handle.c_str());
         }
         if (h.free.set && h.free.has_handle && cfg.pose_slide && cfg.pose_hold_exact)
         {

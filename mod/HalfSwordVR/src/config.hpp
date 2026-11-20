@@ -478,6 +478,11 @@ namespace hsvr
         double pose_slide_gap_max_cm = 4.0;
         bool pose_slide_rondel_stops = true;
         bool pose_slide_butt_is_haft = true;
+        // A one-handed sword (its grip module's game grip type, "Grip R Hand Default", is not one of the
+        // game's two-hand types 10-16) is held at one fixed spot on its grip, the game's own grip point:
+        // no trigger slide along the grip (Matthew 2026-11-20). Hand-and-a-half and two-handed swords, and
+        // every non-sword, keep the slide. The blade (half-swording) is unchanged.
+        bool pose_slide_fixed_1h_sword = true;
         double pose_slide_rate_min = 3.0;
         double pose_slide_rate_max = 40.0;
         double pose_slide_max_cm_s = 250.0; // fastest the hand runs along a weapon
