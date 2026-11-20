@@ -9723,7 +9723,12 @@ namespace
                 g_two.couple = std::fabs(dz) > 1.0 ? cfg.pose_hold_max_force * (std::max)(0.0, cfg.pose_hold_strength) * second.total * 100.0 * std::fabs(dz) : 0.0;
                 // A controller pulled well off its spot on the weapon lets go (B&S).
                 Vec3 spot = bp_now + bq_now.rotate(local2);
-                double off = length(p2 - spot);
+                // Measured also as how far apart your hands are against how far apart the grips are, not only
+                // against where the weapon is: a weapon held back by a body, a wound or the arm's lag trailed 50-100 cm behind
+                // both hands and the second hand was let go 12 times in one fight (playtest 2026-11-20 22:30 UTC)
+                // though your hands never moved apart. Only a hand pulled away from the other lets go.
+                double off_hands = std::fabs(length(p2 - p1) - length(local2 - pivot)); // hands apart vs grips apart
+                double off = (std::min)(length(p2 - spot), off_hands);
                 if (off > (cfg.pose_hold_bs ? cfg.pose_bs_two_let_go_cm : cfg.pose_two_hand_let_go_cm))
                 {
                     if (g_two.far_since < 0.0) g_two.far_since = now;
