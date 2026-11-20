@@ -8809,6 +8809,20 @@ namespace
     // lowerarm 1.22 kg, from their volume, so x scale^3) + hand 1 kg (a fixed override), all x Mass Scale
     // (willie_physics_assets.md; Set Character Height: scale = MapRange(Height 0..1 -> 0.875..1);
     // Mass Scale (Set in BP) = MapRange(Muscle Rate 0..1 -> 1..1.25)). Range 0.78 (min/min) .. 1.27 (max/max).
+    struct BodyDims
+    {
+        double scale = 0.9375, mass_scale = 1.125; // a default creator body until read
+    };
+    BodyDims g_body_dims;
+    // His arm's inertia about the shoulder (kg m^2): upper arm 1.39 kg and forearm 1.22 kg (x scale^3) and
+    // the 1 kg hand, all x Mass Scale, their centres at 0.15 / 0.40 / reach m from the shoulder for a default
+    // body, x his size. Default body about 0.55, the smallest weakest about 0.30.
+    double arm_inertia_shoulder(const BodyDims& d, double reach_m)
+    {
+        double k = d.scale / 0.9375, s3 = d.scale * d.scale * d.scale;
+        double a = 0.15 * k, b = 0.40 * k, c = reach_m * k;
+        return d.mass_scale * (1.39 * s3 * a * a + 1.22 * s3 * b * b + 1.0 * c * c);
+    }
     double body_size_factor(UObject* pawn)
     {
         static UObject* last_pawn = nullptr;
@@ -8830,6 +8844,8 @@ namespace
         if (!(scale > 0.3 && scale < 3.0) || !(mass_scale > 0.1 && mass_scale < 5.0)) return 1.0;
         auto arm = [](double sc, double ms) { return (2.61 * sc * sc * sc + 1.0) * ms; };
         double f = arm(scale, mass_scale) / arm(0.9375, 1.125);
+        g_body_dims.scale = scale;
+        g_body_dims.mass_scale = mass_scale;
         last_pawn = pawn;
         last = f;
         HSVR_LOG("Strength: body size: Character Scale %.4f, Mass Scale %.3f -> arm mass %.2f kg vs %.2f kg for a default body -> hold x%.2f", scale, mass_scale,
@@ -9672,11 +9688,40 @@ namespace
                        rf = two ? cfg.pose_bs_two_rot_max : cfg.pose_hold_max_torque;
                 double st = (std::max)(0.0, cfg.pose_hold_strength);
                 double dst = (std::max)(1.0, st * 0.5);
+                bool arm_lag = cfg.pose_hold_arm_lag && cfg.pose_hold_arm_lag_s > 0.0;
+                if (arm_lag)
+                {
+                    // Flat Half Sword's arm (flat_hs_weight_vs_hold.md, weak_willie_weight.md): the same pull for
+                    // every body on arm + weapon, so the follow slows by sqrt((arm + weapon) / arm) about the
+                    // shoulder. Critically damped spring: steady-swing lag = 2 / omega.
+                    if (cfg.pose_body_size_strength) body_size_factor(pawn);
+                    Vec3 rp = pivot_now - com;
+                    double ig = (std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp); // kg cm^2 about the grip
+                    double reach = cfg.pose_hold_arm_reach_cm * 0.01;
+                    double A = arm_inertia_shoulder(g_body_dims, reach) * (two ? 2.0 : 1.0);
+                    double L = reach * g_body_dims.scale / 0.9375;
+                    double W = ig / 1e4 + mass * L * L;
+                    double fit = (std::min)(body.injury, body.stamina);
+                    if (two) fit = 0.5 * (fit + (std::min)(s2b.injury, s2b.stamina));
+                    fit = (std::max)(0.05, fit);
+                    double lag = cfg.pose_hold_arm_lag_s * std::sqrt((A + W) / (std::max)(0.01, A)) / std::sqrt(fit);
+                    lag = (std::min)((std::max)(cfg.pose_hold_arm_lag_s, cfg.pose_hold_arm_lag_max_s), lag);
+                    double om = 2.0 / lag;
+                    double z = cfg.pose_hold_damping_ratio > 0.0 ? cfg.pose_hold_damping_ratio : 1.0;
+                    double per_point = two ? mass * 0.5 : mass;
+                    pk = per_point * om * om / (std::max)(1e-3, st);
+                    pc = 2.0 * z * per_point * om / dst;
+                    rk = (ig / 1e4) * om * om / (std::max)(1e-3, st);
+                    rc = 2.0 * z * (ig / 1e4) * om / dst;
+                    HSVR_LOG_EVERY(2.0, "Hold: %s arm lag for %ls (%.2f kg, %.3f kg m^2 about the grip%s): arm %.2f + weapon %.2f kg m^2 about the shoulder, fit %.2f -> lag %.3f s "
+                                   "(spring %.0f N/m, turn %.1f N m/rad)", side == 0 ? "left" : "right", weapon->GetName().c_str(), mass, ig / 1e4,
+                                   two ? ", two hands" : "", A, W, fit, lag, pk * st, rk * st);
+                }
                 // Dampers per weapon (pose_hold_damping_ratio): critical damping for this weapon's own mass and
                 // its inertia about the grip, so a long heavy one (war staff, 1.9 kg m^2 about a low grip) settles
                 // without bouncing and a short sword (0.04 kg m^2) doesn't trail the wrist and swing on past a stop
                 // (playtest 14:19 with fixed dampers tuned for the staff). 0 = the fixed dampers above.
-                if (cfg.pose_hold_damping_ratio > 0.0)
+                if (cfg.pose_hold_damping_ratio > 0.0 && !arm_lag)
                 {
                     Vec3 rp = pivot_now - com;
                     double ig = (std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp); // kg cm^2
@@ -9715,6 +9760,17 @@ namespace
                 }
                 Mat3 invI = about_com.inverse();
                 Vec3 vb = v_com_now + g * DT, wb = w_now; // gravity this frame, taken off again below (the physics adds it)
+                if (arm_lag)
+                {
+                    // The arm carries the weapon's weight at the grip (the soft arm spring would let the hand
+                    // sag g / omega^2, 7 cm for a polearm); its lever about the grip is still the turn's to hold.
+                    for (int i = 0; i < n; ++i)
+                    {
+                        Vec3 J = g * (-mass * DT / n);
+                        vb = vb + J * (1.0 / mass);
+                        wb = wb + invI * cross(pts[i].r, J);
+                    }
+                }
                 Vec3 ang;
                 Vec3 err_rot = scaled_axis((rot * target_rot.inverse()).normalized());
                 // The wrist's end stop (Matthew 2026-11-19: with the turning limit at a real wrist's 30 N m,

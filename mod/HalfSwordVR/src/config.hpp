@@ -417,6 +417,18 @@ namespace hsvr
         // The hold's force and torque caps x his arm mass against a default creator body's (height and
         // weight/muscle; 0.78 smallest .. 1.27 biggest), as flat Half Sword's weapon-to-arm mass ratio.
         bool pose_body_size_strength = true;
+        // Arm-inertia lag, like flat Half Sword's arm (Matthew 2026-11-20, option A: a weak Willie should
+        // feel weight and lag): the hold drives his arm and the weapon together, as flat Half Sword's arm
+        // motors do (same pull for every body, so the weapon's share of arm + weapon inertia about the
+        // shoulder sets how much it slows him). Empty-arm follow delay pose_hold_arm_lag_s (flat: 0.1 s),
+        // x sqrt((arm + weapon) / arm), x 1/sqrt(the weaker of injury and stamina), never past
+        // pose_hold_arm_lag_max_s. The weapon's weight at the grip is carried (no sag of the hand), its
+        // lever is not. Replaces the B&S springs and dampers; the caps stay. pose_hold_arm_reach_cm: the
+        // grip's distance from the shoulder for a default body (scaled with his size).
+        bool pose_hold_arm_lag = true;
+        double pose_hold_arm_lag_s = 0.04;
+        double pose_hold_arm_lag_max_s = 0.25;
+        double pose_hold_arm_reach_cm = 55.0;
         // Thin bits on a haft the hand slides over: a wide stretch no longer than ring_max_len_cm along the
         // haft and reaching no more than ring_max_width_cm from its axis, or a gap between parts no longer
         // than gap_max_cm, with narrow haft past it (ring_max_len_cm 0 = every wide bit stops the hand).
