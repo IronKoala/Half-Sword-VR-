@@ -501,6 +501,14 @@ namespace hsvr
         integer("pose_fist_shape", c.pose_fist_shape);
         flag("pose_fist_game_flags", c.pose_fist_game_flags);
         flag("pose_fingers_tracked", c.pose_fingers_tracked);
+        flag("pose_elbow_strikes", c.pose_elbow_strikes);
+        num("pose_elbow_radius_cm", c.pose_elbow_radius_cm);
+        num("pose_elbow_min_ass", c.pose_elbow_min_ass);
+        integer("pose_elbow_learn_min_hits", c.pose_elbow_learn_min_hits);
+        num("pose_elbow_rigidity", c.pose_elbow_rigidity);
+        num("pose_elbow_cut", c.pose_elbow_cut);
+        num("pose_elbow_impulse_per_v", c.pose_elbow_impulse_per_v);
+        num("pose_elbow_velocity_scale", c.pose_elbow_velocity_scale);
         num("pose_fingers_tau_s", c.pose_fingers_tau_s);
         flag("log_fingers", c.log_fingers);
         flag("log_body_grab", c.log_body_grab);

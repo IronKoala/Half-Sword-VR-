@@ -584,6 +584,19 @@ namespace hsvr
         // gives one, else the trigger, grip and touch sensors (the VR framework's empty-hand curls), with
         // the framework's per-joint bends and spread, smoothed over tau_s. Written into the visible
         // body's copy of the animated pose (ABP_CopyPose1), so gauntlets follow. 0 = the game's grip shapes.
+        // Elbow strikes hit like a punch (Matthew 2026-11-20): the elbow (and 7 cm either side along the
+        // arm) meeting a Willie within radius_cm at the fist's speed (min_ass, the game's Aim Swing Speed
+        // for its fist) makes the fist's own damage call on him with the elbow's velocity. Rigidity, cut,
+        // impulse per velocity and velocity scale are the running mean of your last fist hits once
+        // learn_min_hits have landed; until then these defaults.
+        bool pose_elbow_strikes = true;
+        double pose_elbow_radius_cm = 6.0;
+        double pose_elbow_min_ass = 30.0;
+        int pose_elbow_learn_min_hits = 3;
+        double pose_elbow_rigidity = 0.66;
+        double pose_elbow_cut = 0.75;
+        double pose_elbow_impulse_per_v = 0.1;
+        double pose_elbow_velocity_scale = 0.9375;
         bool pose_fingers_tracked = true;
         double pose_fingers_tau_s = 0.05;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.

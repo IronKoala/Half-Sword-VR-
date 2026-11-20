@@ -6545,6 +6545,290 @@ namespace
         }
     }
 
+    // ---- Elbows hit like a punch (Matthew 2026-11-20) -------------------------------------------
+    // Flat Half Sword has no elbow attack: a limb touching a Willie only runs his body-hit block,
+    // whose self-damage is weak (rigidity 0.225-0.5 x a capped impulse). A punch instead is the fist
+    // weapon calling his 'Deal Complex Damage' (BPI_ComplexCollision, ModularWeaponBP UG @41944) with
+    // the fist's velocity, impulse, rigidity and cutting rate. So when the elbow (the lowerarm bone's
+    // root, and 7 cm either side along the arm) meets a Willie's body at fist speed (Aim Swing Speed
+    // 30, the speed the game's fist needs), the mod makes that same call with the elbow's velocity
+    // and the punch's own numbers: the running mean of your last real fist hits (watched on the
+    // way in), or pose_elbow_* until you have punched.
+    struct PunchStats
+    {
+        int n = 0;
+        double rigidity = 0, cut = 0, stab = 0, impulse_per_v = 0, v_per_speed = 0;
+        bool have_template = false;
+        double kick = 1.0, blunt_int = 1.0, draw_cut = 0.0;
+        bool lower_threshold = false, damage_parent = false, extra_high = false;
+    };
+    PunchStats g_punch;
+
+    double read_param_number(uint8_t* base, FProperty* p)
+    {
+        auto kind = p->GetClass().GetName();
+        uint8_t* at = base + p->GetOffset_Internal();
+        if (kind == STR("DoubleProperty")) return *reinterpret_cast<double*>(at);
+        if (kind == STR("FloatProperty")) return *reinterpret_cast<float*>(at);
+        if (kind == STR("IntProperty")) return *reinterpret_cast<int32_t*>(at);
+        if (kind == STR("ByteProperty")) return *at;
+        return 0.0;
+    }
+    void write_param_number(uint8_t* base, FProperty* p, double v)
+    {
+        auto kind = p->GetClass().GetName();
+        uint8_t* at = base + p->GetOffset_Internal();
+        if (kind == STR("DoubleProperty")) *reinterpret_cast<double*>(at) = v;
+        else if (kind == STR("FloatProperty")) *reinterpret_cast<float*>(at) = (float)v;
+        else if (kind == STR("IntProperty")) *reinterpret_cast<int32_t*>(at) = (int32_t)v;
+        else if (kind == STR("ByteProperty")) *at = (uint8_t)v;
+    }
+    bool read_param_bool(uint8_t* base, FProperty* p)
+    {
+        auto* b = static_cast<FBoolProperty*>(p);
+        return (*(base + p->GetOffset_Internal() + b->GetByteOffset()) & b->GetFieldMask()) != 0;
+    }
+    void write_param_bool(uint8_t* base, FProperty* p, bool v)
+    {
+        auto* b = static_cast<FBoolProperty*>(p);
+        uint8_t* at = base + p->GetOffset_Internal() + b->GetByteOffset();
+        if (v) *at |= b->GetFieldMask();
+        else *at &= ~b->GetFieldMask();
+    }
+    hsvr::Vec3 read_param_vec(uint8_t* base, FProperty* p)
+    {
+        double v[3];
+        read_three(base + p->GetOffset_Internal(), p, v);
+        return {v[0], v[1], v[2]};
+    }
+
+    std::atomic<bool> g_elbow_calling{false};
+    // Watches every 'Deal Complex Damage' a Willie gets: the player's fist hits are learnt (and logged).
+    void punch_watch_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        if (g_elbow_calling.load()) return;
+        UFunction* fn = static_cast<UFunction*>(custom_data);
+        uint8_t* locals = context.TheStack.Locals();
+        UObject* victim = context.Context;
+        UObject* pawn = live_posed_pawn();
+        if (!fn || !locals || !victim || !pawn || victim == pawn) return;
+        FProperty *normal_p = nullptr, *collided = nullptr, *vel = nullptr, *imp = nullptr, *cut = nullptr, *stab = nullptr, *rig = nullptr, *kick = nullptr, *blunt = nullptr,
+                  *lower = nullptr, *parent = nullptr, *extra = nullptr, *draw = nullptr, *bone = nullptr;
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            if (n == STR("Collided Component")) collided = p;
+            else if (n == STR("Hit Velocity")) vel = p;
+            else if (n == STR("Hit Impulse")) imp = p;
+            else if (n == STR("Cutting Power")) cut = p;
+            else if (n == STR("Stab Rate")) stab = p;
+            else if (n == STR("Rigidity")) rig = p;
+            else if (n == STR("Kick Power")) kick = p;
+            else if (n == STR("Blunt Destruction Int")) blunt = p;
+            else if (n == STR("Lower Threshold In")) lower = p;
+            else if (n == STR("Damage Parent Bone?")) parent = p;
+            else if (n == STR("Extra High Velocity")) extra = p;
+            else if (n == STR("Draw Cut")) draw = p;
+            else if (n == STR("Hit Bone")) bone = p;
+            else if (n == STR("Normal")) normal_p = p;
+        }
+        if (!collided || !vel || !imp || !rig) return;
+        UObject* comp = *reinterpret_cast<UObject**>(locals + collided->GetOffset_Internal());
+        if (!comp) return;
+        Call oc(comp, STR("GetOwner"));
+        oc.run();
+        UObject* owner = oc.object_result();
+        int side = owner && owner == object_property(pawn, STR("Weapon R")) ? 1 : owner && owner == object_property(pawn, STR("Weapon L")) ? 0 : -1;
+        if (side < 0 || !is_fist(owner)) return;
+        using namespace hsvr;
+        Vec3 v = read_param_vec(locals, vel), ni = read_param_vec(locals, imp);
+        double speed = length(v), r = read_param_number(locals, rig), c = cut ? read_param_number(locals, cut) : 0.0, s = stab ? read_param_number(locals, stab) : 0.0;
+        // The hand's own speed when it hit (to learn the fist's velocity factor).
+        double hand_speed = g_swing_v[side] * 100.0;
+        PunchStats& P = g_punch;
+        int k = (std::min)(P.n, 19);
+        auto mean = [&](double& m, double x) { m = (m * k + x) / (k + 1); };
+        mean(P.rigidity, r);
+        mean(P.cut, c);
+        mean(P.stab, s);
+        if (speed > 1.0) mean(P.impulse_per_v, length(ni) / speed);
+        if (hand_speed > 50.0) mean(P.v_per_speed, speed / hand_speed);
+        P.n += 1;
+        if (kick) P.kick = read_param_number(locals, kick);
+        if (blunt) P.blunt_int = read_param_number(locals, blunt);
+        if (draw) P.draw_cut = read_param_number(locals, draw);
+        if (lower) P.lower_threshold = read_param_bool(locals, lower);
+        if (parent) P.damage_parent = read_param_bool(locals, parent);
+        if (extra) P.extra_high = read_param_bool(locals, extra);
+        P.have_template = true;
+        Vec3 nrm = normal_p ? read_param_vec(locals, normal_p) : Vec3{};
+        double cos_ni = speed > 1.0 && length(ni) > 1e-6 ? dot(v, ni) / (speed * length(ni)) : 0.0;
+        double cos_n = speed > 1.0 && length(nrm) > 1e-6 ? dot(v, nrm) / (speed * length(nrm)) : 0.0;
+        std::wstring b = bone ? reinterpret_cast<FName*>(locals + bone->GetOffset_Internal())->ToString() : STR("?");
+        HSVR_LOG("Punch: %s fist hit %ls (%ls): velocity %.0f cm/s (hand %.0f), impulse %.0f, rigidity %.2f, cut %.2f, stab %.2f, kick %.2f, blunt %.0f, draw %.2f, "
+                 "lower %d, parent %d, extra %d, cos(velocity, impulse) %.2f, cos(velocity, normal) %.2f; learnt from %d hits: rigidity %.2f, cut %.2f, impulse/velocity %.3f, velocity/hand %.2f",
+                 side == 0 ? "left" : "right", victim->GetName().c_str(), b.c_str(), speed, hand_speed, length(ni), r, c, s, P.kick, P.blunt_int, P.draw_cut,
+                 (int)P.lower_threshold, (int)P.damage_parent, (int)P.extra_high, cos_ni, cos_n, P.n, P.rigidity, P.cut, P.impulse_per_v, P.v_per_speed);
+    }
+
+    void install_punch_watch()
+    {
+        static bool installed = false;
+        static double last_try = -10.0;
+        if (installed) return;
+        double now = hsvr::now_seconds();
+        if (now - last_try < 2.0) return;
+        last_try = now;
+        UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:Deal Complex Damage"));
+        if (!fn) return;
+        installed = true;
+        UObjectGlobals::RegisterHook(fn, &punch_watch_hook, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+        HSVR_LOG("Punch: watching Willie's Deal Complex Damage");
+    }
+
+    struct ElbowState
+    {
+        bool have = false;
+        hsvr::Vec3 last[3];
+        double last_t = 0.0;
+        hsvr::Vec3 vel[3];
+        std::map<UObject*, double> touching_until; // a hit needs the elbow to leave him first
+        double last_hit = -10.0;
+    };
+    ElbowState g_elbow[2];
+
+    void elbow_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        Config cfg = config();
+        install_punch_watch();
+        if (!cfg.pose_elbow_strikes || !pawn || !g_pose.mesh || !g_pose_active.load()) return;
+        static std::vector<UObject*> foes;
+        static double found_at = -10.0;
+        double now = now_seconds();
+        if (now - found_at > 1.0)
+        {
+            found_at = now;
+            foes.clear();
+            std::vector<UObject*> all;
+            UObjectGlobals::FindAllOf(STR("Willie_BP_C"), all);
+            for (UObject* w : all)
+                if (w && w != pawn && w->GetName().rfind(STR("Default__"), 0) != 0) foes.push_back(w);
+        }
+        for (int side = 0; side < 2; ++side)
+        {
+            ElbowState& E = g_elbow[side];
+            std::string sx = side == 0 ? "_l" : "_r";
+            Vec3 elbow = socket_location(g_pose.mesh, bone_fname("lowerarm" + sx));
+            Vec3 hand = socket_location(g_pose.mesh, bone_fname("hand" + sx));
+            Vec3 shoulder = socket_location(g_pose.mesh, bone_fname("upperarm" + sx));
+            Vec3 pts[3] = {elbow, elbow + normalized(hand - elbow) * 7.0, elbow + normalized(shoulder - elbow) * 7.0};
+            double dt = now - E.last_t;
+            if (E.have && dt > 1e-4 && dt < 0.1)
+                for (int i = 0; i < 3; ++i) E.vel[i] = E.vel[i] + ((pts[i] - E.last[i]) * (1.0 / dt) - E.vel[i]) * 0.5;
+            else
+                for (int i = 0; i < 3; ++i) E.vel[i] = {};
+            for (int i = 0; i < 3; ++i) E.last[i] = pts[i];
+            E.last_t = now;
+            E.have = true;
+            // Fist speed: the hand speed that gives the game's Aim Swing Speed 30 (the fist's spawn rule).
+            double lo = cfg.pose_swing_speed_lo, hi = (std::max)(lo + 0.1, cfg.pose_swing_speed_hi);
+            double min_speed = (lo + (hi - lo) * cfg.pose_elbow_min_ass / 75.0) * 100.0;
+            for (UObject* w : foes)
+            {
+                UObject* mesh = object_property(w, STR("Mesh"));
+                if (!mesh) continue;
+                if (length(component_location(mesh) - elbow) > 200.0) continue;
+                double best_d = 1e9;
+                int best_i = -1;
+                Vec3 best_pt;
+                FName best_bone;
+                for (int i = 0; i < 3; ++i)
+                {
+                    Call cp(mesh, STR("GetClosestPointOnCollision"));
+                    cp.three(STR("Point"), pts[i].x, pts[i].y, pts[i].z);
+                    cp.run();
+                    double d = cp.number();
+                    if (d < 0.0 || d >= best_d) continue;
+                    best_d = d, best_i = i;
+                    best_pt = d > 0.0 ? cp.vec(STR("OutPointOnBody")) : pts[i];
+                }
+                if (best_i >= 0 && best_d <= cfg.pose_elbow_radius_cm)
+                {
+                    // His bone there (GetClosestPointOnCollision takes a bone, it does not give one back).
+                    Call fb(mesh, STR("FindClosestBone_K2"));
+                    fb.three(STR("TestLocation"), best_pt.x, best_pt.y, best_pt.z);
+                    fb.number(STR("IgnoreScale"), 0.0);
+                    fb.flag(STR("bRequirePhysicsAsset"), true);
+                    fb.run();
+                    if (FProperty* rp = fb.param(STR("ReturnValue"))) best_bone = *reinterpret_cast<FName*>(fb.buffer.data() + rp->GetOffset_Internal());
+                }
+                double& until = E.touching_until[w];
+                if (best_i < 0 || best_d > cfg.pose_elbow_radius_cm)
+                {
+                    if (best_i >= 0 && best_d > cfg.pose_elbow_radius_cm + 3.0) until = 0.0;
+                    continue;
+                }
+                if (until > 0.0) continue; // still in contact since the last hit
+                Vec3 v = E.vel[best_i];
+                Vec3 into = best_d > 0.5 ? normalized(best_pt - pts[best_i]) : normalized(v);
+                double closing = dot(v, into);
+                if (closing < min_speed) continue;
+                until = 1.0;
+                if (now - E.last_hit < 0.1) continue; // the game's own limb-hit cooldown
+                E.last_hit = now;
+                // The punch's numbers (learnt from your fist hits, else the defaults).
+                bool learnt = g_punch.n >= cfg.pose_elbow_learn_min_hits;
+                double rig = learnt ? g_punch.rigidity : cfg.pose_elbow_rigidity;
+                double cutp = learnt ? g_punch.cut : cfg.pose_elbow_cut;
+                double ipv = learnt ? g_punch.impulse_per_v : cfg.pose_elbow_impulse_per_v;
+                double vps = learnt && g_punch.v_per_speed > 0.0 ? g_punch.v_per_speed : cfg.pose_elbow_velocity_scale;
+                Vec3 hv = v * vps;
+                Vec3 hi_v = into * (length(hv) * ipv);
+                Vec3 normal = into * -1.0; // his surface, facing the elbow
+                Call dc(w, STR("Deal Complex Damage"));
+                if (!dc.fn)
+                {
+                    HSVR_LOG_EVERY(10.0, "Elbow: %ls has no Deal Complex Damage", w->GetName().c_str());
+                    continue;
+                }
+                uint8_t* base = dc.buffer.data();
+                dc.object(STR("Hit Component"), mesh);
+                dc.object(STR("Collided Component"), g_pose.mesh);
+                dc.name(STR("Hit Bone"), best_bone);
+                dc.three(STR("Location"), best_pt.x, best_pt.y, best_pt.z);
+                dc.three(STR("Normal"), normal.x, normal.y, normal.z);
+                dc.three(STR("Hit Velocity"), hv.x, hv.y, hv.z);
+                dc.three(STR("Hit Impulse"), hi_v.x, hi_v.y, hi_v.z);
+                auto num = [&](const TCHAR* n, double x) { if (FProperty* p = dc.param(n)) write_param_number(base, p, x); };
+                auto flag = [&](const TCHAR* n, bool x) { if (FProperty* p = dc.param(n)) write_param_bool(base, p, x); };
+                num(STR("Cutting Power"), cutp);
+                num(STR("Stab Rate"), learnt ? g_punch.stab : 0.0);
+                num(STR("Rigidity"), rig);
+                num(STR("Blunt Destruction Int"), g_punch.have_template ? g_punch.blunt_int : 1.0);
+                num(STR("Kick Power"), g_punch.have_template ? g_punch.kick : 1.0);
+                num(STR("Draw Cut"), 0.0);
+                flag(STR("Lower Threshold In"), g_punch.have_template && g_punch.lower_threshold);
+                flag(STR("Damage Parent Bone?"), g_punch.have_template && g_punch.damage_parent);
+                flag(STR("Extra High Velocity"), g_punch.have_template && g_punch.extra_high);
+                double h0 = read_number_variable(w, STR("Health")), c0 = read_number_variable(w, STR("Consciousness"));
+                g_elbow_calling.store(true);
+                dc.run();
+                g_elbow_calling.store(false);
+                double dmg = -1.0, rig_out = -1.0;
+                if (FProperty* p = dc.param(STR("Damage Out"))) dmg = read_param_number(base, p);
+                if (FProperty* p = dc.param(STR("Rigidity Out"))) rig_out = read_param_number(base, p);
+                controllers_buzz(side, 0.5f);
+                const char* where[3] = {"elbow", "forearm", "upper arm"};
+                HSVR_LOG("Elbow: %s %s hit %ls %ls at %.0f cm/s (%.1f cm off): velocity %.0f, impulse %.0f, rigidity %.2f, cut %.2f (%s); damage out %.1f, rigidity out %.2f; "
+                         "health %.1f -> %.1f, consciousness %.0f -> %.0f",
+                         side == 0 ? "left" : "right", where[best_i], w->GetName().c_str(), best_bone.ToString().c_str(), closing, best_d, length(hv), length(hi_v), rig, cutp,
+                         learnt ? "learnt from your punches" : "defaults", dmg, rig_out, h0, read_number_variable(w, STR("Health")), c0,
+                         read_number_variable(w, STR("Consciousness")));
+            }
+        }
+    }
+
     // pose_grab_body_no_slip: right before Willie's tick (where the slip rule runs), the held hand's
     // 'Hand Block Drop' is set while his grip strength is above pose_grab_body_slip_below_t.
     bool g_body_blocking[2] = {false, false};
@@ -12254,6 +12538,7 @@ namespace
             fist_flags_after_tick(context);
             body_grab_after_tick(context);
             body_hit_watch(context);
+            elbow_tick(context);
             thrown_tick(context);
             frames_tick(context);
         }
