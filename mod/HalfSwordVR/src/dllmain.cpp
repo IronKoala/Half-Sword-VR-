@@ -15699,6 +15699,18 @@ namespace
         }
     }
 
+    bool g_script_player_immortal = false;
+    void script_immortal_tick()
+    {
+        static double last = -10.0;
+        if (!g_script_player_immortal) return;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        if (pawn && !set_bool_property(pawn, STR("Immortal"), true)) HSVR_LOG_EVERY(30.0, "Script: hsvr.player_immortal: no Immortal variable on the player");
+    }
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -15796,6 +15808,14 @@ namespace
             if (entry.command.rfind("hsvr.set ", 0) == 0)
             {
                 script_set_game_instance(entry.command.substr(9));
+                continue;
+            }
+            if (entry.command == "hsvr.player_immortal")
+            {
+                // Test: the player's Willie gets the game's own Immortal flag (kept on about once a
+                // second, also across respawns), so an unattended fight stays a fight.
+                g_script_player_immortal = true;
+                HSVR_LOG("Script: hsvr.player_immortal: on");
                 continue;
             }
             if (entry.command == "hsvr.test_room_boot")
@@ -18055,6 +18075,54 @@ namespace
         if (found) HSVR_LOG("Perf segments: opcode table at exe+0x%llx (%d candidate%s)", (unsigned long long)(reinterpret_cast<uint8_t*>(found) - mod), candidates, candidates == 1 ? "" : "s");
         return candidates == 1 ? found : nullptr;
     }
+    // UE4SS finds the table itself by signature and logs "[PS] Found GNatives: 0x..." in UE4SS.log
+    // (this launch's log, next to UE4SS.dll). Read it from there; checked against the exe's data.
+    VmNative* gnatives_from_ue4ss_log()
+    {
+        HMODULE ue4ss = GetModuleHandleW(L"UE4SS.dll");
+        if (!ue4ss) return nullptr;
+        wchar_t path[MAX_PATH];
+        DWORD len = GetModuleFileNameW(ue4ss, path, MAX_PATH);
+        std::wstring w(path, len);
+        w = w.substr(0, w.find_last_of(L"\\/") + 1) + L"UE4SS.log";
+        HANDLE h = CreateFileW(w.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return nullptr;
+        std::string text;
+        char buf[65536];
+        DWORD got = 0;
+        while (text.size() < (64u << 20) && ReadFile(h, buf, sizeof buf, &got, nullptr) && got) text.append(buf, got);
+        CloseHandle(h);
+        size_t at = text.rfind("Found GNatives: 0x");
+        if (at == std::string::npos) return nullptr;
+        uint64_t v = strtoull(text.c_str() + at + 18, nullptr, 16);
+        auto* mod = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + reinterpret_cast<IMAGE_DOS_HEADER*>(mod)->e_lfanew);
+        if (v < (uint64_t)mod || v + 256 * 8 > (uint64_t)mod + nt->OptionalHeader.SizeOfImage)
+        {
+            HSVR_LOG("Perf segments: UE4SS's GNatives 0x%llx is outside the exe; not used", (unsigned long long)v);
+            return nullptr;
+        }
+        auto* t = reinterpret_cast<VmNative*>(v);
+        std::unordered_map<uint64_t, int> c;
+        int nulls = 0;
+        for (int j = 0; j < 256; ++j) ++c[(uint64_t)t[j]], nulls += t[j] == nullptr;
+        int most = 0;
+        uint64_t common = 0;
+        for (auto& kv : c)
+            if (kv.second > most) most = kv.second, common = kv.first;
+        std::string ours;
+        for (int op : {0x04, 0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
+        {
+            char b[48];
+            snprintf(b, sizeof b, " %02X=%s", op, (uint64_t)t[op] == common ? "common" : (t[op] ? "own" : "null"));
+            ours += b;
+        }
+        HSVR_LOG("Perf segments: UE4SS's GNatives at exe+0x%llx: most common entry %d times, %zu distinct, %d null; flow opcodes%s", (unsigned long long)(v - (uint64_t)mod),
+                 most, c.size(), nulls, ours.c_str());
+        for (int op : {0x04, 0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
+            if (!t[op] || (uint64_t)t[op] == common) return nullptr;
+        return t;
+    }
     // From the engine tick (no script running on the game thread).
     void segments_tick()
     {
@@ -18070,7 +18138,8 @@ namespace
         if (!g_seg_target) return;
         if (!g_gnatives)
         {
-            g_gnatives = find_gnatives();
+            g_gnatives = gnatives_from_ue4ss_log();
+            if (!g_gnatives) g_gnatives = find_gnatives();
             if (!g_gnatives)
             {
                 HSVR_LOG("Perf segments: opcode table not found (or not unique); off");
@@ -18252,7 +18321,7 @@ namespace
             { HSVR_SUB("tick:apply_picture_settings"); apply_picture_settings(cfg); }
             { HSVR_SUB("tick:keep_clouds_correct"); keep_clouds_correct(cfg); }
             { HSVR_SUB("tick:keep_light_samples"); keep_light_samples(cfg); }
-            { HSVR_SUB("tick:run_dev_script"); run_dev_script(cfg); }
+            { HSVR_SUB("tick:run_dev_script"); run_dev_script(cfg); script_immortal_tick(); }
             { HSVR_SUB("tick:test_room_tick"); test_room_tick(cfg); }
         }
         // The mod's keys count only while the game has the keyboard, so that Home or End typed in
