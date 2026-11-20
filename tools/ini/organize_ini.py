@@ -56,7 +56,7 @@ LAYOUT = [
         ("hide_own_head", "1 = your own head isn't drawn in your view (shadow and helmet stay)."),
         ("helmet_view", "Your worn helmet in your view: 0 = drawn (blocks the view like a real one), 1 = helmet hidden from you, 2 = everything on your head hidden from you, 3 = clear window (parts near your eyes not drawn). Others still see it; it still protects you."),
         ("helmet_window_cm", "helmet_view 3: helmet parts closer than this to your eyes aren't drawn (cm; 5-9). Food at your mouth that close is cut too."),
-        ("helmet_see_through", "helmet_view 4 (experiment): how much you see through your helmet, 0..1."),
+        ("helmet_see_through", "helmet_view 4 (experiment, does NOT work yet: test 2026-11-20 found no material input that makes the helmet see-through): how much you see through, 0..1."),
         ("helmet_see_through_mode", "helmet_view 4: 0 = screen door through the helmet material, 1 = helmet hidden on alternate frames."),
         ("helmet_see_through_param", "helmet_view 4 mode 0: the helmet material's texture parameter we replace (test)."),
         ("helmet_see_through_test", "helmet_view 4 mode 0: 0 = dither, 1 = all white, 2 = all black (finding what drives the opacity mask)."),

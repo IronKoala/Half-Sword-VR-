@@ -14012,6 +14012,7 @@ namespace
                 get.name(STR("ParameterName"), pname);
                 get.run();
                 UObject* had = get.object_result();
+                if (!had) continue; // this slot's material has no such parameter: leave it alone (setting it back to none doesn't clear the override)
                 Call set(mid, STR("SetTextureParameterValue"));
                 set.name(STR("ParameterName"), pname);
                 set.object(STR("Value"), g_see_rt);
