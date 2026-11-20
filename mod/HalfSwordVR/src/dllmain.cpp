@@ -328,6 +328,7 @@ namespace
     };
     PerfAcc g_perf[PerfCount];
     thread_local uint64_t t_perf_child = 0;
+    thread_local int t_perf_depth = 0; // mod scopes open on this thread (game-cost probes skip calls the mod makes)
     inline uint64_t perf_now()
     {
         LARGE_INTEGER c;
@@ -338,9 +339,14 @@ namespace
     {
         PerfId id;
         uint64_t start, saved;
-        explicit PerfScope(PerfId i) : id(i), start(perf_now()), saved(t_perf_child) { t_perf_child = 0; }
+        explicit PerfScope(PerfId i) : id(i), start(perf_now()), saved(t_perf_child)
+        {
+            t_perf_child = 0;
+            ++t_perf_depth;
+        }
         ~PerfScope()
         {
+            --t_perf_depth;
             uint64_t all = perf_now() - start;
             g_perf[id].ticks.fetch_add(all - (std::min)(all, t_perf_child), std::memory_order_relaxed);
             g_perf[id].calls.fetch_add(1, std::memory_order_relaxed);
@@ -15744,6 +15750,18 @@ namespace
         }
     }
 
+    bool g_script_player_immortal = false;
+    void script_immortal_tick()
+    {
+        static double last = -10.0;
+        if (!g_script_player_immortal) return;
+        double now = hsvr::now_seconds();
+        if (now - last < 1.0) return;
+        last = now;
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        if (pawn && !set_bool_property(pawn, STR("Immortal"), true)) HSVR_LOG_EVERY(30.0, "Script: hsvr.player_immortal: no Immortal variable on the player");
+    }
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -15841,6 +15859,14 @@ namespace
             if (entry.command.rfind("hsvr.set ", 0) == 0)
             {
                 script_set_game_instance(entry.command.substr(9));
+                continue;
+            }
+            if (entry.command == "hsvr.player_immortal")
+            {
+                // Test: the player's Willie gets the game's own Immortal flag (kept on about once a
+                // second, also across respawns), so an unattended fight stays a fight.
+                g_script_player_immortal = true;
+                HSVR_LOG("Script: hsvr.player_immortal: on");
                 continue;
             }
             if (entry.command == "hsvr.test_room_boot")
@@ -17627,6 +17653,609 @@ namespace
     }
 
     // The Perf: line (see PerfScope). Object counts come from the engine's class hash tables.
+    // ---- Game-thread cost probes (perf_events, perf_sample), for "where do the game's 18 ms a frame go
+    // in a 9-foe fight". Both only measure; they change nothing in the game.
+    //
+    // perf_events: every ProcessEvent the game makes on its game thread (native code calling a
+    // Blueprint: actor ReceiveTick, anim BlueprintUpdateAnimation, timers, delegates, hit events),
+    // timed per class and function, with the mod's own time inside taken out. Calls the mod itself
+    // makes are skipped. Pre is registered after the mod's own pre callbacks and post before its post
+    // callbacks, so those sit outside the timed span.
+    //
+    // perf_sample: a thread that stops the game thread about 1000 times a second, walks its stack
+    // with the exe's unwind tables and counts each function (by start address) once per sample:
+    // "self" = the function running, "incl" = anywhere on the stack. Addresses are module+RVA, to
+    // look up in Ghidra.
+    DWORD g_game_thread_id = 0;
+    HANDLE g_game_thread = nullptr;
+    bool g_ev_active = false; // changed only from the engine tick (no ProcessEvent open), so pre/post pair up
+    struct EvKey
+    {
+        const void* cls;
+        const void* fn;
+        bool operator==(const EvKey& o) const { return cls == o.cls && fn == o.fn; }
+    };
+    struct EvKeyHash
+    {
+        size_t operator()(const EvKey& k) const { return std::hash<const void*>{}(k.cls) * 31u ^ std::hash<const void*>{}(k.fn); }
+    };
+    struct EvStat
+    {
+        std::string name;
+        uint64_t incl = 0, excl = 0, outer = 0, calls = 0, worst = 0;
+    };
+    std::unordered_map<EvKey, EvStat, EvKeyHash> g_ev_stats;
+    struct EvFrame
+    {
+        EvStat* st;
+        uint64_t start, child, mod_at;
+    };
+    EvFrame g_ev_stack[512];
+    int g_ev_depth = 0;
+    uint64_t g_ev_outer_ticks = 0, g_ev_calls = 0, g_ev_skipped = 0;
+    bool g_ev_naming = false;
+
+    void ev_pre(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        if (!g_ev_active || GetCurrentThreadId() != g_game_thread_id) return;
+        if (g_ev_depth >= 512) { ++g_ev_depth; return; }
+        EvFrame& f = g_ev_stack[g_ev_depth++];
+        f.st = nullptr;
+        f.child = 0;
+        f.mod_at = t_perf_child;
+        f.start = 0;
+        if (t_perf_depth > 0 || g_ev_naming || !context || !function)
+        {
+            ++g_ev_skipped;
+            return;
+        }
+        EvKey k{context->GetClassPrivate(), function};
+        auto it = g_ev_stats.find(k);
+        if (it == g_ev_stats.end())
+        {
+            g_ev_naming = true; // naming can run script (ToString); do not time ourselves
+            EvStat st;
+            UStruct* cls = context->GetClassPrivate();
+            st.name = (cls ? narrow(cls->GetName()) : std::string("?")) + "." + narrow(function->GetName());
+            g_ev_naming = false;
+            it = g_ev_stats.emplace(k, std::move(st)).first;
+        }
+        f.st = &it->second;
+        f.mod_at = t_perf_child;
+        f.start = perf_now();
+    }
+    void ev_post(Hook::TCallbackIterationData<void>&, UObject*, UFunction*, void*)
+    {
+        if (!g_ev_active || GetCurrentThreadId() != g_game_thread_id || g_ev_depth <= 0) return;
+        if (g_ev_depth > 512) { --g_ev_depth; return; }
+        EvFrame f = g_ev_stack[--g_ev_depth];
+        if (!f.st) return;
+        uint64_t all = perf_now() - f.start, mod = t_perf_child - f.mod_at;
+        uint64_t incl = all - (std::min)(all, mod);
+        f.st->incl += incl;
+        f.st->excl += incl - (std::min)(incl, f.child);
+        f.st->worst = (std::max)(f.st->worst, incl);
+        ++f.st->calls;
+        ++g_ev_calls;
+        if (g_ev_depth > 0)
+            g_ev_stack[g_ev_depth - 1].child += incl;
+        else
+        {
+            f.st->outer += incl;
+            g_ev_outer_ticks += incl;
+        }
+    }
+
+    // Sampler.
+    struct SampleCount
+    {
+        uint64_t self = 0, incl = 0;
+    };
+    std::mutex g_sample_mutex;
+    std::unordered_map<uint64_t, SampleCount> g_samples, g_samples_all;
+    uint64_t g_sample_total = 0, g_sample_total_all = 0, g_sample_failed = 0;
+    std::atomic<bool> g_sampler_running{false}, g_sample_on{false};
+
+    // Walks the suspended thread's stack. No allocation, no locks of ours: the game thread may hold
+    // the heap lock while it is stopped. Returns how many frames; fn[i] = function start (or the
+    // address itself when it has no unwind entry).
+    int sample_walk(HANDLE thread, uint64_t* fn, int max)
+    {
+        CONTEXT ctx{};
+        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if (!GetThreadContext(thread, &ctx)) return -1;
+        int n = 0;
+        __try
+        {
+            while (n < max && ctx.Rip)
+            {
+                DWORD64 base = 0;
+                PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(ctx.Rip, &base, nullptr);
+                if (!rf)
+                {
+                    fn[n++] = ctx.Rip;
+                    if (n > 1) break; // code without unwind data mid-stack (hook stubs): stop
+                    ctx.Rip = *reinterpret_cast<DWORD64*>(ctx.Rsp); // leaf: return address on top
+                    ctx.Rsp += 8;
+                    continue;
+                }
+                fn[n++] = base + rf->BeginAddress;
+                void* handler_data = nullptr;
+                DWORD64 establisher = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, rf, &ctx, &handler_data, &establisher, nullptr);
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        return n;
+    }
+    DWORD WINAPI sampler_thread(void*)
+    {
+        HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /*CREATE_WAITABLE_TIMER_HIGH_RESOLUTION*/, TIMER_ALL_ACCESS);
+        if (!timer) timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+        uint64_t fn[96];
+        while (g_sampler_running.load())
+        {
+            LARGE_INTEGER due;
+            due.QuadPart = -10000; // 1 ms
+            SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
+            WaitForSingleObject(timer, 20);
+            HANDLE h = g_game_thread;
+            if (!h || !g_sample_on.load()) continue;
+            if (SuspendThread(h) == (DWORD)-1) continue;
+            int n = sample_walk(h, fn, 96);
+            ResumeThread(h);
+            std::lock_guard<std::mutex> lock(g_sample_mutex);
+            if (n <= 0)
+            {
+                ++g_sample_failed;
+                continue;
+            }
+            ++g_sample_total, ++g_sample_total_all;
+            for (int i = 0; i < n; ++i)
+            {
+                bool seen = false;
+                for (int j = 0; j < i && !seen; ++j) seen = fn[j] == fn[i];
+                if (seen) continue;
+                SampleCount& c = g_samples[fn[i]];
+                SampleCount& a = g_samples_all[fn[i]];
+                ++c.incl, ++a.incl;
+                if (i == 0) ++c.self, ++a.self;
+            }
+        }
+        CloseHandle(timer);
+        return 0;
+    }
+    std::string module_rva(uint64_t addr)
+    {
+        HMODULE m = nullptr;
+        char b[300];
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(addr), &m) || !m)
+        {
+            snprintf(b, sizeof b, "?+0x%llx", (unsigned long long)addr);
+            return b;
+        }
+        wchar_t path[MAX_PATH];
+        DWORD len = GetModuleFileNameW(m, path, MAX_PATH);
+        std::wstring w(path, len);
+        size_t slash = w.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) w = w.substr(slash + 1);
+        snprintf(b, sizeof b, "%s+0x%llx", narrow(w).c_str(), (unsigned long long)(addr - reinterpret_cast<uint64_t>(m)));
+        return b;
+    }
+    // Every probe's game-thread setup, from the engine tick (no ProcessEvent open there).
+    void probes_tick()
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        if (!g_game_thread_id)
+        {
+            g_game_thread_id = GetCurrentThreadId();
+            g_game_thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, g_game_thread_id);
+        }
+        g_ev_depth = 0;
+        g_ev_active = cfg.perf_events;
+        g_sample_on = cfg.perf_sample;
+        if (cfg.perf_sample && !g_sampler_running.load())
+        {
+            g_sampler_running = true;
+            HANDLE t = CreateThread(nullptr, 0, &sampler_thread, nullptr, 0, nullptr);
+            if (t)
+            {
+                SetThreadPriority(t, THREAD_PRIORITY_TIME_CRITICAL);
+                CloseHandle(t);
+                HSVR_LOG("Perf sample: sampling the game thread about 1000 times a second");
+            }
+            else
+                g_sampler_running = false;
+        }
+    }
+    // The probes' part of the Perf report; frames = engine ticks in the period.
+    void probes_report(uint64_t frames, double ms_per_tick, double seconds)
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        if (g_game_thread)
+        {
+            static uint64_t last_cpu = 0;
+            FILETIME c, e, k, u;
+            if (GetThreadTimes(g_game_thread, &c, &e, &k, &u))
+            {
+                uint64_t cpu = ((uint64_t)k.dwHighDateTime << 32 | k.dwLowDateTime) + ((uint64_t)u.dwHighDateTime << 32 | u.dwLowDateTime);
+                if (last_cpu && frames)
+                    HSVR_LOG("Perf game thread: %.2f ms CPU a frame (%.0f%% busy)", (cpu - last_cpu) / 1e4 / frames, (cpu - last_cpu) / 1e5 / seconds);
+                last_cpu = cpu;
+            }
+        }
+        if (cfg.perf_events && frames && !g_ev_stats.empty())
+        {
+            std::vector<EvStat*> v;
+            for (auto& kv : g_ev_stats)
+                if (kv.second.calls) v.push_back(&kv.second);
+            auto line = [&](const char* title, auto key, size_t top) {
+                std::sort(v.begin(), v.end(), [&](EvStat* a, EvStat* b) { return key(a) > key(b); });
+                HSVR_LOG("Perf events %s:", title); // one entry a line (the log line is capped at 2 KB)
+                for (size_t i = 0; i < v.size() && i < top; ++i)
+                {
+                    double ms = key(v[i]) * ms_per_tick / frames;
+                    if (ms < 0.02) break;
+                    HSVR_LOG("Perf events     %s %.2f ms (%.1f calls, %.3f ms each, worst %.2f; self %.2f)", v[i]->name.c_str(), ms, (double)v[i]->calls / frames,
+                             v[i]->incl * ms_per_tick / v[i]->calls, v[i]->worst * ms_per_tick, v[i]->excl * ms_per_tick / frames);
+                }
+            };
+            HSVR_LOG("Perf events: Blueprint calls from native code %.2f ms a frame (outermost, mod time taken out); %.0f timed calls, %.0f skipped (mod's own) a frame",
+                     g_ev_outer_ticks * ms_per_tick / frames, (double)g_ev_calls / frames, (double)g_ev_skipped / frames);
+            line("by outermost time (ms a frame)", [](EvStat* s) { return s->outer; }, 25);
+            line("by self time (ms a frame)", [](EvStat* s) { return s->excl; }, 25);
+            for (auto& kv : g_ev_stats) kv.second.incl = kv.second.excl = kv.second.outer = kv.second.calls = kv.second.worst = 0;
+            g_ev_outer_ticks = g_ev_calls = g_ev_skipped = 0;
+        }
+        if (cfg.perf_sample)
+        {
+            std::vector<std::pair<uint64_t, SampleCount>> v, all;
+            uint64_t total, total_all, failed;
+            {
+                std::lock_guard<std::mutex> lock(g_sample_mutex);
+                v.assign(g_samples.begin(), g_samples.end());
+                all.assign(g_samples_all.begin(), g_samples_all.end());
+                total = g_sample_total, total_all = g_sample_total_all, failed = g_sample_failed;
+                g_samples.clear();
+                g_sample_total = 0, g_sample_failed = 0;
+            }
+            if (total)
+            {
+                std::map<std::string, uint64_t> modules;
+                for (auto& kv : v)
+                    if (kv.second.self)
+                    {
+                        std::string r = module_rva(kv.first);
+                        modules[r.substr(0, r.find('+'))] += kv.second.self;
+                    }
+                std::string mods;
+                for (auto& kv : modules)
+                {
+                    char b[160];
+                    snprintf(b, sizeof b, "%s%s %.1f%%", mods.empty() ? "" : ", ", kv.first.c_str(), 100.0 * kv.second / total);
+                    mods += b;
+                }
+                HSVR_LOG("Perf sample: %llu samples (%llu failed); self time by module: %s", (unsigned long long)total, (unsigned long long)failed, mods.c_str());
+                auto line = [&](const char* title, bool self, size_t top) {
+                    std::sort(v.begin(), v.end(), [&](auto& a, auto& b) { return (self ? a.second.self : a.second.incl) > (self ? b.second.self : b.second.incl); });
+                    HSVR_LOG("Perf sample %s:", title); // one entry a line (the log line is capped at 2 KB)
+                    for (size_t i = 0; i < v.size() && i < top; ++i)
+                    {
+                        uint64_t n = self ? v[i].second.self : v[i].second.incl;
+                        HSVR_LOG("Perf sample     %s %.1f%%", module_rva(v[i].first).c_str(), 100.0 * n / total);
+                    }
+                };
+                line("self (function running)", true, 30);
+                line("inclusive (on the stack)", false, 60);
+            }
+            // Everything since start, for Ghidra lookups.
+            if (total_all)
+            {
+                std::sort(all.begin(), all.end(), [](auto& a, auto& b) { return a.second.incl > b.second.incl; });
+                CreateDirectoryW((hsvr::mod_dir() + L"logs\\").c_str(), nullptr);
+                FILE* f = _wfopen((hsvr::mod_dir() + L"logs\\perf_samples.tsv").c_str(), L"wb");
+                if (f)
+                {
+                    fprintf(f, "address\tself_pct\tincl_pct\tself\tincl\t(total %llu samples)\n", (unsigned long long)total_all);
+                    for (auto& kv : all)
+                    {
+                        if (kv.second.incl * 2000 < total_all) break; // under 0.05%
+                        fprintf(f, "%s\t%.2f\t%.2f\t%llu\t%llu\n", module_rva(kv.first).c_str(), 100.0 * kv.second.self / total_all, 100.0 * kv.second.incl / total_all,
+                                (unsigned long long)kv.second.self, (unsigned long long)kv.second.incl);
+                    }
+                    fclose(f);
+                }
+            }
+        }
+    }
+
+    // ---- perf_bp_segments: time inside Willie's event graph (ExecuteUbergraph_Willie_BP), by bytecode
+    // segment. Every flow opcode (jump, branch, sequence push/pop, return) is a segment boundary; the
+    // time from one boundary to the next in the same script frame goes to the segment that starts at
+    // the first one (its bytecode offset, as in the decompile listing ub_Willie_BP.txt). Calls made
+    // from inside a segment count in it. Done by wrapping those opcodes' entries in the engine's
+    // opcode table (GNatives), found by scanning the exe's writable data for a 256-entry table of
+    // code pointers in which most unused opcodes share one handler. Only measures.
+    using VmNative = void (*)(UObject*, void*, void*);
+    VmNative* g_gnatives = nullptr;
+    VmNative g_vm_orig[256] = {};
+    UFunction* g_seg_target = nullptr;
+    const uint8_t* g_seg_base = nullptr;
+    bool g_seg_bad = false;
+    struct SegStat
+    {
+        uint64_t ticks = 0, count = 0;
+    };
+    std::unordered_map<uint32_t, SegStat> g_seg_stats;
+    struct SegOpen
+    {
+        void* frame;
+        uint32_t off;
+        uint64_t t;
+    };
+    SegOpen g_seg_open[64];
+    int g_seg_open_n = 0;
+    bool g_seg_on = false;
+    // FFrame (UE 5.4): FOutputDevice (vtable + 2 bools = 16 bytes), then Node, Object, Code, Locals.
+    inline UFunction* frame_node(void* f) { return *reinterpret_cast<UFunction**>(static_cast<uint8_t*>(f) + 0x10); }
+    inline const uint8_t* frame_code(void* f) { return *reinterpret_cast<const uint8_t**>(static_cast<uint8_t*>(f) + 0x20); }
+
+    // A segment is keyed by where execution LANDS after a flow opcode (the jump target, the popped
+    // sequence pin, or the next statement when a branch is not taken), so its time is that code's.
+    // The flow opcode's own condition (which can call functions) counts in the segment it opens.
+    constexpr uint32_t kSegPending = 0xFFFFFFFFu;
+    int seg_find(void* frame)
+    {
+        int i = 0;
+        while (i < g_seg_open_n && g_seg_open[i].frame != frame) ++i;
+        return i;
+    }
+    // Before a flow opcode runs: close the segment that ran up to it.
+    void seg_mark(void* frame, int op)
+    {
+        if (!g_seg_on || GetCurrentThreadId() != g_game_thread_id || frame_node(frame) != g_seg_target) return;
+        uint64_t now = perf_now();
+        const uint8_t* at = frame_code(frame) - 1; // Step has read the opcode byte
+        if (op == 0x4E && !g_seg_base) // EX_ComputedJump: the graph's entry, at offset 5
+        {
+            const uint8_t* base = at - 5;
+            if (base[0] != 0x4C || at[0] != 0x4E) // EX_PushExecutionFlow at 0
+            {
+                if (!g_seg_bad) HSVR_LOG("Perf segments: script layout not as expected (bytes %02x %02x); off", base[0], at[0]);
+                g_seg_bad = true;
+                g_seg_on = false;
+                return;
+            }
+            g_seg_base = base;
+            HSVR_LOG("Perf segments: Willie's event graph found, timing its segments");
+        }
+        if (!g_seg_base) return;
+        int i = seg_find(frame);
+        if (i < g_seg_open_n && op != 0x4E && g_seg_open[i].off != kSegPending)
+        {
+            SegStat& s = g_seg_stats[g_seg_open[i].off];
+            s.ticks += now - g_seg_open[i].t;
+            ++s.count;
+        }
+        if (i == g_seg_open_n)
+        {
+            if (g_seg_open_n >= 64) return;
+            // Another Willie's graph run from inside this one (a hit, damage): its time is its own,
+            // so the open segments stop counting until it returns.
+            for (int j = 0; j < g_seg_open_n; ++j)
+            {
+                if (g_seg_open[j].off != kSegPending) g_seg_stats[g_seg_open[j].off].ticks += now - g_seg_open[j].t;
+                g_seg_open[j].t = now;
+            }
+            ++g_seg_open_n;
+        }
+        g_seg_open[i] = {frame, kSegPending, now};
+    }
+    // After it ran: open the segment where execution landed, or end the frame at the return (the
+    // script loop stops at EX_Return itself; it never goes through the table).
+    void seg_after(void* frame)
+    {
+        if (!g_seg_on || !g_seg_base || GetCurrentThreadId() != g_game_thread_id || frame_node(frame) != g_seg_target) return;
+        int i = seg_find(frame);
+        if (i == g_seg_open_n) return;
+        const uint8_t* code = frame_code(frame);
+        if (*code == 0x04)
+        {
+            g_seg_open[i] = g_seg_open[--g_seg_open_n];
+            uint64_t t = perf_now();
+            for (int j = 0; j < g_seg_open_n; ++j) g_seg_open[j].t = t;
+            return;
+        }
+        g_seg_open[i].off = (uint32_t)(code - g_seg_base);
+    }
+    template <int Op> void vm_wrap(UObject* context, void* frame, void* result)
+    {
+        seg_mark(frame, Op);
+        g_vm_orig[Op](context, frame, result);
+        seg_after(frame);
+    }
+
+    VmNative* find_gnatives()
+    {
+        auto* mod = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + dos->e_lfanew);
+        IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+        uint8_t *text_lo = nullptr, *text_hi = nullptr;
+        for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+            if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)
+            {
+                uint8_t* lo = mod + sec[i].VirtualAddress;
+                if (!text_lo || lo < text_lo) text_lo = lo;
+                if (lo + sec[i].Misc.VirtualSize > text_hi) text_hi = lo + sec[i].Misc.VirtualSize;
+            }
+        VmNative* found = nullptr;
+        int candidates = 0;
+        // Best near-miss, logged when nothing qualifies.
+        size_t best_in = 0, best_most = 0, best_distinct = 0;
+        uint64_t best_at = 0;
+        auto in_text = [&](uint64_t v) { return v >= (uint64_t)text_lo && v < (uint64_t)text_hi; };
+        for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+        {
+            if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE) || (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+            auto* p = reinterpret_cast<uint64_t*>(mod + sec[i].VirtualAddress);
+            size_t n = sec[i].Misc.VirtualSize / 8;
+            if (n < 256) continue;
+            // Sliding count of entries pointing into the exe's code; mods (UE4SS) may have repointed
+            // a few opcodes into their own dlls, so up to 16 others are allowed if not null.
+            size_t in = 0;
+            for (size_t j = 0; j < 256; ++j) in += in_text(p[j]);
+            for (size_t k = 0; k + 256 <= n; ++k)
+            {
+                if (k)
+                {
+                    in -= in_text(p[k - 1]);
+                    in += in_text(p[k + 255]);
+                }
+                if (in < 240) continue;
+                bool nonnull = true;
+                for (int j = 0; j < 256 && nonnull; ++j) nonnull = p[k + j] != 0;
+                if (!nonnull) continue;
+                std::unordered_map<uint64_t, int> c;
+                for (int j = 0; j < 256; ++j) ++c[p[k + j]];
+                uint64_t common = 0;
+                int most = 0;
+                for (auto& kv : c)
+                    if (kv.second > most) most = kv.second, common = kv.first;
+                if (in > best_in || (in == best_in && (size_t)most > best_most))
+                    best_in = in, best_most = most, best_distinct = c.size(), best_at = (uint64_t)(reinterpret_cast<uint8_t*>(p + k) - mod);
+                if (most < 30 || c.size() < 60) continue;
+                bool ours_defined = true;
+                for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F}) ours_defined = ours_defined && p[k + op] != common;
+                if (!ours_defined) continue;
+                ++candidates;
+                if (!found) found = reinterpret_cast<VmNative*>(p + k);
+                // skip past this table
+                for (size_t j = 1; j < 256 && k + 1 + 256 <= n; ++j)
+                {
+                    ++k;
+                    in -= in_text(p[k - 1]);
+                    in += in_text(p[k + 255]);
+                }
+            }
+        }
+        if (!found)
+            HSVR_LOG("Perf segments: no opcode table; closest at exe+0x%llx: %zu of 256 entries in exe code, most common entry %zu times, %zu distinct",
+                     (unsigned long long)best_at, best_in, best_most, best_distinct);
+        if (found) HSVR_LOG("Perf segments: opcode table at exe+0x%llx (%d candidate%s)", (unsigned long long)(reinterpret_cast<uint8_t*>(found) - mod), candidates, candidates == 1 ? "" : "s");
+        return candidates == 1 ? found : nullptr;
+    }
+    // UE4SS finds the table itself by signature and logs "[PS] Found GNatives: 0x..." in UE4SS.log
+    // (this launch's log, next to UE4SS.dll). Read it from there; checked against the exe's data.
+    VmNative* gnatives_from_ue4ss_log()
+    {
+        HMODULE ue4ss = GetModuleHandleW(L"UE4SS.dll");
+        if (!ue4ss) return nullptr;
+        wchar_t path[MAX_PATH];
+        DWORD len = GetModuleFileNameW(ue4ss, path, MAX_PATH);
+        std::wstring w(path, len);
+        w = w.substr(0, w.find_last_of(L"\\/") + 1) + L"UE4SS.log";
+        HANDLE h = CreateFileW(w.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return nullptr;
+        std::string text;
+        char buf[65536];
+        DWORD got = 0;
+        while (text.size() < (64u << 20) && ReadFile(h, buf, sizeof buf, &got, nullptr) && got) text.append(buf, got);
+        CloseHandle(h);
+        size_t at = text.rfind("Found GNatives: 0x");
+        if (at == std::string::npos) return nullptr;
+        uint64_t v = strtoull(text.c_str() + at + 18, nullptr, 16);
+        auto* mod = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mod + reinterpret_cast<IMAGE_DOS_HEADER*>(mod)->e_lfanew);
+        if (v < (uint64_t)mod || v + 256 * 8 > (uint64_t)mod + nt->OptionalHeader.SizeOfImage)
+        {
+            HSVR_LOG("Perf segments: UE4SS's GNatives 0x%llx is outside the exe; not used", (unsigned long long)v);
+            return nullptr;
+        }
+        auto* t = reinterpret_cast<VmNative*>(v);
+        std::unordered_map<uint64_t, int> c;
+        int nulls = 0;
+        for (int j = 0; j < 256; ++j) ++c[(uint64_t)t[j]], nulls += t[j] == nullptr;
+        int most = 0;
+        uint64_t common = 0;
+        for (auto& kv : c)
+            if (kv.second > most) most = kv.second, common = kv.first;
+        std::string ours;
+        for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
+        {
+            char b[48];
+            snprintf(b, sizeof b, " %02X=%s", op, (uint64_t)t[op] == common ? "common" : (t[op] ? "own" : "null"));
+            ours += b;
+        }
+        HSVR_LOG("Perf segments: UE4SS's GNatives at exe+0x%llx: most common entry %d times, %zu distinct, %d null; flow opcodes%s", (unsigned long long)(v - (uint64_t)mod),
+                 most, c.size(), nulls, ours.c_str());
+        for (int op : {0x06, 0x07, 0x4C, 0x4D, 0x4E, 0x4F})
+            if (!t[op] || (uint64_t)t[op] == common) return nullptr;
+        return t;
+    }
+    // From the engine tick (no script running on the game thread).
+    void segments_tick()
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        g_seg_open_n = 0;
+        if (!cfg.perf_bp_segments || g_seg_bad)
+        {
+            g_seg_on = false;
+            return;
+        }
+        if (!g_seg_target)
+            g_seg_target = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:ExecuteUbergraph_Willie_BP"));
+        if (!g_seg_target) return;
+        if (!g_gnatives)
+        {
+            g_gnatives = gnatives_from_ue4ss_log();
+            if (!g_gnatives) g_gnatives = find_gnatives();
+            if (!g_gnatives)
+            {
+                HSVR_LOG("Perf segments: opcode table not found (or not unique); off");
+                g_seg_bad = true;
+                return;
+            }
+            DWORD old = 0;
+            VirtualProtect(g_gnatives, 256 * sizeof(VmNative), PAGE_READWRITE, &old);
+#define HSVR_WRAP(op) g_vm_orig[op] = g_gnatives[op], g_gnatives[op] = &vm_wrap<op>
+            HSVR_WRAP(0x06);
+            HSVR_WRAP(0x07);
+            HSVR_WRAP(0x4C);
+            HSVR_WRAP(0x4D);
+            HSVR_WRAP(0x4E);
+            HSVR_WRAP(0x4F);
+#undef HSVR_WRAP
+        }
+        g_seg_on = true;
+    }
+    void segments_report(uint64_t frames, double ms_per_tick)
+    {
+        if (!g_seg_on || !frames || g_seg_stats.empty()) return;
+        std::vector<std::pair<uint32_t, SegStat>> v(g_seg_stats.begin(), g_seg_stats.end());
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second.ticks > b.second.ticks; });
+        double total = 0.0;
+        for (auto& kv : v) total += kv.second.ticks * ms_per_tick / frames;
+        HSVR_LOG("Perf segments: Willie's event graph %.2f ms a frame in all; by segment (offset in ub_Willie_BP.txt where the code runs from, after a jump/branch/sequence pin):", total);
+        for (size_t i = 0; i < v.size() && i < 60; ++i)
+        {
+            double ms = v[i].second.ticks * ms_per_tick / frames;
+            if (ms < 0.01) break;
+            HSVR_LOG("Perf segments     @%u %.3f ms (%.1f a frame, %.4f ms each)", v[i].first, ms, (double)v[i].second.count / frames, v[i].second.ticks * ms_per_tick / v[i].second.count);
+        }
+        // Everything, for mapping onto the listing.
+        CreateDirectoryW((hsvr::mod_dir() + L"logs\\").c_str(), nullptr);
+        if (FILE* f = _wfopen((hsvr::mod_dir() + L"logs\\perf_segments.tsv").c_str(), L"ab"))
+        {
+            for (auto& kv : v)
+                fprintf(f, "%.1f\t%u\t%.4f\t%.2f\n", hsvr::now_seconds(), kv.first, kv.second.ticks * ms_per_tick / frames, (double)kv.second.count / frames);
+            fclose(f);
+        }
+        g_seg_stats.clear();
+    }
+
     void perf_report(float delta_seconds)
     {
         static double since = -1.0;
@@ -17708,6 +18337,8 @@ namespace
                  "%d decals, %d primitives (%d simulating, %d of them skeletal); counted in %.1f ms",
                  frames / (now - since), 1000.0 * dt_sum / frames, 1000.0 * dt_max, now - since, total, parts.c_str(), Unreal::UObjectArray::GetNumElements(), actors,
                  willies, weapons, ais, decals, (int)prims.size(), simulating, sim_skel, census_ms);
+        probes_report(frames, ms_per_tick, now - since);
+        segments_report(frames, ms_per_tick);
         since = now;
         frames = 0, dt_sum = 0.0, dt_max = 0.0;
     }
@@ -17715,7 +18346,10 @@ namespace
     void game_tick(UObject* engine, float delta_seconds)
     {
         gc_sync();
+        g_ev_active = false; // the census below calls the game; not the game's own time
         perf_report(delta_seconds); // outside the tick's own scope: the census is not per-frame time
+        probes_tick();
+        segments_tick();
         HSVR_PROF(PerfTick);
         g_engine = engine;
         { HSVR_SUB("tick:hit_frame_refresh"); hit_frame_refresh(); }
@@ -17758,7 +18392,7 @@ namespace
             { HSVR_SUB("tick:apply_picture_settings"); apply_picture_settings(cfg); }
             { HSVR_SUB("tick:keep_clouds_correct"); keep_clouds_correct(cfg); }
             { HSVR_SUB("tick:keep_light_samples"); keep_light_samples(cfg); }
-            { HSVR_SUB("tick:run_dev_script"); run_dev_script(cfg); }
+            { HSVR_SUB("tick:run_dev_script"); run_dev_script(cfg); script_immortal_tick(); }
             { HSVR_SUB("tick:test_room_tick"); test_room_tick(cfg); }
         }
         // The mod's keys count only while the game has the keyboard, so that Home or End typed in
@@ -17846,6 +18480,9 @@ class HalfSwordVR : public CppUserModBase
             hsvr::vr_install_present_hook();
         }
         Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});
+        // Cost probe: pre after the mod's pre callbacks, post before its post callbacks (perf_events).
+        Hook::RegisterProcessEventPreCallback(&ev_pre, {false, false, STR("HalfSwordVR"), STR("CostProbePre")});
+        Hook::RegisterProcessEventPostCallback(&ev_post, {false, false, STR("HalfSwordVR"), STR("CostProbePost")});
         Hook::RegisterProcessEventPostCallback(&capsule_after_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleAfter")});
         Hook::RegisterProcessEventPostCallback(&pose_after_anim_update, {false, false, STR("HalfSwordVR"), STR("PoseAfterAnim")});
         Hook::RegisterProcessEventPostCallback(&feet_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FeetAfterAnim")});
