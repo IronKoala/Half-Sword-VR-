@@ -13686,6 +13686,16 @@ namespace
         std::vector<UObject*> settling; // foe meshes moved with physics off (room_settle_foes)
         double settle_at = 0.0;
         bool settled = false;
+        // Respawn (test_room_respawn): one slot per foe of the arc, with who stands there now.
+        struct Slot
+        {
+            hsvr::Vec3 at;
+            double yaw;
+            UObject* foe;
+            double dead_since; // < 0 = alive
+        };
+        std::vector<Slot> slots;
+        double next_respawn_check = 0.0;
         double watch_from = 0.0, next_watch = 0.0;     // diagnostics after the weapons are put down
         std::map<UObject*, hsvr::Vec3> watch_last;
     };
@@ -13809,7 +13819,7 @@ namespace
 
     // Spawns an actor of a class (loaded if needed) with a transform; `before` runs before its
     // BeginPlay (FinishSpawning), for ExposeOnSpawn variables.
-    template <typename F> UObject* room_spawn(const TCHAR* class_path, UObject* world_object, const hsvr::Vec3& at, const hsvr::Quat& q, F before)
+    template <typename F> UObject* room_spawn(const TCHAR* class_path, UObject* world_object, const hsvr::Vec3& at, const hsvr::Quat& q, F before, double scale = 1.0)
     {
         UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, class_path);
         if (!cls)
@@ -13843,7 +13853,7 @@ namespace
                     }
             }
             if (FProperty* t = struct_member(type, STR("Translation"))) write_three(tat + t->GetOffset_Internal(), t, at.x, at.y, at.z);
-            if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(tat + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+            if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(tat + sc->GetOffset_Internal(), sc, scale, scale, scale);
         };
         Call begin(gs, STR("BeginDeferredActorSpawnFromClass"));
         begin.object(STR("WorldContextObject"), world_object);
@@ -13890,6 +13900,7 @@ namespace
         static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
         g_room.settling.clear();
         g_room.settled = false;
+        g_room.slots.clear();
         int n = (int)foes.size();
         for (int i = 0; i < n; ++i)
         {
@@ -13924,6 +13935,7 @@ namespace
                 off.run();
                 g_room.settling.push_back(fm);
             }
+            g_room.slots.push_back(TestRoom::Slot{at, yaw, foe, -1.0});
             HSVR_LOG("TestRoom: %ls stood at (%.0f, %.0f, %.0f), facing him", foe->GetName().c_str(), at.x, at.y, at.z);
         }
         g_room.settle_at = hsvr::now_seconds();
@@ -13961,6 +13973,204 @@ namespace
         if (!g_room.settled) HSVR_LOG("TestRoom: %d foe(s) back to physics", (int)g_room.settling.size());
         g_room.settled = true;
         if (since >= 1.4) g_room.settling.clear();
+    }
+
+    // ---- Respawn (test_room_respawn) ----------------------------------------------------------------
+    // A dead foe is replaced test_room_respawn_seconds later: his body is removed the way the arena
+    // removes Willies (Willie_BP "Destroy Willie", Clean Up Map), then a new one is made the way the
+    // game makes a Free Mode foe (BP_SpawnerPoint_Willies UG @5101-@9167, defaults\test_room.md §7):
+    // BP_Generator_Characters_Random (Equipment Budget 0) "Generate Character" -> his passport; a
+    // deferred Willie_BP with Team Int, Character Passport, Spawn in Pants and Blossfechten Gear set
+    // before FinishSpawning, scaled by his Height; AI_BP possesses him itself (AutoPossessAI); the game
+    // mode's Enemy Count +1. He is made passive at once and stands in the dead one's slot.
+
+    UObject* room_game_mode()
+    {
+        std::vector<UObject*> gms;
+        UObjectGlobals::FindAllOf(STR("BP_HalfSwordGameMode_C"), gms);
+        for (UObject* g : gms)
+            if (g && g->GetName().rfind(STR("Default__"), 0) != 0) return g;
+        return nullptr;
+    }
+
+    // The game mode's Enemy Count (a foe's death or giving up takes 1 off; at 0 the match is won:
+    // Minus Enemy). With respawn it is held at 100 or more, so the match is never won: a foe beaten and
+    // then killed counts twice (Call Minus Enemy and Minus Enemy are separate DoOnces), and killing them
+    // all faster than they come back took one spare to 0 (test 2026-11-20 01:28).
+    // Diagnostics: every call of the game mode's enemy counting, with the count before and after.
+    int32_t g_room_count_before = 0;
+    void room_count_pre(Unreal::UnrealScriptFunctionCallableContext& ctx, void*)
+    {
+        int32_t* c = ctx.Context ? ctx.Context->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
+        g_room_count_before = c ? *c : -1;
+    }
+    void room_count_post(Unreal::UnrealScriptFunctionCallableContext& ctx, void*)
+    {
+        int32_t* c = ctx.Context ? ctx.Context->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
+        HSVR_LOG("TestRoom: game mode %ls: Enemy Count %d -> %d, Match Won %d", ctx.TheStack.Node() ? ctx.TheStack.Node()->GetName().c_str() : STR("?"), g_room_count_before,
+                 c ? *c : -1, (int)bool_property(ctx.Context, STR("Match Won")));
+    }
+    void room_watch_counting(UObject* gm)
+    {
+        static bool done = false;
+        if (done || !gm) return;
+        done = true;
+        for (const TCHAR* f : {STR("Minus Enemy"), STR("Plus Enemy"), STR("Multiplayer Match Win Check")})
+            if (UFunction* fn = gm->GetFunctionByNameInChain(f)) UObjectGlobals::RegisterHook(fn, &room_count_pre, &room_count_post, nullptr);
+    }
+
+    void room_hold_enemy_count()
+    {
+        room_watch_counting(room_game_mode());
+        UObject* gm = room_game_mode();
+        int32_t* count = gm ? gm->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
+        if (!count) return;
+        if (*count < 100)
+        {
+            HSVR_LOG("TestRoom: respawn: Enemy Count %d -> 100 (the match is never won while foes respawn)", *count);
+            *count = 100;
+        }
+        // Something else also wins the match about 1.7 s after every foe is dead at once (Enemy Count
+        // was 100; UI_WinScreen then sets Match Won and Enemy Count 0, test 2026-11-20 01:33): never
+        // let the room be empty (room_respawn_tick), and undo a win that gets through anyway.
+        if (bool_property(gm, STR("Match Won")) || bool_property(gm, STR("All Enemies Dead")))
+        {
+            set_variable(gm, STR("Match Won"), 0.0);
+            set_variable(gm, STR("All Enemies Dead"), 0.0);
+            HSVR_LOG("TestRoom: respawn: the game called the match won; undone");
+        }
+    }
+
+    UObject* room_spawn_foe(UObject* player, const TestRoom::Slot& slot)
+    {
+        using hsvr::Vec3;
+        const hsvr::Config& cfg = hsvr::config();
+        static unsigned seed = (unsigned)GetTickCount64() ^ 0x9e3779b9u;
+        int tier = cfg.test_room_tier;
+        if (tier < 0)
+        {
+            seed = seed * 1103515245u + 12345u;
+            tier = (int)((seed >> 16) % 8u); // the Free Mode menu's range, Beggar .. Knight
+        }
+        tier = (std::min)(tier, 8);
+        UObject* gen = room_spawn(STR("/Game/Blueprints/Generators/BP_Generator_Characters_Random.BP_Generator_Characters_Random_C"), player, slot.at, yaw_quat(0.0),
+                                  [&](UObject* a) { set_variable(a, STR("Equipment Budget"), 0.0); });
+        if (!gen)
+        {
+            HSVR_LOG("TestRoom: respawn: no character generator");
+            return nullptr;
+        }
+        UClass* willie = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C"));
+        Call gc(gen, STR("Generate Character"));
+        gc.object(STR("Actor Class"), willie);
+        gc.byte(STR("Nationality"), 0);
+        gc.byte(STR("Faction"), 0);
+        gc.byte(STR("Tier"), (uint8_t)tier);
+        gc.run();
+        FProperty* pp = gc.param(STR("Character Passport"));
+        uint8_t* passport = pp ? gc.buffer.data() + pp->GetOffset_Internal() : nullptr;
+        double height = 0.5;
+        if (passport)
+            if (FProperty* h = struct_member_prefix(struct_type(pp), STR("Height")))
+            {
+                uint8_t* at = passport + h->GetOffset_Internal();
+                height = h->GetClass().GetName() == STR("DoubleProperty") ? *reinterpret_cast<double*>(at) : *reinterpret_cast<float*>(at);
+            }
+        // Where the game puts him: the spawn point 100 cm above the floor, + Height * 10 cm, his
+        // size MapRange(Height 0..1 -> 0.875..1).
+        double floor_z = slot.at.z;
+        if (UObject* capsule = object_property(player, STR("CapsuleComponent")))
+        {
+            Call hh(capsule, STR("GetScaledCapsuleHalfHeight"));
+            hh.run();
+            if (FProperty* p = hh.param(STR("ReturnValue")))
+            {
+                uint8_t* at = hh.buffer.data() + p->GetOffset_Internal();
+                floor_z = actor_location(player).z - (p->GetClass().GetName() == STR("DoubleProperty") ? *reinterpret_cast<double*>(at) : *reinterpret_cast<float*>(at));
+            }
+        }
+        Vec3 at = slot.at;
+        at.z = floor_z + 100.0 + height * 10.0;
+        UObject* foe = room_spawn(STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C"), player, at, yaw_quat(slot.yaw), [&](UObject* a) {
+            set_variable(a, STR("Team Int"), 2.0); // the spawner's value for a Free Mode foe (Duel)
+            set_variable(a, STR("Spawn in Pants"), 0.0);
+            set_variable(a, STR("Blossfechten Gear"), 0.0);
+            if (passport)
+                if (FProperty* dst = a->GetPropertyByNameInChain(STR("Character Passport")))
+                    dst->CopyCompleteValue(reinterpret_cast<uint8_t*>(a) + dst->GetOffset_Internal(), passport);
+        }, 0.875 + 0.125 * height);
+        if (passport) pp->DestroyValue(passport);
+        Call gone(gen, STR("K2_DestroyActor"));
+        gone.run();
+        if (!foe)
+        {
+            HSVR_LOG("TestRoom: respawn: the new foe did NOT spawn");
+            return nullptr;
+        }
+        UObject* ai = object_property(foe, STR("Controller"));
+        if (ai) make_foe_passive(ai, foe);
+        HSVR_LOG("TestRoom: respawn: %ls (tier %d, height %.2f) at (%.0f, %.0f, %.0f), facing you, AI %ls", foe->GetName().c_str(), tier, height, at.x, at.y, at.z,
+                 ai ? STR("off") : STR("not there yet (the sweep stops it)"));
+        return foe;
+    }
+
+    bool room_alive(UObject* foe, const std::vector<UObject*>& willies)
+    {
+        // Out of the fight = dead (DED) or beaten ("Give Up": Health under 5 -> Dying, he gives up and
+        // the game has already taken him off Enemy Count; test 2026-11-20 01:28: Give Up 1, Downed and
+        // DED stay 0, Health regrows).
+        return foe && std::find(willies.begin(), willies.end(), foe) != willies.end() && !bool_property(foe, STR("DED")) && !bool_property(foe, STR("Give Up"));
+    }
+
+    void room_respawn_tick(UObject* player)
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        if (!cfg.test_room_respawn || g_room.slots.empty()) return;
+        double now = hsvr::now_seconds();
+        room_hold_enemy_count(); // every tick
+        if (now < g_room.next_respawn_check) return;
+        g_room.next_respawn_check = now + 0.25;
+        std::vector<UObject*> willies;
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        // Never all out at once: when no foe is left standing, the one out longest comes back now.
+        {
+            int alive = 0;
+            TestRoom::Slot* oldest = nullptr;
+            for (TestRoom::Slot& s : g_room.slots)
+            {
+                if (room_alive(s.foe, willies)) ++alive;
+                else if (s.dead_since >= 0.0 && (!oldest || s.dead_since < oldest->dead_since)) oldest = &s;
+            }
+            if (alive == 0 && oldest && oldest->dead_since > now - cfg.test_room_respawn_seconds)
+            {
+                oldest->dead_since = now - cfg.test_room_respawn_seconds;
+                HSVR_LOG("TestRoom: respawn: every foe is out; one comes back now");
+            }
+        }
+        for (TestRoom::Slot& s : g_room.slots)
+        {
+            if (room_alive(s.foe, willies))
+            {
+                s.dead_since = -1.0;
+                continue;
+            }
+            bool body = s.foe && std::find(willies.begin(), willies.end(), s.foe) != willies.end();
+            if (s.dead_since < 0.0)
+            {
+                s.dead_since = now;
+                HSVR_LOG("TestRoom: respawn: %ls is dead; a new foe in %.0f s", body ? s.foe->GetName().c_str() : STR("a foe"), cfg.test_room_respawn_seconds);
+            }
+            if (now - s.dead_since < cfg.test_room_respawn_seconds) continue;
+            // The body goes first: a new foe spawned into it would be thrown.
+            if (body)
+            {
+                Call d(s.foe, STR("Destroy Willie"));
+                d.run();
+                HSVR_LOG("TestRoom: respawn: %ls removed (Destroy Willie)", s.foe->GetName().c_str());
+            }
+            s.foe = room_spawn_foe(player, s);
+            s.dead_since = s.foe ? -1.0 : now; // no foe: tried again after the delay
+        }
     }
 
     // Two weapon tables side by side, 1.1 m in front of him, long side across his view.
@@ -14131,6 +14341,7 @@ namespace
             room_spawn_weapons(player);
         }
         room_settle_foes();
+        if (g_room.stage >= 1) room_respawn_tick(player);
         // Diagnostics: for 5 s from the tables (weapons at +1.5 s), every table or loose weapon near the
         // tables that moves more than 3 cm between samples (20 a second).
         if (g_room.watch_from > 0.0 && now - g_room.watch_from < 5.0 && now >= g_room.next_watch)
@@ -14244,8 +14455,9 @@ namespace
         for (UObject* f : willies)
         {
             if (!f || f == player || f->GetName().rfind(STR("Default__"), 0) == 0) continue;
-            ++foes;
             Vec3 at = actor_location(f);
+            if (at.x == 0.0 && at.y == 0.0 && at.z == 0.0) continue; // removed (Destroy Willie), waiting for clean-up
+            ++foes;
             UObject* m = object_property(f, STR("Mesh"));
             Vec3 pe = m ? socket_location(m, pelvis_bone) : at;
             UObject* ai = object_property(f, STR("Controller"));
@@ -14260,6 +14472,12 @@ namespace
         }
         HSVR_LOG("TestRoom: check: %d table(s), %d loose weapon(s) of which %d on a table, %d foe(s) of which %d standing and %d with AI on", (int)tables.size(), loose,
                  on_table, foes, standing, ai_on);
+        if (UObject* gm = room_game_mode())
+        {
+            int32_t* count = gm->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count"));
+            HSVR_LOG("TestRoom: check: game mode Enemy Count %d, Match Won %d, All Enemies Dead %d", count ? *count : -1, (int)bool_property(gm, STR("Match Won")),
+                     (int)bool_property(gm, STR("All Enemies Dead")));
+        }
     }
 
     void run_dev_script(const hsvr::Config& cfg)
@@ -14364,6 +14582,34 @@ namespace
             if (entry.command == "hsvr.test_room_boot")
             {
                 room_boot(cfg);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.test_room_kill", 0) == 0 || entry.command.rfind("hsvr.test_room_beat", 0) == 0)
+            {
+                // "beat": Health 0 only (he goes down and gives up, not dead).
+                bool beat_only = entry.command.rfind("hsvr.test_room_beat", 0) == 0;
+                // Test: kills one room foe through the game's own path (Health 0, then his Death event:
+                // DED, AI_BP DED, Minus Enemy). "hsvr.test_room_kill <slot>" or the first alive.
+                int want = entry.command.size() > 20 ? atoi(entry.command.c_str() + 20) : -1;
+                std::vector<UObject*> willies;
+                UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+                bool killed = false;
+                for (size_t i = 0; i < g_room.slots.size() && !killed; ++i)
+                {
+                    if (want >= 0 && (int)i != want) continue;
+                    UObject* f = g_room.slots[i].foe;
+                    if (!room_alive(f, willies)) continue;
+                    set_variable(f, STR("Health"), 0.0);
+                    // Health 0 alone makes him Dying (down, gives up); his Death event kills him.
+                    if (!beat_only)
+                    {
+                        Call death(f, STR("Death"));
+                        death.run();
+                    }
+                    killed = true;
+                    HSVR_LOG("TestRoom: kill: slot %d, %ls (Health 0%s)", (int)i, f->GetName().c_str(), beat_only ? ", beaten only" : ", Death");
+                }
+                if (!killed) HSVR_LOG("TestRoom: kill: no living foe%s", want >= 0 ? " in that slot" : "");
                 continue;
             }
             if (entry.command == "hsvr.test_room_report")
