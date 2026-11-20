@@ -4534,6 +4534,8 @@ namespace
         double handle_damp = 0.0;      // the slide's damper along the handle (N s/m), from the trigger
         double settle_until = -1.0;    // pulled from settle_from into the hand until then
         bool flipped = false;          // turned end for end by the grip flip (for the log)
+        bool drag_capped = false;      // dragging a body by a stuck weapon with all the hand's strength
+        double drag_slip_since = -1.0; // ... since when, with the grip past reach (the grip slipping)
         double settle_s = 0.0;
         hsvr::Vec3 settle_from_pos;
         hsvr::Quat settle_from_rot;
@@ -8041,11 +8043,45 @@ namespace
             double from_shoulder = length(grip_at - shoulder) - length(h.in_hand);
             double from_hand = length(grip_at - hand_point);
             bool out = from_shoulder > reach + 2.0 || (!in_body && from_hand > reach);
+            if (in_body && cfg.stab_drag)
+            {
+                // Dragging a body: the weapon stays in the hand; it slips out only when the hand has
+                // pulled with all its strength, the grip still past arm's length, for longer than the
+                // grip holds (stab_drag_grip_s x his strength: tired, hurt or weak hands let go sooner).
+                out = false;
+                double tn = now_seconds();
+                if (h.drag_capped && from_shoulder > reach + 2.0)
+                {
+                    if (h.drag_slip_since < 0.0) h.drag_slip_since = tn;
+                    double hold_s = cfg.stab_drag_grip_s * (std::max)(0.05, h.body_strength);
+                    if (tn - h.drag_slip_since >= hold_s)
+                    {
+                        HSVR_LOG("Hold: %s hand's grip gives: %ls dragged out of it after %.1f s at full strength (strength %.0f%%, grip past reach by %.0f cm)",
+                                 side == 0 ? "left" : "right", h.weapon->GetName().c_str(), tn - h.drag_slip_since, h.body_strength * 100.0, from_shoulder - reach);
+                        h.drag_slip_since = -1.0;
+                        drop_weapon(side, g_pose.pawn);
+                        return false;
+                    }
+                }
+                else
+                    h.drag_slip_since = -1.0;
+            }
+            // How far the hand is out along the wound (pommel side), for the yank: a pull sideways
+            // drags him instead.
+            double out_along = from_hand;
+            if (in_body && cfg.stab_drag)
+                if (UObject* jt = object_property(h.weapon, STR("Jammed Tip")))
+                {
+                    Call f(jt, STR("GetForwardVector"));
+                    f.run();
+                    Vec3 fw = f.vec();
+                    if (length(fw) > 0.5) out_along = -dot(hand_point - grip_at, fw * (1.0 / length(fw)));
+                }
             // Pulled hard out of a wound: your hand more than stab_yank_cm from the grip for
             // stab_yank_s tears the blade out (the game's own Release All Jammed Bones) and the hand
             // keeps it (flip-test1: the hand was 74 cm away while the blade stayed in him).
             static double yank_since[2] = {-1.0, -1.0};
-            if (in_body && cfg.stab_yank_cm > 0.0 && from_hand > cfg.stab_yank_cm)
+            if (in_body && cfg.stab_yank_cm > 0.0 && out_along > cfg.stab_yank_cm)
             {
                 double tn = now_seconds();
                 if (yank_since[side] < 0.0) yank_since[side] = tn;
@@ -8061,7 +8097,7 @@ namespace
                 yank_since[side] = -1.0;
             // A pull that the yank will answer is not a let-go (flip-test3: the past-reach let-go fired
             // after 0.15 s and dropped the weapon before the 0.25 s yank could pull it out).
-            if (in_body && cfg.stab_yank_cm > 0.0 && from_hand > cfg.stab_yank_cm) out = false;
+            if (in_body && cfg.stab_yank_cm > 0.0 && out_along > cfg.stab_yank_cm) out = false;
             // Not right after it came into the hand (a new or long weapon swings into place first),
             // and not while it is still closing in on where the hold sends it.
             double t_now = now_seconds();
@@ -9208,6 +9244,7 @@ namespace
             max_force *= (std::max)(0.0, draw_scale_cfg);
             max_torque *= (std::max)(0.0, draw_scale_cfg);
         }
+        double max_force_unstuck = max_force; // the hand's whole strength (drag, below)
         if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body")))
         {
             max_force *= (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
@@ -9355,6 +9392,8 @@ namespace
             // cone). Pulling back far enough draws it out; the game lets go once the tip box leaves
             // the body (stab-test9).
             bool in_wound = cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body"));
+            bool drag = false;
+            Vec3 wound_axis;
             static bool was_in_wound[2] = {false, false};
             if (!in_wound && was_in_wound[side]) HSVR_LOG("Hold: %s hand's weapon is out of the wound", side == 0 ? "left" : "right");
             was_in_wound[side] = in_wound;
@@ -9383,14 +9422,40 @@ namespace
                 // tip 1.2 cm inside, then outside), so for the first moments it is carried in at
                 // stab_wound_entry_cms whatever the hand does, as the arm's momentum would.
                 if (settling) ax = (std::max)(ax, cfg.stab_wound_entry_cms);
-                v_need = (v_com_now - u * now_ax) + u * ax;
+                // Dragging him (Matthew 2026-11-20: a falling body should not rip the weapon out of
+                // his hand, his weapon should pull the body): once the stick has settled, the hand
+                // pulls the blade sideways toward where it holds it with its whole strength (arm
+                // strength, stamina, injuries: max_force), and the game's stuck joint pulls the body
+                // after it. Along the wound the slide limits above still decide (pulling out).
+                drag = cfg.stab_drag && !settling;
+                Vec3 lat = drag ? (v_need - u * need_ax) : (v_com_now - u * now_ax);
+                v_need = lat + u * ax;
+                wound_axis = u;
                 HSVR_LOG_EVERY(0.25, "Hold: %s hand's %ls in a wound (%ls): wanted %.0f cm/s along it, slides %.0f", side == 0 ? "left" : "right",
                                weapon->GetName().c_str(), bone.c_str(), need_ax, ax);
             }
             Vec3 dv = v_need - v_com_now;
             double dv_most = (max_force / (std::max)(0.05, mass)) * DT + std::fabs(gz) * DT;
             bool f_capped = length(dv) > dv_most;
-            dv = clamp_length(dv, dv_most);
+            if (drag)
+            {
+                // Along the wound: the stuck share of the strength; across it: the drag share of all of it.
+                double dax = dot(dv, wound_axis);
+                Vec3 dlat = dv - wound_axis * dax;
+                double lat_most = (max_force_unstuck * cfg.stab_drag_force_scale / (std::max)(0.05, mass)) * DT + std::fabs(gz) * DT;
+                f_capped = length(dlat) > lat_most;
+                dlat = clamp_length(dlat, lat_most);
+                dax = (std::min)(dv_most, (std::max)(-dv_most, dax));
+                dv = dlat + wound_axis * dax;
+                h.drag_capped = f_capped;
+                HSVR_LOG_EVERY(0.5, "Hold: %s hand drags him by the stuck %ls: %.0f N of the %.0f N it has%s", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                               length(dlat) * mass / DT / 100.0, max_force_unstuck * cfg.stab_drag_force_scale / 100.0, f_capped ? " (all of it)" : "");
+            }
+            else
+            {
+                dv = clamp_length(dv, dv_most);
+                h.drag_capped = false;
+            }
             Vec3 w_need = scaled_axis((rot_t * rot.inverse()).normalized()) * (1.0 / DT);
             if (in_wound) w_need = w_now;
             Vec3 dL = about_com * (w_need - w_now);
