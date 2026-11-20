@@ -193,6 +193,7 @@ LAYOUT = [
         ("pose_hold_arm_reach_cm", ""),
         ("pose_hold_shoulder_fade_from_cm", ""),
         ("pose_hold_shoulder_fade_to_cm", ""),
+        ("pose_hold_let_go_reach_slack_cm", "With the arm-lag hold: how far past your reach a held weapon may trail before it is let go (cm)."),
         ("pose_hold_weight", ""),
         ("pose_hold_weight_torque_scale", ""),
         ("pose_hold_weight_two_hand_couple", ""),
