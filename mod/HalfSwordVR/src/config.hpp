@@ -800,6 +800,9 @@ namespace hsvr
         // good (playtest 2026-11-20 11:20Z). Enemies are not touched; leg injuries still cut leg tonus.
         bool pose_player_no_kneel = true;
         bool pose_capsule_floor_clamp = true;
+        // Every tick: the capsule never more than 15 cm under standing height over the floor (one trace),
+        // and above it he falls with gravity (pits, ledges). Stops the running sink-into-the-floor collapse.
+        bool pose_capsule_keep_on_floor = true;
         // The game sets the capsule's height to (lower foot's step end) + half height + clamp(Step Height 2,
         // +-10). Step Height 2 sinks to about -4 cm through each step and snaps back to 0 as a foot lands,
         // so walking the capsule (and the view and his body on it) dropped and hopped ~2 times a second

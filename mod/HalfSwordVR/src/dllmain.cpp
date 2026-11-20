@@ -13695,6 +13695,62 @@ namespace
                 }
             }
         }
+        // On the floor every tick (pose_capsule_keep_on_floor). The game hangs his capsule from his
+        // pelvis and his "Root Linear Constraint Power" (UG @427425), which goes to 0 when his feet
+        // trail far behind his head (running), in free fall, or with no leg tonus. Then the capsule
+        // sank ~20 cm a second into the floor, the body went with it and the game's own traces took it
+        // for kneeling and falling: he lay in the floor and could not get up (playtest 2026-11-20
+        // 22:28Z, 1278 s: capsule 92 -> -36 cm in 7 s at 3.5 m/s). So, with one floor trace a tick:
+        // never more than 15 cm under standing height over the floor, and above standing height he
+        // falls (gravity, from where he was last tick), so a pit or a ledge drops him instead of
+        // leaving him floating where the game keeps him.
+        static double fall_v = 0.0, fall_t = 0.0;
+        static double kept_up_max = 0.0, fell_max = 0.0;
+        if (hsvr::config().pose_capsule_keep_on_floor && g_pose.mesh && rise <= 30.0)
+        {
+            auto flag_on = [&](const TCHAR* name) {
+                FProperty* p = prop_chain(context, name);
+                return p && number_property(context, p) > 0.5;
+            };
+            double t_now = now_seconds();
+            double dt = (std::min)(0.05, (std::max)(0.0, t_now - fall_t));
+            fall_t = t_now;
+            bool airborne_by_choice = flag_on(STR("Climbing In Air")) || flag_on(STR("Jump Pressed"));
+            double floor_z = 0.0;
+            double half = 90.0 * component_scale_z(g_pose.mesh);
+            bool floor = ground_below(context, keep.x, keep.y, (std::max)(g_hold_location.z, keep.z) + 40.0, floor_z);
+            double standing = floor ? floor_z + half : -1e9;
+            if (floor && keep.z < standing - 15.0)
+            {
+                kept_up_max = (std::max)(kept_up_max, standing - 15.0 - keep.z);
+                keep.z = standing - 15.0;
+                fall_v = 0.0;
+            }
+            else if (!airborne_by_choice && keep.z > standing + 5.0)
+            {
+                fall_v = (std::min)(1500.0, fall_v + 980.0 * dt);
+                double fallen = g_hold_location.z - fall_v * dt;
+                if (floor) fallen = (std::max)(fallen, standing);
+                if (fallen < keep.z)
+                {
+                    fell_max = (std::max)(fell_max, keep.z - fallen);
+                    keep.z = fallen;
+                }
+            }
+            else
+                fall_v = 0.0;
+            if (kept_up_max > 0.0 || fell_max > 0.0)
+            {
+                static double said = 0.0;
+                if (t_now - said >= 1.0)
+                {
+                    said = t_now;
+                    HSVR_LOG("Capsule: kept on the floor (pose_capsule_keep_on_floor): lifted up to %.1f cm a tick out of the floor, let fall up to %.1f cm a tick (%s, centre %.1f, standing %.1f, fall speed %.0f cm/s)",
+                             kept_up_max, fell_max, floor ? "floor found" : "no floor within 2 m", keep.z, floor ? standing : 0.0, fall_v);
+                    kept_up_max = fell_max = 0.0;
+                }
+            }
+        }
         static double last_line = 0.0;
         static double moved_max = 0.0;
         static int climbs = 0;
