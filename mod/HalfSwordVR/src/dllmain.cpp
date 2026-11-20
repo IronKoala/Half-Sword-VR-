@@ -6646,21 +6646,30 @@ namespace
         static double found_at = -10.0;
         struct Seen { double impulse = -1.0, health = -1.0, conscious = -1.0; };
         static std::map<UObject*, Seen> seen;
+        // Willies the game frees (a removed corpse) leave both lists at once (gc_sync); a new list
+        // is also taken after every garbage collection (crash 2026-11-20: a freed Willie was used).
+        static bool tracked = on_freed([] {
+            erase_gone(foes);
+            erase_gone_keys(seen);
+        });
+        static uint64_t epoch = 0;
         double now = hsvr::now_seconds();
-        if (now - found_at > 1.0)
+        if (now - found_at > 1.0 || epoch != g_gc_epoch)
         {
             found_at = now;
+            epoch = g_gc_epoch;
             foes.clear();
             std::vector<UObject*> all;
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), all);
             for (UObject* w : all)
-                if (w && w != pawn && w->GetName().rfind(STR("Default__"), 0) != 0) foes.push_back(w);
+                if (w && w != pawn && w->GetName().rfind(STR("Default__"), 0) != 0 && object_alive(w)) foes.push_back(w);
             std::map<UObject*, Seen> keep;
             for (UObject* w : foes) keep[w] = seen[w];
             seen.swap(keep);
         }
         for (UObject* w : foes)
         {
+            if (!object_alive(w)) continue; // destroyed this second (still readable, not a fighter)
             Seen& was = seen[w];
             // Willie-on-Willie contacts go through branch H of the block, which writes 'Last Hit Impulse
             // (Other Body)' (reset after 1 s), not 'Last Hit Impulse' (ground hits only).
@@ -6875,15 +6884,24 @@ namespace
         if (!cfg.pose_elbow_strikes || !pawn || !g_pose.mesh || !g_pose_active.load()) return;
         static std::vector<UObject*> foes;
         static double found_at = -10.0;
+        // Willies the game frees (a removed corpse) leave the list and the touch marks at once
+        // (gc_sync); a new list is also taken after every garbage collection (crash 2026-11-20 08:13:
+        // this list still held a Willie the test room had removed and the game had freed).
+        static bool tracked = on_freed([] {
+            erase_gone(foes);
+            for (ElbowState& e : g_elbow) erase_gone_keys(e.touching_until);
+        });
+        static uint64_t epoch = 0;
         double now = now_seconds();
-        if (now - found_at > 1.0)
+        if (now - found_at > 1.0 || epoch != g_gc_epoch)
         {
             found_at = now;
+            epoch = g_gc_epoch;
             foes.clear();
             std::vector<UObject*> all;
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), all);
             for (UObject* w : all)
-                if (w && w != pawn && w->GetName().rfind(STR("Default__"), 0) != 0) foes.push_back(w);
+                if (w && w != pawn && w->GetName().rfind(STR("Default__"), 0) != 0 && object_alive(w)) foes.push_back(w);
         }
         for (int side = 0; side < 2; ++side)
         {
@@ -6906,6 +6924,7 @@ namespace
             double min_speed = (lo + (hi - lo) * cfg.pose_elbow_min_ass / 75.0) * 100.0;
             for (UObject* w : foes)
             {
+                if (!object_alive(w)) continue; // destroyed this second (still readable, not a fighter)
                 UObject* mesh = object_property(w, STR("Mesh"));
                 if (!mesh) continue;
                 if (length(component_location(mesh) - elbow) > 200.0) continue;
