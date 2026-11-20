@@ -16606,7 +16606,7 @@ namespace
                 // in the reference pose), turned with the head bone's pose against the body.
                 hsvr::Quat hr = socket_rotation(ref, bone_fname("head"));
                 auto local = [&](const hsvr::Vec3& w) { return hr.inverse().rotate(w - hb); };
-                HSVR_LOG("Probe helmet: near clip %.2f cm, eye offset fwd %.1f up %.1f; head bone of %ls", pcfg.near_clip_cm, pcfg.eye_forward_cm, pcfg.eye_up_cm, ref->GetName().c_str());
+                HSVR_LOG("Probe helmet: near clip %.2f cm (helmet window %.2f cm, helmet_view %d), eye offset fwd %.1f up %.1f; head bone of %ls", pcfg.near_clip_cm, hsvr::shared().helmet_window_cm.load(), pcfg.helmet_view, pcfg.eye_forward_cm, pcfg.eye_up_cm, ref->GetName().c_str());
                 for (int e = 0; e < 2; ++e)
                 {
                     hsvr::Vec3 at;
@@ -16643,8 +16643,8 @@ namespace
                     Call lb(c, STR("GetLocalBounds"));
                     lb.run();
                     hsvr::Vec3 mn = lb.vec(STR("Min")), mx = lb.vec(STR("Max"));
-                    HSVR_LOG("Probe helmet: piece %ls mesh %ls visible %d ownerNoSee %.0f hiddenInGame %.0f bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f)", c->GetName().c_str(),
-                             sk ? sk->GetName().c_str() : STR("?"), visible ? 1 : 0, flag(STR("bOwnerNoSee")), flag(STR("bHiddenInGame")), mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
+                    HSVR_LOG("Probe helmet: piece %ls mesh %ls visible %d ownerNoSee %.0f castHiddenShadow %.0f hiddenInGame %.0f bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f)", c->GetName().c_str(),
+                             sk ? sk->GetName().c_str() : STR("?"), visible ? 1 : 0, flag(STR("bOwnerNoSee")), flag(STR("bCastHiddenShadow")), flag(STR("bHiddenInGame")), mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
                     Call nm(c, STR("GetNumMaterials"));
                     nm.run();
                     int n = nm.integer();
