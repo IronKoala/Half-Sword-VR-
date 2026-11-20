@@ -1959,6 +1959,7 @@ namespace
     std::atomic<double> g_worst_lag[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     std::atomic<bool> g_fake_stick_click{false}; // test: hsvr.stick_click 1 holds the left stick click
+    std::atomic<double> g_fake_stick[2] = {-9.0, 0.0}; // test: hsvr.stick <x> <y> holds the left stick (x -9 = off)
     std::string g_park_socket;                  // test: hsvr.arm_park <socket> (arm mode 13): right hand there
     double g_arm_floor[3] = {45.0, 15.0, 5.0};
     std::atomic<double> g_fake_jitter_cm{0.0};
@@ -3459,6 +3460,11 @@ namespace
         {
             x = state.hand[0].stick_x;
             y = state.hand[0].stick_y;
+        }
+        if (cfg.pose_stick_walk && g_fake_stick[0].load() > -5.0)
+        {
+            x = g_fake_stick[0].load();
+            y = g_fake_stick[1].load();
         }
         double m = std::sqrt(x * x + y * y);
         double dz = cfg.pose_stick_dead_zone;
@@ -16929,6 +16935,15 @@ namespace
                 float v = sp == std::string::npos ? -1.0f : (float)atof(entry.command.c_str() + sp + 1);
                 g_fake_squeeze[side].store(v);
                 HSVR_LOG("Script: hsvr.squeeze %d %.2f", side, v);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.stick ", 0) == 0)
+            {
+                double fx = -9.0, fy = 0.0;
+                sscanf_s(entry.command.c_str() + 11, "%lf %lf", &fx, &fy);
+                g_fake_stick[0].store(fx);
+                g_fake_stick[1].store(fy);
+                HSVR_LOG("Script: hsvr.stick %.2f %.2f%s", fx, fy, fx <= -5.0 ? " (off)" : "");
                 continue;
             }
             if (entry.command.rfind("hsvr.stick_click ", 0) == 0)
