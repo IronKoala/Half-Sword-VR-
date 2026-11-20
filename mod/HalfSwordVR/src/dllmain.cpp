@@ -6888,7 +6888,9 @@ namespace
         // (gc_sync); a new list is also taken after every garbage collection (crash 2026-11-20 08:13:
         // this list still held a Willie the test room had removed and the game had freed).
         static bool tracked = on_freed([] {
+            size_t before = foes.size();
             erase_gone(foes);
+            if (foes.size() != before) HSVR_LOG("Elbow: %d freed Willie(s) taken off the foe list", (int)(before - foes.size()));
             for (ElbowState& e : g_elbow) erase_gone_keys(e.touching_until);
         });
         static uint64_t epoch = 0;
@@ -6900,8 +6902,17 @@ namespace
             foes.clear();
             std::vector<UObject*> all;
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), all);
+            int skipped = 0;
             for (UObject* w : all)
-                if (w && w != pawn && w->GetName().rfind(STR("Default__"), 0) != 0 && object_alive(w)) foes.push_back(w);
+                if (w && w != pawn && w->GetName().rfind(STR("Default__"), 0) != 0)
+                {
+                    if (object_alive(w)) foes.push_back(w);
+                    else ++skipped;
+                }
+            static int skipped_logged = 0;
+            if (skipped != skipped_logged)
+                HSVR_LOG("Elbow: %d Willie(s) being destroyed left off the foe list (%d on it)", skipped, (int)foes.size());
+            skipped_logged = skipped;
         }
         for (int side = 0; side < 2; ++side)
         {
