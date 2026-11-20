@@ -328,6 +328,7 @@ namespace
     };
     PerfAcc g_perf[PerfCount];
     thread_local uint64_t t_perf_child = 0;
+    thread_local int t_perf_depth = 0; // mod scopes open on this thread (game-cost probes skip calls the mod makes)
     inline uint64_t perf_now()
     {
         LARGE_INTEGER c;
@@ -338,9 +339,14 @@ namespace
     {
         PerfId id;
         uint64_t start, saved;
-        explicit PerfScope(PerfId i) : id(i), start(perf_now()), saved(t_perf_child) { t_perf_child = 0; }
+        explicit PerfScope(PerfId i) : id(i), start(perf_now()), saved(t_perf_child)
+        {
+            t_perf_child = 0;
+            ++t_perf_depth;
+        }
         ~PerfScope()
         {
+            --t_perf_depth;
             uint64_t all = perf_now() - start;
             g_perf[id].ticks.fetch_add(all - (std::min)(all, t_perf_child), std::memory_order_relaxed);
             g_perf[id].calls.fetch_add(1, std::memory_order_relaxed);
@@ -17576,6 +17582,330 @@ namespace
     }
 
     // The Perf: line (see PerfScope). Object counts come from the engine's class hash tables.
+    // ---- Game-thread cost probes (perf_events, perf_sample), for "where do the game's 18 ms a frame go
+    // in a 9-foe fight". Both only measure; they change nothing in the game.
+    //
+    // perf_events: every ProcessEvent the game makes on its game thread (native code calling a
+    // Blueprint: actor ReceiveTick, anim BlueprintUpdateAnimation, timers, delegates, hit events),
+    // timed per class and function, with the mod's own time inside taken out. Calls the mod itself
+    // makes are skipped. Pre is registered after the mod's own pre callbacks and post before its post
+    // callbacks, so those sit outside the timed span.
+    //
+    // perf_sample: a thread that stops the game thread about 1000 times a second, walks its stack
+    // with the exe's unwind tables and counts each function (by start address) once per sample:
+    // "self" = the function running, "incl" = anywhere on the stack. Addresses are module+RVA, to
+    // look up in Ghidra.
+    DWORD g_game_thread_id = 0;
+    HANDLE g_game_thread = nullptr;
+    bool g_ev_active = false; // changed only from the engine tick (no ProcessEvent open), so pre/post pair up
+    struct EvKey
+    {
+        const void* cls;
+        const void* fn;
+        bool operator==(const EvKey& o) const { return cls == o.cls && fn == o.fn; }
+    };
+    struct EvKeyHash
+    {
+        size_t operator()(const EvKey& k) const { return std::hash<const void*>{}(k.cls) * 31u ^ std::hash<const void*>{}(k.fn); }
+    };
+    struct EvStat
+    {
+        std::string name;
+        uint64_t incl = 0, excl = 0, outer = 0, calls = 0, worst = 0;
+    };
+    std::unordered_map<EvKey, EvStat, EvKeyHash> g_ev_stats;
+    struct EvFrame
+    {
+        EvStat* st;
+        uint64_t start, child, mod_at;
+    };
+    EvFrame g_ev_stack[512];
+    int g_ev_depth = 0;
+    uint64_t g_ev_outer_ticks = 0, g_ev_calls = 0, g_ev_skipped = 0;
+    bool g_ev_naming = false;
+
+    void ev_pre(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        if (!g_ev_active || GetCurrentThreadId() != g_game_thread_id) return;
+        if (g_ev_depth >= 512) { ++g_ev_depth; return; }
+        EvFrame& f = g_ev_stack[g_ev_depth++];
+        f.st = nullptr;
+        f.child = 0;
+        f.mod_at = t_perf_child;
+        f.start = 0;
+        if (t_perf_depth > 0 || g_ev_naming || !context || !function)
+        {
+            ++g_ev_skipped;
+            return;
+        }
+        EvKey k{context->GetClassPrivate(), function};
+        auto it = g_ev_stats.find(k);
+        if (it == g_ev_stats.end())
+        {
+            g_ev_naming = true; // naming can run script (ToString); do not time ourselves
+            EvStat st;
+            UStruct* cls = context->GetClassPrivate();
+            st.name = (cls ? narrow(cls->GetName()) : std::string("?")) + "." + narrow(function->GetName());
+            g_ev_naming = false;
+            it = g_ev_stats.emplace(k, std::move(st)).first;
+        }
+        f.st = &it->second;
+        f.mod_at = t_perf_child;
+        f.start = perf_now();
+    }
+    void ev_post(Hook::TCallbackIterationData<void>&, UObject*, UFunction*, void*)
+    {
+        if (!g_ev_active || GetCurrentThreadId() != g_game_thread_id || g_ev_depth <= 0) return;
+        if (g_ev_depth > 512) { --g_ev_depth; return; }
+        EvFrame f = g_ev_stack[--g_ev_depth];
+        if (!f.st) return;
+        uint64_t all = perf_now() - f.start, mod = t_perf_child - f.mod_at;
+        uint64_t incl = all - (std::min)(all, mod);
+        f.st->incl += incl;
+        f.st->excl += incl - (std::min)(incl, f.child);
+        f.st->worst = (std::max)(f.st->worst, incl);
+        ++f.st->calls;
+        ++g_ev_calls;
+        if (g_ev_depth > 0)
+            g_ev_stack[g_ev_depth - 1].child += incl;
+        else
+        {
+            f.st->outer += incl;
+            g_ev_outer_ticks += incl;
+        }
+    }
+
+    // Sampler.
+    struct SampleCount
+    {
+        uint64_t self = 0, incl = 0;
+    };
+    std::mutex g_sample_mutex;
+    std::unordered_map<uint64_t, SampleCount> g_samples, g_samples_all;
+    uint64_t g_sample_total = 0, g_sample_total_all = 0, g_sample_failed = 0;
+    std::atomic<bool> g_sampler_running{false}, g_sample_on{false};
+
+    // Walks the suspended thread's stack. No allocation, no locks of ours: the game thread may hold
+    // the heap lock while it is stopped. Returns how many frames; fn[i] = function start (or the
+    // address itself when it has no unwind entry).
+    int sample_walk(HANDLE thread, uint64_t* fn, int max)
+    {
+        CONTEXT ctx{};
+        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if (!GetThreadContext(thread, &ctx)) return -1;
+        int n = 0;
+        __try
+        {
+            while (n < max && ctx.Rip)
+            {
+                DWORD64 base = 0;
+                PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(ctx.Rip, &base, nullptr);
+                if (!rf)
+                {
+                    fn[n++] = ctx.Rip;
+                    if (n > 1) break; // code without unwind data mid-stack (hook stubs): stop
+                    ctx.Rip = *reinterpret_cast<DWORD64*>(ctx.Rsp); // leaf: return address on top
+                    ctx.Rsp += 8;
+                    continue;
+                }
+                fn[n++] = base + rf->BeginAddress;
+                void* handler_data = nullptr;
+                DWORD64 establisher = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, rf, &ctx, &handler_data, &establisher, nullptr);
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        return n;
+    }
+    DWORD WINAPI sampler_thread(void*)
+    {
+        HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /*CREATE_WAITABLE_TIMER_HIGH_RESOLUTION*/, TIMER_ALL_ACCESS);
+        if (!timer) timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+        uint64_t fn[96];
+        while (g_sampler_running.load())
+        {
+            LARGE_INTEGER due;
+            due.QuadPart = -10000; // 1 ms
+            SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
+            WaitForSingleObject(timer, 20);
+            HANDLE h = g_game_thread;
+            if (!h || !g_sample_on.load()) continue;
+            if (SuspendThread(h) == (DWORD)-1) continue;
+            int n = sample_walk(h, fn, 96);
+            ResumeThread(h);
+            std::lock_guard<std::mutex> lock(g_sample_mutex);
+            if (n <= 0)
+            {
+                ++g_sample_failed;
+                continue;
+            }
+            ++g_sample_total, ++g_sample_total_all;
+            for (int i = 0; i < n; ++i)
+            {
+                bool seen = false;
+                for (int j = 0; j < i && !seen; ++j) seen = fn[j] == fn[i];
+                if (seen) continue;
+                SampleCount& c = g_samples[fn[i]];
+                SampleCount& a = g_samples_all[fn[i]];
+                ++c.incl, ++a.incl;
+                if (i == 0) ++c.self, ++a.self;
+            }
+        }
+        CloseHandle(timer);
+        return 0;
+    }
+    std::string module_rva(uint64_t addr)
+    {
+        HMODULE m = nullptr;
+        char b[300];
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(addr), &m) || !m)
+        {
+            snprintf(b, sizeof b, "?+0x%llx", (unsigned long long)addr);
+            return b;
+        }
+        wchar_t path[MAX_PATH];
+        DWORD len = GetModuleFileNameW(m, path, MAX_PATH);
+        std::wstring w(path, len);
+        size_t slash = w.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) w = w.substr(slash + 1);
+        snprintf(b, sizeof b, "%s+0x%llx", narrow(w).c_str(), (unsigned long long)(addr - reinterpret_cast<uint64_t>(m)));
+        return b;
+    }
+    // Every probe's game-thread setup, from the engine tick (no ProcessEvent open there).
+    void probes_tick()
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        if (!g_game_thread_id)
+        {
+            g_game_thread_id = GetCurrentThreadId();
+            g_game_thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, g_game_thread_id);
+        }
+        g_ev_depth = 0;
+        g_ev_active = cfg.perf_events;
+        g_sample_on = cfg.perf_sample;
+        if (cfg.perf_sample && !g_sampler_running.load())
+        {
+            g_sampler_running = true;
+            HANDLE t = CreateThread(nullptr, 0, &sampler_thread, nullptr, 0, nullptr);
+            if (t)
+            {
+                SetThreadPriority(t, THREAD_PRIORITY_TIME_CRITICAL);
+                CloseHandle(t);
+                HSVR_LOG("Perf sample: sampling the game thread about 1000 times a second");
+            }
+            else
+                g_sampler_running = false;
+        }
+    }
+    // The probes' part of the Perf report; frames = engine ticks in the period.
+    void probes_report(uint64_t frames, double ms_per_tick, double seconds)
+    {
+        const hsvr::Config& cfg = hsvr::config();
+        if (g_game_thread)
+        {
+            static uint64_t last_cpu = 0;
+            FILETIME c, e, k, u;
+            if (GetThreadTimes(g_game_thread, &c, &e, &k, &u))
+            {
+                uint64_t cpu = ((uint64_t)k.dwHighDateTime << 32 | k.dwLowDateTime) + ((uint64_t)u.dwHighDateTime << 32 | u.dwLowDateTime);
+                if (last_cpu && frames)
+                    HSVR_LOG("Perf game thread: %.2f ms CPU a frame (%.0f%% busy)", (cpu - last_cpu) / 1e4 / frames, (cpu - last_cpu) / 1e5 / seconds);
+                last_cpu = cpu;
+            }
+        }
+        if (cfg.perf_events && frames && !g_ev_stats.empty())
+        {
+            std::vector<EvStat*> v;
+            for (auto& kv : g_ev_stats)
+                if (kv.second.calls) v.push_back(&kv.second);
+            auto line = [&](const char* title, auto key, size_t top) {
+                std::sort(v.begin(), v.end(), [&](EvStat* a, EvStat* b) { return key(a) > key(b); });
+                std::string out;
+                for (size_t i = 0; i < v.size() && i < top; ++i)
+                {
+                    double ms = key(v[i]) * ms_per_tick / frames;
+                    if (ms < 0.02) break;
+                    char b[384];
+                    snprintf(b, sizeof b, "\n    %s %.2f ms (%.1f calls, %.3f ms each, worst %.2f; self %.2f)", v[i]->name.c_str(), ms, (double)v[i]->calls / frames,
+                             v[i]->incl * ms_per_tick / v[i]->calls, v[i]->worst * ms_per_tick, v[i]->excl * ms_per_tick / frames);
+                    out += b;
+                }
+                HSVR_LOG("Perf events %s:%s", title, out.c_str());
+            };
+            HSVR_LOG("Perf events: Blueprint calls from native code %.2f ms a frame (outermost, mod time taken out); %.0f timed calls, %.0f skipped (mod's own) a frame",
+                     g_ev_outer_ticks * ms_per_tick / frames, (double)g_ev_calls / frames, (double)g_ev_skipped / frames);
+            line("by outermost time (ms a frame)", [](EvStat* s) { return s->outer; }, 25);
+            line("by self time (ms a frame)", [](EvStat* s) { return s->excl; }, 25);
+            for (auto& kv : g_ev_stats) kv.second.incl = kv.second.excl = kv.second.outer = kv.second.calls = kv.second.worst = 0;
+            g_ev_outer_ticks = g_ev_calls = g_ev_skipped = 0;
+        }
+        if (cfg.perf_sample)
+        {
+            std::vector<std::pair<uint64_t, SampleCount>> v, all;
+            uint64_t total, total_all, failed;
+            {
+                std::lock_guard<std::mutex> lock(g_sample_mutex);
+                v.assign(g_samples.begin(), g_samples.end());
+                all.assign(g_samples_all.begin(), g_samples_all.end());
+                total = g_sample_total, total_all = g_sample_total_all, failed = g_sample_failed;
+                g_samples.clear();
+                g_sample_total = 0, g_sample_failed = 0;
+            }
+            if (total)
+            {
+                std::map<std::string, uint64_t> modules;
+                for (auto& kv : v)
+                    if (kv.second.self)
+                    {
+                        std::string r = module_rva(kv.first);
+                        modules[r.substr(0, r.find('+'))] += kv.second.self;
+                    }
+                std::string mods;
+                for (auto& kv : modules)
+                {
+                    char b[160];
+                    snprintf(b, sizeof b, "%s%s %.1f%%", mods.empty() ? "" : ", ", kv.first.c_str(), 100.0 * kv.second / total);
+                    mods += b;
+                }
+                HSVR_LOG("Perf sample: %llu samples (%llu failed); self time by module: %s", (unsigned long long)total, (unsigned long long)failed, mods.c_str());
+                auto line = [&](const char* title, bool self, size_t top) {
+                    std::sort(v.begin(), v.end(), [&](auto& a, auto& b) { return (self ? a.second.self : a.second.incl) > (self ? b.second.self : b.second.incl); });
+                    std::string out;
+                    for (size_t i = 0; i < v.size() && i < top; ++i)
+                    {
+                        uint64_t n = self ? v[i].second.self : v[i].second.incl;
+                        char b[200];
+                        snprintf(b, sizeof b, "\n    %s %.1f%%", module_rva(v[i].first).c_str(), 100.0 * n / total);
+                        out += b;
+                    }
+                    HSVR_LOG("Perf sample %s:%s", title, out.c_str());
+                };
+                line("self (function running)", true, 30);
+                line("inclusive (on the stack)", false, 60);
+            }
+            // Everything since start, for Ghidra lookups.
+            if (total_all)
+            {
+                std::sort(all.begin(), all.end(), [](auto& a, auto& b) { return a.second.incl > b.second.incl; });
+                CreateDirectoryW((hsvr::mod_dir() + L"logs\\").c_str(), nullptr);
+                FILE* f = _wfopen((hsvr::mod_dir() + L"logs\\perf_samples.tsv").c_str(), L"wb");
+                if (f)
+                {
+                    fprintf(f, "address\tself_pct\tincl_pct\tself\tincl\t(total %llu samples)\n", (unsigned long long)total_all);
+                    for (auto& kv : all)
+                    {
+                        if (kv.second.incl * 2000 < total_all) break; // under 0.05%
+                        fprintf(f, "%s\t%.2f\t%.2f\t%llu\t%llu\n", module_rva(kv.first).c_str(), 100.0 * kv.second.self / total_all, 100.0 * kv.second.incl / total_all,
+                                (unsigned long long)kv.second.self, (unsigned long long)kv.second.incl);
+                    }
+                    fclose(f);
+                }
+            }
+        }
+    }
+
     void perf_report(float delta_seconds)
     {
         static double since = -1.0;
@@ -17657,6 +17987,7 @@ namespace
                  "%d decals, %d primitives (%d simulating, %d of them skeletal); counted in %.1f ms",
                  frames / (now - since), 1000.0 * dt_sum / frames, 1000.0 * dt_max, now - since, total, parts.c_str(), Unreal::UObjectArray::GetNumElements(), actors,
                  willies, weapons, ais, decals, (int)prims.size(), simulating, sim_skel, census_ms);
+        probes_report(frames, ms_per_tick, now - since);
         since = now;
         frames = 0, dt_sum = 0.0, dt_max = 0.0;
     }
@@ -17664,7 +17995,9 @@ namespace
     void game_tick(UObject* engine, float delta_seconds)
     {
         gc_sync();
+        g_ev_active = false; // the census below calls the game; not the game's own time
         perf_report(delta_seconds); // outside the tick's own scope: the census is not per-frame time
+        probes_tick();
         HSVR_PROF(PerfTick);
         g_engine = engine;
         { HSVR_SUB("tick:hit_frame_refresh"); hit_frame_refresh(); }
@@ -17795,6 +18128,9 @@ class HalfSwordVR : public CppUserModBase
             hsvr::vr_install_present_hook();
         }
         Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});
+        // Cost probe: pre after the mod's pre callbacks, post before its post callbacks (perf_events).
+        Hook::RegisterProcessEventPreCallback(&ev_pre, {false, false, STR("HalfSwordVR"), STR("CostProbePre")});
+        Hook::RegisterProcessEventPostCallback(&ev_post, {false, false, STR("HalfSwordVR"), STR("CostProbePost")});
         Hook::RegisterProcessEventPostCallback(&capsule_after_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleAfter")});
         Hook::RegisterProcessEventPostCallback(&pose_after_anim_update, {false, false, STR("HalfSwordVR"), STR("PoseAfterAnim")});
         Hook::RegisterProcessEventPostCallback(&feet_after_anim_update, {false, false, STR("HalfSwordVR"), STR("FeetAfterAnim")});
