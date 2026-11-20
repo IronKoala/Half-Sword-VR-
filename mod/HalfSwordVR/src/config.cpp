@@ -382,6 +382,7 @@ namespace hsvr
         flag("pose_hold_ignore_body", c.pose_hold_ignore_body);
         num("pose_hold_weight_spin_extra", c.pose_hold_weight_spin_extra);
         flag("pose_hold_hand_on_weapon", c.pose_hold_hand_on_weapon);
+        flag("pose_arm_solve_drawn_hand", c.pose_arm_solve_drawn_hand);
         num("pose_hold_blocked_from_cm", c.pose_hold_blocked_from_cm);
         flag("pose_hold_hand_follows", c.pose_hold_hand_follows);
         integer("pose_hold_hand_follows_predict", c.pose_hold_hand_follows_predict);
@@ -530,6 +531,9 @@ namespace hsvr
         flag("pose_fist_slap", c.pose_fist_slap);
         num("pose_fist_slap_ass", c.pose_fist_slap_ass);
         num("pose_fist_slap_keep_s", c.pose_fist_slap_keep_s);
+        flag("pose_fist_clear", c.pose_fist_clear);
+        num("pose_fist_clear_margin_cm", c.pose_fist_clear_margin_cm);
+        num("pose_fist_clear_retry_s", c.pose_fist_clear_retry_s);
         integer("pose_fist_shape", c.pose_fist_shape);
         flag("pose_fist_game_flags", c.pose_fist_game_flags);
         flag("pose_fingers_tracked", c.pose_fingers_tracked);

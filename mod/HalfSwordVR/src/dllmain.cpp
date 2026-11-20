@@ -2412,6 +2412,20 @@ namespace
             }
         }
         double prior = swivel_angle(prior_dir);
+        // The elbow is chosen for the hand as it is drawn. While his hand rides a weapon that something
+        // stopped (a post, a shield, a body), that is the weapon's turn, not your controller's: with the
+        // controller's, the elbow sat right for a hand that wasn't there and his wrist bent up to 150 deg
+        // (Matthew 2026-11-20 14:43, a war hammer against the wooden post; log: wrist bend median 69,
+        // p90 121 deg whenever the weapon was 30+ cm off the controller, 31 deg when it was on it).
+        // B&S does the same: the arm's IK target is an anchor on the item's grip, position and rotation
+        // (Handle.cs SetHandAnchor(gripInfo.ikAnchor), solved by VRIK with its WristRelaxer).
+        if (on_weapon && cfg.pose_arm_solve_drawn_hand)
+        {
+            fingers_world = normalized(Wh.rotate(a.fingers_local));
+            Vec3 th = Wh.rotate(a.thumb_local);
+            th = th - fingers_world * dot(th, fingers_world);
+            if (length(th) > 1e-6) thumb_world = normalized(th);
+        }
         Vec3 hand_y = normalized(fingers_world), hand_z = normalized(thumb_world), hand_x = cross(hand_y, hand_z);
         // A nearly straight arm follows the hand's twist: the inside of the elbow toward the thumb.
         double dd = (std::min)(D, L1 + L2);
@@ -6254,15 +6268,97 @@ namespace
         }
     }
 
+    // The fist's collision ball, measured from the first live fist (its "Sphere" component).
+    double g_fist_radius_cm = 13.0;
+    bool g_fist_radius_measured = false;
+    bool g_fist_blocked[2] = {false, false};
+
+    void measure_fist_radius(UObject* fist)
+    {
+        if (g_fist_radius_measured || !fist) return;
+        double most = -1.0;
+        for (const TCHAR* n : {STR("Sphere"), STR("SearchBeacon")})
+            if (UObject* c = object_property(fist, n))
+            {
+                Call r(c, STR("GetScaledSphereRadius"));
+                r.run();
+                double radius = r.number();
+                Call q(c, STR("GetCollisionEnabled"));
+                q.run();
+                FProperty* rp = q.param(STR("ReturnValue"));
+                int enabled = rp ? *(q.buffer.data() + rp->GetOffset_Internal()) : -1;
+                HSVR_LOG("Fist: its %ls ball has radius %.1f cm, collision %d (0 none, 1 query, 2 physics, 3 both)", n, radius, enabled);
+                // Only a ball that takes part in physics pushes anyone.
+                if ((enabled == 2 || enabled == 3) && radius > most) most = radius;
+            }
+        g_fist_radius_measured = true;
+        if (most > 0.0) g_fist_radius_cm = most;
+        HSVR_LOG("Fist: clearance ball %.1f cm", g_fist_radius_cm);
+    }
+
+    // How close the fist's ball centre (where it would be made) is to another Willie's physics bodies:
+    // his nearest body to the point, then the distance to that body's collision (0 = inside). Fresh
+    // list each call (no Willie pointer kept across frames).
+    double fist_clearance(UObject* pawn, const hsvr::Vec3& at, std::wstring& who, std::wstring& bone_out)
+    {
+        double best = 1e9;
+        std::vector<UObject*> all;
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), all);
+        for (UObject* w : all)
+        {
+            if (!w || w == pawn || w->GetName().rfind(STR("Default__"), 0) == 0 || !object_alive(w)) continue;
+            UObject* mesh = object_property(w, STR("Mesh"));
+            if (!mesh) continue;
+            if (hsvr::length(component_location(mesh) - at) > 250.0) continue;
+            Call fb(mesh, STR("FindClosestBone_K2"));
+            fb.three(STR("TestLocation"), at.x, at.y, at.z);
+            fb.number(STR("IgnoreScale"), 0.0);
+            fb.flag(STR("bRequirePhysicsAsset"), true);
+            fb.run();
+            FProperty* rp = fb.param(STR("ReturnValue"));
+            if (!rp) continue;
+            FName bone = *reinterpret_cast<FName*>(fb.buffer.data() + rp->GetOffset_Internal());
+            Call cp(mesh, STR("GetClosestPointOnCollision"));
+            cp.three(STR("Point"), at.x, at.y, at.z);
+            cp.name(STR("BoneName"), bone);
+            cp.run();
+            double d = cp.number();
+            if (d < 0.0 || d >= best) continue; // < 0: no collision on that body
+            best = d;
+            who = w->GetName();
+            bone_out = bone.ToString();
+        }
+        return best;
+    }
+
     bool make_fist(int side, UObject* pawn, const hsvr::Config& cfg)
     {
+        g_fist_blocked[side] = false;
         if (!cfg.pose_fists) return false;
         UClass* cls = fist_class(cfg);
         if (!cls) return false;
         if (object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))) return false;
+        // Made inside him, the ball is pushed out of his body by the physics while the game pulls it
+        // into the hand (its soft attach, which the mod's hold waits out): he is thrown.
+        if (cfg.pose_fist_clear)
+            if (UObject* mesh = object_property(pawn, STR("Mesh")))
+            {
+                hsvr::Vec3 at = hand_grab_point(mesh, side);
+                std::wstring who, bone;
+                double d = fist_clearance(pawn, at, who, bone);
+                double need = g_fist_radius_cm + (std::max)(0.0, cfg.pose_fist_clear_margin_cm);
+                if (d < need)
+                {
+                    g_fist_blocked[side] = true;
+                    HSVR_LOG_EVERY(0.5, "Fist: %s hand waits: its %.0f cm ball would be inside %ls (%ls %.1f cm from the hand, needs %.0f)",
+                                   side == 0 ? "left" : "right", g_fist_radius_cm, who.c_str(), bone.c_str(), d, need);
+                    return false;
+                }
+            }
         set_up_hand(side, pawn, cls, false, false, true);
         UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
         bool ok = is_fist(now);
+        if (ok) measure_fist_radius(now);
         if (cfg.pose_fist_mark_spawned) set_bool_property(pawn, fist_spawned_name(side), ok);
         HSVR_LOG("Fist: %s hand %s", side == 0 ? "left" : "right", ok ? "is a fist" : "could not be made a fist");
         if (ok) g_fist_made_at[side] = hsvr::now_seconds();
@@ -7844,7 +7940,7 @@ namespace
                 (g_two.active && side == g_two.second))
                 continue;
             if (t < g_fist_retry_at[side]) continue;
-            if (!make_fist(side, pawn, cfg)) g_fist_retry_at[side] = t + 0.5;
+            if (!make_fist(side, pawn, cfg)) g_fist_retry_at[side] = t + (g_fist_blocked[side] ? (std::max)(0.0, cfg.pose_fist_clear_retry_s) : 0.5);
         }
     }
 
@@ -15758,6 +15854,57 @@ namespace
                     Call r(wr, STR("Release All Jammed Bones"));
                     bool ok = r.run();
                     HSVR_LOG("Script: hsvr.unstick: %s; stuck in body now %d", ok ? "released" : "function not found", (int)bool_property(wr, STR("Stuck In Body")));
+                }
+                continue;
+            }
+            if (entry.command.rfind("hsvr.foe_at_hand ", 0) == 0)
+            {
+                // Fist-clear tests: "hsvr.foe_at_hand <side> <cm>": every foe put facing him with his
+                // pelvis under that hand's grab point, moved <cm> further away from him (0 = the hand
+                // on his centre line), so the hand is inside his body whatever way the body faces.
+                using hsvr::Vec3;
+                int side = std::atoi(entry.command.c_str() + 17) != 0 ? 1 : 0;
+                size_t sp = entry.command.find(' ', 17);
+                double cm = sp != std::string::npos ? std::atof(entry.command.c_str() + sp + 1) : 0.0;
+                UObject* player = nullptr;
+                UObject* pm = find_pawn_mesh(&player);
+                if (!player || !pm) continue;
+                Vec3 hand = hand_grab_point(pm, side);
+                Vec3 me = actor_location(player);
+                Vec3 f{hand.x - me.x, hand.y - me.y, 0.0};
+                double fl = hsvr::length(f);
+                if (fl < 1e-3) continue;
+                f = f * (1.0 / fl);
+                double yaw = std::atan2(-f.y, -f.x) * 57.29577951308232;
+                std::vector<UObject*> foes;
+                UObjectGlobals::FindAllOf(STR("Willie_BP_C"), foes);
+                static const FName pelvis_bone2(STR("pelvis"), FNAME_Add);
+                for (UObject* foe : foes)
+                {
+                    if (!foe || foe == player || foe->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                    Vec3 al = actor_location(foe);
+                    Vec3 at{hand.x + f.x * cm, hand.y + f.y * cm, al.z};
+                    Call mv(foe, STR("K2_SetActorLocationAndRotation"));
+                    mv.three(STR("NewLocation"), at.x, at.y, at.z);
+                    mv.three(STR("NewRotation"), 0.0, yaw, 0.0);
+                    mv.flag(STR("bTeleport"), true);
+                    mv.run();
+                    UObject* fm = object_property(foe, STR("Mesh"));
+                    Vec3 after;
+                    if (fm)
+                    {
+                        Vec3 before = socket_location(fm, pelvis_bone2);
+                        Call off(fm, STR("K2_AddWorldOffset"));
+                        off.three(STR("DeltaLocation"), at.x - before.x, at.y - before.y, 0.0);
+                        off.flag(STR("bTeleport"), true);
+                        off.run();
+                        Call still(fm, STR("SetAllPhysicsLinearVelocity"));
+                        still.three(STR("NewVel"), 0.0, 0.0, 0.0);
+                        still.run();
+                        after = socket_location(fm, pelvis_bone2);
+                    }
+                    HSVR_LOG("Script: hsvr.foe_at_hand %d %.0f: %ls pelvis now (%.0f, %.0f, %.0f), hand at (%.0f, %.0f, %.0f), yaw %.0f", side, cm, foe->GetName().c_str(),
+                             after.x, after.y, after.z, hand.x, hand.y, hand.z, yaw);
                 }
                 continue;
             }

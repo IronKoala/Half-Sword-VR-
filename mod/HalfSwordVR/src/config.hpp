@@ -391,6 +391,8 @@ namespace hsvr
         // the hand stays on it instead of going on with your controller. It eases from following the
         // controller to sitting on the weapon as the weapon falls 1 to pose_hold_blocked_from_cm behind.
         bool pose_hold_hand_on_weapon = true;
+        // The elbow is chosen for his drawn hand (on a stopped weapon: the weapon's turn), as B&S's IK does.
+        bool pose_arm_solve_drawn_hand = true;
         double pose_hold_blocked_from_cm = 3.0;
         // B&S (bs_hold_measured.md section 5): while a hand holds something, his drawn hand always rides
         // the item at its grip (where the item will be after this frame's physics), never your controller;
@@ -632,6 +634,13 @@ namespace hsvr
         bool pose_fist_slap = true;
         double pose_fist_slap_ass = 30.0;
         double pose_fist_slap_keep_s = 0.3;
+        // No fist while the hand is inside another Willie (playtest 2026-11-20 588 s: a fist made at his
+        // neck as a throat grab let go threw his head and neck at 37-87 m/s). The fist waits until its
+        // ball (radius measured from the live fist, 13 cm until then) plus margin_cm is clear of every
+        // other Willie's physics bodies, checked every pose_fist_clear_retry_s; the fingers still close.
+        bool pose_fist_clear = true;
+        double pose_fist_clear_margin_cm = 2.0;
+        double pose_fist_clear_retry_s = 0.03;
         // The fist's finger shape in his animation: -2 = the game's own, -1 = the animation's grab
         // shape (its 'Grabbed' switch), 0..17 = that grip type, 100 = its guard fist ('Guarding' for
         // that hand, with the swing speed its fist blend reads held at 75 in the animation only).
