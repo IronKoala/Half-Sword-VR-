@@ -732,6 +732,8 @@ namespace hsvr
         num("stab_push_time_s", c.stab_push_time_s);
         flag("hide_own_head", c.hide_own_head);
         text("hide_own_gore_from", c.hide_own_gore_from);
+        flag("player_takes_damage", c.player_takes_damage);
+        flag("player_stump_blood", c.player_stump_blood);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;

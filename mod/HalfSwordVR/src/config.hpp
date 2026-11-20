@@ -890,6 +890,15 @@ namespace hsvr
         // hidden head: it is hidden from this bone up. Empty = not hidden. Wounds elsewhere still
         // show their bones.
         std::string hide_own_gore_from = "neck_01";
+        // 1 = hits on your posed body hurt you as in the flat game. The game's Get Damage only counts
+        // Health, Consciousness, Bleeding and Force Death when the victim's head body simulates
+        // physics (Root Mesh, Get Damage @540-@584); the posed body does not, so without this the
+        // player only lost limb health and could die only by losing his head.
+        bool player_takes_damage = true;
+        // 1 = blood from your own cut-off limb stays at the stump. The game sticks the fountain to a
+        // bone of the cut-off limb, which it only hides; the posed body keeps moving that hidden
+        // bone (hand to controller, head to headset), so the blood floated in mid-air.
+        bool player_stump_blood = true;
     };
 
     // Current settings (copy). Cheap enough to call once per frame.

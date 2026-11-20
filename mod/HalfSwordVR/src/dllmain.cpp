@@ -22,6 +22,7 @@
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Mod/CppUserModBase.hpp>
 #include <Unreal/FProperty.hpp>
+#include <Unreal/Property/FArrayProperty.hpp>
 #include <Unreal/Property/FBoolProperty.hpp>
 #include <Unreal/Property/FStructProperty.hpp>
 #include <Unreal/UScriptStruct.hpp>
@@ -7378,6 +7379,165 @@ namespace
         HSVR_LOG("Punch: watching Willie's Deal Complex Damage");
     }
 
+    // ---- Damage to the player ------------------------------------------------------------------
+    // The game's Get Damage (Willie_BP) works out Root Mesh = (mesh is SK_Skeleton) OR (head has
+    // mass AND mesh.IsSimulatingPhysics(head)) (Get Damage @498-@870) and multiplies every Health,
+    // Consciousness, Bleeding and Force Death term by it. His posed body does not simulate, so the
+    // player took hits (limb health, cuts, dismemberment) but never lost Health from them. While
+    // his own Get Damage runs, IsSimulatingPhysics on his mesh answers yes: the flat game's answer.
+    UFunction* g_get_damage_fn = nullptr;
+    std::atomic<uint64_t> g_player_damage_overrides{0};
+    void player_sim_check_post(Unreal::UnrealScriptFunctionCallableContext& context, void*)
+    {
+        // Pointer compares first: IsSimulatingPhysics is called a lot.
+        if (!g_get_damage_fn || context.TheStack.Node() != g_get_damage_fn) return;
+        if (!context.Context || context.Context != g_pose.mesh || !g_pose_active.load() || !context.RESULT_DECL) return;
+        if (!hsvr::config().player_takes_damage) return;
+        *static_cast<bool*>(context.RESULT_DECL) = true;
+        g_player_damage_overrides.fetch_add(1);
+    }
+
+    // Logs what each Get Damage on him did to his Health and Consciousness (once per hit).
+    UObject* g_player_hit_pawn = nullptr;
+    double g_player_hit_h0 = 0.0, g_player_hit_c0 = 0.0;
+    void player_get_damage_pre(Unreal::UnrealScriptFunctionCallableContext& context, void*)
+    {
+        gc_sync();
+        g_player_hit_pawn = nullptr;
+        UObject* pawn = context.Context;
+        if (!pawn || !g_pose_active.load() || pawn != g_pose.pawn) return;
+        g_player_hit_pawn = pawn;
+        g_player_hit_h0 = read_number_variable(pawn, STR("Health"));
+        g_player_hit_c0 = read_number_variable(pawn, STR("Consciousness"));
+    }
+    void player_get_damage_post(Unreal::UnrealScriptFunctionCallableContext& context, void*)
+    {
+        UObject* pawn = g_player_hit_pawn;
+        g_player_hit_pawn = nullptr;
+        if (!pawn || context.Context != pawn) return;
+        double h = read_number_variable(pawn, STR("Health")), c = read_number_variable(pawn, STR("Consciousness"));
+        if (h == g_player_hit_h0 && c == g_player_hit_c0) return;
+        HSVR_LOG("Player hit: health %.2f -> %.2f, consciousness %.2f -> %.2f, blood %.2f (counted as the flat game: %d)", g_player_hit_h0, h, g_player_hit_c0, c,
+                 read_number_variable(pawn, STR("Blood")), (int)hsvr::config().player_takes_damage);
+    }
+
+    void install_player_damage()
+    {
+        static bool installed = false;
+        static double last_try = -10.0;
+        if (installed) return;
+        double now = hsvr::now_seconds();
+        if (now - last_try < 2.0) return;
+        last_try = now;
+        UFunction* gd = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:Get Damage"));
+        UFunction* sim = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Engine.PrimitiveComponent:IsSimulatingPhysics"));
+        if (!gd || !sim) return;
+        installed = true;
+        g_get_damage_fn = gd;
+        UObjectGlobals::RegisterHook(sim, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, &player_sim_check_post, nullptr);
+        UObjectGlobals::RegisterHook(gd, &player_get_damage_pre, &player_get_damage_post, nullptr);
+        HSVR_LOG("Player damage: his Get Damage counts his posed body as simulating (player_takes_damage)");
+    }
+
+    // ---- Blood at his own stumps ------------------------------------------------------------------
+    // Dismember Function Delayed hides the cut-off bones on his mesh (HideBoneByName) and calls Spawn
+    // Blood with the closest bone to the cut, often one of the cut-off ones (foot_r, neck_01). The
+    // fountain (Blood_BP_P4) and running blood (RunningBlood_BP) are attached to that bone, which the
+    // posed body keeps moving, so the blood floated where the limb would be. Each new one on a
+    // hidden bone is moved to the stump (the top hidden bone's joint) and attached to the visible
+    // parent bone there.
+    void stump_blood_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        static std::unordered_set<UObject*> done;
+        static UObject* last_pawn = nullptr;
+        static bool tracked = on_freed([] {
+            for (auto it = done.begin(); it != done.end();)
+                it = gone(*it) ? done.erase(it) : std::next(it);
+            if (gone(last_pawn)) last_pawn = nullptr;
+        });
+        (void)tracked;
+        if (pawn != last_pawn)
+        {
+            last_pawn = pawn;
+            done.clear();
+        }
+        UObject* mesh = g_pose.mesh;
+        if (!pawn || !mesh || !config().player_stump_blood) return;
+        for (const TCHAR* list : {STR("Attached Blood Emitters"), STR("Running Blood Array")})
+        {
+            FProperty* p = prop_chain(pawn, list);
+            if (!p || p->GetClass().GetName() != STR("ArrayProperty")) continue;
+            FProperty* inner = static_cast<FArrayProperty*>(p)->GetInner();
+            if (!inner || inner->GetClass().GetName() != STR("ObjectProperty")) continue;
+            struct RawArray
+            {
+                UObject** data;
+                int32_t num;
+                int32_t max;
+            };
+            auto* arr = reinterpret_cast<RawArray*>(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal());
+            if (!arr->data || arr->num <= 0 || arr->num > arr->max) continue;
+            for (int32_t i = 0; i < arr->num; ++i)
+            {
+                UObject* item = arr->data[i];
+                if (!item || done.count(item)) continue;
+                done.insert(item);
+                UObject* comp = item;
+                if (is_a(item, STR("Actor")))
+                {
+                    Call root(item, STR("K2_GetRootComponent"));
+                    root.run();
+                    comp = root.object_result();
+                }
+                if (!comp || !is_a(comp, STR("SceneComponent"))) continue;
+                Call ap(comp, STR("GetAttachParent"));
+                ap.run();
+                if (ap.object_result() != mesh) continue;
+                Call sn(comp, STR("GetAttachSocketName"));
+                if (!sn.run()) continue;
+                FProperty* rp = sn.param(STR("ReturnValue"));
+                if (!rp) continue;
+                FName bone = *reinterpret_cast<FName*>(sn.buffer.data() + rp->GetOffset_Internal());
+                auto hidden = [&](FName b) {
+                    Call h(mesh, STR("IsBoneHiddenByName"));
+                    h.name(STR("BoneName"), b);
+                    h.run();
+                    FProperty* r = h.param(STR("ReturnValue"));
+                    return r && read_param_bool(h.buffer.data(), r);
+                };
+                if (!hidden(bone)) continue;
+                // Up the chain to the first visible bone; the last hidden one is the stump's joint.
+                FName top = bone, at = parent_bone(mesh, bone);
+                int guard = 0;
+                while (guard++ < 40 && at.ToString() != STR("None") && hidden(at))
+                {
+                    top = at;
+                    at = parent_bone(mesh, at);
+                }
+                if (at.ToString() == STR("None")) continue;
+                Vec3 stump = socket_location(mesh, top);
+                Call wl(comp, STR("K2_GetComponentLocation"));
+                wl.run();
+                Vec3 was = wl.vec();
+                Call mv(comp, STR("K2_SetWorldLocation"));
+                mv.three(STR("NewLocation"), stump.x, stump.y, stump.z);
+                mv.flag(STR("bTeleport"), true);
+                mv.run();
+                Call at_call(comp, STR("K2_AttachToComponent"));
+                at_call.object(STR("Parent"), mesh);
+                at_call.name(STR("SocketName"), at);
+                at_call.byte(STR("LocationRule"), 1); // KeepWorld
+                at_call.byte(STR("RotationRule"), 1);
+                at_call.byte(STR("ScaleRule"), 1);
+                at_call.flag(STR("bWeldSimulatedBodies"), false);
+                at_call.run();
+                HSVR_LOG("Stump blood: %ls on cut-off bone %ls moved %.0f cm to the stump at %ls (attached to %ls, %.0f cm from its origin)", item->GetName().c_str(),
+                         bone.ToString().c_str(), length(stump - was), top.ToString().c_str(), at.ToString().c_str(), length(stump - socket_location(mesh, at)));
+            }
+        }
+    }
+
     struct ElbowState
     {
         bool have = false;
@@ -13640,6 +13800,8 @@ namespace
             { HSVR_SUB("after:body_grab_after_tick"); body_grab_after_tick(context); }
             { HSVR_SUB("after:body_hit_watch"); body_hit_watch(context); }
             { HSVR_SUB("after:elbow_tick"); elbow_tick(context); }
+            { HSVR_SUB("after:install_player_damage"); install_player_damage(); }
+            { HSVR_SUB("after:stump_blood_tick"); stump_blood_tick(context); }
             { HSVR_SUB("after:thrown_tick"); thrown_tick(context); }
             { HSVR_SUB("after:frames_tick"); frames_tick(context); }
         }
