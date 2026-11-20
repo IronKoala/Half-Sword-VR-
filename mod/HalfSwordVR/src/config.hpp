@@ -297,6 +297,7 @@ namespace hsvr
         bool stab_wound_hold = true;
         // A weapon the mod holds is never left "Being Rubber Banded" by the game (it then can't stick and hits at x0.1).
         bool stab_no_rubber_band = true;
+        double stab_pickup_grace_s = 0.3; // the game's 2 s "Just Picked Up" (no sticking) cut to this; < 0 = the game's
         // A body with the weapon stuck in it is dragged by the hand (all its strength x
         // stab_drag_force_scale across the wound) instead of the hand letting go; the weapon slips
         // only after pulling at full strength with the grip past reach for stab_drag_grip_s x his
@@ -335,8 +336,8 @@ namespace hsvr
         double stab_start_depth_max_cm = 4.5;
         double stab_wound_in_cms = 120.0; // (was 50: daggers needed pushing and pushing, playtest 2026-11-20)
         double stab_wound_head_in_factor = 0.6;
-        double stab_wound_out_cms = 40.0;
-        double stab_wound_head_factor = 0.35;
+        double stab_wound_out_cms = 60.0;
+        double stab_wound_head_factor = 0.6;
         double pose_hold_turn_spring = 1100.0;
         double pose_hold_turn_damper = 75.0;
         // One hand's most turning force at the grip (N m, x his strength): a real wrist, not B&S's 250. A war
@@ -848,11 +849,11 @@ namespace hsvr
         // to stab_arm_mass_kg x that speed, along the thrust. The game then judges the stab itself
         // (alignment, armour, sticking, damage).
         bool stab_assist = true;
-        double stab_min_speed_cms = 120.0;
+        double stab_min_speed_cms = 70.0;  // (120 until 2026-11-20: "too much force, too much effort")
         double stab_min_into_cos = 0.5;
         double stab_arm_mass_kg = 4.0;
-        double stab_push_force_n = 150.0;
-        double stab_push_time_s = 0.15;
+        double stab_push_force_n = 60.0;
+        double stab_push_time_s = 0.1;
         // 1 = your character's head (and hair) is not drawn in your own view while you look out of
         // it; it still casts its shadow and is there for the game (hits, other characters). Helmets
         // and other headwear stay visible.

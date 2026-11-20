@@ -557,6 +557,7 @@ namespace hsvr
         num("pose_hold_stuck_force_scale", c.pose_hold_stuck_force_scale);
         flag("stab_wound_hold", c.stab_wound_hold);
         flag("stab_no_rubber_band", c.stab_no_rubber_band);
+        num("stab_pickup_grace_s", c.stab_pickup_grace_s);
         flag("stab_drag", c.stab_drag);
         num("stab_drag_force_scale", c.stab_drag_force_scale);
         num("stab_drag_grip_s", c.stab_drag_grip_s);
