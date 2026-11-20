@@ -6507,6 +6507,19 @@ namespace
         UClass* cls = fist_class(cfg);
         if (!cls) return false;
         if (object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))) return false;
+        // Knocked out or falling, the fist opens (grab_button, the game's rule UF @556985). Making it again
+        // there opened and remade it every tick (playtest 2026-11-20 1296-1306 s: 256 fists in 10 s,
+        // "weapons" 113 -> 339).
+        {
+            double conscious = read_number_variable(pawn, STR("Consciousness"));
+            double falling = read_number_variable(pawn, STR("Free Fall Rate"));
+            if ((conscious >= 0.0 && conscious <= 0.0) || falling > 0.5)
+            {
+                g_fist_blocked[side] = true;
+                HSVR_LOG_EVERY(1.0, "Fist: %s hand waits: you are %s", side == 0 ? "left" : "right", conscious <= 0.0 ? "knocked out" : "falling");
+                return false;
+            }
+        }
         // Made inside him, the ball is pushed out of his body by the physics while the game pulls it
         // into the hand (its soft attach, which the mod's hold waits out): he is thrown.
         if (cfg.pose_fist_clear)
@@ -9719,7 +9732,12 @@ namespace
                 g_two.couple = std::fabs(dz) > 1.0 ? cfg.pose_hold_max_force * (std::max)(0.0, cfg.pose_hold_strength) * second.total * 100.0 * std::fabs(dz) : 0.0;
                 // A controller pulled well off its spot on the weapon lets go (B&S).
                 Vec3 spot = bp_now + bq_now.rotate(local2);
-                double off = length(p2 - spot);
+                // Measured also as how far apart your hands are against how far apart the grips are, not only
+                // against where the weapon is: a weapon held back by a body, a wound or the arm's lag trailed 50-100 cm behind
+                // both hands and the second hand was let go 12 times in one fight (playtest 2026-11-20 22:30 UTC)
+                // though your hands never moved apart. Only a hand pulled away from the other lets go.
+                double off_hands = std::fabs(length(p2 - p1) - length(local2 - pivot)); // hands apart vs grips apart
+                double off = (std::min)(length(p2 - spot), off_hands);
                 if (off > (cfg.pose_hold_bs ? cfg.pose_bs_two_let_go_cm : cfg.pose_two_hand_let_go_cm))
                 {
                     if (g_two.far_since < 0.0) g_two.far_since = now;
@@ -11190,6 +11208,16 @@ namespace
                     closing = std::fabs(dot(lv.vec(), n));
                 }
             }
+            // A fist: the 0.05 kg ball is thrown about by contacts (playtest 2026-11-20 909-910 s: the
+            // ball at 2-4 m/s against his blocking arm while the hand moved 0.6-1.2 m/s, every contact
+            // boosted to impulse 900-1500, a hit every 15-30 ms). Only the hand's own speed into him counts.
+            bool fist_hit = is_fist(weapon);
+            double ball_closing = closing;
+            if (fist_hit)
+            {
+                Vec3 cv = g_stab_ctrl_vel[side];
+                closing = (std::min)(closing, std::fabs(dot(cv, n)));
+            }
             if (closing >= cfg.hit_assist_min_cms)
             {
                 double strength = (std::max)(0.05, h.body_strength);
@@ -11199,6 +11227,9 @@ namespace
                          side == 0 ? "left" : "right", weapon->GetName().c_str(), victim_comp ? victim_comp->GetName().c_str() : STR("?"), bone_s.c_str(), ni_len, boosted,
                          closing, cfg.hit_arm_mass_kg, strength * 100.0);
             }
+            else if (fist_hit && ball_closing >= cfg.hit_assist_min_cms)
+                HSVR_LOG_EVERY(0.25, "Stab: hit assist: %s fist on %ls %ls: none (the ball closes at %.0f cm/s, your hand at %.0f)", side == 0 ? "left" : "right",
+                               victim_comp ? victim_comp->GetName().c_str() : STR("?"), bone_s.c_str(), ball_closing, closing);
         }
 
         w.weapon = weapon;
