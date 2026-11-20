@@ -1522,6 +1522,7 @@ namespace
         double lift = 0.0;      // this frame's height above the ground (cm)
         double ground_z = 0.0;  // where the foot bone sits when the foot is down: the floor plus the ankle height
         bool have_ground = false;
+        double ground_t = -100.0; // when a trace last found the floor under this foot
         int steps = 0;
     };
     FootState g_feet[2];
@@ -1658,6 +1659,7 @@ namespace
             {
                 f.ground_z = floor_z + g_pose.ankle_height[side];
                 f.have_ground = true;
+                f.ground_t = hsvr::now_seconds();
             }
             // The foot points where it was put down, flat (the leg IK takes its turn from the hips otherwise).
             if (ModifyBoneNode* n = chain_node(side == 0 ? "foot_l" : "foot_r"))
@@ -1960,6 +1962,7 @@ namespace
     std::atomic<double> g_worst_lag[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     std::atomic<bool> g_fake_stick_click{false}; // test: hsvr.stick_click 1 holds the left stick click
+    std::atomic<double> g_fake_stick[2] = {-9.0, 0.0}; // test: hsvr.stick <x> <y> holds the left stick (x -9 = off)
     std::string g_park_socket;                  // test: hsvr.arm_park <socket> (arm mode 13): right hand there
     double g_arm_floor[3] = {45.0, 15.0, 5.0};
     std::atomic<double> g_fake_jitter_cm{0.0};
@@ -2723,6 +2726,12 @@ namespace
     UObject* g_helmet = nullptr;     // the worn piece tagged "Head 2" or "Head 1" (helmet, hood), or null
     UObject* g_helmet_pawn = nullptr;
     std::vector<UObject*> g_head_pieces; // every worn piece on the head, and his head (CharacterMesh_Head)
+    struct HeadWear
+    {
+        UObject* comp;
+        int slot; // 2: tagged "Head 2" (helmet), 1: "Head 1" (hood, coif, cap)
+    };
+    std::vector<HeadWear> g_head_wear; // worn pieces on the head only (helmet_view)
     void armour_scan(const hsvr::Config& cfg, UObject* pawn, UObject* mesh)
     {
         static double last = 0.0;
@@ -2750,6 +2759,7 @@ namespace
             }
         int tagged = 0;
         std::vector<UObject*> head_pieces;
+        std::vector<HeadWear> head_wear;
         if (UObject* head = object_property(pawn, STR("CharacterMesh_Head"))) head_pieces.push_back(head);
         for (UObject* c : parts)
             for (const TCHAR* tag : {STR("Head 2"), STR("Head 1")})
@@ -2762,6 +2772,7 @@ namespace
                 {
                     if (!helmet || tag[5] == L'2') helmet = c; // the helmet slot (Head 2) over a hood (Head 1)
                     head_pieces.push_back(c);
+                    head_wear.push_back(HeadWear{c, tag[5] == L'2' ? 2 : 1});
                     ++tagged;
                     break;
                 }
@@ -2775,6 +2786,7 @@ namespace
         }
         g_helmet = helmet;
         g_head_pieces = head_pieces;
+        g_head_wear = head_wear;
         if (cfg.pose_no_uro)
         {
             static int said = 0;
@@ -3460,6 +3472,11 @@ namespace
         {
             x = state.hand[0].stick_x;
             y = state.hand[0].stick_y;
+        }
+        if (cfg.pose_stick_walk && g_fake_stick[0].load() > -5.0)
+        {
+            x = g_fake_stick[0].load();
+            y = g_fake_stick[1].load();
         }
         double m = std::sqrt(x * x + y * y);
         double dz = cfg.pose_stick_dead_zone;
@@ -4820,6 +4837,11 @@ namespace
         double zone_stop = 0.0, zone_tip = 0.0; // the guard (top stop) and the tip, from the game's grip point
         double body_strength = 1.0; // the game's stats on this hand's hold (strength x injury x stamina)
         bool into_hand_tried = false; // pose_shield_in_hand looked once
+        // The game's joint frames and bone, kept from the last tick it had a joint: the hold carries on
+        // from these if the game's hand joint goes while the hand still holds the weapon (dismemberment).
+        bool joint_frames_known = false;
+        std::string kept_bone2;
+        hsvr::Vec3 kept_pos1, kept_pos2, kept_pri1, kept_sec1, kept_pri2, kept_sec2;
         bool forearm = false;       // held on the forearm (strap shields: the game's joint is to the lower arm)
         std::string anchor_bone;    // the bone the game's joint holds it to
         bool sliding = false;
@@ -6499,6 +6521,19 @@ namespace
         UClass* cls = fist_class(cfg);
         if (!cls) return false;
         if (object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))) return false;
+        // Knocked out or falling, the fist opens (grab_button, the game's rule UF @556985). Making it again
+        // there opened and remade it every tick (playtest 2026-11-20 1296-1306 s: 256 fists in 10 s,
+        // "weapons" 113 -> 339).
+        {
+            double conscious = read_number_variable(pawn, STR("Consciousness"));
+            double falling = read_number_variable(pawn, STR("Free Fall Rate"));
+            if ((conscious >= 0.0 && conscious <= 0.0) || falling > 0.5)
+            {
+                g_fist_blocked[side] = true;
+                HSVR_LOG_EVERY(1.0, "Fist: %s hand waits: you are %s", side == 0 ? "left" : "right", conscious <= 0.0 ? "knocked out" : "falling");
+                return false;
+            }
+        }
         // Made inside him, the ball is pushed out of his body by the physics while the game pulls it
         // into the hand (its soft attach, which the mod's hold waits out): he is thrown.
         if (cfg.pose_fist_clear)
@@ -9738,7 +9773,8 @@ namespace
         // (shield_x_socket), and its frame there is in that bone's space (shield_grips.md). Reading
         // it as the hand's put the strap ~10 cm toward the fingers (playtest 2026-11-18).
         {
-            std::string bone2 = nested_name(joint, {STR("ConstraintInstance"), STR("ConstraintBone2")});
+            std::string bone2 = joint ? nested_name(joint, {STR("ConstraintInstance"), STR("ConstraintBone2")}) : h.kept_bone2;
+            if (joint) h.kept_bone2 = bone2;
             std::string lower = bone2;
             for (auto& ch : lower) ch = (char)tolower((unsigned char)ch);
             bool forearm = lower.rfind("lowerarm", 0) == 0;
@@ -9806,10 +9842,20 @@ namespace
             return std::isnan(x) ? 0.0 : x;
         };
         auto ax = [&](const TCHAR* v) { return Vec3{jn(v, STR("X")), jn(v, STR("Y")), jn(v, STR("Z"))}; };
-        Vec3 pivot = ax(STR("Pos1"));   // the point held, in the weapon's frame
-        Vec3 in_hand = ax(STR("Pos2")); // where the hand holds it, in the hand bone's frame
-        Quat f1 = quat_from_axes(ax(STR("PriAxis1")), ax(STR("SecAxis1")));
-        Quat f2 = quat_from_axes(ax(STR("PriAxis2")), ax(STR("SecAxis2")));
+        if (joint)
+        {
+            h.kept_pos1 = ax(STR("Pos1"));
+            h.kept_pos2 = ax(STR("Pos2"));
+            h.kept_pri1 = ax(STR("PriAxis1"));
+            h.kept_sec1 = ax(STR("SecAxis1"));
+            h.kept_pri2 = ax(STR("PriAxis2"));
+            h.kept_sec2 = ax(STR("SecAxis2"));
+            h.joint_frames_known = true;
+        }
+        Vec3 pivot = h.kept_pos1;   // the point held, in the weapon's frame
+        Vec3 in_hand = h.kept_pos2; // where the hand holds it, in the hand bone's frame
+        Quat f1 = quat_from_axes(h.kept_pri1, h.kept_sec1);
+        Quat f2 = quat_from_axes(h.kept_pri2, h.kept_sec2);
         h.handle_slide = false;
         if (cfg.pose_grab_handles && !h.free.set && !h.forearm && !is_fist(weapon))
         {
@@ -10027,7 +10073,12 @@ namespace
                 g_two.couple = std::fabs(dz) > 1.0 ? cfg.pose_hold_max_force * (std::max)(0.0, cfg.pose_hold_strength) * second.total * 100.0 * std::fabs(dz) : 0.0;
                 // A controller pulled well off its spot on the weapon lets go (B&S).
                 Vec3 spot = bp_now + bq_now.rotate(local2);
-                double off = length(p2 - spot);
+                // Measured also as how far apart your hands are against how far apart the grips are, not only
+                // against where the weapon is: a weapon held back by a body, a wound or the arm's lag trailed 50-100 cm behind
+                // both hands and the second hand was let go 12 times in one fight (playtest 2026-11-20 22:30 UTC)
+                // though your hands never moved apart. Only a hand pulled away from the other lets go.
+                double off_hands = std::fabs(length(p2 - p1) - length(local2 - pivot)); // hands apart vs grips apart
+                double off = (std::min)(length(p2 - spot), off_hands);
                 if (off > (cfg.pose_hold_bs ? cfg.pose_bs_two_let_go_cm : cfg.pose_two_hand_let_go_cm))
                 {
                     if (g_two.far_since < 0.0) g_two.far_since = now;
@@ -11498,6 +11549,16 @@ namespace
                     closing = std::fabs(dot(lv.vec(), n));
                 }
             }
+            // A fist: the 0.05 kg ball is thrown about by contacts (playtest 2026-11-20 909-910 s: the
+            // ball at 2-4 m/s against his blocking arm while the hand moved 0.6-1.2 m/s, every contact
+            // boosted to impulse 900-1500, a hit every 15-30 ms). Only the hand's own speed into him counts.
+            bool fist_hit = is_fist(weapon);
+            double ball_closing = closing;
+            if (fist_hit)
+            {
+                Vec3 cv = g_stab_ctrl_vel[side];
+                closing = (std::min)(closing, std::fabs(dot(cv, n)));
+            }
             if (closing >= cfg.hit_assist_min_cms)
             {
                 double strength = (std::max)(0.05, h.body_strength);
@@ -11507,6 +11568,9 @@ namespace
                          side == 0 ? "left" : "right", weapon->GetName().c_str(), victim_comp ? victim_comp->GetName().c_str() : STR("?"), bone_s.c_str(), ni_len, boosted,
                          closing, cfg.hit_arm_mass_kg, strength * 100.0);
             }
+            else if (fist_hit && ball_closing >= cfg.hit_assist_min_cms)
+                HSVR_LOG_EVERY(0.25, "Stab: hit assist: %s fist on %ls %ls: none (the ball closes at %.0f cm/s, your hand at %.0f)", side == 0 ? "left" : "right",
+                               victim_comp ? victim_comp->GetName().c_str() : STR("?"), bone_s.c_str(), ball_closing, closing);
         }
 
         w.weapon = weapon;
@@ -13147,7 +13211,31 @@ namespace
             // (Not the second hand's: it holds no weapon of its own, but must not collide with the one it holds too.)
             if (g_arm_ignore[side].weapon && g_arm_ignore[side].weapon != weapon && !(g_two.active && g_two.second == side && g_arm_ignore[side].weapon == g_two.weapon))
                 clear_arm_ignore(side);
-            if (!joint || !weapon) continue;
+            if (!weapon) continue;
+            if (!joint)
+            {
+                // The game's hand joint can go while the game still says that hand holds its weapon: a
+                // dismemberment (his right forearm cut off, playtest 2026-11-20 at 392.8 s) cleared both
+                // hand joints' links, and the game's cleanup freed the left one 13 s later while "Weapon L"
+                // stayed the pavise. The mod's hold stopped there and the pavise fell to the floor and lay
+                // there, still "held" ("it would kind of freeze in place"). The hold now carries on from the
+                // joint's frames it kept.
+                HoldState& hk = g_hold[side];
+                if (!hold_on || hk.weapon != weapon || !hk.joint_frames_known) continue;
+                if (bool_property(weapon, STR("Is Sheathed"))) continue;
+                UObject* kb = object_property(weapon, STR("BaseMesh"));
+                if (!kb) continue;
+                Call ks(kb, STR("IsSimulatingPhysics"));
+                ks.run();
+                FProperty* kp = ks.param(STR("ReturnValue"));
+                if (!kp || !*(ks.buffer.data() + kp->GetOffset_Internal())) continue;
+                Call km(kb, STR("GetMass"));
+                km.run();
+                HSVR_LOG_EVERY(2.0, "Hold: %s hand: the game's hand joint is gone but the hand still holds %ls; held on from the joint's kept frames",
+                               side == 0 ? "left" : "right", weapon->GetName().c_str());
+                hold_weapon(side, pawn, nullptr, kb, weapon, (std::max)(0.05, km.number()), cfg);
+                continue;
+            }
             // Only a seated weapon (the game first pulls a new weapon into the hand over a short distance).
             if (side == 1)
                 if (FProperty* p = prop_chain(pawn, STR("R Hand Soft Attach Distance")))
@@ -14015,6 +14103,74 @@ namespace
                 }
             }
         }
+        // On the floor every tick (pose_capsule_keep_on_floor). The game hangs his capsule from his
+        // pelvis and his "Root Linear Constraint Power" (UG @427425), which goes to 0 when his feet
+        // trail far behind his head (running), in free fall, or with no leg tonus. Then the capsule
+        // sank ~20 cm a second into the floor, the body went with it and the game's own traces took it
+        // for kneeling and falling: he lay in the floor and could not get up (playtest 2026-11-20
+        // 22:28Z, 1278 s: capsule 92 -> -36 cm in 7 s at 3.5 m/s). So, with one floor trace a tick:
+        // never more than 15 cm under standing height over the floor, and above standing height he
+        // falls (gravity, from where he was last tick), so a pit or a ledge drops him instead of
+        // leaving him floating where the game keeps him.
+        static double fall_v = 0.0, fall_t = 0.0;
+        static double kept_up_max = 0.0, fell_max = 0.0;
+        if (hsvr::config().pose_capsule_keep_on_floor && g_pose.mesh && rise <= 30.0)
+        {
+            auto flag_on = [&](const TCHAR* name) {
+                FProperty* p = prop_chain(context, name);
+                return p && number_property(context, p) > 0.5;
+            };
+            double t_now = now_seconds();
+            double dt = (std::min)(0.05, (std::max)(0.0, t_now - fall_t));
+            fall_t = t_now;
+            bool airborne_by_choice = flag_on(STR("Climbing In Air")) || flag_on(STR("Jump Pressed"));
+            double floor_z = 0.0;
+            double half = 90.0 * component_scale_z(g_pose.mesh);
+            bool floor = ground_below(context, keep.x, keep.y, (std::max)(g_hold_location.z, keep.z) + 40.0, floor_z);
+            // The trace under his middle can miss among loose weapons and shields (it looks through
+            // only 5 of them): then the higher of the feet's floors (found within 0.25 s) is the floor.
+            // Only with neither is there no floor (a pit, a ledge) and he falls.
+            if (!floor)
+                for (int side = 0; side < 2; ++side)
+                {
+                    const FootState& f = g_feet[side];
+                    if (!f.have_ground || t_now - f.ground_t > 0.25) continue;
+                    double fz = f.ground_z - g_pose.ankle_height[side];
+                    if (!floor || fz > floor_z) floor_z = fz;
+                    floor = true;
+                }
+            double standing = floor ? floor_z + half : -1e9;
+            if (floor && keep.z < standing - 15.0)
+            {
+                kept_up_max = (std::max)(kept_up_max, standing - 15.0 - keep.z);
+                keep.z = standing - 15.0;
+                fall_v = 0.0;
+            }
+            else if (!airborne_by_choice && keep.z > standing + 5.0)
+            {
+                fall_v = (std::min)(1500.0, fall_v + 980.0 * dt);
+                double fallen = g_hold_location.z - fall_v * dt;
+                if (floor) fallen = (std::max)(fallen, standing);
+                if (fallen < keep.z)
+                {
+                    fell_max = (std::max)(fell_max, keep.z - fallen);
+                    keep.z = fallen;
+                }
+            }
+            else
+                fall_v = 0.0;
+            if (kept_up_max > 0.0 || fell_max > 0.0)
+            {
+                static double said = 0.0;
+                if (t_now - said >= 1.0)
+                {
+                    said = t_now;
+                    HSVR_LOG("Capsule: kept on the floor (pose_capsule_keep_on_floor): lifted up to %.1f cm a tick out of the floor, let fall up to %.1f cm a tick (%s, centre %.1f, standing %.1f, fall speed %.0f cm/s)",
+                             kept_up_max, fell_max, floor ? "floor found" : "no floor within 2 m", keep.z, floor ? standing : 0.0, fall_v);
+                    kept_up_max = fell_max = 0.0;
+                }
+            }
+        }
         static double last_line = 0.0;
         static double moved_max = 0.0;
         static int climbs = 0;
@@ -14079,12 +14235,253 @@ namespace
         shadow.run();
     }
 
+    // ---- Your worn helmet in your own view (helmet_view) ----------------------------------------
+    // Real helmets block most of the view. helmet_view 1 hides the helmet (the piece worn in the
+    // game's "Head 2" slot) from your view only, 2 hides everything worn on the head (helmet and
+    // the hood/coif/cap under it, "Head 1"). Owner-no-see, like your head: everyone else still sees
+    // it, its shadow stays, and it still protects you.
+    void helmet_view_update(const hsvr::Config& cfg, bool first_person)
+    {
+        static std::vector<UObject*> hidden;
+        static bool hidden_tracked = on_freed([] { hidden.erase(std::remove_if(hidden.begin(), hidden.end(), [](UObject* o) { return gone(o); }), hidden.end()); });
+        std::vector<UObject*> want;
+        bool any_worn = false;
+        for (const HeadWear& w : g_head_wear)
+            if (w.comp && !gone(w.comp)) any_worn = true;
+        if (first_person && (cfg.helmet_view == 1 || cfg.helmet_view == 2))
+            for (const HeadWear& w : g_head_wear)
+                if (w.comp && !gone(w.comp) && (w.slot == 2 || cfg.helmet_view == 2)) want.push_back(w.comp);
+        // 3: a clear window. The eyes' near clip moves out to helmet_window_cm while something is
+        // worn on the head, so the walls right around your eyes (visor, cheek plates: 2-6 cm away)
+        // aren't drawn while the brim and shell further out still are. Anything else that close to
+        // your eyes (food at your mouth) is cut too.
+        double window = first_person && cfg.helmet_view == 3 && any_worn ? cfg.helmet_window_cm : 0.0;
+        if (window != hsvr::shared().helmet_window_cm.load())
+        {
+            hsvr::shared().helmet_window_cm.store(window);
+            HSVR_LOG("Helmet view: near clip %s", window > 0.0 ? "moved out to helmet_window_cm (clear window around your eyes)" : "back to near_clip_cm");
+        }
+        for (UObject* c : hidden)
+            if (std::find(want.begin(), want.end(), c) == want.end() && !gone(c))
+            {
+                set_owner_hidden(c, false);
+                HSVR_LOG("Helmet view: %ls shown in your view again", c->GetFullName().c_str());
+            }
+        for (UObject* c : want)
+            if (std::find(hidden.begin(), hidden.end(), c) == hidden.end())
+            {
+                set_owner_hidden(c, true);
+                HSVR_LOG("Helmet view: %ls hidden from your view (helmet_view %d; others still see it, shadow kept)", c->GetFullName().c_str(), cfg.helmet_view);
+            }
+        hidden = want;
+    }
+
+    // ---- helmet_view 4 (experiment): the helmet half see-through for you -------------------------
+    // The armour master (M_Armor_Layered_Material_Master) is Masked and has the texture parameters
+    // RT_Damage / RT_Blood (default the canvas render target CRT_DamageMask); the game never sets them
+    // on armour. Mode 0 points one of them (helmet_see_through_param) at our own render target, filled
+    // white / black (test 1 / 2, to find out what drives the opacity mask) or with an ordered dither
+    // (test 0, density = helmet_see_through), and logs what each slot had. Mode 1 hides the helmet
+    // from you on alternate frames instead.
+    void put_raw(Call& c, const TCHAR* name, const void* data, size_t n)
+    {
+        if (FProperty* p = c.param(name)) std::memcpy(c.buffer.data() + p->GetOffset_Internal(), data, (std::min)(n, (size_t)p->GetSize()));
+    }
+    void put_vec2(Call& c, const TCHAR* name, double x, double y)
+    {
+        FProperty* p = c.param(name);
+        if (!p) return;
+        if (p->GetSize() >= 16) { double v[2] = {x, y}; put_raw(c, name, v, sizeof v); }
+        else { float v[2] = {(float)x, (float)y}; put_raw(c, name, v, sizeof v); }
+    }
+    void put_int(Call& c, const TCHAR* name, int32_t v)
+    {
+        put_raw(c, name, &v, sizeof v);
+    }
+    struct SeeThroughSlot
+    {
+        UObject* comp;
+        UObject* mid;
+        std::wstring param;
+        UObject* original;
+    };
+    std::vector<SeeThroughSlot> g_see_slots;
+    UObject* g_see_rt = nullptr;
+    std::string g_see_key; // what the render target holds now
+
+    void see_through_restore()
+    {
+        for (const SeeThroughSlot& s : g_see_slots)
+        {
+            if (!s.mid || gone(s.mid) || gone(s.comp) || !object_alive(s.mid)) continue;
+            Call set(s.mid, STR("SetTextureParameterValue"));
+            set.name(STR("ParameterName"), FName(s.param.c_str(), FNAME_Add));
+            set.object(STR("Value"), s.original);
+            set.run();
+        }
+        if (!g_see_slots.empty()) HSVR_LOG("Helmet see-through: %zu material slot(s) given back their own texture", g_see_slots.size());
+        g_see_slots.clear();
+    }
+
+    // Fills our render target: test 1 white, 2 black, 0 an ordered (4x4 Bayer) dither in 8-texel cells
+    // where a white cell is drawn with probability 1 - see_through.
+    bool see_through_paint(UObject* world_ctx, const hsvr::Config& cfg)
+    {
+        static UObject* krl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
+        if (!krl) { HSVR_LOG("Helmet see-through: no KismetRenderingLibrary"); return false; }
+        constexpr int size = 256, cell = 8;
+        if (!g_see_rt || gone(g_see_rt) || !object_alive(g_see_rt))
+        {
+            Call mk(krl, STR("CreateRenderTarget2D"));
+            mk.object(STR("WorldContextObject"), world_ctx);
+            put_int(mk, STR("Width"), size);
+            put_int(mk, STR("Height"), size);
+            mk.byte(STR("Format"), 2); // RTF_RGBA8
+            float black[4] = {0, 0, 0, 1};
+            put_raw(mk, STR("ClearColor"), black, sizeof black);
+            mk.run();
+            g_see_rt = mk.object_result();
+            if (!g_see_rt) { HSVR_LOG("Helmet see-through: CreateRenderTarget2D gave nothing"); return false; }
+            g_see_rt->SetRootSet();
+            g_see_key.clear();
+            HSVR_LOG("Helmet see-through: render target %ls made (%dx%d)", g_see_rt->GetFullName().c_str(), size, size);
+        }
+        char key[64];
+        std::snprintf(key, sizeof key, "%d/%.3f", cfg.helmet_see_through_test, cfg.helmet_see_through);
+        if (g_see_key == key) return true;
+        g_see_key = key;
+        float fill[4] = {0, 0, 0, 1};
+        if (cfg.helmet_see_through_test == 1) fill[0] = fill[1] = fill[2] = 1.0f;
+        Call clear(krl, STR("ClearRenderTarget2D"));
+        clear.object(STR("WorldContextObject"), world_ctx);
+        clear.object(STR("TextureRenderTarget"), g_see_rt);
+        put_raw(clear, STR("ClearColor"), fill, sizeof fill);
+        clear.run();
+        int drawn = 0;
+        if (cfg.helmet_see_through_test == 0)
+        {
+            static const int bayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+            double keep = 1.0 - (std::clamp)(cfg.helmet_see_through, 0.0, 1.0);
+            Call begin(krl, STR("BeginDrawCanvasToRenderTarget"));
+            begin.object(STR("WorldContextObject"), world_ctx);
+            begin.object(STR("TextureRenderTarget"), g_see_rt);
+            begin.run();
+            UObject* canvas = begin.object_result(STR("Canvas"));
+            if (canvas)
+            {
+                Call draw(canvas, STR("K2_DrawTexture"));
+                for (int y = 0; y < size / cell; ++y)
+                    for (int x = 0; x < size / cell; ++x)
+                    {
+                        if ((bayer[(y % 4) * 4 + (x % 4)] + 0.5) / 16.0 >= keep) continue;
+                        std::fill(draw.buffer.begin(), draw.buffer.end(), uint8_t{0});
+                        put_vec2(draw, STR("ScreenPosition"), x * cell, y * cell);
+                        put_vec2(draw, STR("ScreenSize"), cell, cell);
+                        put_vec2(draw, STR("CoordinateSize"), 1, 1);
+                        float white[4] = {1, 1, 1, 1};
+                        put_raw(draw, STR("RenderColor"), white, sizeof white);
+                        draw.byte(STR("BlendMode"), 0); // opaque
+                        draw.run();
+                        ++drawn;
+                    }
+            }
+            Call end(krl, STR("EndDrawCanvasToRenderTarget"));
+            end.object(STR("WorldContextObject"), world_ctx);
+            if (FProperty* from = begin.param(STR("Context")))
+                put_raw(end, STR("Context"), begin.buffer.data() + from->GetOffset_Internal(), from->GetSize());
+            end.run();
+            if (!canvas) HSVR_LOG("Helmet see-through: BeginDrawCanvasToRenderTarget gave no canvas");
+        }
+        constexpr int cells = (size / cell) * (size / cell);
+        HSVR_LOG("Helmet see-through: render target filled (%s; %d of %d cells white)",
+                 cfg.helmet_see_through_test == 1 ? "all white" : cfg.helmet_see_through_test == 2 ? "all black" : "dither",
+                 cfg.helmet_see_through_test == 1 ? cells : drawn, cells);
+        return true;
+    }
+
+    void helmet_see_through_update(const hsvr::Config& cfg, bool first_person, UObject* pawn)
+    {
+        bool want = first_person && cfg.helmet_view == 4 && cfg.helmet_see_through_mode == 0;
+        std::wstring param(cfg.helmet_see_through_param.begin(), cfg.helmet_see_through_param.end());
+        std::vector<UObject*> comps;
+        if (want)
+            for (const HeadWear& w : g_head_wear)
+                if (w.comp && !gone(w.comp)) comps.push_back(w.comp);
+        // Start over when the pieces worn, the parameter or the mode change.
+        bool same = want && !g_see_slots.empty() && g_see_slots.front().param == param;
+        if (same)
+            for (const SeeThroughSlot& s : g_see_slots)
+                if (gone(s.comp) || std::find(comps.begin(), comps.end(), s.comp) == comps.end()) same = false;
+        if (same)
+            for (UObject* c : comps)
+                if (std::none_of(g_see_slots.begin(), g_see_slots.end(), [&](const SeeThroughSlot& s) { return s.comp == c; })) same = false;
+        if (!same) see_through_restore();
+        if (!want || comps.empty() || !pawn) return;
+        if (!see_through_paint(pawn, cfg)) return;
+        if (same) return;
+        FName pname(param.c_str(), FNAME_Add);
+        for (UObject* c : comps)
+        {
+            Call nm(c, STR("GetNumMaterials"));
+            nm.run();
+            int n = nm.integer();
+            for (int i = 0; i < n && i < 16; ++i)
+            {
+                Call gm(c, STR("GetMaterial"));
+                put_int(gm, STR("ElementIndex"), i);
+                gm.run();
+                UObject* m = gm.object_result();
+                if (!m) continue;
+                UObject* mid = m;
+                bool made = false;
+                if (m->GetClassPrivate()->GetName().find(STR("MaterialInstanceDynamic")) == std::wstring::npos)
+                {
+                    Call cd(c, STR("CreateDynamicMaterialInstance"));
+                    put_int(cd, STR("ElementIndex"), i);
+                    cd.object(STR("SourceMaterial"), m);
+                    cd.run();
+                    mid = cd.object_result();
+                    made = true;
+                }
+                if (!mid) continue;
+                Call get(mid, STR("K2_GetTextureParameterValue"));
+                get.name(STR("ParameterName"), pname);
+                get.run();
+                UObject* had = get.object_result();
+                if (!had) continue; // this slot's material has no such parameter: leave it alone (setting it back to none doesn't clear the override)
+                Call set(mid, STR("SetTextureParameterValue"));
+                set.name(STR("ParameterName"), pname);
+                set.object(STR("Value"), g_see_rt);
+                set.run();
+                g_see_slots.push_back({c, mid, param, had});
+                HSVR_LOG("Helmet see-through: %ls slot %d %ls%ls: %ls was %ls, now our render target", c->GetName().c_str(), i, mid->GetName().c_str(),
+                         made ? STR(" (new dynamic instance)") : STR(""), param.c_str(), had ? had->GetFullName().c_str() : STR("none"));
+            }
+        }
+    }
+
+    // Mode 1: the head pieces hidden from you on every other frame (called every frame).
+    void helmet_alternate_frames(const hsvr::Config& cfg, bool first_person)
+    {
+        static bool was = false;
+        static uint64_t frame = 0;
+        bool want = first_person && cfg.helmet_view == 4 && cfg.helmet_see_through_mode == 1;
+        if (!want && !was) return;
+        bool hide = want && (++frame % 2 == 0);
+        for (const HeadWear& w : g_head_wear)
+            if (w.comp && !gone(w.comp)) set_owner_hidden(w.comp, hide);
+        if (want != was) HSVR_LOG("Helmet see-through: alternate-frame hiding %s", want ? "on" : "off");
+        was = want;
+    }
+
     void hide_own_head(const hsvr::Config& cfg)
     {
         constexpr int N = 2;
         static UObject* hidden[N] = {nullptr, nullptr};
         static bool hidden_tracked = on_freed([] { for (UObject*& o : hidden) if (gone(o)) o = nullptr; });
         static double last = 0.0;
+        static bool see_fp = false; // first person, as of the last once-a-second check
+        helmet_alternate_frames(cfg, see_fp);
         double now = hsvr::now_seconds();
         if (now - last < 1.0) return;
         last = now;
@@ -14092,6 +14489,9 @@ namespace
         find_pawn_mesh(&pawn);
         bool willie = pawn && pawn->GetFullName().find(STR("Willie_BP")) != std::wstring::npos;
         bool want = cfg.hide_own_head && willie && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().stereo_installed.load();
+        see_fp = willie && pawn == g_helmet_pawn && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().stereo_installed.load();
+        helmet_view_update(cfg, see_fp);
+        helmet_see_through_update(cfg, see_fp, pawn);
         UObject* parts[N] = {nullptr, nullptr};
         if (willie)
         {
@@ -16881,7 +17281,7 @@ namespace
                 // in the reference pose), turned with the head bone's pose against the body.
                 hsvr::Quat hr = socket_rotation(ref, bone_fname("head"));
                 auto local = [&](const hsvr::Vec3& w) { return hr.inverse().rotate(w - hb); };
-                HSVR_LOG("Probe helmet: near clip %.2f cm, eye offset fwd %.1f up %.1f; head bone of %ls", pcfg.near_clip_cm, pcfg.eye_forward_cm, pcfg.eye_up_cm, ref->GetName().c_str());
+                HSVR_LOG("Probe helmet: near clip %.2f cm (helmet window %.2f cm, helmet_view %d), eye offset fwd %.1f up %.1f; head bone of %ls", pcfg.near_clip_cm, hsvr::shared().helmet_window_cm.load(), pcfg.helmet_view, pcfg.eye_forward_cm, pcfg.eye_up_cm, ref->GetName().c_str());
                 for (int e = 0; e < 2; ++e)
                 {
                     hsvr::Vec3 at;
@@ -16918,8 +17318,8 @@ namespace
                     Call lb(c, STR("GetLocalBounds"));
                     lb.run();
                     hsvr::Vec3 mn = lb.vec(STR("Min")), mx = lb.vec(STR("Max"));
-                    HSVR_LOG("Probe helmet: piece %ls mesh %ls visible %d ownerNoSee %.0f hiddenInGame %.0f bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f)", c->GetName().c_str(),
-                             sk ? sk->GetName().c_str() : STR("?"), visible ? 1 : 0, flag(STR("bOwnerNoSee")), flag(STR("bHiddenInGame")), mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
+                    HSVR_LOG("Probe helmet: piece %ls mesh %ls visible %d ownerNoSee %.0f castHiddenShadow %.0f hiddenInGame %.0f bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f)", c->GetName().c_str(),
+                             sk ? sk->GetName().c_str() : STR("?"), visible ? 1 : 0, flag(STR("bOwnerNoSee")), flag(STR("bCastHiddenShadow")), flag(STR("bHiddenInGame")), mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
                     Call nm(c, STR("GetNumMaterials"));
                     nm.run();
                     int n = nm.integer();
@@ -17215,6 +17615,15 @@ namespace
                 float v = sp == std::string::npos ? -1.0f : (float)atof(entry.command.c_str() + sp + 1);
                 g_fake_squeeze[side].store(v);
                 HSVR_LOG("Script: hsvr.squeeze %d %.2f", side, v);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.stick ", 0) == 0)
+            {
+                double fx = -9.0, fy = 0.0;
+                sscanf_s(entry.command.c_str() + 11, "%lf %lf", &fx, &fy);
+                g_fake_stick[0].store(fx);
+                g_fake_stick[1].store(fy);
+                HSVR_LOG("Script: hsvr.stick %.2f %.2f%s", fx, fy, fx <= -5.0 ? " (off)" : "");
                 continue;
             }
             if (entry.command.rfind("hsvr.stick_click ", 0) == 0)
