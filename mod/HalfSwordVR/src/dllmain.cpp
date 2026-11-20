@@ -1216,6 +1216,8 @@ namespace
         double pitch = 0.0, roll = 0.0; // your head's pitch down and roll right (degrees)
         double t = 0.0;
         double held = 1.0;       // share of the wanted bend allowed by the head height
+        hsvr::Vec3 offset;       // your neck away from where his hips stand (body frame, cm; pose_lean_step_radius_cm)
+        double off_fwd = 0.0, off_side = 0.0; // the bend that offset asks for (degrees)
     };
     LeanState g_lean;
     // Test: hsvr.fake_head_tilt <pitch down> <roll right> <drop cm> nods the TRACKED headset about the
@@ -2969,6 +2971,20 @@ namespace
                 twist = (std::max)(-90.0, (std::min)(90.0, rel)) * (std::min)(1.0, cfg.pose_torso_twist);
             }
         }
+        // Lean first, step after: the bend that puts his head over your neck's offset from his hips
+        // (about the spine_02 joint, head height h above it).
+        g_lean.off_fwd = g_lean.off_side = 0.0;
+        if (cfg.pose_lean && g_lean.calibrated && cfg.pose_lean_step_radius_cm > 0.0)
+        {
+            double h = (std::max)(20.0, g_lean.pts[6].z - g_lean.pts[0].z);
+            auto as = [](double v, double lo, double hi) { return std::asin((std::max)(lo, (std::min)(hi, v))) * kRadToDeg; };
+            g_lean.off_fwd = as(g_lean.offset.x / h, -0.34, 0.95); // back at most 20 degrees
+            g_lean.off_side = as(g_lean.offset.y / h, -0.7, 0.7);
+            // With the head's own bends: the same way, the larger one; opposite ways, both.
+            auto merge = [](double a, double b) { return a * b > 0.0 ? (std::fabs(a) > std::fabs(b) ? a : b) : a + b; };
+            want_f = (std::min)(cfg.pose_lean_max_deg, merge(want_f, g_lean.off_fwd));
+            want_s = (std::max)(-cfg.pose_lean_side_max_deg - 15.0, (std::min)(cfg.pose_lean_side_max_deg + 15.0, merge(want_s, g_lean.off_side)));
+        }
         g_lean.want_fwd = want_f;
         g_lean.want_side = want_s;
         double a = (cfg.pose_lean_smooth_s > 1e-4 && dt > 0.0 && dt < 0.2) ? 1.0 - std::exp(-dt / cfg.pose_lean_smooth_s) : 1.0;
@@ -3095,13 +3111,35 @@ namespace
                 Vec3 total = base.inverse().rotate(Vec3{neck_now.x - neck_then.x, neck_now.y - neck_then.y, 0.0});
                 total.z = 0.0;
                 Vec3 delta = total - g_pose_room_moved_local;
-                if (length(delta) > 50.0)
+                // Lean first, step after: the capsule follows only the part of your neck's offset beyond
+                // pose_lean_step_radius_cm; the rest is his torso leaning (lean_update). Walking pulls it in.
+                Vec3 follow = delta;
+                double radius = cfg.pose_lean && g_lean.calibrated ? (std::min)(40.0, (std::max)(0.0, cfg.pose_lean_step_radius_cm)) : 0.0;
+                if (radius > 0.0)
+                {
+                    static Vec3 last_neck;
+                    static double last_t = 0.0, speed = 0.0;
+                    double tn = now_seconds(), dtn = tn - last_t;
+                    if (dtn > 0.0 && dtn < 0.2)
+                    {
+                        double v = length(Vec3{neck_now.x - last_neck.x, neck_now.y - last_neck.y, 0.0}) / dtn;
+                        speed += (v - speed) * (1.0 - std::exp(-dtn / 0.1));
+                    }
+                    last_neck = neck_now;
+                    last_t = tn;
+                    double d = length(delta);
+                    double keep = d > radius ? radius / d : 1.0; // share of the offset kept as lean
+                    if (speed > cfg.pose_lean_walk_speed_cms && dtn > 0.0 && dtn < 0.2 && cfg.pose_lean_walk_catchup_s > 1e-3)
+                        keep *= std::exp(-dtn / cfg.pose_lean_walk_catchup_s);
+                    follow = delta * (1.0 - keep);
+                }
+                if (length(delta) > 50.0 + radius)
                 {
                     g_pose_room_moved_local = total; // recentred or tracking jumped: take it as the new start
                 }
-                else if (length(delta) > 0.3)
+                else if (length(follow) > 0.3)
                 {
-                    Vec3 want = actor + base.rotate(delta);
+                    Vec3 want = actor + base.rotate(follow);
                     Call move(pawn, STR("K2_SetActorLocation"));
                     move.three(STR("NewLocation"), want.x, want.y, want.z);
                     move.flag(STR("bSweep"), true);
@@ -3114,6 +3152,22 @@ namespace
                     actor = actor + moved;
                     room = moved;
                 }
+            }
+        }
+        // Your neck's offset from where his hips stand (what the capsule has not followed), in his body's frame.
+        g_lean.offset = {};
+        if (cfg.pose_follow_room && (state.head_valid || g_fake_head_pose.load()) && stereo_view_anchor(anchor, base_yaw))
+        {
+            Vec3 head_world;
+            Quat head_rot;
+            if (head_pose_world(cfg, state, head_world, head_rot))
+            {
+                Quat base = quat_from_yaw_deg(base_yaw);
+                Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
+                Vec3 total = base.inverse().rotate((head_world - head_rot.rotate(eye_offset)) - (anchor - base.rotate(eye_offset)));
+                Vec3 d{total.x - g_pose_room_moved_local.x, total.y - g_pose_room_moved_local.y, 0.0};
+                if (length(d) <= 50.0 + 40.0) g_lean.offset = body.inverse().rotate(base.rotate(d));
+                g_lean.offset.z = 0.0;
             }
         }
         // Put the body so its pelvis stands on the capsule. The game pulls the capsule toward the
@@ -3190,7 +3244,8 @@ namespace
             bool have_head = !cfg.dev_pose_fake_tracking && head_pose_world(cfg, state, hw, hr);
             lean_update(cfg, have_head, hr, heading, g_crouch_drop);
             Vec3 m = g_lean.head_moved;
-            place = place - body.rotate(Vec3{m.x, m.y, 0.0});
+            // His head goes over your neck: hips at the capsule, less the bend's carry, plus your offset.
+            place = place - body.rotate(Vec3{m.x - g_lean.offset.x, m.y - g_lean.offset.y, 0.0});
             g_crouch_drop = (std::max)(0.0, g_crouch_drop + m.z);
         }
         if (g_crouch_drop > 10.0) crouch_push_log(pawn, mesh);
@@ -3362,9 +3417,11 @@ namespace
                     Vec3 cl = body.inverse().rotate(socket_location(mesh, bone_fname("clavicle_l")) - hw);
                     Vec3 cr = body.inverse().rotate(socket_location(mesh, bone_fname("clavicle_r")) - hw);
                     HSVR_LOG("Lean: your head pitch %.0f roll %.0f; wanted forward %.0f side %.0f, bent forward %.0f side %.0f (%.0f%% allowed by head height); "
-                             "head carried (%.1f, %.1f, %.1f) cm, crouch %.0f cm; chest (spine_05) %.1f cm in front of your eyes, %.1f below; clavicles %.1f / %.1f in front",
+                             "head carried (%.1f, %.1f, %.1f) cm, crouch %.0f cm; chest (spine_05) %.1f cm in front of your eyes, %.1f below; clavicles %.1f / %.1f in front; "
+                             "your neck (%.1f, %.1f) cm from his hips -> lean forward %.0f side %.0f; capsule (%.0f, %.0f)",
                              g_lean.pitch, g_lean.roll, g_lean.want_fwd, g_lean.want_side, g_lean.fwd, g_lean.side, g_lean.held * 100.0, g_lean.head_moved.x,
-                             g_lean.head_moved.y, g_lean.head_moved.z, g_crouch_drop, c.x, -c.z, cl.x, cr.x);
+                             g_lean.head_moved.y, g_lean.head_moved.z, g_crouch_drop, c.x, -c.z, cl.x, cr.x, g_lean.offset.x, g_lean.offset.y, g_lean.off_fwd,
+                             g_lean.off_side, actor.x, actor.y);
                 }
             }
             HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d, torso twist %.0f deg asked; on screen: head %.0f, chest %.0f, hips %.0f (chest %+.0f from hips)",

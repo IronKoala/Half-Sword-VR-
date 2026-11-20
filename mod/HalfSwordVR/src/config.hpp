@@ -219,6 +219,14 @@ namespace hsvr
         // A bend lowers his head; his hips can't rise above standing, so the bend is held to what your
         // headset's drop (plus this much neck slack) allows.
         double pose_lean_slack_cm = 4.0;
+        // Lean first, step after (Matthew 2026-11-20): when your neck moves away from where his hips
+        // stand, his torso leans to put his head there; only once it is more than pose_lean_step_radius_cm
+        // away does his capsule (and so his feet) follow, by the part beyond it. Walking (neck moving faster
+        // than pose_lean_walk_speed_cms) brings the hips back under you within pose_lean_walk_catchup_s.
+        // 0 = the old way (his hips always under your neck).
+        double pose_lean_step_radius_cm = 30.0;
+        double pose_lean_walk_speed_cms = 50.0;
+        double pose_lean_walk_catchup_s = 0.25;
         // 1 = the game's own forward bend from crouching (Root Height) and reaching for grabs (Lean
         // Forward (Grabbing)) is taken out of his animation, so only your lean bends him.
         bool pose_lean_cancel_game_bend = true;
