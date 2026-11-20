@@ -461,6 +461,11 @@ namespace hsvr
         // grip's pull on the weapon is capped at its mass x this torque x reach / (arm + weapon inertia).
         // A two-hander in one hand trails and won't whip round like a one-hander (Matthew 2026-11-20). 0 = off.
         double pose_hold_shoulder_torque = 150.0;
+        // The shoulder limit fades out as the grip trails the hand from shoulder_fade_from_cm to shoulder_fade_to_cm
+        // (the hand is on the weapon: it can't trail far), so a big jump or a hard swing never trails it far
+        // enough for the stuck rule to let go (unattended test: a longsword 53 cm behind was dropped).
+        double pose_hold_shoulder_fade_from_cm = 15.0;
+        double pose_hold_shoulder_fade_to_cm = 35.0;
         // Thin bits on a haft the hand slides over: a wide stretch no longer than ring_max_len_cm along the
         // haft and reaching no more than ring_max_width_cm from its axis, or a gap between parts no longer
         // than gap_max_cm, with narrow haft past it (ring_max_len_cm 0 = every wide bit stops the hand).

@@ -9782,7 +9782,13 @@ namespace
                     p.fmax = pf * st * s2b.total * 100.0 * draw_scale;
                 }
                 if (arm_fcap >= 0.0)
-                    for (int i = 0; i < n; ++i) pts[i].fmax = (std::min)(pts[i].fmax, arm_fcap * 100.0 * draw_scale);
+                    for (int i = 0; i < n; ++i)
+                    {
+                        double f0 = cfg.pose_hold_shoulder_fade_from_cm, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_shoulder_fade_to_cm);
+                        double u = (std::min)(1.0, (std::max)(0.0, (length(pts[i].err) - f0) / (f1 - f0)));
+                        double cap = arm_fcap * 100.0 * draw_scale;
+                        if (cap < pts[i].fmax) pts[i].fmax = cap + (pts[i].fmax - cap) * u;
+                    }
                 Mat3 invI = about_com.inverse();
                 Vec3 vb = v_com_now + g * DT, wb = w_now; // gravity this frame, taken off again below (the physics adds it)
                 if (arm_lag)
