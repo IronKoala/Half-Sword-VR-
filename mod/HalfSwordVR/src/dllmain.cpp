@@ -1230,6 +1230,8 @@ namespace
     // live from the clock, so the pose and the view's late copy see different head poses (as a moving
     // real head does a frame apart).
     std::atomic<double> g_fake_wobble_deg{0.0}, g_fake_wobble_hz{1.0};
+    // Test: hsvr.fake_head_shift <forward cm> <right cm> moves the head (tracked or fake) that far, as a lean.
+    std::atomic<double> g_fake_shift_fwd{0.0}, g_fake_shift_right{0.0};
 
     // The bend and twist of the 6 bones, and where they carry the head (body frame). Each bone turns
     // about its own joint and carries everything above it, as the end-of-graph Modify Bone nodes do
@@ -2940,6 +2942,8 @@ namespace
             w = pivot + t.rotate(w - pivot) - Vec3{0.0, 0.0, dr};
             r = (t * r).normalized();
         }
+        if (double sf = g_fake_shift_fwd.load(), sr = g_fake_shift_right.load(); sf != 0.0 || sr != 0.0)
+            w = w + quat_from_yaw_deg(quat_yaw_deg(r)).rotate(Vec3{sf, sr, 0.0});
         return true;
     }
 
@@ -17001,6 +17005,14 @@ namespace
                          game_mode ? game_mode->GetFullName().c_str() : STR("missing"), (int)a, (int)bool_property(game_mode, STR("Match Won")), (int)b,
                          (int)bool_property(pawn, STR("Match Won (Player)")));
                 continue;
+            }
+            if (entry.command.rfind("hsvr.fake_head_shift ", 0) == 0)
+            {
+                double f = 0, r = 0;
+                sscanf(entry.command.c_str() + 21, "%lf %lf", &f, &r);
+                g_fake_shift_fwd.store(f);
+                g_fake_shift_right.store(r);
+                HSVR_LOG("Script: hsvr.fake_head_shift forward %.0f right %.0f cm", f, r);
             }
             if (entry.command.rfind("hsvr.fake_head_wobble ", 0) == 0)
             {
