@@ -524,6 +524,17 @@ namespace hsvr
         // game's sword grip, curled; -1 = leave the game's).
         bool pose_shield_in_hand = true;
         double pose_shield_hand_grip_type = 2.0;
+        // Shield straps and handles are fixed grips (Matthew 2026-11-20: "the grips, they should be
+        // fixed... I shouldn't be able to slide up and down"): the hand always holds one at its middle,
+        // at whatever angle round it the hand came in, and the trigger never slides it. 0 = slide.
+        bool pose_shield_fixed_grip = true;
+        // Away from its straps and handles a shield is taken only by its rim (the hand within
+        // pose_shield_rim_cm of an outer edge), never by the flat front or back (Matthew 2026-11-20:
+        // "I can also grab the shields anywhere... the flat front... I shouldn't be able to").
+        // pose_shield_grab_rim 0 = straps and handles only; pose_shield_grab_face 1 = anywhere, as before.
+        bool pose_shield_grab_rim = true;
+        double pose_shield_rim_cm = 4.0;
+        bool pose_shield_grab_face = false;
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;

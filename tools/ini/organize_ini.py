@@ -274,6 +274,10 @@ LAYOUT = [
         ("pose_shield_point_cm", ""),
         ("pose_shield_in_hand", "1 = strap shields held in the hand, not on the forearm."),
         ("pose_shield_hand_grip_type", ""),
+        ("pose_shield_fixed_grip", "1 = shield straps/handles are fixed grips (held at their middle, no trigger slide)."),
+        ("pose_shield_grab_rim", "1 = a shield can also be taken by its rim; 0 = straps and handles only."),
+        ("pose_shield_rim_cm", "How near an outer edge the hand must be for a rim grab (cm)."),
+        ("pose_shield_grab_face", "1 = a shield can be taken anywhere, flat faces too (old way)."),
     ]),
     ("Drawing, sheathing, belt", "", [
         ("pose_draw", ""),

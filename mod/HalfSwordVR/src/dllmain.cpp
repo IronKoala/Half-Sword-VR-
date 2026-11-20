@@ -5786,6 +5786,9 @@ namespace
     FreeGrip handle_grip(int side, UObject* mesh, const hsvr::Vec3& w0_pos, const hsvr::Quat& w0_rot, const hsvr::Vec3& palm, const Handle& hd, double t);
     int clamp_grip_type(int side, int g);
     double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out = nullptr, UObject** out_part = nullptr);
+    bool class_name_starts(UObject* object, const TCHAR* prefix);
+    // A shield touched away from its straps and handles: may the hand take it there (its rim, not a face)?
+    bool shield_off_handle_ok(int side, UObject* shield, UObject* base, const hsvr::Vec3& hand, const hsvr::Config& cfg);
 
     // The grab button (Phase 4): squeezing a controller's grip with that hand empty picks up the
     // nearest loose weapon whose body is within pose_grab_radius_cm of the hand; letting go of the
@@ -6083,6 +6086,7 @@ namespace
                      weapon->GetName().c_str(), hi >= 0 ? hs[hi].name.c_str() : "none", hd);
             return false;
         }
+        if (!on_handle && class_name_starts(weapon, STR("Shield")) && !shield_off_handle_ok(side, weapon, base, at, cfg)) return false;
         Vec3 spot = local;
         if (!on_handle)
         {
@@ -6893,6 +6897,80 @@ namespace
         std::wstring cls = shield && shield->GetClassPrivate() ? shield->GetClassPrivate()->GetName() : std::wstring();
         if (cls.size() > 2 && cls.substr(cls.size() - 2) == STR("_C")) cls.resize(cls.size() - 2);
         return cls;
+    }
+
+    // A shield's plate normal in its BaseMesh frame: the local axis with the least collision across it
+    // (asked from 200 cm out each way, as hsvr.bring_object's rim test), found once per class.
+    hsvr::Vec3 shield_plate_normal(UObject* shield, UObject* base)
+    {
+        using namespace hsvr;
+        static std::unordered_map<std::wstring, Vec3> known;
+        std::wstring cls = shield_class(shield);
+        auto f = known.find(cls);
+        if (f != known.end()) return f->second;
+        Vec3 centre = component_location(base);
+        Quat rot = component_rotation(base);
+        const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        double across[3];
+        bool ok = true;
+        for (int a = 0; a < 3; ++a)
+        {
+            across[a] = 0.0;
+            for (double sgn : {1.0, -1.0})
+            {
+                Vec3 dir = rot.rotate(axes[a] * sgn), p;
+                if (closest_on_weapon(shield, centre + dir * 200.0, &p) < 0.0)
+                {
+                    ok = false;
+                    p = centre;
+                }
+                across[a] += dot(p - centre, dir);
+            }
+        }
+        int thin = 0;
+        for (int a = 1; a < 3; ++a)
+            if (across[a] < across[thin]) thin = a;
+        HSVR_LOG("Shield: %ls across its local X %.1f, Y %.1f, Z %.1f cm: plate faces along %c", cls.c_str(), across[0], across[1], across[2], "XYZ"[thin]);
+        if (ok) known[cls] = axes[thin];
+        return axes[thin];
+    }
+
+    // Away from its straps and handles a shield is taken only by its rim: the point the hand touched
+    // is within pose_shield_rim_cm of an outer edge (a probe that far out from it, along the plate,
+    // finds the shield's nearest point off to the side, past the edge). A flat face is never taken.
+    bool shield_off_handle_ok(int side, UObject* shield, UObject* base, const hsvr::Vec3& hand, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (cfg.pose_shield_grab_face) return true;
+        const char* hname = side == 0 ? "left" : "right";
+        if (!cfg.pose_shield_grab_rim)
+        {
+            HSVR_LOG("Grab: %s hand touched %ls off its straps and handles: not taken (pose_shield_grab_rim 0)", hname, shield->GetName().c_str());
+            return false;
+        }
+        Vec3 touch;
+        if (closest_on_weapon(shield, hand, &touch) < 0.0) return false;
+        Quat rot = component_rotation(base);
+        Vec3 n = normalized(rot.rotate(shield_plate_normal(shield, base)));
+        // Two directions along the plate, and eight probes round the touch point.
+        Vec3 u = cross(n, Vec3{0, 0, 1});
+        if (length(u) < 0.2) u = cross(n, Vec3{1, 0, 0});
+        u = normalized(u);
+        Vec3 v = cross(n, u);
+        double r = cfg.pose_shield_rim_cm, most = 0.0;
+        for (int i = 0; i < 8; ++i)
+        {
+            double ang = i * 3.14159265358979 / 4.0;
+            Vec3 probe = touch + (u * std::cos(ang) + v * std::sin(ang)) * r, p;
+            if (closest_on_weapon(shield, probe, &p) < 0.0) continue;
+            Vec3 off = p - probe;
+            off = off - n * dot(off, n); // along the plate only (a curved face sits a little behind)
+            most = (std::max)(most, length(off));
+        }
+        bool rim = most > 1.0;
+        HSVR_LOG("Grab: %s hand touched %ls off its straps and handles: %s (an edge %s %.0f cm; probes reached %.1f cm past it)", hname, shield->GetName().c_str(),
+                 rim ? "by the rim, taken" : "on a flat face, not taken", rim ? "within" : "not within", r, most);
+        return rim;
     }
 
     // A shield taken with the grip button. The hand point, in the shield's frame from before the
@@ -8314,6 +8392,7 @@ namespace
                                  hi >= 0 ? hs[hi].name.c_str() : "none", hd, cfg.pose_grab_handle_cm);
                         continue;
                     }
+                    if (!(hi >= 0 && hd <= cfg.pose_grab_handle_cm) && class_name_starts(best, STR("Shield")) && !shield_off_handle_ok(side, best, hb, at, cfg)) continue;
                     bool ok = give_hand_weapon(side, pawn, best);
                     UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
                     if (ok && now == best)
@@ -8750,6 +8829,12 @@ namespace
                 Vec3 c{f.cx, f.cy, f.cz}, a = normalized(Vec3{f.ax, f.ay, f.az});
                 double h = (std::max)(0.0, f.length * 0.5 - half);
                 hs.push_back(Handle{c - a * h, c + a * h, f.name, 5, 5});
+                if (cfg.pose_shield_fixed_grip)
+                {
+                    // Fixed (Matthew 2026-11-20): held at its middle, any angle round it, never slid.
+                    hs.back().fixed = true;
+                    hs.back().fixed_t = 0.5;
+                }
             }
         }
         else
