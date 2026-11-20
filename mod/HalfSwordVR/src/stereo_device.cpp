@@ -282,6 +282,8 @@ namespace hsvr
                     right = up = 1.0;
                 }
                 double z_near = config().near_clip_cm;
+                double window = shared().helmet_window_cm.load();
+                if (window > z_near) z_near = window; // helmet_view 3: the helmet's walls right around your eyes not drawn
                 double sum_rl = right + left, sum_tb = up + down;
                 double inv_rl = 1.0 / (right - left), inv_tb = 1.0 / (up - down);
                 ue::FMatrix m{};

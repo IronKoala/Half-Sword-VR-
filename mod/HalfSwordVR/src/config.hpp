@@ -889,6 +889,21 @@ namespace hsvr
         // it; it still casts its shadow and is there for the game (hits, other characters). Helmets
         // and other headwear stay visible.
         bool hide_own_head = true;
+        // Your worn helmet in your own view: 0 drawn (real, blocks the view), 1 the helmet hidden from
+        // you, 2 everything on your head hidden from you (helmet and hood/coif/cap), 3 a clear window:
+        // the parts within helmet_window_cm of your eyes aren't drawn. Others still see it and it
+        // still protects you.
+        int helmet_view = 0;
+        double helmet_window_cm = 7.0;
+        // helmet_view 4 (experiment): the helmet half see-through for you. helmet_see_through is how
+        // much you see through (0..1). helmet_see_through_mode 0 = screen door through the helmet
+        // material's texture parameter helmet_see_through_param (our own render target, dithered;
+        // helmet_see_through_test 1 fills it white, 2 black, to find what drives the opacity mask),
+        // 1 = the helmet hidden from you on alternate frames.
+        double helmet_see_through = 0.5;
+        int helmet_see_through_mode = 0;
+        std::string helmet_see_through_param = "RT_Damage";
+        int helmet_see_through_test = 0;
         // The gore skeleton under his skin (skull, jaw, teeth, throat) would show from inside the
         // hidden head: it is hidden from this bone up. Empty = not hidden. Wounds elsewhere still
         // show their bones.
