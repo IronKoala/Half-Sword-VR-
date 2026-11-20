@@ -3439,9 +3439,11 @@ namespace
     struct TestInput { std::wstring part; double value = 0.0; double until = 0.0; bool once = false; };
     std::vector<TestInput> g_test_inputs;
     bool g_input_list_now = false;
+    void install_punch_watch();
     void input_before_tick(UObject* pawn)
     {
         if (!pawn) return;
+        install_punch_watch(); // flat mode has no posed tick to install it
         if (g_input_list_now)
         {
             g_input_list_now = false;
