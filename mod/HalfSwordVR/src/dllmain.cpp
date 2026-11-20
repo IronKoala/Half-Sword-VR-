@@ -166,14 +166,9 @@ namespace
         for (auto& f : g_prune_hooks) f();
         g_freed_now.clear();
     }
-    // Still a live object: not being destroyed and not waiting for clean-up. Only for pointers that
-    // are not freed (taken this frame, or kept in a holder that gc_sync cleans).
-    bool object_alive(UObject* p)
-    {
-        if (!p) return false;
-        Unreal::FUObjectItem* item = Unreal::FUObjectArray::IndexToObject(p->GetInternalIndex());
-        return item && item->GetUObject() == p && !item->IsUnreachable() && !item->IsPendingKill();
-    }
+    // Still a live object: not destroyed and not waiting for clean-up (below, after Call). Only for
+    // pointers that are not freed (taken this frame, or kept in a holder that gc_sync cleans).
+    bool object_alive(UObject* p);
 
     UObject* find_player_controller()
     {
@@ -841,6 +836,24 @@ namespace
         Call c(component, STR("K2_GetComponentRotation"));
         c.run();
         return c.rot();
+    }
+
+    // The engine's own test (KismetSystemLibrary IsValid: not null, not marked as garbage). UE4SS's
+    // IsPendingKill does not see a destroyed actor in this game (test 2026-11-20 08:36: removed
+    // corpses stayed "alive").
+    bool object_alive(UObject* p)
+    {
+        if (!p) return false;
+        Unreal::FUObjectItem* item = Unreal::FUObjectArray::IndexToObject(p->GetInternalIndex());
+        if (!item || item->GetUObject() != p || item->IsUnreachable()) return false;
+        static UObject* ksl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        if (!ksl) return true;
+        Call v(ksl, STR("IsValid"));
+        if (!v.fn) return true;
+        v.object(STR("Object"), p);
+        v.run();
+        FProperty* r = v.param(STR("ReturnValue"));
+        return !r || *(v.buffer.data() + r->GetOffset_Internal()) != 0;
     }
 
     hsvr::Vec3 component_location(UObject* component)
@@ -14177,9 +14190,67 @@ namespace
             if (UFunction* fn = gm->GetFunctionByNameInChain(f)) UObjectGlobals::RegisterHook(fn, &room_count_pre, &room_count_post, nullptr);
     }
 
+    // The match is still called won now and then when every foe is out at about the same moment
+    // (2026-11-20 08:37: a new foe was already up; not Minus Enemy, whose calls are all logged).
+    // UI_WinScreen's Construct then sets Match Won, Enemy Count 0, Rounds Won + 1 and half-speed time
+    // for 0.5 s. While foes respawn, the screen is taken down at once and all of that undone (its
+    // music still plays: PlaySound2D cannot be called back).
+    void room_winscreen_post(Unreal::UnrealScriptFunctionCallableContext& context, void*)
+    {
+        gc_sync();
+        if (!g_room.entered || g_room.done || !hsvr::config().test_room_respawn) return;
+        UObject* w = context.Context;
+        if (!w) return;
+        Call rm(w, STR("RemoveFromParent"));
+        rm.run();
+        UObject* gi = game_instance_object();
+        if (gi)
+        {
+            set_variable(gi, STR("Time Dilation"), 1.0);
+            double rounds = read_number_variable(gi, STR("Rounds Won"));
+            if (rounds > 0.0) set_variable(gi, STR("Rounds Won"), rounds - 1.0);
+        }
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        if (gs)
+        {
+            Call td(gs, STR("SetGlobalTimeDilation"));
+            td.object(STR("WorldContextObject"), w);
+            td.number(STR("TimeDilation"), 1.0);
+            td.run();
+        }
+        if (UObject* gm = room_game_mode())
+        {
+            set_variable(gm, STR("Match Won"), 0.0);
+            set_variable(gm, STR("All Enemies Dead"), 0.0);
+            if (int32_t* count = gm->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count"))) *count = 100;
+        }
+        HSVR_LOG("TestRoom: respawn: the game put up its win screen; taken down (time, Rounds Won, Match Won and Enemy Count put back)");
+    }
+
+    void room_watch_winscreen()
+    {
+        static bool done = false;
+        if (done) return;
+        UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/UI/UI_WinScreen.UI_WinScreen_C:Construct"));
+        if (!fn)
+        {
+            load_asset_object(STR("/Game/UI/UI_WinScreen"));
+            fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/UI/UI_WinScreen.UI_WinScreen_C:Construct"));
+        }
+        done = true;
+        if (!fn)
+        {
+            HSVR_LOG("TestRoom: respawn: UI_WinScreen Construct not found");
+            return;
+        }
+        UObjectGlobals::RegisterHook(fn, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, &room_winscreen_post, nullptr);
+        HSVR_LOG("TestRoom: respawn: watching %ls", fn->GetFullName().c_str());
+    }
+
     void room_hold_enemy_count()
     {
         room_watch_counting(room_game_mode());
+        room_watch_winscreen();
         UObject* gm = room_game_mode();
         int32_t* count = gm ? gm->GetValuePtrByPropertyNameInChain<int32_t>(STR("Enemy Count")) : nullptr;
         if (!count) return;
@@ -14819,6 +14890,19 @@ namespace
             if (entry.command == "hsvr.test_room_boot")
             {
                 room_boot(cfg);
+                continue;
+            }
+            if (entry.command == "hsvr.gc")
+            {
+                // Test: a garbage collection now (the shipping game has no "obj gc"); it runs at the
+                // start of the next frame, and gc_sync picks up what it frees.
+                static UObject* ksl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+                if (ksl)
+                {
+                    Call c(ksl, STR("CollectGarbage"));
+                    c.run();
+                }
+                HSVR_LOG("Script: hsvr.gc: garbage collection asked for");
                 continue;
             }
             if (entry.command.rfind("hsvr.test_room_kill", 0) == 0 || entry.command.rfind("hsvr.test_room_beat", 0) == 0)
