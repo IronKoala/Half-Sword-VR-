@@ -391,6 +391,8 @@ namespace hsvr
         // the hand stays on it instead of going on with your controller. It eases from following the
         // controller to sitting on the weapon as the weapon falls 1 to pose_hold_blocked_from_cm behind.
         bool pose_hold_hand_on_weapon = true;
+        // The elbow is chosen for his drawn hand (on a stopped weapon: the weapon's turn), as B&S's IK does.
+        bool pose_arm_solve_drawn_hand = true;
         double pose_hold_blocked_from_cm = 3.0;
         // B&S (bs_hold_measured.md section 5): while a hand holds something, his drawn hand always rides
         // the item at its grip (where the item will be after this frame's physics), never your controller;

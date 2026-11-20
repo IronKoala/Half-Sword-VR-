@@ -2412,6 +2412,20 @@ namespace
             }
         }
         double prior = swivel_angle(prior_dir);
+        // The elbow is chosen for the hand as it is drawn. While his hand rides a weapon that something
+        // stopped (a post, a shield, a body), that is the weapon's turn, not your controller's: with the
+        // controller's, the elbow sat right for a hand that wasn't there and his wrist bent up to 150 deg
+        // (Matthew 2026-11-20 14:43, a war hammer against the wooden post; log: wrist bend median 69,
+        // p90 121 deg whenever the weapon was 30+ cm off the controller, 31 deg when it was on it).
+        // B&S does the same: the arm's IK target is an anchor on the item's grip, position and rotation
+        // (Handle.cs SetHandAnchor(gripInfo.ikAnchor), solved by VRIK with its WristRelaxer).
+        if (on_weapon && cfg.pose_arm_solve_drawn_hand)
+        {
+            fingers_world = normalized(Wh.rotate(a.fingers_local));
+            Vec3 th = Wh.rotate(a.thumb_local);
+            th = th - fingers_world * dot(th, fingers_world);
+            if (length(th) > 1e-6) thumb_world = normalized(th);
+        }
         Vec3 hand_y = normalized(fingers_world), hand_z = normalized(thumb_world), hand_x = cross(hand_y, hand_z);
         // A nearly straight arm follows the hand's twist: the inside of the elbow toward the thumb.
         double dd = (std::min)(D, L1 + L2);

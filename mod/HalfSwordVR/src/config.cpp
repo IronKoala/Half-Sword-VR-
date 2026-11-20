@@ -382,6 +382,7 @@ namespace hsvr
         flag("pose_hold_ignore_body", c.pose_hold_ignore_body);
         num("pose_hold_weight_spin_extra", c.pose_hold_weight_spin_extra);
         flag("pose_hold_hand_on_weapon", c.pose_hold_hand_on_weapon);
+        flag("pose_arm_solve_drawn_hand", c.pose_arm_solve_drawn_hand);
         num("pose_hold_blocked_from_cm", c.pose_hold_blocked_from_cm);
         flag("pose_hold_hand_follows", c.pose_hold_hand_follows);
         integer("pose_hold_hand_follows_predict", c.pose_hold_hand_follows_predict);
