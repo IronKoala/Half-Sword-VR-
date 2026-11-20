@@ -138,7 +138,8 @@ namespace
             g_freed_pending.store(true, std::memory_order_release);
             g_freed_writers.fetch_sub(1, std::memory_order_acq_rel);
         }
-        void OnUObjectArrayShutdown() override {}
+        // The engine asserts at quit if a delete listener is still registered (crash 2026-11-20 03:05).
+        void OnUObjectArrayShutdown() override { Unreal::FUObjectArray::RemoveUObjectDeleteListener(this); }
     };
     FreedListener g_freed_listener;
     std::vector<std::function<void()>> g_prune_hooks;
