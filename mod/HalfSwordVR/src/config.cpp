@@ -440,6 +440,7 @@ namespace hsvr
         num("pose_stamina_scale", c.pose_stamina_scale);
         num("pose_stamina_gate", c.pose_stamina_gate);
         num("pose_stamina_fist_scale", c.pose_stamina_fist_scale);
+        flag("pose_no_lawnmower", c.pose_no_lawnmower);
         num("pose_stamina_force_cap_n", c.pose_stamina_force_cap_n);
         num("pose_stamina_torque_cap_nm", c.pose_stamina_torque_cap_nm);
         flag("pose_hold_exact", c.pose_hold_exact);

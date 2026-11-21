@@ -291,6 +291,9 @@ namespace hsvr
         double pose_stamina_gate = 0.0;
         // A fist's burn x this, on top of the game's own fist factor (Hands Rigidity x Fisting Rate).
         double pose_stamina_fist_scale = 1.0;
+        // 1 = the game's 'Lawnmower Rate' (mouse waggle spam penalty) kept at 0 for your player: with
+        // Aim Vector always 0 in VR it read every fast real swing as spam (x10 stamina, x0.5 grip).
+        bool pose_no_lawnmower = true;
         double pose_stamina_force_cap_n = 250.0;  // playtest 2026-11-21: clean holds p90 60 N, real swings 36-216 N, snags up to 1019 N
         double pose_stamina_torque_cap_nm = 30.0; // clean holds p90 26.5 N m, swings 8-32, snags up to 290
         // Exact hold (B&S-style): each frame the weapon gets the velocity that puts it exactly where

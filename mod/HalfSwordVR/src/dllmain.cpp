@@ -15654,6 +15654,12 @@ namespace
             { HSVR_SUB("after:weapon_spring_after_tick"); weapon_spring_after_tick(context); }
             { HSVR_SUB("after:swing_speed_after_tick"); swing_speed_after_tick(context); }
             { HSVR_SUB("after:fist_flags_after_tick"); fist_flags_after_tick(context); }
+            // The game's 'Lawnmower Rate' (mouse waggle spam, Willie @628040-630154) integrates up at 2/s
+            // whenever Aim Swing Speed >= 30..70 and |Aim Vector| < 30. In VR Aim Vector stays 0, so every
+            // fast real swing counted as spam: x up to 10 on the swing stamina burn and x0.5 on the grip
+            // slip threshold (playtest 2026-11-21: 99 -> 0 in 0.6 s flailing fists). Reset after each tick,
+            // it never grows past one tick's step (<= x1.27).
+            if (hsvr::config().pose_no_lawnmower) set_variable(context, STR("Lawnmower Rate"), 0.0, nullptr, nullptr);
             { HSVR_SUB("after:body_grab_after_tick"); body_grab_after_tick(context); }
             { HSVR_SUB("after:joint_strain_log"); joint_torque_tick(context); joint_break_tick(context); joint_strain_log(context); }
             { HSVR_SUB("after:body_hit_watch"); body_hit_watch(context); }
