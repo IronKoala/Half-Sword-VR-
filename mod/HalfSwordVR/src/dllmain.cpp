@@ -2488,7 +2488,10 @@ namespace
                 static double since = 0.0;
                 if (epoch_seen != g_fake_arm_epoch.load()) epoch_seen = g_fake_arm_epoch.load(), since = now;
                 double speed = g_fake_thrust_pitch.load() > 0.0 ? g_fake_thrust_pitch.load() : 80.0;
-                double up = side == 1 ? (std::min)(g_fake_two_up.load(), speed * (now - since)) : 0.0;
+                // Optional 4th number: the height it starts from (hsvr.arm_move 22 <to> <cm/s> <from>).
+                double from = g_fake_thrust_up.load(), to = g_fake_two_up.load();
+                double moved = speed * (now - since);
+                double up = side == 1 ? (to >= from ? (std::min)(to, from + moved) : (std::max)(to, from - moved)) : 0.0;
                 local = Vec3{40.0, out * 15.0, -10.0 + up};
             }
             else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
@@ -6283,7 +6286,7 @@ namespace
             if (out) *out = d > 0.0 ? cp.vec(STR("OutPointOnBody")) : at;
             return d;
         }
-        if (!func_chain(c, STR("GetStaticMesh"))) return -1.0;
+        if (!is_a(c, STR("StaticMeshComponent"))) return -1.0;
         return closest_on_triangles(c, at, range, out);
     }
 
@@ -6355,12 +6358,12 @@ namespace
             if (!simulating)
             {
                 // Scenery: a static mesh that physically blocks (not a trigger box), not a person.
-                if (!cfg.pose_grab_world || skeletal || is_a(owner, STR("Willie_BP_C")) || !func_chain(c, STR("GetStaticMesh"))) continue;
+                if (!cfg.pose_grab_world || skeletal || is_a(owner, STR("Willie_BP_C")) || !is_a(c, STR("StaticMeshComponent"))) { seen += STR("(not scenery) "); continue; }
                 Call ce(c, STR("GetCollisionEnabled"));
                 ce.run();
                 FProperty* cr = ce.param(STR("ReturnValue"));
                 uint8_t enabled = cr ? *(ce.buffer.data() + cr->GetOffset_Internal()) : 0;
-                if (enabled < 2) continue; // NoCollision / QueryOnly
+                if (enabled < 2) { seen += STR("(collision ") + std::to_wstring(enabled) + STR(") "); continue; } // NoCollision / QueryOnly
                 Vec3 sp;
                 double d = closest_point_any(c, bone, at, cfg.pose_grab_radius_cm, &sp);
                 seen += STR("(") + std::to_wstring((int)std::lround(d)) + STR(" cm) ");
@@ -20787,11 +20790,39 @@ namespace
                         if (a && a->GetName() == want) { comp = object_property(a, STR("StaticMeshComponent")); break; }
                 if (!comp) { HSVR_LOG("Script: hsvr.hand_to_scenery: no StaticMeshActor %s", nm); continue; }
                 Vec3 hand = hand_grab_point(pm, side);
-                Call cp(comp, STR("GetClosestPointOnCollision"));
-                cp.three(STR("Point"), hand.x, hand.y, hand.z);
-                cp.run();
-                double d = cp.number();
-                Vec3 on = cp.vec(STR("OutPointOnBody"));
+                // Simple collision, or the triangles (complex-only meshes like the Yard fence).
+                Vec3 on = hand;
+                double d = closest_point_any(comp, FName(STR("None"), FNAME_Add), hand, 600.0, &on);
+                if (d < 0.0)
+                {
+                    // Rays can miss a thin rail metres away: aim at its bounds' middle (at hand height first).
+                    static UObject* ksl_h = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+                    Call bnd(ksl_h, STR("GetComponentBounds"));
+                    bnd.object(STR("Component"), comp);
+                    bnd.run();
+                    Vec3 mid = bnd.vec(STR("Origin"));
+                    Vec3 aims[2] = {Vec3{mid.x, mid.y, hand.z}, mid};
+                    for (const Vec3& aim : aims)
+                    {
+                        Vec3 dir = aim - hand;
+                        double l = hsvr::length(dir);
+                        if (l < 1.0) continue;
+                        Vec3 h, nn;
+                        if (trace_component(comp, hand, hand + dir * ((l + 300.0) / l), h, nn))
+                        {
+                            Vec3 fine;
+                            double d2 = closest_on_triangles(comp, h + nn * 5.0, 60.0, &fine);
+                            on = d2 >= 0.0 ? fine : h;
+                            d = hsvr::length(on - hand);
+                            break;
+                        }
+                    }
+                }
+                if (d < 0.0)
+                {
+                    HSVR_LOG("Script: hsvr.hand_to_scenery %d %.0f %s: no surface within 6 m of the hand (%.0f %.0f %.0f)", side, cm, nm, hand.x, hand.y, hand.z);
+                    continue;
+                }
                 Vec3 n = hand - on;
                 n.z = 0.0;
                 double nl = hsvr::length(n);
@@ -21689,6 +21720,7 @@ namespace
                 if (got >= 2) g_fake_two_up.store(a1);
                 if (got >= 3) g_fake_thrust_pitch.store(a2);
                 if (got >= 4) g_fake_thrust_up.store(a3);
+                else if (mode_arg == 22) g_fake_thrust_up.store(0.0);
                 continue;
             }
             if (entry.command.rfind("hsvr.weapon_channel ", 0) == 0)
