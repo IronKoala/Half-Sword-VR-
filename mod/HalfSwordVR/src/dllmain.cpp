@@ -6216,6 +6216,77 @@ namespace
         if (!moving.empty()) HSVR_LOG("Crouch: %.0f cm down, moving near his legs: %ls", g_crouch_drop, moving.c_str());
     }
 
+    // ---- Complex-only collision (scenery) -------------------------------------------------------
+    // The Yard's fences and most of its scenery have no simple collision (347 of 597 static actors
+    // within 15 m; GetClosestPointOnCollision gives -1 on the fence), only their triangles. Those are
+    // measured with line traces against the component's triangles (K2_LineTraceComponent, complex).
+    bool trace_component(UObject* c, const hsvr::Vec3& a, const hsvr::Vec3& b, hsvr::Vec3& hit, hsvr::Vec3& normal)
+    {
+        Call t(c, STR("K2_LineTraceComponent"));
+        if (!t.fn) return false;
+        t.three(STR("TraceStart"), a.x, a.y, a.z);
+        t.three(STR("TraceEnd"), b.x, b.y, b.z);
+        t.flag(STR("bTraceComplex"), true);
+        t.flag(STR("bShowTrace"), false);
+        t.flag(STR("bPersistentShowTrace"), false);
+        if (!t.run()) return false;
+        FProperty* r = t.param(STR("ReturnValue"));
+        if (!r || !(*(t.buffer.data() + r->GetOffset_Internal()) & 1)) return false;
+        hit = t.vec(STR("HitLocation"));
+        normal = hsvr::normalized(t.vec(STR("HitNormal")));
+        return true;
+    }
+    // n directions spread evenly over the sphere (Fibonacci).
+    const std::vector<hsvr::Vec3>& sphere_dirs(int n)
+    {
+        static std::map<int, std::vector<hsvr::Vec3>> cache;
+        std::vector<hsvr::Vec3>& d = cache[n];
+        if (d.empty())
+            for (int i = 0; i < n; ++i)
+            {
+                double z = 1.0 - (2.0 * i + 1.0) / n, r = std::sqrt((std::max)(0.0, 1.0 - z * z)), a = i * 2.39996322972865332;
+                d.push_back(hsvr::Vec3{r * std::cos(a), r * std::sin(a), z});
+            }
+        return d;
+    }
+    // Nearest point of the component's triangles to `at` within `range` (cm), or -1.
+    double closest_on_triangles(UObject* c, const hsvr::Vec3& at, double range, hsvr::Vec3* out, hsvr::Vec3* out_n = nullptr)
+    {
+        using namespace hsvr;
+        double best = -1.0;
+        Vec3 bp{0, 0, 0}, bn{0, 0, 1};
+        for (const Vec3& d : sphere_dirs(42))
+        {
+            Vec3 h, n;
+            if (!trace_component(c, at, at + d * range, h, n)) continue;
+            double e = length(h - at);
+            if (best < 0.0 || e < best) best = e, bp = h, bn = n;
+        }
+        if (best < 0.0) return -1.0;
+        // The foot of the perpendicular on that face, when it is nearer.
+        Vec3 h, n;
+        if (trace_component(c, at, at - bn * (best + 1.0), h, n) && length(h - at) < best) best = length(h - at), bp = h, bn = n;
+        if (out) *out = bp;
+        if (out_n) *out_n = bn;
+        return best;
+    }
+    // The engine's simple-collision distance, or the triangles' when it has none (a static mesh).
+    double closest_point_any(UObject* c, FName bone, const hsvr::Vec3& at, double range, hsvr::Vec3* out)
+    {
+        Call cp(c, STR("GetClosestPointOnCollision"));
+        cp.three(STR("Point"), at.x, at.y, at.z);
+        cp.name(STR("BoneName"), bone);
+        cp.run();
+        double d = cp.number();
+        if (d >= 0.0)
+        {
+            if (out) *out = d > 0.0 ? cp.vec(STR("OutPointOnBody")) : at;
+            return d;
+        }
+        if (!func_chain(c, STR("GetStaticMesh"))) return -1.0;
+        return closest_on_triangles(c, at, range, out);
+    }
+
     bool grab_object(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg, const hsvr::Vec3& at)
     {
         using namespace hsvr;
@@ -6290,16 +6361,13 @@ namespace
                 FProperty* cr = ce.param(STR("ReturnValue"));
                 uint8_t enabled = cr ? *(ce.buffer.data() + cr->GetOffset_Internal()) : 0;
                 if (enabled < 2) continue; // NoCollision / QueryOnly
-                Call cs(c, STR("GetClosestPointOnCollision"));
-                cs.three(STR("Point"), at.x, at.y, at.z);
-                cs.name(STR("BoneName"), bone);
-                cs.run();
-                double d = cs.number();
+                Vec3 sp;
+                double d = closest_point_any(c, bone, at, cfg.pose_grab_radius_cm, &sp);
                 seen += STR("(") + std::to_wstring((int)std::lround(d)) + STR(" cm) ");
                 if (d < 0.0 || d > still_d) continue;
                 still_d = d;
                 still = c;
-                still_point = d > 0.0 ? cs.vec(STR("OutPointOnBody")) : at;
+                still_point = sp;
                 continue;
             }
             Call closest(c, STR("GetClosestPointOnCollision"));
@@ -9785,6 +9853,10 @@ namespace
     // when it has none). That costs a call per sample, so the wrap is solved one finger per frame
     // (the held thing keeps its place in the hand, the game's joint holds it) and refreshed every
     // pose_wrap_refresh_s; the framework's 6 samples / 20 steps / 6 halvings are cut to 5 / 10 / 4.
+    struct SurfacePoint
+    {
+        hsvr::Vec3 p, n;
+    };
     struct WrapGrab
     {
         bool on = false;
@@ -9815,6 +9887,7 @@ namespace
         bool passenger = false;             // the other hand drives this object; this hand rides it
         hsvr::Vec3 spot_local, palm_local;  // the held spot (thing's frame) and the palm (hand frame)
         hsvr::Vec3 hand_v;                  // the drawn hand's velocity (cm/s), for letting go
+        std::vector<SurfacePoint> cloud;    // scenery with triangles only: its surface round the spot
     };
     WrapGrab g_wrap[2];
     bool g_wrap_on_side(int side) { return g_wrap[side].on; }
@@ -9862,6 +9935,22 @@ namespace
         double distance(const hsvr::Vec3& p_cs)
         {
             hsvr::Vec3 p = cp + cq.rotate(p_cs * cs);
+            if (!g->cloud.empty())
+            {
+                // Triangles only: the nearest sampled surface point's face (behind it = inside).
+                ++queries;
+                const SurfacePoint* best = nullptr;
+                double be = 1e18;
+                for (const SurfacePoint& s : g->cloud)
+                {
+                    hsvr::Vec3 dv = p - s.p;
+                    double e = hsvr::dot(dv, dv);
+                    if (e < be) be = e, best = &s;
+                }
+                double e = std::sqrt(be), plane = hsvr::dot(p - best->p, best->n);
+                if (plane < 0.0) return e < 3.0 ? 0.0 : e / cs;
+                return (std::max)(plane, e - 1.5) / cs;
+            }
             write_three(query->buffer.data() + q_point->GetOffset_Internal(), q_point, p.x, p.y, p.z);
             *reinterpret_cast<FName*>(query->buffer.data() + q_bone->GetOffset_Internal()) = g->bone;
             query->run();
@@ -10460,13 +10549,31 @@ namespace
         Quat hq = socket_rotation(mesh, bone_fname("hand" + sx));
         Vec3 knuckle = socket_location(mesh, bone_fname("middle_01" + sx));
         Vec3 palm = hp + (knuckle - hp) * cfg.pose_grab_palm_along + normalized(hq.rotate(Vec3{0, 0, -1})) * cfg.pose_grab_palm_cm;
-        Call cp(g.comp, STR("GetClosestPointOnCollision"));
-        cp.three(STR("Point"), palm.x, palm.y, palm.z);
-        cp.name(STR("BoneName"), g.bone);
-        cp.run();
-        double d = cp.number();
+        Vec3 spot;
+        double d = closest_point_any(g.comp, g.bone, palm, 30.0, &spot);
         if (d < 0.0) return false;
-        Vec3 spot = d > 0.0 ? cp.vec(STR("OutPointOnBody")) : palm;
+        // Triangles only: the fingers measure against the surface round the spot, sampled once here
+        // (rays from 12 cm out through three points across the hand's width).
+        g.cloud.clear();
+        {
+            Call probe(g.comp, STR("GetClosestPointOnCollision"));
+            probe.three(STR("Point"), spot.x, spot.y, spot.z);
+            probe.name(STR("BoneName"), g.bone);
+            probe.run();
+            if (probe.number() < 0.0)
+            {
+                Vec3 across = normalized(socket_location(mesh, bone_fname("index_01" + sx)) - socket_location(mesh, bone_fname("pinky_01" + sx)));
+                for (double k : {-1.0, 0.0, 1.0})
+                {
+                    Vec3 aim = spot + across * (3.5 * k);
+                    for (const Vec3& dir : sphere_dirs(80))
+                    {
+                        Vec3 h, n;
+                        if (trace_component(g.comp, aim + dir * 12.0, aim - dir * 2.0, h, n)) g.cloud.push_back(SurfacePoint{h, n});
+                    }
+                }
+            }
+        }
         Vec3 bp = component_location(g.comp);
         Quat bq = component_rotation(g.comp);
         g.boned = false;
@@ -10476,7 +10583,7 @@ namespace
         g.rel_rot = (hq.inverse() * bq).normalized();
         g.palm_local = hq.inverse().rotate(palm - hp);
         g.spot_local = bq.inverse().rotate(spot - bp);
-        if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand seats on %ls: spot %.1f cm from the palm", L ? "left" : "right", g.comp->GetName().c_str(), d);
+        if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand seats on %ls: spot %.1f cm from the palm (%d surface samples for the fingers)", L ? "left" : "right", g.comp->GetName().c_str(), d, (int)g.cloud.size());
         return true;
     }
     bool seat_on_palm(int side, UObject* pawn, WrapGrab& g, const hsvr::Config& cfg)
