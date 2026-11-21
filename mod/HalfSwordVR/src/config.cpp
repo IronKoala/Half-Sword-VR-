@@ -669,6 +669,9 @@ namespace hsvr
         flag("pose_finger_schedule", c.pose_finger_schedule);
         flag("pose_fingers_per_joint", c.pose_fingers_per_joint);
         num("pose_finger_dip_coupling", c.pose_finger_dip_coupling);
+        num("pose_finger_scale_mcp", c.pose_finger_scale_mcp);
+        num("pose_finger_scale_pip", c.pose_finger_scale_pip);
+        num("pose_finger_scale_dip", c.pose_finger_scale_dip);
         num("pose_finger_mcp_lag", c.pose_finger_mcp_lag);
         num("pose_finger_pip_full", c.pose_finger_pip_full);
         flag("pose_wrap", c.pose_wrap);

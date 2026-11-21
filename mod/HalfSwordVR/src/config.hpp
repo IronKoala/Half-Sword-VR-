@@ -796,6 +796,10 @@ namespace hsvr
         // With per-joint fingers: the end joint bends this much of the middle joint's angle (the tendon
         // couples them, ~0.67); 0 = as the hand skeleton reports it.
         double pose_finger_dip_coupling = 0.67;
+        // The fingers' full bend at each joint x this (knuckle / middle / end; thumb not included).
+        double pose_finger_scale_mcp = 1.0;
+        double pose_finger_scale_pip = 1.0;
+        double pose_finger_scale_dip = 1.0;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or

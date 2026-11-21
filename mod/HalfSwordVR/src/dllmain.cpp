@@ -9528,6 +9528,9 @@ namespace
         {1.54, 1.66, 1.05},
     };
     const double g_finger_lift[5] = {1.6, 0.35, 0.35, 0.35, 0.35};
+    // Scales on the four fingers' full bend at the knuckle / middle / end joint (pose_finger_scale_*):
+    // the gauntlet's skin rolls a PIP-heavy finger into a tube (Matthew's 14:10 screenshots).
+    std::atomic<double> g_finger_joint_scale[3] = {1.0, 1.0, 1.0};
     const double g_finger_spread[5] = {0.35, 0.21, 0.03, -0.14, -0.31};
     const char* kFingerNames[5] = {"thumb", "index", "middle", "ring", "pinky"};
 
@@ -10003,7 +10006,7 @@ namespace
                 Vec3 prev = j == 0 ? along : seg(j - 1);
                 double bend = bend_about(prev, seg(j), axis);
                 double c = cj[j];
-                double turn = (j == 0 && thumb) ? c * g_finger_full[0][0] : c * g_finger_full[f][j] - bend;
+                double turn = (j == 0 && thumb) ? c * g_finger_full[0][0] : c * g_finger_full[f][j] * (thumb ? 1.0 : g_finger_joint_scale[j].load()) - bend;
                 before[j] = bend;
                 turn_subtree(B, R.subtree[side][f][j], P(ch[f][j]), quat_axis_angle(axis, turn));
                 after[j] = bend_about(prev, seg(j), axis);
@@ -10115,21 +10118,31 @@ namespace
             hsvr::Vec3 p = cp + cq.rotate(p_cs * cs);
             if (!g->cloud.empty())
             {
-                // Triangles only: the nearest sampled surface point's face (behind it = inside).
+                // Triangles only: the nearest sampled surface points. Inside only when the 4 nearest
+                // all have it behind their faces (one face's plane alone was wrong at a rail's edge:
+                // every finger above the beam counted as inside and stayed straight, 09e4943 test;
+                // and a lone e < 3 cm rule let fingers deep in the beam count as outside, 13:58).
                 ++queries;
-                const SurfacePoint* best = nullptr;
-                double be = 1e18;
-                for (const SurfacePoint& s : g->cloud)
+                const SurfacePoint* near4[4] = {nullptr, nullptr, nullptr, nullptr};
+                double e4[4] = {1e18, 1e18, 1e18, 1e18};
+                for (const SurfacePoint& sp : g->cloud)
                 {
-                    hsvr::Vec3 dv = p - s.p;
+                    hsvr::Vec3 dv = p - sp.p;
                     double e = hsvr::dot(dv, dv);
-                    if (e < be) be = e, best = &s;
+                    for (int k = 0; k < 4; ++k)
+                        if (e < e4[k])
+                        {
+                            for (int m = 3; m > k; --m) e4[m] = e4[m - 1], near4[m] = near4[m - 1];
+                            e4[k] = e, near4[k] = &sp;
+                            break;
+                        }
                 }
-                double e = std::sqrt(be), plane = hsvr::dot(p - best->p, best->n);
-                // Behind the nearest sample's face = inside the beam (a finger deeper than 3 cm in a
-                // fence rail counted as outside and kept curling through it, 13:58 playtest).
-                if (plane < 0.0) return 0.0;
-                return (std::max)(plane, e - 1.5) / cs;
+                int behind = 0, have = 0;
+                for (int k = 0; k < 4; ++k)
+                    if (near4[k]) ++have, behind += hsvr::dot(p - near4[k]->p, near4[k]->n) < 0.0 ? 1 : 0;
+                if (have > 0 && behind == have) return 0.0;
+                double e = std::sqrt(e4[0]), plane = hsvr::dot(p - near4[0]->p, near4[0]->n);
+                return (plane >= 0.0 ? (std::max)(plane, e - 1.5) : e) / cs;
             }
             write_three(query->buffer.data() + q_point->GetOffset_Internal(), q_point, p.x, p.y, p.z);
             *reinterpret_cast<FName*>(query->buffer.data() + q_bone->GetOffset_Internal()) = g->bone;
@@ -11225,6 +11238,9 @@ namespace
         g_finger_schedule.store(cfg.pose_finger_schedule);
         g_finger_mcp_lag.store(cfg.pose_finger_mcp_lag);
         g_finger_pip_full.store(cfg.pose_finger_pip_full);
+        g_finger_joint_scale[0].store(cfg.pose_finger_scale_mcp);
+        g_finger_joint_scale[1].store(cfg.pose_finger_scale_pip);
+        g_finger_joint_scale[2].store(cfg.pose_finger_scale_dip);
         if (pawn && g_pose_active.load()) wrap_tick(cfg, pawn);
         if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
