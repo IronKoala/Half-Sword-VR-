@@ -1024,6 +1024,10 @@ namespace hsvr
         // material the game ships). helmet_fade_see_through 0 = solid, 1 = invisible. The material has
         // no colour texture: helmet_fade_tint is the metal colour "r,g,b" (0-1).
         double helmet_fade_see_through = 0.5;
+        // Which head pieces helmet_view 5 fades: those in front of your eyes (built-in list measured
+        // from the meshes: helmet_fade_face.md). Comma lists of mesh names to always / never fade.
+        std::string helmet_fade_always = "";
+        std::string helmet_fade_never = "";
         std::string helmet_fade_tint = "0.55,0.55,0.58";
         double helmet_fade_metallic = 1.0;
         double helmet_fade_roughness = 0.35;

@@ -64,6 +64,8 @@ LAYOUT = [
         ("helmet_view", "Your worn helmet in your view: 0 = drawn (blocks the view like a real one), 1 = helmet hidden from you, 2 = everything on your head hidden from you, 3 = clear window (parts near your eyes not drawn), 5 = see-through (faded, see helmet_fade_see_through). Others still see it; it still protects you."),
         ("helmet_window_cm", "helmet_view 3: helmet parts closer than this to your eyes aren't drawn (cm; 5-9). Food at your mouth that close is cut too."),
         ("helmet_fade_see_through", "helmet_view 5: how see-through your helmet is (0 = solid, 0.5 = half, 1 = invisible)."),
+        ("helmet_fade_always", "helmet_view 5 fades only pieces in front of your eyes (visors, barbutes, armets, closed sallets); hats and caps stay solid. Mesh names to fade anyway, comma separated (the log names them)."),
+        ("helmet_fade_never", "helmet_view 5: mesh names never to fade, comma separated."),
         ("helmet_fade_tint", "helmet_view 5: the faded helmet's metal colour, r,g,b (0-1)."),
         ("helmet_fade_metallic", "helmet_view 5: how metallic the faded helmet looks (0-1)."),
         ("helmet_fade_roughness", "helmet_view 5: how rough/dull the faded helmet looks (0 = mirror, 1 = matte)."),

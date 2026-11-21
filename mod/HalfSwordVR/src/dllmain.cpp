@@ -3111,6 +3111,7 @@ namespace
         int slot; // 2: tagged "Head 2" (helmet), 1: "Head 1" (hood, coif, cap)
     };
     std::vector<HeadWear> g_head_wear; // worn pieces on the head only (helmet_view)
+    bool fade_face_covering(UObject* comp, const hsvr::Config& cfg, std::wstring* mesh_name);
     void armour_scan(const hsvr::Config& cfg, UObject* pawn, UObject* mesh)
     {
         static double last = 0.0;
@@ -16959,7 +16960,7 @@ namespace
             if (w.comp && !gone(w.comp)) any_worn = true;
         if (first_person && (cfg.helmet_view == 1 || cfg.helmet_view == 2 || cfg.helmet_view == 5))
             for (const HeadWear& w : g_head_wear)
-                if (w.comp && !gone(w.comp) && (w.slot == 2 || cfg.helmet_view != 1)) want.push_back(w.comp);
+                if (w.comp && !gone(w.comp) && (w.slot == 2 || cfg.helmet_view != 1) && (cfg.helmet_view != 5 || fade_face_covering(w.comp, cfg, nullptr))) want.push_back(w.comp);
         // 3: a clear window. The eyes' near clip moves out to helmet_window_cm while something is
         // worn on the head, so the walls right around your eyes (visor, cheek plates: 2-6 cm away)
         // aren't drawn while the brim and shell further out still are. Anything else that close to
@@ -17197,6 +17198,79 @@ namespace
         UObject* copy;
     };
     std::vector<FadeCopy> g_fade;
+
+    // Head-wear meshes that cover the central view from our eyes (front_block.py: share of +-25 x +-20
+    // deg blocked from both eyes, threshold in helmet_fade_face.md). Hats, caps, kettle hats, open
+    // sallets and straps aren't here: they stay solid.
+    bool in_csv(const std::string& csv, const std::wstring& name)
+    {
+        std::string n(name.begin(), name.end());
+        size_t at = 0;
+        while (at <= csv.size())
+        {
+            size_t end = csv.find(',', at);
+            if (end == std::string::npos) end = csv.size();
+            std::string item = csv.substr(at, end - at);
+            item.erase(0, item.find_first_not_of(" \t"));
+            item.erase(item.find_last_not_of(" \t") + 1);
+            if (!item.empty() && _stricmp(item.c_str(), n.c_str()) == 0) return true;
+            at = end + 1;
+        }
+        return false;
+    }
+    bool fade_face_covering(UObject* comp, const hsvr::Config& cfg, std::wstring* mesh_name)
+    {
+        static const wchar_t* const face[] = {
+            L"SK_Armor_Head_Armet_Visor_002",
+            L"SK_Armor_Head_Armet_Wrapper_002",
+            L"SK_Armor_Head_Barbute_A_001",
+            L"SK_Armor_Head_Helm_Eisenhut_AA_001",
+            L"SK_Armor_Head_Helm_Eisenhut_AB_001",
+            L"SK_Armor_Head_Helm_Eisenhut_B_002",
+            L"SK_Armor_Head_Helm_Eisenhut_G_002",
+            L"SK_Armor_Head_Sallet_Open_A_002",
+            L"SK_Armor_Head_Sallet_Solid_A_001",
+            L"SK_Armor_Head_Sallet_Solid_A_002",
+            L"SK_Armor_Head_Sallet_Solid_A_003",
+            L"SK_Armor_Head_Sallet_Solid_A_004",
+            L"SK_Armor_Head_Sallet_Solid_B_001",
+            L"SK_Armor_Head_Sallet_Solid_B_002",
+            L"SK_Armor_Head_Sallet_Solid_B_003",
+            L"SK_Armor_Head_Sallet_Solid_B_004",
+            L"SK_Armor_Head_Sallet_Solid_C_001",
+            L"SK_Armor_Head_Sallet_Solid_C_002",
+            L"SK_Armor_Head_Sallet_Solid_D_001",
+            L"SK_Armor_Head_Sallet_Solid_D_002",
+            L"SK_Armor_Head_Sallet_Solid_D_004",
+            L"SK_Armor_Head_Sallet_Solid_E_001",
+            L"SK_Armor_Head_Sallet_Solid_E_002",
+            L"SK_Armor_Head_Sallet_Visor_A_Visor_001",
+            L"SK_Armor_Head_Sallet_Visor_Visor_A_002",
+            L"SK_Armor_Head_Sallet_Visor_Visor_B_002",
+            L"SK_Armor_Head_Sallet_Visor_Visor_C_002",
+            L"SK_Armor_Head_Sallet_Visor_Visor_D_002",
+            L"SK_Armor_Helmet_Barbute_B_001",
+            L"Sk_Armor_Head_Armet_A",
+            L"Sk_Armor_Head_Armet_A_B",
+            L"Sk_Armor_Head_Armet_A_G",
+            L"Sk_Armor_Head_Armet_R",
+            L"Sk_Armor_Head_Armet_Visor_A",
+            L"Sk_Armor_Head_Armet_Visor_A_B",
+            L"Sk_Armor_Head_Armet_Visor_A_G",
+            L"Sk_Armor_Head_Armet_Visor_A_R",
+            L"Sk_Armor_Head_Sallet_Visor_A_Visor",
+            L"Sk_Armor_Head_Sallet_Visor_B_Visor"};
+        UObject* mesh = object_property(comp, STR("SkeletalMesh"));
+        if (!mesh) mesh = object_property(comp, STR("SkeletalMeshAsset"));
+        std::wstring name = mesh ? mesh->GetName() : STR("");
+        if (mesh_name) *mesh_name = name;
+        if (name.empty()) return false;
+        if (in_csv(cfg.helmet_fade_never, name)) return false;
+        if (in_csv(cfg.helmet_fade_always, name)) return true;
+        for (const wchar_t* f : face)
+            if (_wcsicmp(f, name.c_str()) == 0) return true;
+        return false;
+    }
     UObject* g_fade_pawn = nullptr;
     std::string g_fade_key; // the scalars last written
 
@@ -17269,9 +17343,22 @@ namespace
         static std::string failed_path;
         bool want = first_person && cfg.helmet_view == 5 && pawn;
         std::vector<UObject*> pieces;
+        static std::string logged; // which pieces were last reported solid / faded
+        std::string report;
         if (want)
             for (const HeadWear& w : g_head_wear)
-                if (w.comp && !gone(w.comp)) pieces.push_back(w.comp);
+                if (w.comp && !gone(w.comp))
+                {
+                    std::wstring mn;
+                    bool face = fade_face_covering(w.comp, cfg, &mn);
+                    if (face) pieces.push_back(w.comp);
+                    report += std::string(mn.begin(), mn.end()) + (face ? " faded; " : " solid (not in front of your eyes); ");
+                }
+        if (want && report != logged)
+        {
+            logged = report;
+            if (!report.empty()) HSVR_LOG("Helmet fade: %s", report.c_str());
+        }
         bool same = want && pawn == g_fade_pawn && pieces.size() == g_fade.size();
         if (same)
             for (const FadeCopy& f : g_fade)
@@ -17317,13 +17404,32 @@ namespace
                     }
                 if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
             }
-            add.flag(STR("bDeferredFinish"), false);
+            // Deferred: no collision is set before it is registered or has a mesh, so it never gets physics
+            // bodies (a primitive with collision off creates no physics state). Playtest 2026-11-21 11:21:
+            // the first version (collision turned off after the mesh) stopped his held weapons at "Head".
+            add.flag(STR("bDeferredFinish"), true);
             if (!add.run() || !add.object_result())
             {
                 HSVR_LOG("Helmet fade: could not add a copy for %ls", real->GetName().c_str());
                 continue;
             }
             UObject* c = add.object_result();
+            {
+                Call prof(c, STR("SetCollisionProfileName"));
+                prof.name(STR("InCollisionProfileName"), FName(STR("NoCollision"), FNAME_Add));
+                prof.flag(STR("bUpdateOverlaps"), false);
+                prof.run();
+                Call ce0(c, STR("SetCollisionEnabled"));
+                ce0.byte(STR("NewType"), 0);
+                ce0.run();
+                Call all(c, STR("SetCollisionResponseToAllChannels"));
+                all.byte(STR("NewResponse"), 0); // ECR_Ignore
+                all.run();
+                Call ov(c, STR("SetGenerateOverlapEvents"));
+                ov.first_flag(false);
+                ov.run();
+                if (FProperty* step = prop_chain(c, STR("CanCharacterStepUpOn"))) *(reinterpret_cast<uint8_t*>(c) + step->GetOffset_Internal()) = 0; // ECB_No
+            }
             bool set = false;
             for (const TCHAR* fn : {STR("SetSkeletalMeshAsset"), STR("SetSkinnedAssetAndUpdate"), STR("SetSkeletalMesh")})
             {
@@ -17333,6 +17439,25 @@ namespace
                 sm.run();
                 set = true;
                 break;
+            }
+            {
+                Call fin(pawn, STR("FinishAddComponent"));
+                fin.object(STR("Component"), c);
+                fin.flag(STR("bManualAttachment"), true);
+                if (FProperty* t = fin.param(STR("RelativeTransform")))
+                {
+                    uint8_t* at = fin.buffer.data() + t->GetOffset_Internal();
+                    UScriptStruct* type = struct_type(t);
+                    if (FProperty* r = struct_member(type, STR("Rotation")))
+                        if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                        {
+                            uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                            if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                            else *reinterpret_cast<float*>(wat) = 1.0f;
+                        }
+                    if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+                }
+                fin.run();
             }
             Call at_call(c, STR("K2_AttachToComponent"));
             at_call.object(STR("Parent"), real);
@@ -17389,8 +17514,16 @@ namespace
                 }
             }
             g_fade.push_back({real, c});
-            HSVR_LOG("Helmet fade: see-through copy of %ls (%ls, %d material slot%s, mesh %s, normal map %ls) made, only you see it", real->GetName().c_str(), mesh->GetName().c_str(), n,
-                     n == 1 ? "" : "s", set ? "set" : "NOT set", normal ? normal->GetName().c_str() : STR("none"));
+            Call gce(c, STR("GetCollisionEnabled"));
+            gce.run();
+            FProperty* gr = gce.param(STR("ReturnValue"));
+            int coll = gr ? *(gce.buffer.data() + gr->GetOffset_Internal()) : -1;
+            Call gpn(c, STR("GetCollisionProfileName"));
+            gpn.run();
+            FProperty* gpr = gpn.param(STR("ReturnValue"));
+            std::wstring prof_name = gpr ? reinterpret_cast<FName*>(gpn.buffer.data() + gpr->GetOffset_Internal())->ToString() : STR("?");
+            HSVR_LOG("Helmet fade: see-through copy of %ls (%ls, %d material slot%s, mesh %s, normal map %ls) made, only you see it; collision %d (0 = none), profile %ls",
+                     real->GetName().c_str(), mesh->GetName().c_str(), n, n == 1 ? "" : "s", set ? "set" : "NOT set", normal ? normal->GetName().c_str() : STR("none"), coll, prof_name.c_str());
         }
         fade_set_params(cfg, true);
         return true;
@@ -20690,6 +20823,42 @@ namespace
                 hsvr::Quat hr = socket_rotation(ref, bone_fname("head"));
                 auto local = [&](const hsvr::Vec3& w) { return hr.inverse().rotate(w - hb); };
                 HSVR_LOG("Probe helmet: near clip %.2f cm (helmet window %.2f cm, helmet_view %d), eye offset fwd %.1f up %.1f; head bone of %ls", pcfg.near_clip_cm, hsvr::shared().helmet_window_cm.load(), pcfg.helmet_view, pcfg.eye_forward_cm, pcfg.eye_up_cm, ref->GetName().c_str());
+                // What collides at his head: every component a 25 cm sphere there overlaps (all object types),
+                // so a see-through copy that has collision would show up here.
+                {
+                    static UObject* ksl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+                    static uint8_t types[32];
+                    for (int i = 0; i < 32; ++i) types[i] = (uint8_t)i;
+                    Call ov(ksl, STR("SphereOverlapComponents"));
+                    FProperty* ot = ov.param(STR("ObjectTypes"));
+                    FProperty* out = ov.param(STR("OutComponents"));
+                    if (ksl && ot && out)
+                    {
+                        ov.object(STR("WorldContextObject"), pawn);
+                        ov.three(STR("SpherePos"), hb.x, hb.y, hb.z);
+                        ov.number(STR("SphereRadius"), 25.0);
+                        RawArray* list = reinterpret_cast<RawArray*>(ov.buffer.data() + ot->GetOffset_Internal());
+                        list->Data = reinterpret_cast<void**>(types);
+                        list->Num = list->Max = 32;
+                        ov.run();
+                        RawArray* found = reinterpret_cast<RawArray*>(ov.buffer.data() + out->GetOffset_Internal());
+                        std::wstring names;
+                        int copies = 0;
+                        for (int32_t i = 0; i < found->Num && found->Data; ++i)
+                        {
+                            UObject* oc = reinterpret_cast<UObject*>(found->Data[i]);
+                            if (!oc) continue;
+                            bool copy = std::any_of(g_fade.begin(), g_fade.end(), [&](const FadeCopy& f) { return f.copy == oc; });
+                            copies += copy ? 1 : 0;
+                            names += (names.empty() ? STR("") : STR(", ")) + oc->GetName() + (copy ? STR(" [SEE-THROUGH COPY]") : STR(""));
+                        }
+                        HSVR_LOG("Probe helmet: collision at his head (25 cm): %d component(s), %d of them see-through copies (of %zu copies): %ls", found->Num, copies, g_fade.size(), names.c_str());
+                        found->Data = nullptr; // the engine's array memory is leaked on purpose (tiny, test only)
+                        found->Num = found->Max = 0;
+                        list->Data = nullptr;
+                        list->Num = list->Max = 0;
+                    }
+                }
                 for (int e = 0; e < 2; ++e)
                 {
                     hsvr::Vec3 at;

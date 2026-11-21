@@ -788,6 +788,8 @@ namespace hsvr
         text("helmet_see_through_param", c.helmet_see_through_param);
         integer("helmet_see_through_test", c.helmet_see_through_test);
         num("helmet_fade_see_through", c.helmet_fade_see_through);
+        text("helmet_fade_always", c.helmet_fade_always);
+        text("helmet_fade_never", c.helmet_fade_never);
         text("helmet_fade_tint", c.helmet_fade_tint);
         num("helmet_fade_metallic", c.helmet_fade_metallic);
         num("helmet_fade_roughness", c.helmet_fade_roughness);
