@@ -885,7 +885,7 @@ namespace hsvr
         // How far his legs crouch him (cm, times his size). Deeper than that (your view lower still), he
         // bends forward until his head is down with your view, so his hands reach as low as yours
         // (pose_crouch_bend_for_depth; playtest 2026-11-21: he could not reach the ground).
-        double pose_crouch_max_cm = 55.0;
+        double pose_crouch_max_cm = 62.0; // was a fixed 55; playtest 2026-11-21: view 114 cm down, his head bone 35 cm above it
         bool pose_crouch_bend_for_depth = true;
         // Left stick click toggles a button crouch this deep (cm, eased at _cms); 0 = off.
         double pose_crouch_button_cm = 40.0;
