@@ -39,6 +39,8 @@ MODEL_TYPES = "*.glb *.gltf *.obj *.nif *.stl *.ply *.dae *.off"
 MODEL_EXTS = tuple(e[1:] for e in MODEL_TYPES.split())
 TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or spear", "hafted")]
 ZONE_COLOURS = {"Pommel": "#b07a3c", "Grip": "#7a4a2a", "Guard": "#c9a227", "Head": "#8fa3b8"}
+# Display units. Everything inside stays centimetres and kilograms; only what is shown and typed changes.
+UNIT_SYSTEMS = {"Metric (cm, kg)": ("cm", 1.0, "kg", 1.0), "Imperial (inches, pounds)": ("in", 2.54, "lb", 0.45359237)}
 SETTINGS = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "HalfSwordWeaponConverter.json")
 
 
@@ -180,7 +182,7 @@ def render_view(pos, nrm, uv, tris, colour_img, zones, view, width, height, s):
     return img
 
 
-def zone_bar(zones, zmin, s, width, hafted):
+def zone_bar(zones, zmin, s, width, hafted, fmt_len=lambda cm: f"{cm:.0f} cm"):
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (width, 26), (34, 36, 40))
     d = ImageDraw.Draw(img)
@@ -191,7 +193,7 @@ def zone_bar(zones, zmin, s, width, hafted):
         if x1 - x0 < 1:
             continue
         d.rectangle([x0, 2, x1, 12], fill=ZONE_COLOURS[slot])
-        label = f"{names[slot]} {hi - lo:.0f} cm"
+        label = f"{names[slot]} {fmt_len(hi - lo)}"
         tw = d.textlength(label)
         if tw < x1 - x0 + 30:
             d.text(((x0 + x1) / 2 - tw / 2, 13), label, fill=(220, 220, 220))
@@ -231,12 +233,14 @@ class App:
 
         form = ttk.Frame(main)
         form.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
-        ttk.Label(form, text="Real length (cm)").grid(row=0, column=0, sticky="w", **pad)
+        self.length_label = ttk.Label(form, text="Real length (cm)")
+        self.length_label.grid(row=0, column=0, sticky="w", **pad)
         self.length_var = tk.StringVar()
         ttk.Entry(form, textvariable=self.length_var, width=10).grid(row=0, column=1, sticky="w", **pad)
-        ttk.Label(form, text="arming sword ~90, longsword 110-125, greatsword 140-180, spear 200+",
-                  foreground="#777").grid(row=0, column=2, sticky="w", **pad)
-        ttk.Label(form, text="Weight (kg)").grid(row=1, column=0, sticky="w", **pad)
+        self.length_hint = ttk.Label(form, text="", foreground="#777")
+        self.length_hint.grid(row=0, column=2, sticky="w", **pad)
+        self.mass_label = ttk.Label(form, text="Weight (kg)")
+        self.mass_label.grid(row=1, column=0, sticky="w", **pad)
         self.mass_var = tk.StringVar()
         ttk.Entry(form, textvariable=self.mass_var, width=10).grid(row=1, column=1, sticky="w", **pad)
         ttk.Label(form, text="leave empty to estimate it from the model", foreground="#777").grid(row=1, column=2, sticky="w", **pad)
@@ -244,6 +248,14 @@ class App:
         self.type_var = tk.StringVar(value=TYPES[0][0])
         ttk.Combobox(form, textvariable=self.type_var, values=[t for t, _ in TYPES], state="readonly",
                      width=28).grid(row=2, column=1, columnspan=2, sticky="w", **pad)
+        ttk.Label(form, text="Units").grid(row=3, column=0, sticky="w", **pad)
+        unit_name = self.settings.get("units")
+        self.units_var = tk.StringVar(value=unit_name if unit_name in UNIT_SYSTEMS else next(iter(UNIT_SYSTEMS)))
+        self.units_shown = self.units_var.get()
+        ttk.Combobox(form, textvariable=self.units_var, values=list(UNIT_SYSTEMS), state="readonly",
+                     width=28).grid(row=3, column=1, columnspan=2, sticky="w", **pad)
+        self.units_var.trace_add("write", lambda *_: self.units_changed())
+        self.show_unit_labels()
         for var in (self.length_var, self.mass_var, self.type_var):
             var.trace_add("write", lambda *_: self.inputs_changed())
 
@@ -340,25 +352,72 @@ class App:
         ttk.Button(win, text="Use this one", command=ok).pack(pady=8)
         win.grab_set()
 
+    # ---- units -----------------------------------------------------------------------------------------
+    def units(self):
+        return UNIT_SYSTEMS[self.units_var.get()]
+
+    def fmt_len(self, cm, digits=0):
+        u, k, _, _ = self.units()
+        if u == "in" and digits == 0:
+            digits = 1  # a whole inch is too coarse for guards and pommels
+        return f"{cm / k:,.{digits}f} {u}"
+
+    def fmt_mass(self, kg):
+        _, _, u, k = self.units()
+        return f"{kg / k:.2f} {u}"
+
+    def show_unit_labels(self):
+        lu, _, mu, _ = self.units()
+        self.length_label.config(text=f"Real length ({lu})")
+        self.mass_label.config(text=f"Weight ({mu})")
+        self.length_hint.config(text="arming sword ~90, longsword 110-125, greatsword 140-180, spear 200+" if lu == "cm"
+                                else "arming sword ~35, longsword 43-49, greatsword 55-71, spear 79+")
+
+    def units_changed(self):
+        old, new = UNIT_SYSTEMS[self.units_shown], self.units()
+        self.units_shown = self.units_var.get()
+        self.settings["units"] = self.units_shown
+        save_settings(self.settings)
+        # Convert what is already typed, then relabel everything. Half-converted fields must not count as
+        # a change, so the check runs once at the end.
+        self.converting_units = True
+        for var, k_old, k_new, digits in ((self.length_var, old[1], new[1], 2), (self.mass_var, old[3], new[3], 3)):
+            try:
+                v = float(var.get().replace(",", ".")) * k_old / k_new
+                var.set(f"{v:.{digits}f}".rstrip("0").rstrip("."))
+            except ValueError:
+                pass
+        self.converting_units = False
+        self.show_unit_labels()
+        if self.raw_length is not None and self.model_var.get():
+            for w in self.unit_buttons.winfo_children():
+                w.destroy()
+            self.measured(self.model_var.get(), self.raw_length, keep_length=True)
+        if self.result is not None:
+            self.redraw_result()
+        self.inputs_changed()
+
     def measure(self, path):
         raw = model_to_weapon.model_length(path)
         self.events.put(("measured", path, raw))
 
-    def measured(self, path, raw):
+    def measured(self, path, raw, keep_length=False):
         if path != self.model_var.get():
             return
         self.raw_length = raw
+        k = self.units()[1]
         if os.path.splitext(path)[1].lower() in (".glb", ".gltf"):
-            self.model_info.config(text=f"The file makes this weapon {raw * 100:,.1f} cm long. "
+            self.model_info.config(text=f"The file makes this weapon {self.fmt_len(raw * 100, 1)} long. "
                                         "Downloaded models are often scaled wrong: check the length below.")
-            self.length_var.set(f"{raw * 100:.1f}")
+            if not keep_length:
+                self.length_var.set(f"{raw * 100 / k:.1f}")
         else:
             self.model_info.config(text="This file does not say what unit it uses. Pick the one that gives a "
                                         "sensible length, or type the real length below:")
             units = UNITS + ([("Skyrim units", 1.42875)] if path.lower().endswith(".nif") else [])
             for word, cm in units:
-                ttk.Button(self.unit_buttons, text=f"{word}: {raw * cm:,.1f} cm",
-                           command=lambda v=raw * cm: self.length_var.set(f"{v:.1f}")).pack(side="left", padx=(0, 6))
+                ttk.Button(self.unit_buttons, text=f"{word}: {self.fmt_len(raw * cm, 1)}",
+                           command=lambda v=raw * cm / k: self.length_var.set(f"{v:.1f}")).pack(side="left", padx=(0, 6))
 
     def pick_mod(self):
         path = filedialog.askdirectory(title="The HalfSwordCustomWeapon folder (in ...\\ue4ss\\Mods)",
@@ -381,23 +440,41 @@ class App:
             self.mod_info.config(text="", foreground="")
 
     def inputs(self):
+        """(length cm, mass kg text or "", type, flip): always metric inside, whatever is shown."""
+        lu, lk, mu, mk = self.units()
         try:
-            length = float(self.length_var.get().replace(",", "."))
+            length = round(float(self.length_var.get().replace(",", ".")) * lk, 2)
         except ValueError:
-            return None, "Type the weapon's real length in centimetres, for example 120."
+            return None, ("Type the weapon's real length in centimetres, for example 120." if lu == "cm" else
+                          "Type the weapon's real length in inches, for example 47.")
         if not 10 <= length <= 400:
-            return None, "The length should be between 10 and 400 cm."
+            return None, f"The length should be between {self.fmt_len(10)} and {self.fmt_len(400)}."
         mass = self.mass_var.get().strip().replace(",", ".")
         if mass:
             try:
-                if not 0.05 <= float(mass) <= 50:
-                    return None, "The weight should be between 0.05 and 50 kg."
+                kg = float(mass) * mk
             except ValueError:
-                return None, "Type the weight in kilograms, for example 1.8, or leave it empty."
+                return None, ("Type the weight in kilograms, for example 1.8, or leave it empty." if mu == "kg" else
+                              "Type the weight in pounds, for example 4, or leave it empty.")
+            if not 0.05 <= kg <= 50:
+                return None, f"The weight should be between {self.fmt_mass(0.05)} and {self.fmt_mass(50)}."
+            mass = f"{kg:.4f}"
         return (length, mass, dict(TYPES)[self.type_var.get()], self.flip), None
 
+    def same_inputs(self, a, b):
+        """Equal apart from unit-conversion rounding (switching units must not ask for a new Convert)."""
+        if a is None or b is None:
+            return a is b
+        if a[2:] != b[2:] or bool(a[1]) != bool(b[1]):
+            return False
+        if abs(a[0] - b[0]) > 0.05:
+            return False
+        return not a[1] or abs(float(a[1]) - float(b[1])) <= 0.005
+
     def inputs_changed(self):
-        if self.result is not None and self.inputs()[0] != self.result_inputs:
+        if getattr(self, "converting_units", False):
+            return
+        if self.result is not None and not self.same_inputs(self.inputs()[0], self.result_inputs):
             self.install_btn.config(state="disabled")
             self.status.config(text="Changed: press Convert again before installing.")
 
@@ -458,43 +535,52 @@ class App:
         s = view_scale(pos, width, (200, 70))
         flat = render_view(pos, nrm, uv, tris, colour, zones, "flat", width, 200, s)
         edge = render_view(pos, nrm, uv, tris, colour, zones, "edge", width, 70, s)
-        bar = zone_bar(zones, float(pos[:, 2].min()), s, width, info["type"] == "hafted")
-        from PIL import Image
+        views = (flat, edge, zones, float(pos[:, 2].min()), s, width)
+        self.events.put(("converted", (name, info, views), values))
+
+    def converted(self, payload, values):
+        name, info, views = payload
+        self.result, self.result_inputs = (name, info), values
+        self.result_views = views
+        self.redraw_result()
+        self.flip_btn.config(state="normal")
+        self.install_btn.config(state="normal")
+        self.status.config(text="Check the picture, then Install.")
+
+    def redraw_result(self):
+        """Picture bar and summary text in the units shown (the conversion itself is unit-free)."""
+        from PIL import Image, ImageTk
+        name, info = self.result
+        flat, edge, zones, zmin, s, width = self.result_views
+        L = self.fmt_len
+        bar = zone_bar(zones, zmin, s, width, info["type"] == "hafted", L)
         pic = Image.new("RGB", (width, flat.height + edge.height + bar.height), (34, 36, 40))
         pic.paste(flat, (0, 0))
         pic.paste(edge, (0, flat.height))
         pic.paste(bar, (0, flat.height + edge.height))
-        self.events.put(("converted", (name, info, pic), values))
-
-    def converted(self, payload, values):
-        from PIL import ImageTk
-        name, info, pic = payload
-        self.result, self.result_inputs = (name, info), values
         photo = ImageTk.PhotoImage(pic)
         self.photos = [photo]
         self.preview.config(image=photo)
         zn = info["zones_cm"]
         hafted = info["type"] == "hafted"
         how = "found by the model's part names" if info["parts_by_name"] else "found from the model's shape"
-        mass = f"{info['mass_kg']:.2f} kg"
+        mass = self.fmt_mass(info["mass_kg"])
         if info["mass_note"] != "given":
             mass += (" (estimated: type the real weight if you know it)" if info["mass_kg"] <= 6 else
                      " (estimated, and heavier than any real weapon: the model is probably much thicker than "
-                     "the real thing. Type a weight, for example 1.5 for a sword or 2 for an axe)")
+                     "the real thing. Type a weight, for example " +
+                     ("1.5 for a sword or 2 for an axe)" if self.units()[2] == "kg" else "3.3 for a sword or 4.4 for an axe)"))
         if hafted:
-            parts = (f"haft {-zn['handle_bottom']:.0f} cm, head {zn['tip']:.0f} cm"
-                     + (f", butt cap {zn['handle_bottom'] - zn['pommel_end']:.0f} cm" if zn['handle_bottom'] > zn['pommel_end'] + 0.5 else ""))
+            parts = (f"haft {L(-zn['handle_bottom'])}, head {L(zn['tip'])}"
+                     + (f", butt cap {L(zn['handle_bottom'] - zn['pommel_end'])}" if zn['handle_bottom'] > zn['pommel_end'] + 0.5 else ""))
         else:
-            parts = (f"pommel {zn['handle_bottom'] - zn['pommel_end']:.0f} cm, grip {-zn['handle_bottom']:.0f} cm, "
-                     f"guard {zn['guard_top']:.1f} cm, blade {zn['tip'] - zn['guard_top']:.0f} cm")
-        self.summary.config(text=f"{'Hafted weapon' if hafted else 'Sword'}, {zn['tip'] - zn['pommel_end']:.0f} cm, "
+            parts = (f"pommel {L(zn['handle_bottom'] - zn['pommel_end'])}, grip {L(-zn['handle_bottom'])}, "
+                     f"guard {L(zn['guard_top'], 1)}, blade {L(zn['tip'] - zn['guard_top'])}")
+        self.summary.config(text=f"{'Hafted weapon' if hafted else 'Sword'}, {L(zn['tip'] - zn['pommel_end'])}, "
                                  f"{mass}.\nParts ({how}): {parts}.\n"
                                  "The handle is on the left and the " + ("head" if hafted else "blade") +
                                  " on the right. If the picture shows it the other way round, press "
                                  "\"Blade is on the wrong end\".")
-        self.flip_btn.config(state="normal")
-        self.install_btn.config(state="normal")
-        self.status.config(text="Check the picture, then Install.")
 
     def toggle_flip(self):
         self.flip = not self.flip
