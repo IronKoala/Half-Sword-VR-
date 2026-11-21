@@ -17,6 +17,7 @@ namespace hsvr
     namespace
     {
         AnchorProvider g_anchor_provider = nullptr;
+        LatchCallback g_latch_callback = nullptr;
         std::atomic<uint64_t> g_game_frame{1};
         double g_delta_seconds = 1.0 / 90.0;
 
@@ -37,6 +38,9 @@ namespace hsvr
             double base_yaw = 0.0; // world heading that "straight ahead" maps to
             Recenter recenter;
             double cm_per_metre = 100.0; // world centimetres per real metre (last seen)
+            Vec3 eye_at[2];              // each eye as the engine last drew it (world), for the helmet probe
+            Quat eye_rot[2];
+            bool eye_valid[2] = {false, false};
         };
         FrameView g_view;
         bool g_have_smoothed = false;
@@ -234,8 +238,10 @@ namespace hsvr
 
             void CalculateStereoViewOffset(const int32_t ViewIndex, ue::FRotator& ViewRotation, const float WorldToMeters, ue::FVector& ViewLocation) override
             {
+                uint64_t latched_before = g_view.game_frame;
                 latch_frame(ViewRotation, ViewLocation);
                 if (!g_view.valid) return;
+                if (g_view.game_frame != latched_before && g_latch_callback) g_latch_callback();
                 Config cfg = config();
                 const XrEyeRaw eye = eye_for_view(ViewIndex);
                 double cm_per_metre = (WorldToMeters > 1.0f ? (double)WorldToMeters : 100.0) * cfg.world_scale;
@@ -253,6 +259,12 @@ namespace hsvr
                 ViewRotation.Pitch = rotation.pitch;
                 ViewRotation.Yaw = rotation.yaw;
                 ViewRotation.Roll = rotation.roll;
+                if (ViewIndex >= 0 && ViewIndex < 2)
+                {
+                    g_view.eye_at[ViewIndex] = location;
+                    g_view.eye_rot[ViewIndex] = (base * relative_rotation).normalized();
+                    g_view.eye_valid[ViewIndex] = true;
+                }
             }
 
             ue::FMatrix GetStereoProjectionMatrix(const int32_t ViewIndex) const override
@@ -270,6 +282,8 @@ namespace hsvr
                     right = up = 1.0;
                 }
                 double z_near = config().near_clip_cm;
+                double window = shared().helmet_window_cm.load();
+                if (window > z_near) z_near = window; // helmet_view 3: the helmet's walls right around your eyes not drawn
                 double sum_rl = right + left, sum_tb = up + down;
                 double inv_rl = 1.0 / (right - left), inv_tb = 1.0 / (up - down);
                 ue::FMatrix m{};
@@ -334,6 +348,11 @@ namespace hsvr
         g_anchor_provider = provider;
     }
 
+    void stereo_set_latch_callback(LatchCallback callback)
+    {
+        g_latch_callback = callback;
+    }
+
     void stereo_begin_game_frame(double delta_seconds)
     {
         g_game_frame.fetch_add(1);
@@ -351,16 +370,37 @@ namespace hsvr
         }
     }
 
+    // Where the view will be anchored this frame, worked out now (the same sum latch_frame makes when the
+    // views are set up, late in the frame, without moving its smoothing on). Hands placed during the
+    // frame from the anchor of the frame before were off by however far he moved since: while walking
+    // his hands shook against the view by the capsule's own step-to-step jerk (playtest 11:31).
+    bool current_anchor(Vec3& anchor, double& base_yaw)
+    {
+        anchor = g_view.anchor;
+        base_yaw = g_view.base_yaw;
+        Config cfg = config();
+        if (!cfg.tracking_current_anchor || !g_have_smoothed || !g_anchor_provider) return true;
+        if (cfg.anchor != "head" || shared().third_person.load()) return true;
+        PlayerAnchor player;
+        if (!g_anchor_provider(player) || !player.has_head) return true;
+        if (cfg.heading == "aim" && player.has_heading) base_yaw = player.heading_yaw;
+        anchor = player.actor_position + g_smoothed_offset + quat_from_yaw_deg(base_yaw).rotate({cfg.eye_forward_cm, 0.0, 0.0}) + Vec3{0.0, 0.0, cfg.eye_up_cm};
+        return true;
+    }
+
     bool stereo_tracking_to_world(const XrPoseRaw& pose, Vec3& location, Quat& rotation)
     {
         if (!g_view.valid || !g_view.recenter.valid) return false;
+        Vec3 anchor;
+        double base_yaw = 0.0;
+        current_anchor(anchor, base_yaw);
         // Exactly the placement the eyes get in CalculateStereoViewOffset.
         Quat recenter_inverse = quat_from_yaw_deg(g_view.recenter.yaw_deg).inverse();
         Vec3 real_cm = xr_to_ue_position(pose.px, pose.py, pose.pz, 100.0);
         Vec3 relative = recenter_inverse.rotate(real_cm - g_view.recenter.position_cm) * (g_view.cm_per_metre / 100.0);
         Quat relative_rotation = recenter_inverse * xr_to_ue_rotation(pose.qx, pose.qy, pose.qz, pose.qw);
-        Quat base = quat_from_yaw_deg(g_view.base_yaw);
-        location = g_view.anchor + base.rotate(relative);
+        Quat base = quat_from_yaw_deg(base_yaw);
+        location = anchor + base.rotate(relative);
         rotation = (base * relative_rotation).normalized();
         return true;
     }
@@ -368,8 +408,14 @@ namespace hsvr
     bool stereo_view_anchor(Vec3& anchor, double& base_yaw)
     {
         if (!g_view.valid) return false;
-        anchor = g_view.anchor;
-        base_yaw = g_view.base_yaw;
+        return current_anchor(anchor, base_yaw); // the same anchor stereo_tracking_to_world places things from
+    }
+
+    bool stereo_last_eye(int index, Vec3& location, Quat& rotation)
+    {
+        if (index < 0 || index > 1 || !g_view.eye_valid[index]) return false;
+        location = g_view.eye_at[index];
+        rotation = g_view.eye_rot[index];
         return true;
     }
 
