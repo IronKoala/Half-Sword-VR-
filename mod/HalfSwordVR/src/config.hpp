@@ -469,6 +469,10 @@ namespace hsvr
         bool pose_hold_arm_lag = true;
         double pose_hold_arm_lag_s = 0.05;
         double pose_hold_arm_lag_max_s = 0.25;
+        // A heavy weapon's own heft, whoever holds it (Matthew 2026-11-21: a max-strength "GigaChad" Willie swung a
+        // greatsword like a dagger): the lag is never below this x sqrt(weapon inertia about the shoulder per arm,
+        // in kg m^2). 0.11: greatsword ~0.10 s two-handed / 0.14 one-handed, arming sword ~0.08, dagger ~0.05. 0 = off.
+        double pose_hold_heft_lag_s = 0.11;
         double pose_hold_arm_reach_cm = 55.0;
         // His shoulder's strength (N m, for a default fresh body; x his strength, injury and stamina; both arms
         // add): the arm-lag hold can't speed arm + weapon about the shoulder faster than this allows, so the
@@ -913,6 +917,14 @@ namespace hsvr
         int helmet_see_through_mode = 0;
         std::string helmet_see_through_param = "RT_Damage";
         int helmet_see_through_test = 0;
+        // helmet_view 5: your helmet faded in your view (an only-you-see copy drawn with a translucent
+        // material the game ships). helmet_fade_see_through 0 = solid, 1 = invisible. The material has
+        // no colour texture: helmet_fade_tint is the metal colour "r,g,b" (0-1).
+        double helmet_fade_see_through = 0.5;
+        std::string helmet_fade_tint = "0.55,0.55,0.58";
+        double helmet_fade_metallic = 1.0;
+        double helmet_fade_roughness = 0.35;
+        std::string helmet_fade_material = "/DatasmithContent/Materials/StdTranslucent/M_StdTranslucent.M_StdTranslucent";
         // The gore skeleton under his skin (skull, jaw, teeth, throat) would show from inside the
         // hidden head: it is hidden from this bone up. Empty = not hidden. Wounds elsewhere still
         // show their bones.
