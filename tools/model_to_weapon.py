@@ -249,7 +249,32 @@ def load_model(path):
         if mat is not None and getattr(mat, "name", None):
             names.append(str(mat.name))
         out.append((names, g))
-    return out
+    return drop_scenery(out)
+
+
+SCENERY_WORDS = r"ground|floor|backdrop|studio|environment|turntable|plinth|pedestal|display stand|camera|light"
+
+
+def drop_scenery(meshes):
+    """Leaves out what a model's author put around the weapon for its presentation: meshes named like
+    scenery (a "Studio | Ground" plane, a backdrop), and flat meshes far bigger than everything else
+    (a floor plane 200 m wide made a 104 cm knife read as 20,000 cm)."""
+    if len(meshes) < 2:
+        return meshes
+    keep, dropped = [], []
+    for names, g in meshes:
+        ext = np.ptp(np.asarray(g.vertices), axis=0)
+        others = [np.asarray(h.vertices) for n2, h in meshes if h is not g]
+        rest = float(np.ptp(np.vstack(others), axis=0).max()) if others else 0.0
+        flat = ext.min() < 1e-6 * max(ext.max(), 1e-12) or len(g.vertices) <= 8
+        if re.search(SCENERY_WORDS, " ".join(names), re.I) or (flat and ext.max() > 3 * rest > 0):
+            dropped.append(names[0])
+        else:
+            keep.append((names, g))
+    if dropped and keep:
+        print("left out (scenery, not part of the weapon): " + ", ".join(dropped))
+        return keep
+    return meshes
 
 
 def model_length(path):
@@ -283,6 +308,13 @@ def material_maps(mat, size, metallic, roughness):
         bf = factor(mat.baseColorFactor, 4)
         metal_f = 1.0 if mat.metallicFactor is None else float(mat.metallicFactor)
         rough_f = 1.0 if mat.roughnessFactor is None else float(mat.roughnessFactor)
+        if all(v is None for v in (mat.baseColorTexture, mat.normalTexture, mat.metallicRoughnessTexture,
+                                   mat.baseColorFactor, mat.metallicFactor, mat.roughnessFactor)):
+            # A material with nothing in it (Blender node setups that glTF cannot carry export like
+            # this): plain steel instead of glTF's default white rough metal. Iron's base colour
+            # 0.56/0.57/0.58 from the usual PBR reference charts; roughness/metallic from the options.
+            bf = np.array([0.56, 0.57, 0.58, 1.0])
+            metal_f, rough_f = metallic, roughness
     else:  # OBJ/MTL and the like: a colour map at most
         base = img(getattr(mat, "image", None)) if mat is not None else None
         bf = factor(getattr(mat, "diffuse", None), 4) if mat is not None else np.ones(4)
@@ -298,7 +330,10 @@ def material_maps(mat, size, metallic, roughness):
         r, m = mr[:, :, 1] * rough_f, mr[:, :, 2] * metal_f
     else:
         r, m = np.full((h, w), rough_f), np.full((h, w), metal_f)
-    has_maps = base is not None or nm is not None or mr is not None
+    # Plain colours count too (a material with only a colour and roughness/metal numbers).
+    has_maps = base is not None or nm is not None or mr is not None or (
+        isinstance(mat, trimesh.visual.material.PBRMaterial) and
+        any(v is not None for v in (mat.baseColorFactor, mat.metallicFactor, mat.roughnessFactor)))
     return (colour, nx, ny, np.dstack([o, r, m])), has_maps
 
 
@@ -368,7 +403,17 @@ def main(argv=None):
 
     # ---- named parts ----------------------------------------------------------------------------------
     mesh_part = [part_of(names) for names, _ in meshes]
-    named = "Head" in mesh_part and ("Guard" in mesh_part or "Grip" in mesh_part)
+    named = "Head" in mesh_part and ("Grip" in mesh_part or ("Guard" in mesh_part and "Pommel" in mesh_part))
+    if named:
+        # Names are only trusted when they make sense: a "blade" mesh that also runs the length of the
+        # handle (a full tang modelled as one piece with the blade) does not mark where the blade starts.
+        head_t = t[np.isin(mesh_of_vertex, [k for k, p in enumerate(mesh_part) if p == "Head"])]
+        hilt_t = t[np.isin(mesh_of_vertex, [k for k, p in enumerate(mesh_part) if p in ("Grip", "Pommel")])]
+        if len(hilt_t):
+            ov = min(head_t.max(), hilt_t.max()) - max(head_t.min(), hilt_t.min())
+            if ov > 0.3 * max(float(np.ptp(hilt_t)), 1e-9):
+                print("part names ignored: the blade mesh runs through the handle (full tang?); finding parts from the shape")
+                named = False
     hafted = False
     vertex_part = np.array([mesh_part[k] or "" for k in mesh_of_vertex]) if named else None
     if named:
@@ -403,8 +448,14 @@ def main(argv=None):
         at = (widths[peak][0] - t.min()) / max(float(np.ptp(t)), 1e-9)
         # So does a wide part much longer than a guard (an axe's head reaches over a fifth of the length).
         long_run = (g_hi - g_lo) > 0.2 * float(np.ptp(t))
-        hafted = args.type == "hafted" or (args.type is None and (at < 0.15 or at > 0.85 or long_run))
-        if hafted:
+        # A long wide part on a model whose meshes or materials say "blade" is a guardless blade
+        # (machete, long knife), not an axe head.
+        says_blade = any(re.search(r"blade|sword|knife|machete|sabre|saber|katana|dagger", " ".join(n), re.I)
+                         for n, _ in meshes)
+        end_peak = at < 0.15 or at > 0.85
+        hafted = args.type == "hafted" or (args.type is None and (end_peak or long_run) and not (says_blade and long_run))
+        guardless = not hafted and long_run  # a sword chosen by the user, but no short wide guard in it
+        if hafted or guardless:
             blade_up = at > 0.5
             middle = [w for s_, w in widths if w > 0 and 0.3 <= (s_ - t.min()) / np.ptp(t) <= 0.7]
             haft_w = float(np.median(middle)) if middle else 0.0
@@ -418,9 +469,42 @@ def main(argv=None):
                 if w > 0 and w <= 1.3 * haft_w:
                     head_start = s_
                     break
+            if guardless:
+                # No guard to go by: a blade is much thinner than its handle (scales, wrap), so the
+                # thickness profile splits them. The split with the biggest step between the two
+                # sides' median thickness is where the blade starts; the thinner side is the blade.
+                thk = np.column_stack([(positions - centre) @ side_b, (positions - centre) @ side_a, t])
+                th = np.array([w for _, w in wp.section_widths(thk, tris, t.min() + step / 2, t.max(), step)])
+                cs = np.array([c for c, _ in widths])
+                n_s = len(th)
+                best, k_best = -1.0, None
+                for k in range(max(1, n_s // 10), n_s - max(1, n_s // 10)):
+                    a_, b_ = np.median(th[:k]), np.median(th[k:])
+                    if abs(a_ - b_) > best:
+                        best, k_best = abs(a_ - b_), k
+                if k_best is not None:
+                    blade_up = np.median(th[k_best:]) < np.median(th[:k_best])
+                    # Exact place: from the blade side, the first section thicker than halfway between
+                    # the two medians.
+                    t_blade = np.median(th[k_best:] if blade_up else th[:k_best])
+                    t_handle = np.median(th[:k_best] if blade_up else th[k_best:])
+                    half = 0.5 * (t_blade + t_handle)
+                    order = range(n_s - 1, -1, -1) if blade_up else range(n_s)
+                    k_edge = k_best
+                    for i in order:
+                        if th[i] > half:
+                            k_edge = i
+                            break
+                    head_start = float(cs[k_edge] + (step / 2 if blade_up else -step / 2))
+                    print(f"thickness: {'-' if blade_up else '+'} side {np.median(th[:k_best] if blade_up else th[k_best:]):.2f} cm "
+                          f"(handle), {'+' if blade_up else '-'} side {np.median(th[k_best:] if blade_up else th[:k_best]):.2f} cm (blade)")
             g_lo = g_hi = head_start
-            print(f"head on a haft: widest {w_max:.1f} cm at the {'+' if blade_up else '-'} end, haft {haft_w:.1f} cm wide, "
-                  f"head starts {head_start:.1f} cm along the axis")
+            if guardless:
+                print(f"no guard found: the blade starts where the width changes, {head_start:.1f} cm along the axis "
+                      f"(handle {haft_w:.1f} cm wide)")
+            else:
+                print(f"head on a haft: widest {w_max:.1f} cm at the {'+' if blade_up else '-'} end, haft {haft_w:.1f} cm wide, "
+                      f"head starts {head_start:.1f} cm along the axis")
         else:
             print(f"guard found {g_lo:.1f}..{g_hi:.1f} cm along the axis (widest {w_max:.1f} cm)")
     if args.flip:
@@ -493,6 +577,13 @@ def main(argv=None):
                 between = [(s, w) for s, w in prof if s_max < s <= end + 0.5 * span and w > 0]
                 if between:
                     handle_bottom = min(between, key=lambda p: p[1])[0]
+                    # On a handle of even width the narrowest section is anywhere: then the pommel
+                    # starts where the width first comes back down to the grip's, going up from its
+                    # widest point.
+                    for s_, w_ in between:
+                        if w_ <= 1.05 * grip_w:
+                            handle_bottom = s_
+                            break
         print(f"grip width {grip_w:.1f} cm; handle bottom {handle_bottom:.1f} cm, pommel end {end:.1f} cm"
               + ("" if handle_bottom > end else " (no wider pommel found: whole handle is grip)"))
 
@@ -630,7 +721,7 @@ def main(argv=None):
     top = float(z.max())
     numbers = {"mass_kg": float(mass), "pommel_end": round(end, 2), "handle_bottom": round(float(handle_bottom), 2),
                "handle_top": 0.0, "guard_bottom": round(float(guard_bottom), 2), "guard_top": round(float(guard_top), 2),
-               "tip": round(top, 2)}
+               "tip": round(top, 2), "hafted": 1 if hafted else 0}
     wp.write_numbers(os.path.join(args.out, name + ".txt"), f"{name}: written by tools/model_to_weapon.py", numbers)
     json.dump({"source": os.path.basename(args.model), "scale": scale_note, "mass_kg": mass, "mass_note": mass_note,
                "zones_cm": numbers, "volumes_cm3": {s: round(v, 1) for s, v in volume.items()},

@@ -1267,7 +1267,8 @@ namespace
         const double half_hand = 4.5; // cm, half a hand's width
         double handle_bottom = numbers["handle_bottom"];
         double grip_len = -handle_bottom;
-        bool hafted = numbers["guard_top"] - numbers["guard_bottom"] < 0.01;
+        // The converter writes hafted=1/0; older files: no guard means hafted.
+        bool hafted = numbers.count("hafted") ? numbers["hafted"] > 0.5 : numbers["guard_top"] - numbers["guard_bottom"] < 0.01;
         auto model_z = [&](UObject* c, V3& hl) {
             hl = transform_point(head_xf, world_location(c), true);
             return hl.z * hs.z - shift;
