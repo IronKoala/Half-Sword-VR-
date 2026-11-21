@@ -140,6 +140,7 @@ LAYOUT = [
     ("Moving: sticks, turning, crouch", "Stick turn, dead zone, crouch button and kick are in Quick settings.", [
         ("pose_stick_walk", ""),
         ("pose_body_turn", "1 = his body turns to face where you look."),
+        ("pose_mouse_off_with_controllers", "1 = with controllers tracked, the mouse does not turn or tilt him."),
         ("pose_turn_dead_zone_deg", "...once you look this far away."),
         ("pose_turn_speed_dps", ""),
         ("pose_turn_max_deg", "Past this the hips come round at once."),

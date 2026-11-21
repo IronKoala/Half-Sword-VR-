@@ -426,6 +426,7 @@ namespace hsvr
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);
         flag("pose_body_turn", c.pose_body_turn);
+        flag("pose_mouse_off_with_controllers", c.pose_mouse_off_with_controllers);
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);

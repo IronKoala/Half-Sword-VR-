@@ -4109,11 +4109,27 @@ namespace
             g_turn_valid = true;
             HSVR_LOG("Turn: your body now faces where you face (start %.0f)", g_turn_yaw);
         }
+        ControllerState state = controllers_state();
+        // Playing with controllers, the mouse does nothing: no turn, no look up or down (Matthew
+        // 2026-11-21: moving the mouse over the window bent him to look down while he stood straight;
+        // the game's spine bend reads the control pitch). pose_mouse_off_with_controllers.
+        bool controllers_in_use = state.active && (state.hand[0].grip_valid || state.hand[1].grip_valid);
+        bool mouse_off = config().pose_mouse_off_with_controllers && controllers_in_use;
         // Whatever turned the control yaw since we last wrote it (mouse, stick) is your turn.
-        g_turn_yaw = wrap(g_turn_yaw + wrap(rotation->Yaw - g_last_written_yaw));
+        if (!mouse_off) g_turn_yaw = wrap(g_turn_yaw + wrap(rotation->Yaw - g_last_written_yaw));
+        else
+        {
+            static bool said = false;
+            if (!said && (std::fabs(wrap(rotation->Yaw - g_last_written_yaw)) > 0.5 || std::fabs(rotation->Pitch) > 0.5))
+            {
+                said = true;
+                HSVR_LOG("Turn: mouse turn/look ignored while controllers are in use (yaw %+.1f, pitch %.1f; pose_mouse_off_with_controllers)",
+                         wrap(rotation->Yaw - g_last_written_yaw), (double)rotation->Pitch);
+            }
+            rotation->Pitch = 0.0;
+        }
         double dt = (std::min)(0.1, (std::max)(0.0, now - g_turn_time));
         g_turn_time = now;
-        ControllerState state = controllers_state();
         // The right stick turns you (view and body together), smoothly or in snaps.
         {
             Config cfg = config();

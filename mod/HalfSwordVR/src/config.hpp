@@ -256,6 +256,9 @@ namespace hsvr
         // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
         // turns you as well.
         bool pose_body_turn = true;
+        // 1 = while the controllers are tracked, the mouse neither turns him nor tilts his look (the
+        // control pitch is held at 0); with mouse and keyboard play the mouse works as before.
+        bool pose_mouse_off_with_controllers = true;
         double pose_turn_dead_zone_deg = 60.0;
         double pose_turn_speed_dps = 150.0;
         // The most your head can be turned from his hips (a neck's reach): past it the hips come
