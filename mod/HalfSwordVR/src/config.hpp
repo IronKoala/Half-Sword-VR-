@@ -942,7 +942,7 @@ namespace hsvr
         // 1 = while the game's kick has a leg (Kicking L/R), the mod stops planting that foot and holding
         // it flat; it is planted again where the kick put it down (playtest 2026-11-21: foot turned backwards).
         bool pose_feet_free_on_kick = true;
-        double pose_feet_kick_free_s = 0.8; // and for this long after right A fires a kick
+        double pose_feet_kick_free_s = 1.0; // and this long after right A / the left-X tap fires a kick (kicks rise 0.2-0.3 s after the press and last ~0.5 s)
         double pose_step_distance_cm = 10.0, pose_step_angle_deg = 30.0; // when a foot steps
         double pose_step_time_s = 0.3;  // how long a step takes standing (shorter when moving)
         double pose_step_lift_cm = 10.0; // how high the foot lifts

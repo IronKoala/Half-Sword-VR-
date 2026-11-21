@@ -21697,6 +21697,7 @@ namespace
             HSVR_LOG("Jump: left X up after %.2f s (Jump Rate %.2f: %s): game's Jump release %s", now - x_since, rate,
                      rate >= 0.5 ? "a jump if a foot is near the ground" : (rate > 0.0 ? "the game's tap-kick" : "nothing"),
                      ok ? "called" : (pawn ? "NOT FOUND on the character" : "skipped (no character)"));
+            if (ok && pawn && rate > 0.0 && rate < 0.5) g_kick_fired_at = now_seconds(); // the tap-kick: legs to the game (pose_feet_free_on_kick)
             if (ok && pawn && rate >= 0.5)
             {
                 g_jump_until = now + 1.5;
