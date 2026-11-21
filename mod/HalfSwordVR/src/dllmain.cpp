@@ -2041,7 +2041,7 @@ namespace
     std::atomic<double> g_fake_stick[2] = {-9.0, 0.0}; // test: hsvr.stick <x> <y> holds the left stick (x -9 = off)
     std::string g_park_socket;                  // test: hsvr.arm_park <socket> (arm mode 13): right hand there
     double g_arm_floor[3] = {45.0, 15.0, 5.0};
-    double g_slot_test[4] = {1.0, 4.0, 0.0, 0.0}; // test: hsvr.arm_to_slot <hand> <slot 0-4> <along cm> <out cm> (arm mode 22)
+    double g_slot_test[5] = {1.0, 4.0, 0.0, 0.0, 0.0}; // test: hsvr.arm_to_slot <hand> <slot 0-4> <along cm> <out cm> [cm/s] (arm mode 22)
     std::atomic<double> g_fake_jitter_cm{0.0};
     bool is_fist(UObject* weapon);  // test: hsvr.fake_jitter <cm>: tracking-like noise on the fake hands (rms per axis)  // test: hsvr.arm_floor <fwd> <side> <height> (arm mode 14): right hand near the floor
     std::atomic<float> g_fake_trigger[2] = {-1.0f, -1.0f}; // test: hsvr.trigger <0|1> <value>, -1 = the controller
@@ -2734,6 +2734,17 @@ namespace
                     if (ol > 1.0) outw = outw * (1.0 / ol);
                     last = p + outw * g_slot_test[3];
                     have = true;
+                }
+                else if (have && g_slot_test[4] > 0.0)
+                {
+                    // Taken: the hand carries it to the front (40 cm ahead of the shoulder) at this speed.
+                    static double t_prev = now;
+                    double dt = (std::min)(0.1, (std::max)(0.0, now - t_prev));
+                    t_prev = now;
+                    Vec3 front = shoulder + body.rotate(Vec3{40.0, out * 15.0, -10.0});
+                    Vec3 d = front - last;
+                    double dl = length(d), step = g_slot_test[4] * dt;
+                    last = dl <= step ? front : last + d * (step / dl);
                 }
                 if (have) grip = last;
             }
@@ -22486,7 +22497,7 @@ namespace
             }
             if (entry.command.rfind("hsvr.arm_to_slot ", 0) == 0)
             {
-                std::sscanf(entry.command.c_str() + 17, "%lf %lf %lf %lf", &g_slot_test[0], &g_slot_test[1], &g_slot_test[2], &g_slot_test[3]);
+                std::sscanf(entry.command.c_str() + 17, "%lf %lf %lf %lf %lf", &g_slot_test[0], &g_slot_test[1], &g_slot_test[2], &g_slot_test[3], &g_slot_test[4]);
                 g_fake_arm_mode.store(22);
                 HSVR_LOG("Script: hsvr.arm_to_slot %s hand on slot %.0f item, %.0f cm along it, %.0f cm out", g_slot_test[0] == 0.0 ? "left" : "right", g_slot_test[1],
                          g_slot_test[2], g_slot_test[3]);
