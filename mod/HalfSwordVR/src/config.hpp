@@ -212,6 +212,13 @@ namespace hsvr
         // Forward bend = (head pitch below the horizon - pose_lean_pitch_dead_deg) x pose_lean_pitch_gain,
         // at most pose_lean_max_deg (the game's own lean reaches 60). Sideways = head roll likewise.
         bool pose_lean = true;
+        // 1 = also bend him from your head's pitch and roll (the bend above); 0 = his torso only leans to
+        // where your neck actually is, as closed PR #8/#10 did (Matthew 2026-11-21: that leaning was
+        // "basically perfect"; with the head-angle bend his spine was never in line with his own).
+        bool pose_lean_head_angle = false;
+        // Looking down, his chest leans back out of the view by up to this many cm (reached at 60 degrees
+        // down, from 5), from closed PR #8/#10. 0 = off.
+        double pose_lean_look_down_back_cm = 16.0;
         double pose_lean_pitch_dead_deg = 10.0;
         double pose_lean_pitch_gain = 0.7;
         double pose_lean_max_deg = 60.0;
@@ -227,8 +234,13 @@ namespace hsvr
         // away does he step: his capsule (and so his feet) comes back under your neck over
         // pose_lean_walk_catchup_s and stays with you while you walk, until it is under your neck again.
         // 0 = the old way (his hips always under your neck).
-        double pose_lean_step_radius_cm = 30.0;
+        double pose_lean_step_radius_cm = 8.0;
         double pose_lean_walk_catchup_s = 0.15;
+        // 1 = past the radius his hips follow your neck at once (at most pose_lean_follow_speed_cms), so
+        // your neck is never more than the radius from over his hips (closed PR #8/#10: 8 cm, 400 cm/s).
+        // 0 = past the radius he steps all the way under you (pose_lean_walk_catchup_s).
+        bool pose_lean_follow_past_radius = true;
+        double pose_lean_follow_speed_cms = 400.0;
         // A lean you hold still is a new stance: once your neck has moved less than
         // pose_lean_settle_speed_cms for pose_lean_settle_s, he steps under you (0 = never; stays leaned).
         double pose_lean_settle_s = 0.8;
