@@ -18136,18 +18136,24 @@ namespace
             }
             if (entry.command.rfind("hsvr.foe_bone_at_hand ", 0) == 0)
             {
-                // Wrap tests: "hsvr.foe_bone_at_hand <side> <bone> [<bone2>]": every foe moved (not
-                // turned) so the middle of <bone>..<bone2> (or <bone> alone) is at that hand's grab point.
+                // Wrap tests: "hsvr.foe_bone_at_hand <side> <cm> <bone> [<bone2>]": every foe moved (not
+                // turned) so the middle of <bone>..<bone2> (or <bone> alone) is <cm> out from that hand's
+                // grab point along its palm normal (hand bone -Z), so the limb lies against the palm.
                 using hsvr::Vec3;
                 int side = 1;
+                double cm = 0.0;
                 char b1c[64] = {0}, b2c[64] = {0};
-                int got = sscanf(entry.command.c_str() + 22, "%d %63s %63s", &side, b1c, b2c);
+                int got = sscanf(entry.command.c_str() + 22, "%d %lf %63s %63s", &side, &cm, b1c, b2c);
                 side = side != 0 ? 1 : 0;
-                std::string b1 = got >= 2 ? b1c : "", b2 = got >= 3 ? b2c : "";
+                std::string b1 = got >= 3 ? b1c : "", b2 = got >= 4 ? b2c : "";
                 UObject* player = nullptr;
                 UObject* pm = find_pawn_mesh(&player);
                 if (!player || !pm || b1.empty()) continue;
                 Vec3 hand = hand_grab_point(pm, side);
+                {
+                    hsvr::Quat hq = socket_rotation(pm, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+                    hand = hand + hsvr::normalized(hq.rotate(Vec3{0, 0, -1})) * cm;
+                }
                 std::vector<UObject*> foes;
                 UObjectGlobals::FindAllOf(STR("Willie_BP_C"), foes);
                 for (UObject* foe : foes)
