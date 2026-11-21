@@ -798,6 +798,13 @@ namespace hsvr
         // A short tap (under kick_tap_s) of right A kicks: the game's Kick Event.
         bool kick_on_a = true;
         double kick_tap_s = 0.35;
+        // Left X is the game's Jump key (Space): hold to gather, let go to leap (the game jumps only
+        // once its Jump Rate has reached 0.5; a quick tap is the game's own tap-kick). 0 = off.
+        bool jump_on_x = true;
+        // Right stick click is the game's SloMo key (F): toggles its slow motion (Slomo Timeline:
+        // time slows to 0.75..0.25 by his Body Skill, stamina drains faster, it ends by itself at
+        // stamina 0.5 or consciousness 50). 0 = off.
+        bool slowmo_on_right_stick_click = true;
         // Crouching keeps his legs on the leg IK: the animation's kneel and falling leg poses are kept
         // off (they sank the whole body 50-100 cm at a deep crouch). And the capsule is never put more
         // than 15 cm below its standing height over the floor (the game drops it ~77 cm when its foot

@@ -1965,6 +1965,8 @@ namespace
     std::atomic<int> g_count_letgo{0}, g_count_kicks{0};
     std::atomic<double> g_worst_lag[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
+    std::atomic<bool> g_fake_x{false};        // test: hsvr.press_x 1 holds left X (jump)
+    std::atomic<bool> g_fake_rstick{false};   // test: hsvr.press_rstick 1 holds the right stick click (slow motion)
     std::atomic<bool> g_fake_stick_click{false}; // test: hsvr.stick_click 1 holds the left stick click
     std::atomic<double> g_fake_stick[2] = {-9.0, 0.0}; // test: hsvr.stick <x> <y> holds the left stick (x -9 = off)
     std::string g_park_socket;                  // test: hsvr.arm_park <socket> (arm mode 13): right hand there
@@ -18351,6 +18353,18 @@ namespace
                 g_fake_continue.store(atoi(entry.command.c_str() + 13) != 0);
                 continue;
             }
+            if (entry.command.rfind("hsvr.press_x ", 0) == 0)
+            {
+                g_fake_x.store(atoi(entry.command.c_str() + 13) != 0);
+                HSVR_LOG("Script: hsvr.press_x %d", (int)g_fake_x.load());
+                continue;
+            }
+            if (entry.command.rfind("hsvr.press_rstick ", 0) == 0)
+            {
+                g_fake_rstick.store(atoi(entry.command.c_str() + 18) != 0);
+                HSVR_LOG("Script: hsvr.press_rstick %d", (int)g_fake_rstick.load());
+                continue;
+            }
             if (entry.command.rfind("hsvr.match_won", 0) == 0)
             {
                 // What the GameMode's Minus Enemy sets when the last enemy dies, so the "Hold G to
@@ -18922,6 +18936,94 @@ namespace
         controllers_buzz(1, 0.6f);
         HSVR_LOG("Menu: A held %.1f s after a won fight: VO Deescalate called (Player Match End now %d)", cfg.menu_continue_hold_s,
                  (int)bool_property(pawn, STR("Player Match End")));
+    }
+
+    // Jump and slow motion on the controllers: the game's own input events, called the way a key
+    // press calls them (InputAction "Jump" = Space, "SloMo" = F in DefaultInput.ini). Nothing of
+    // either is redone by the mod: the game's own rules decide (Willie UG, extract 2026-11-19):
+    // - Jump press (K2Node_InputActionEvent_14, UG @226650): Rest and Is Crouched?? off, Timeline_4
+    //   from the start, which raises Jump Rate. Release (_15, UG @225874): with Jump Rate >= 0.5, a
+    //   foot near the ground and not already Jump Pressed, Last Jump Power = Jump Rate and 0.2 s later
+    //   Jump Pressed for 0.4 s (UG @113555); with less Jump Rate it is the game's tap-kick (Kick Event).
+    // - SloMo press (_8, UG @228079): a toggle allowed while Stamina > 0.5 and Consciousness > 50;
+    //   on: SlowMoEffect sound, Slomo Active, Slomo Timeline plays (GI Settings' Time Dilation =
+    //   clamp(track, MapRange(Body Skill 0..1 -> 0.75..0.25), 1), SetGlobalTimeDilation, vignette and
+    //   fringe on his cameras, stamina use x up to 10); off: NoSlowMo sound, timeline back.
+    //   It ends itself through End Arrow Time Event at stamina 0.5 or consciousness 50 (UG @620089).
+    void jump_slowmo_buttons(const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        static bool x_down = false, stick_down = false;
+        static double x_since = -1.0;
+        static double watch_until = -1.0, watch_start_z = 0.0, watch_peak = 0.0, watch_rate = 0.0;
+        ControllerState state = controllers_state();
+        bool live = state.active && state.focused;
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        auto call = [&](const TCHAR* name) -> bool {
+            UFunction* fn = pawn ? func_chain(pawn, name) : nullptr;
+            if (!fn) return false;
+            std::vector<uint8_t> block = param_block(fn);
+            pawn->ProcessEvent(fn, block.data());
+            return true;
+        };
+        double now = now_seconds();
+
+        bool x = (cfg.jump_on_x && live && state.hand[0].primary) || g_fake_x.load();
+        if (x && !x_down)
+        {
+            x_down = true;
+            x_since = now;
+            bool ok = call(STR("InpActEvt_Jump_K2Node_InputActionEvent_14"));
+            HSVR_LOG("Jump: left X down: game's Jump press %s", ok ? "called" : (pawn ? "NOT FOUND on the character" : "skipped (no character)"));
+        }
+        else if (!x && x_down)
+        {
+            x_down = false;
+            double rate = read_number_variable(pawn, STR("Jump Rate"));
+            bool ok = call(STR("InpActEvt_Jump_K2Node_InputActionEvent_15"));
+            HSVR_LOG("Jump: left X up after %.2f s (Jump Rate %.2f: %s): game's Jump release %s", now - x_since, rate,
+                     rate >= 0.5 ? "a jump if a foot is near the ground" : (rate > 0.0 ? "the game's tap-kick" : "nothing"),
+                     ok ? "called" : (pawn ? "NOT FOUND on the character" : "skipped (no character)"));
+            if (ok && pawn && rate >= 0.5)
+            {
+                watch_until = now + 1.5;
+                watch_start_z = actor_location(pawn).z;
+                watch_peak = 0.0;
+                watch_rate = rate;
+            }
+        }
+        if (watch_until > 0.0 && pawn)
+        {
+            watch_peak = (std::max)(watch_peak, actor_location(pawn).z - watch_start_z);
+            if (now >= watch_until)
+            {
+                watch_until = -1.0;
+                HSVR_LOG("Jump: capsule rose at most %.1f cm in the 1.5 s after the release (Jump Rate %.2f, Last Jump Power %.2f)", watch_peak, watch_rate,
+                         read_number_variable(pawn, STR("Last Jump Power")));
+            }
+        }
+
+        bool stick = (cfg.slowmo_on_right_stick_click && live && state.hand[1].stick_click) || g_fake_rstick.load();
+        if (stick && !stick_down)
+        {
+            bool was = bool_property(pawn, STR("Slomo Active"));
+            bool ok = call(STR("InpActEvt_SloMo_K2Node_InputActionEvent_8"));
+            bool is = bool_property(pawn, STR("Slomo Active"));
+            HSVR_LOG("SloMo: right stick click: game's SloMo %s, Slomo Active %d -> %d (stamina %.2f, consciousness %.0f, Body Skill %.2f)",
+                     ok ? "called" : (pawn ? "NOT FOUND on the character" : "skipped (no character)"), (int)was, (int)is,
+                     read_number_variable(pawn, STR("Stamina")), read_number_variable(pawn, STR("Consciousness")), read_number_variable(pawn, STR("Body Skill (Temp)")));
+        }
+        stick_down = stick;
+        // How slow it is, every second while on (the game's own value, GI Settings' Time Dilation).
+        static double slomo_logged = 0.0;
+        if (pawn && now - slomo_logged >= 1.0 && bool_property(pawn, STR("Slomo Active")))
+        {
+            slomo_logged = now;
+            UObject* gi = object_property(pawn, STR("GI Settings"));
+            HSVR_LOG("SloMo: on, time dilation %.2f, stamina %.2f", gi ? read_number_variable(gi, STR("Time Dilation")) : -1.0,
+                     read_number_variable(pawn, STR("Stamina")));
+        }
     }
 
     // Drops every object the game has freed (the batch in g_freed_now) from the mod's global holders.
@@ -19786,9 +19888,11 @@ namespace
         if (front_process != GetCurrentProcessId())
         {
             menu_buttons(cfg, nullptr); // lets a held Escape go
+            jump_slowmo_buttons(cfg);
             return;
         }
         menu_buttons(cfg, GetForegroundWindow());
+        jump_slowmo_buttons(cfg);
         if (recenter)
         {
             shared.recenter_requested.store(true);

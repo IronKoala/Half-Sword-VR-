@@ -35,6 +35,8 @@ LAYOUT = [
         ("pose_crouch_button_cms", "How fast that crouch goes down and up (cm/s)."),
         ("kick_on_a", "1 = a short tap of right A kicks."),
         ("kick_tap_s", "A press shorter than this (s) is a kick tap."),
+        ("jump_on_x", "1 = left X is the game's jump: hold, then let go to leap (a quick tap is the game's tap-kick)."),
+        ("slowmo_on_right_stick_click", "1 = right stick click toggles the game's slow motion."),
         ("pose_hold_arm_lag", "1 = held weapons trail your hand like flat Half Sword's arm (heavier = more lag)."),
         ("pose_hold_arm_lag_s", "Empty-arm follow delay (s); weapons add to it by their weight. Flat game ~0.1."),
         ("pose_hold_arm_lag_max_s", "Most lag any weapon gets (s)."),
