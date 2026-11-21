@@ -20648,8 +20648,36 @@ namespace
                 UObjectGlobals::FindAllOf(STR("StaticMeshActor"), actors);
                 std::wstring want(nm, nm + strlen(nm));
                 UObject* comp = nullptr;
-                for (UObject* a : actors)
-                    if (a && a->GetName() == want) { comp = object_property(a, STR("StaticMeshComponent")); break; }
+                Vec3 hand0 = hand_grab_point(pm, side);
+                if (want == STR("auto"))
+                {
+                    // The nearest StaticMeshActor within 4 m with simple collision, its nearest point at
+                    // least 30 cm above his feet (not the floor); counts the ones with no simple collision.
+                    double best = 400.0;
+                    int complex_only = 0, checked = 0;
+                    double feet = actor_location(player).z - 80.0;
+                    for (UObject* a : actors)
+                    {
+                        UObject* sc = a ? object_property(a, STR("StaticMeshComponent")) : nullptr;
+                        if (!sc || hsvr::length(component_location(sc) - hand0) > 1500.0) continue;
+                        Call q(sc, STR("GetClosestPointOnCollision"));
+                        q.three(STR("Point"), hand0.x, hand0.y, hand0.z);
+                        q.run();
+                        double dd = q.number();
+                        ++checked;
+                        if (dd < 0.0) { ++complex_only; continue; }
+                        Vec3 pt = q.vec(STR("OutPointOnBody"));
+                        if (pt.z < feet + 30.0 || dd > best) continue;
+                        best = dd;
+                        comp = sc;
+                        want = a->GetName();
+                    }
+                    HSVR_LOG("Script: hsvr.hand_to_scenery auto: %d static actors within 15 m, %d with no simple collision; picked %ls (%.0f cm)", checked, complex_only,
+                             comp ? want.c_str() : STR("none"), best);
+                }
+                else
+                    for (UObject* a : actors)
+                        if (a && a->GetName() == want) { comp = object_property(a, STR("StaticMeshComponent")); break; }
                 if (!comp) { HSVR_LOG("Script: hsvr.hand_to_scenery: no StaticMeshActor %s", nm); continue; }
                 Vec3 hand = hand_grab_point(pm, side);
                 Call cp(comp, STR("GetClosestPointOnCollision"));
@@ -21221,7 +21249,7 @@ namespace
                     Call sim(c, STR("IsSimulatingPhysics"));
                     sim.run();
                     FProperty* sp = sim.param(STR("ReturnValue"));
-                    if (!want_held_kind && (!sp || !*(sim.buffer.data() + sp->GetOffset_Internal()))) continue; // a weapon just spawned may not simulate yet
+                    if (!want_held_kind && !want_clutter && (!sp || !*(sim.buffer.data() + sp->GetOffset_Internal()))) continue; // a weapon just spawned may not simulate yet
                     ++loose;
                     double d = hsvr::length(component_location(c) - hand);
                     if (want_heavy)
@@ -21252,6 +21280,9 @@ namespace
                         hsvr::Vec3 mid = bnd.vec(STR("Origin"));
                         hsvr::Vec3 at = component_location(best);
                         put = hand + (at - mid);
+                        Call simon(best, STR("SetSimulatePhysics"));
+                        simon.first_flag(true);
+                        simon.run();
                         Call mm(best, STR("GetMass"));
                         mm.run();
                         HSVR_LOG("Script: hsvr.bring_object clutter: %ls, %.1f kg, pivot %.1f cm from its bounds' middle", best->GetName().c_str(), mm.number(), hsvr::length(at - mid));
