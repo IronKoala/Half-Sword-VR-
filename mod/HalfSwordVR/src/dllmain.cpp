@@ -3925,15 +3925,78 @@ namespace
         }
     }
 
+    // ---- Stamina trace (hsvr.stamina_trace <seconds>, 0 = off) ----------------------------------
+    // For matching the VR drain to the flat game: every <seconds>, in flat mode too, logs his
+    // number variables whose names contain "stamina", "burn" or "swing", plus Muscle Rate, Fat
+    // Rate, Liver Pain, Aim Swing Speed, the frame time and each hand joint's GetConstraintForce
+    // (linear and angular, as the game's hand burn reads them, @407166).
+    double watch_read(UObject* owner, FProperty* p);
+    double g_stamina_trace_s = 0.0;
+    double g_stamina_trace_last = -1e9;
+    std::vector<FProperty*> g_stamina_trace_props;
+    UObject* g_stamina_trace_pawn = nullptr;
+    void stamina_trace(UObject* pawn)
+    {
+        if (g_stamina_trace_s <= 0.0 || !pawn) return;
+        double now = hsvr::now_seconds();
+        if (now - g_stamina_trace_last < g_stamina_trace_s) return;
+        double frame = g_stamina_trace_last > 0.0 ? now - g_stamina_trace_last : 0.0;
+        g_stamina_trace_last = now;
+        if (pawn != g_stamina_trace_pawn)
+        {
+            g_stamina_trace_pawn = pawn;
+            g_stamina_trace_props.clear();
+            for (UStruct* level = static_cast<UStruct*>(pawn->GetClassPrivate()); level; level = level->GetSuperStruct())
+                for (FProperty* p : level->ForEachProperty())
+                {
+                    auto kind = p->GetClass().GetName();
+                    if (kind != STR("DoubleProperty") && kind != STR("FloatProperty")) continue;
+                    std::wstring lower;
+                    for (wchar_t ch : std::wstring(p->GetName())) lower += (wchar_t)towlower(ch);
+                    if (lower.find(STR("stamina")) != std::wstring::npos || lower.find(STR("burn")) != std::wstring::npos ||
+                        lower.find(STR("swing")) != std::wstring::npos || lower == STR("muscle rate") || lower == STR("fat rate") ||
+                        lower == STR("liver pain") || lower.find(STR("fisting rate")) != std::wstring::npos)
+                        g_stamina_trace_props.push_back(p);
+                }
+            HSVR_LOG("StaminaTrace: %d variables", (int)g_stamina_trace_props.size());
+        }
+        std::string line;
+        char buf[160];
+        for (FProperty* p : g_stamina_trace_props)
+        {
+            double v = watch_read(pawn, p);
+            std::string n;
+            for (wchar_t ch : std::wstring(p->GetName())) n += (char)(ch < 128 ? ch : '?');
+            snprintf(buf, sizeof(buf), "%s=%.4g; ", n.c_str(), v);
+            line += buf;
+        }
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* joint = object_property(pawn, side == 0 ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand"));
+            if (!joint) continue;
+            Call f(joint, STR("GetConstraintForce"));
+            if (!f.run()) continue;
+            snprintf(buf, sizeof(buf), "joint%s lin=%.1f ang=%.1f; ", side == 0 ? "L" : "R", hsvr::length(f.vec(STR("OutLinearForce"))),
+                     hsvr::length(f.vec(STR("OutAngularForce"))));
+            line += buf;
+        }
+        UObject* wr = object_property(pawn, STR("Weapon R"));
+        HSVR_LOG("StaminaTrace: %.3f (%.2f s) weaponR %ls; %s", now, frame, wr ? wr->GetName().c_str() : STR("none"), line.c_str());
+    }
+
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         gc_sync();
         HSVR_PROF(PerfCapsuleBefore);
         // Test input runs in flat mode too (no posed body): the player's pawn's own tick.
-        if ((!g_test_inputs.empty() || g_input_list_now) && context && function && function->GetName() == STR("ReceiveTick"))
+        if ((!g_test_inputs.empty() || g_input_list_now || g_stamina_trace_s > 0.0) && context && function && function->GetName() == STR("ReceiveTick"))
         {
             UObject* pc = find_player_controller();
-            if (pc && object_property(pc, STR("Pawn")) == context) input_before_tick(context);
+            if (pc && object_property(pc, STR("Pawn")) == context)
+            {
+                input_before_tick(context);
+                stamina_trace(context);
+            }
         }
         if (!is_receive_tick(context, function)) return;
         g_hold_location = actor_location(context);
@@ -10055,23 +10118,20 @@ namespace
         return b;
     }
 
-    // Holding and swinging tire him, by the game's own drain (stamina_calibration.md, Willie @441248,
-    // "R Hand Stamina Burn Rate f", @354657), which reads the hand joint (0 under the mod's hold) and
-    // the mouse's "Aim Swing Speed" (never moved in VR). Per hand:
-    //   burn B = (F + 100 tau) / 60 x MRC(Muscle Rate, 0..3 -> 1..0.1), kept only from 10 up
-    //     (the game's joint "force" is an impulse per step, so at 60 fps it is (F N + 100 tau N m) / 60);
-    //     F and tau the hold's own, capped at pose_stamina_force_cap_n / pose_stamina_torque_cap_nm
-    //     (a weapon snagged or blocked made 680 N and emptied the bar in a second, playtest 2026-11-18);
-    //   swing M = the controller's speed at the grip, smoothed over pose_stamina_speed_smooth_s,
-    //     lo..hi cm/s -> x10..x85 (the game's Aim Swing Speed builds up the same way: one swing stays near x10);
-    //   per second = B x M x 0.0125 x MRC(Fat Rate, -1..10 -> 0.5..2.25) x pose_stamina_scale.
-    struct StaminaHand
-    {
-        bool have = false;
-        hsvr::Vec3 last;
-        double speed = 0.0;
-    };
-    StaminaHand g_stamina_hand[2];
+    // Holding and swinging tire him through the game's own stamina rules (stamina_tick_order.md,
+    // Willie 11-19 listing). The game's per-hand burn "R/L Hand Stamina Burn Rate" (HandBurn, pin
+    // @394236: (|lin| + |ang| of GetConstraintForce(PhysicsConstraint R Hand)) x 0.01 x MRC(Muscle
+    // Rate, 0..3 -> 1..0.1), kept only from 10 up) reads the hand joint, which the mod's hold frees
+    // (force ~0). After his tick the mod writes the hold's own value there instead:
+    //   HandBurn = (F + 100 tau) / 60 x MRC(Muscle Rate, 0..3 -> 1..0.1) x pose_stamina_scale,
+    //   kept only from pose_stamina_gate up (the game's 10; GetConstraintForce is an impulse per
+    //   step, so at 60 fps it is (F N + 100 tau N m) / 60, stamina_calibration.md 1.2);
+    //   F and tau the hold's own, capped at pose_stamina_force_cap_n / pose_stamina_torque_cap_nm.
+    // The next tick's "R Hand Stamina Burn Rate f" (@630756) reads it before the game recomputes it
+    // and turns it into Stamina Burn Swing R with the game's own multipliers (Aim Swing Speed 35..70
+    // -> x10..x85, now fed from the controllers; x0.0125; Lawnmower Rate; swing direction change;
+    // plus the arm armour term), which Stamina Burn sums (x fat, temperature) and the tick takes off
+    // the bar, and which also drives his muscle growth, hunger and sweat.
     double number_var(UObject* owner, const TCHAR* name, bool& found)
     {
         FProperty* p = owner ? prop_chain(owner, name) : nullptr;
@@ -10083,42 +10143,28 @@ namespace
         double t = (std::min)(1.0, (std::max)(0.0, (v - a) / (b - a)));
         return x + (y - x) * t;
     }
-    void drain_stamina(int side, UObject* pawn, double force_n, double torque_nm, const hsvr::Vec3& grip_target, double dt, const hsvr::Config& cfg)
+    void drain_stamina(int side, UObject* pawn, double force_n, double torque_nm, const hsvr::Config& cfg)
     {
-        using namespace hsvr;
-        StaminaHand& sh = g_stamina_hand[side];
-        if (!pawn || dt <= 0.0) return;
-        if (sh.have)
-        {
-            double inst = length(grip_target - sh.last) / dt;
-            if (inst > 3000.0) inst = sh.speed; // a recentre or teleport, not a swing
-            double a = (std::min)(1.0, dt / (std::max)(0.01, cfg.pose_stamina_speed_smooth_s));
-            sh.speed += (inst - sh.speed) * a;
-        }
-        sh.last = grip_target;
-        sh.have = true;
-        if (cfg.pose_stamina_scale <= 0.0) return;
-        bool has_mr = false, has_fat = false;
+        if (!pawn || cfg.pose_stamina_scale <= 0.0) return;
+        bool has_mr = false;
         double mr = number_var(pawn, STR("Muscle Rate"), has_mr);
-        double fat = number_var(pawn, STR("Fat Rate"), has_fat);
         double strength = has_mr ? map_range(mr, 0.0, 3.0, 1.0, 0.1) : 1.0;
-        double fat_k = has_fat ? map_range(fat, -1.0, 10.0, 0.5, 2.25) : 1.0;
         double f = (std::min)(force_n, cfg.pose_stamina_force_cap_n), t = (std::min)(torque_nm, cfg.pose_stamina_torque_cap_nm);
-        double burn = (f + 100.0 * t) / 60.0 * strength;
-        double lo = cfg.pose_stamina_swing_lo_cm_s, hi = (std::max)(lo + 1.0, cfg.pose_stamina_swing_hi_cm_s);
-        double swing = map_range(sh.speed, lo, hi, 10.0, 85.0);
-        double per_s = burn >= 10.0 ? burn * swing * 0.0125 * fat_k * cfg.pose_stamina_scale : 0.0;
-        double st = read_number_variable(pawn, STR("Stamina"));
-        if (st < 0.0) return;
-        if (per_s > 0.0) set_variable(pawn, STR("Stamina"), (std::max)(0.0, st - per_s * dt));
+        double raw = (f + 100.0 * t) / 60.0 * strength * cfg.pose_stamina_scale;
+        double burn = raw >= cfg.pose_stamina_gate ? raw : 0.0;
+        const TCHAR* name = side == 0 ? STR("L Hand Stamina Burn Rate") : STR("R Hand Stamina Burn Rate");
+        bool ok = set_variable(pawn, name, burn, nullptr, nullptr);
         static double last_line[2] = {0.0, 0.0};
-        double now = now_seconds();
+        double now = hsvr::now_seconds();
         if (now - last_line[side] >= 1.0)
         {
             last_line[side] = now;
-            HSVR_LOG("Stamina: %s hand: %.1f, taking %.1f a second (burn %.1f from %.0f N, %.1f N m; speed %.0f cm/s -> x%.0f; Muscle Rate %s%.2f x%.2f, Fat Rate %s%.2f x%.2f)",
-                     side == 0 ? "left" : "right", st, per_s, burn, force_n, torque_nm, sh.speed, swing, has_mr ? "" : "(not found) ", mr, strength,
-                     has_fat ? "" : "(not found) ", fat, fat_k);
+            bool has_swing = false;
+            double swing = number_var(pawn, side == 0 ? STR("Stamina Burn Swing L") : STR("Stamina Burn Swing R"), has_swing);
+            HSVR_LOG("Stamina: %s hand: bar %.1f, burn %.1f%s (%.1f from %.0f N, %.1f N m; Muscle Rate %s%.2f x%.2f; gate %.0f); game's swing burn last tick %.2f a second, Stamina Burn %.2f, Aim Swing Speed %.0f",
+                     side == 0 ? "left" : "right", read_number_variable(pawn, STR("Stamina")), burn, ok ? "" : " (NOT WRITTEN: variable not found)", raw, force_n,
+                     torque_nm, has_mr ? "" : "(not found) ", mr, strength, cfg.pose_stamina_gate, has_swing ? swing : -1.0,
+                     read_number_variable(pawn, STR("Stamina Burn")), read_number_variable(pawn, STR("Aim Swing Speed")));
         }
     }
 
@@ -11059,7 +11105,7 @@ namespace
         }
         h.expected_com = com_next;
         h.have_expected = true;
-        drain_stamina(side, pawn, h.force_n, h.torque_nm, target_pivot, dt, cfg);
+        drain_stamina(side, pawn, h.force_n, h.torque_nm, cfg);
         // Wake it first: a body the solver has put to sleep (a weapon lying still on the ground) may
         // keep the velocity it is given without moving (run 29: the knife stayed frozen on the floor).
         Call wake(base, STR("WakeRigidBody"));
@@ -17359,6 +17405,13 @@ namespace
                     }
                 if (!replaced) g_pawn_pins.push_back({name, value});
                 HSVR_LOG("Script: hsvr.pawn_pin %ls = %g", name.c_str(), value);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.stamina_trace", 0) == 0)
+            {
+                g_stamina_trace_s = entry.command.size() > 19 ? atof(entry.command.c_str() + 19) : 0.0;
+                g_stamina_trace_pawn = nullptr;
+                HSVR_LOG("Script: hsvr.stamina_trace every %.2f s", g_stamina_trace_s);
                 continue;
             }
             if (entry.command.rfind("hsvr.watch_vars", 0) == 0)
