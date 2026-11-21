@@ -154,6 +154,9 @@ namespace hsvr
         // write the game makes to it in the room is undone; leaving the room puts it all back.
         // Read at launch. 0 = normal game.
         bool test_room = false;
+        // 1 = in Free Mode the fencer's dialog (the tavern's "Train") gets a Train button that takes
+        // you into the test room instead of the cellar (progression's Train is not changed).
+        bool test_room_button = true;
         std::string test_room_map = "/Game/Maps/Arenas/Map_Arena_Yard";
         int test_room_foes = 4;
         // The foes' tier (armour and weapons): -1 = a random tier each, 0 Beggar .. 8 Lord.

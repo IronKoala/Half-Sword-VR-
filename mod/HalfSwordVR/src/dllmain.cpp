@@ -18870,8 +18870,269 @@ namespace
         }
     }
 
+    // ---- The Train button in Free Mode (ini test_room_button) ------------------------------------
+    // In progression the fencer's dialog has Spar / Train / Hire muscle; in Free Mode the game shows
+    // another dialog (UI_Dialog_Widget_Fencer_FreeMode: only "Play Progression" and "Leave", no Train;
+    // defaults\train_button.md). While that dialog is up the mod puts a "Train" button in it, above
+    // Leave and drawn like it, which takes you into the test room (room_start_from_menu) instead of
+    // the cellar: the game's Training handler never runs, so nothing is saved. Its clicks are read
+    // from the button's own pressed and hovered state, so the mouse and the VR panel pointer (which
+    // moves the Windows mouse) both work.
+    struct TrainButton
+    {
+        UObject* dialog = nullptr; // the Free Mode fencer dialog it was put into
+        UObject* button = nullptr;
+        UObject* text = nullptr;
+        bool was_pressed = false;
+        bool logged_spot = false;
+        double next_look = 0.0;
+    };
+    TrainButton g_train;
+
+    // Copies one property's value (same name and type on both objects).
+    bool copy_property(UObject* dst, UObject* src, const TCHAR* name)
+    {
+        FProperty* from = src ? src->GetPropertyByNameInChain(name) : nullptr;
+        FProperty* to = dst ? dst->GetPropertyByNameInChain(name) : nullptr;
+        if (!from || !to || from->GetClass().GetName() != to->GetClass().GetName()) return false;
+        to->CopyCompleteValue(reinterpret_cast<uint8_t*>(dst) + to->GetOffset_Internal(), reinterpret_cast<uint8_t*>(src) + from->GetOffset_Internal());
+        return true;
+    }
+
+    // A setter's one parameter filled from a property of another object (struct or enum by value).
+    void call_with_property(UObject* target, const TCHAR* function, const TCHAR* param, UObject* src, const TCHAR* src_prop)
+    {
+        if (!target || !src) return;
+        FProperty* from = src->GetPropertyByNameInChain(src_prop);
+        Call c(target, function);
+        FProperty* to = c.param(param);
+        if (!c.fn || !from || !to || from->GetSize() != to->GetSize()) return;
+        to->CopyCompleteValue(c.buffer.data() + to->GetOffset_Internal(), reinterpret_cast<uint8_t*>(src) + from->GetOffset_Internal());
+        c.run();
+    }
+
+    UObject* construct_widget(UClass* cls, UObject* outer)
+    {
+        if (!cls || !outer) return nullptr;
+        Unreal::FStaticConstructObjectParameters params(cls, outer);
+        return UObjectGlobals::StaticConstructObject(params);
+    }
+
+    void text_block_set(UObject* text_block, const wchar_t* text)
+    {
+        static UObject* ktl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetTextLibrary"));
+        if (!ktl || !text_block) return;
+        Call conv(ktl, STR("Conv_StringToText"));
+        FProperty* in = conv.param(STR("InString"));
+        FProperty* out = conv.param(STR("ReturnValue"));
+        if (!conv.fn || !in || !out) return;
+        new (conv.buffer.data() + in->GetOffset_Internal()) Unreal::FString(text);
+        conv.run();
+        Call set(text_block, STR("SetText"));
+        FProperty* param = set.param(STR("InText"));
+        if (!set.fn || !param) return;
+        param->CopyCompleteValue(set.buffer.data() + param->GetOffset_Internal(), conv.buffer.data() + out->GetOffset_Internal());
+        set.run();
+    }
+
+    // Puts the Train button into the Free Mode fencer dialog, above Leave and drawn like it.
+    bool train_button_build(UObject* dialog)
+    {
+        UObject* leave = object_property(dialog, STR("Button_1"));
+        UObject* leave_text = object_property(dialog, STR("TextBlock_1"));
+        UObject* tree = object_property(dialog, STR("WidgetTree"));
+        if (!leave || !leave_text || !tree)
+        {
+            HSVR_LOG("TestRoom: Train button: the Free Mode fencer dialog has no Leave button to copy");
+            return false;
+        }
+        Call gp(leave, STR("GetParent"));
+        gp.run();
+        UObject* box = gp.object_result();
+        if (!box) return false;
+        UObject* button = construct_widget(leave->GetClassPrivate(), tree);
+        UObject* text = construct_widget(leave_text->GetClassPrivate(), tree);
+        if (!button || !text) return false;
+        for (const TCHAR* prop : {STR("WidgetStyle"), STR("ColorAndOpacity"), STR("BackgroundColor"), STR("ClickMethod"), STR("TouchMethod"), STR("IsFocusable")}) copy_property(button, leave, prop);
+        for (const TCHAR* prop : {STR("Font"), STR("ColorAndOpacity"), STR("ShadowOffset"), STR("ShadowColorAndOpacity"), STR("Justification"), STR("Margin"), STR("MinDesiredWidth")})
+            copy_property(text, leave_text, prop);
+        text_block_set(text, L"Train");
+        // The text in the button, laid out like Leave's.
+        Call add(button, STR("AddChild"));
+        add.object(STR("Content"), text);
+        add.run();
+        if (UObject* slot = add.object_result())
+            if (UObject* leave_slot = object_property(leave_text, STR("Slot")))
+            {
+                call_with_property(slot, STR("SetPadding"), STR("InPadding"), leave_slot, STR("Padding"));
+                call_with_property(slot, STR("SetHorizontalAlignment"), STR("InHorizontalAlignment"), leave_slot, STR("HorizontalAlignment"));
+                call_with_property(slot, STR("SetVerticalAlignment"), STR("InVerticalAlignment"), leave_slot, STR("VerticalAlignment"));
+            }
+        // The button above Leave, laid out like it.
+        Call ix(box, STR("GetChildIndex"));
+        ix.object(STR("Content"), leave);
+        ix.run();
+        int32_t at = 0;
+        if (FProperty* r = ix.param(STR("ReturnValue"))) at = *reinterpret_cast<int32_t*>(ix.buffer.data() + r->GetOffset_Internal());
+        Call ins(box, STR("InsertChildAt"));
+        if (FProperty* ip = ins.param(STR("Index"))) *reinterpret_cast<int32_t*>(ins.buffer.data() + ip->GetOffset_Internal()) = (std::max)(0, at);
+        ins.object(STR("Content"), button);
+        ins.run();
+        UObject* slot = ins.object_result();
+        UObject* leave_slot = object_property(leave, STR("Slot"));
+        if (slot && leave_slot)
+        {
+            call_with_property(slot, STR("SetPadding"), STR("InPadding"), leave_slot, STR("Padding"));
+            call_with_property(slot, STR("SetHorizontalAlignment"), STR("InHorizontalAlignment"), leave_slot, STR("HorizontalAlignment"));
+            call_with_property(slot, STR("SetVerticalAlignment"), STR("InVerticalAlignment"), leave_slot, STR("VerticalAlignment"));
+            call_with_property(slot, STR("SetSize"), STR("InSize"), leave_slot, STR("Size"));
+        }
+        g_train.dialog = dialog;
+        g_train.button = button;
+        g_train.text = text;
+        g_train.was_pressed = false;
+        g_train.logged_spot = false;
+        HSVR_LOG("TestRoom: Train button put into %ls (above Leave, at %d)", dialog->GetName().c_str(), at);
+        return true;
+    }
+
+    void close_widgets_of(const TCHAR* class_name)
+    {
+        std::vector<UObject*> ws;
+        UObjectGlobals::FindAllOf(class_name, ws);
+        for (UObject* w : ws)
+            if (w && w->GetName().rfind(STR("Default__"), 0) != 0)
+            {
+                Call rm(w, STR("RemoveFromParent"));
+                rm.run();
+            }
+    }
+
+    // Input back to the game: no mouse pointer, keys and mouse to the fight (what the Free Mode
+    // menu's Fight button does before it opens an arena, UI_Jester_FreeMode @1410-@1504).
+    void input_to_game()
+    {
+        UObject* pc = find_player_controller();
+        static UObject* wbl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/UMG.Default__WidgetBlueprintLibrary"));
+        if (!pc) return;
+        if (wbl)
+        {
+            Call gm(wbl, STR("SetInputMode_GameOnly"));
+            gm.object(STR("PlayerController"), pc);
+            gm.flag(STR("bFlushInput"), true);
+            gm.run();
+        }
+        set_variable(pc, STR("bShowMouseCursor"), 0.0);
+    }
+
+    // From a menu into the test room: the room's boot path (save copy, test values, Load Game hook),
+    // then the arena. A room already left this launch starts afresh.
+    void room_start_from_menu(const hsvr::Config& cfg, const char* why)
+    {
+        if (g_room.booted && !g_room.failed && !g_room.done)
+        {
+            HSVR_LOG("TestRoom: %s: the room is already on", why);
+            return;
+        }
+        g_room = TestRoom{};
+        close_widgets_of(STR("UI_Dialog_Widget_Fencer_FreeMode_C"));
+        close_widgets_of(STR("UI_Tavern_Dialog_C"));
+        close_widgets_of(STR("UI_Hub_Tavern_C"));
+        close_widgets_of(STR("UI_Tevern_LowerPanel_C"));
+        g_train = TrainButton{};
+        room_boot(cfg);
+        if (g_room.failed) return;
+        input_to_game();
+        HSVR_LOG("TestRoom: %s: into the test room (%s)", why, cfg.test_room_map.c_str());
+        run_console_command(std::string("open ") + cfg.test_room_map);
+    }
+
+    // Where a widget's centre is on the desktop (Slate absolute space); false if not laid out yet.
+    bool widget_desktop_centre(UObject* widget, double& x, double& y, double& w, double& h)
+    {
+        static UObject* sbl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/UMG.Default__SlateBlueprintLibrary"));
+        if (!sbl || !widget) return false;
+        Call geo(widget, STR("GetCachedGeometry"));
+        geo.run();
+        FProperty* gr = geo.param(STR("ReturnValue"));
+        if (!gr) return false;
+        auto read2 = [](FProperty* p, uint8_t* at, double& a, double& b) {
+            if (p->GetSize() == 16) { a = reinterpret_cast<double*>(at)[0]; b = reinterpret_cast<double*>(at)[1]; }
+            else { a = reinterpret_cast<float*>(at)[0]; b = reinterpret_cast<float*>(at)[1]; }
+        };
+        Call size(sbl, STR("GetLocalSize"));
+        FProperty* sg = size.param(STR("Geometry"));
+        FProperty* sr = size.param(STR("ReturnValue"));
+        if (!sg || !sr) return false;
+        sg->CopyCompleteValue(size.buffer.data() + sg->GetOffset_Internal(), geo.buffer.data() + gr->GetOffset_Internal());
+        size.run();
+        read2(sr, size.buffer.data() + sr->GetOffset_Internal(), w, h);
+        if (w <= 1.0 || h <= 1.0) return false;
+        Call abs(sbl, STR("LocalToAbsolute"));
+        FProperty* ag = abs.param(STR("Geometry"));
+        FProperty* al = abs.param(STR("LocalCoordinate"));
+        FProperty* ar = abs.param(STR("ReturnValue"));
+        if (!ag || !al || !ar) return false;
+        ag->CopyCompleteValue(abs.buffer.data() + ag->GetOffset_Internal(), geo.buffer.data() + gr->GetOffset_Internal());
+        uint8_t* lc = abs.buffer.data() + al->GetOffset_Internal();
+        if (al->GetSize() == 16) { reinterpret_cast<double*>(lc)[0] = w * 0.5; reinterpret_cast<double*>(lc)[1] = h * 0.5; }
+        else { reinterpret_cast<float*>(lc)[0] = (float)(w * 0.5); reinterpret_cast<float*>(lc)[1] = (float)(h * 0.5); }
+        abs.run();
+        read2(ar, abs.buffer.data() + ar->GetOffset_Internal(), x, y);
+        return true;
+    }
+
+    bool widget_bool(UObject* widget, const TCHAR* function)
+    {
+        Call c(widget, function);
+        if (!c.fn) return false;
+        c.run();
+        FProperty* r = c.param(STR("ReturnValue"));
+        return r && *(c.buffer.data() + r->GetOffset_Internal()) != 0;
+    }
+
+    void train_button_tick(const hsvr::Config& cfg)
+    {
+        static bool tracked = on_freed([] {
+            if (gone(g_train.dialog) || gone(g_train.button) || gone(g_train.text)) g_train = TrainButton{};
+        });
+        if (!cfg.test_room_button) return;
+        double now = hsvr::now_seconds();
+        // The dialog: looked for 4 times a second.
+        if (now >= g_train.next_look)
+        {
+            g_train.next_look = now + 0.25;
+            if (g_train.dialog && !object_alive(g_train.dialog)) g_train = TrainButton{};
+            std::vector<UObject*> ds;
+            UObjectGlobals::FindAllOf(STR("UI_Dialog_Widget_Fencer_FreeMode_C"), ds);
+            for (UObject* d : ds)
+            {
+                if (!d || d == g_train.dialog || d->GetName().rfind(STR("Default__"), 0) == 0 || !object_alive(d)) continue;
+                if (!widget_bool(d, STR("IsInViewport"))) continue;
+                train_button_build(d);
+                break;
+            }
+        }
+        if (!g_train.button || !object_alive(g_train.button)) return;
+        bool pressed = widget_bool(g_train.button, STR("IsPressed"));
+        bool hovered = widget_bool(g_train.button, STR("IsHovered"));
+        if (!g_train.logged_spot)
+        {
+            double x, y, w, h;
+            if (widget_desktop_centre(g_train.button, x, y, w, h))
+            {
+                HSVR_LOG("TestRoom: Train button at desktop (%.0f, %.0f), %.0f x %.0f", x, y, w, h);
+                g_train.logged_spot = true;
+            }
+        }
+        bool clicked = g_train.was_pressed && !pressed && hovered;
+        g_train.was_pressed = pressed;
+        if (clicked) room_start_from_menu(cfg, "Train button clicked");
+    }
+
     void test_room_tick(const hsvr::Config& cfg)
     {
+        train_button_tick(cfg);
         if (!g_room.booted || g_room.failed || g_room.done) return;
         double now = hsvr::now_seconds();
         // Any save the game writes while the room is up is undone.
@@ -19185,6 +19446,34 @@ namespace
                 room_boot(cfg);
                 continue;
             }
+            if (entry.command.rfind("hsvr.widget_call ", 0) == 0)
+            {
+                // Test: hsvr.widget_call <widget class> <function>: calls that function (an event a
+                // button's click is bound to, for example) on every one of those widgets on screen.
+                std::string rest = entry.command.substr(17);
+                size_t sp = rest.find(' ');
+                if (sp == std::string::npos) continue;
+                std::wstring cls(rest.begin(), rest.begin() + sp), fn(rest.begin() + sp + 1, rest.end());
+                std::vector<UObject*> ws;
+                UObjectGlobals::FindAllOf(cls.c_str(), ws);
+                int n = 0;
+                for (UObject* w : ws)
+                {
+                    if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || !object_alive(w)) continue;
+                    Call c(w, fn.c_str());
+                    if (!c.fn) continue;
+                    c.run();
+                    ++n;
+                }
+                HSVR_LOG("Script: hsvr.widget_call %s: called on %d widget(s)", rest.c_str(), n);
+                continue;
+            }
+            if (entry.command == "hsvr.train_click")
+            {
+                // Test: what a click on the Free Mode Train button does.
+                room_start_from_menu(cfg, "hsvr.train_click");
+                continue;
+            }
             if (entry.command == "hsvr.gc")
             {
                 // Test: a garbage collection now (the shipping game has no "obj gc"); it runs at the
@@ -19239,7 +19528,11 @@ namespace
             }
             if (entry.command == "hsvr.test_room_open")
             {
-                if (g_room.booted && !g_room.failed) run_console_command(std::string("open ") + cfg.test_room_map);
+                if (g_room.booted && !g_room.failed)
+                {
+                    input_to_game(); // no menu pointer left over from the first menu
+                    run_console_command(std::string("open ") + cfg.test_room_map);
+                }
                 return;
             }
             if (entry.command == "hsvr.dump")
