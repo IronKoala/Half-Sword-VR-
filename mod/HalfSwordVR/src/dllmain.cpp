@@ -4343,6 +4343,14 @@ namespace
     bool cfg_scabbard_free() { return hsvr::config().pose_draw_scabbard_free; }
     bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Vec3& palm, const hsvr::Config& cfg);
     bool in_own_slot(UObject* pawn, UObject* w);
+    struct SlotTake
+    {
+        UObject* weapon = nullptr;
+        int slot = 0; // index into k_slots
+        double t0 = 0.0;
+    };
+    SlotTake g_slot_take[2];
+    void slot_take_tick(UObject* pawn);
     bool try_scabbard_grab(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg);
     void scabbard_let_go(int side, const char* why);
     bool scabbard_held(int side);
@@ -11198,6 +11206,7 @@ namespace
             return;
         }
         keep_brought_object(pawn, mesh);
+        slot_take_tick(pawn);
         fist_trace(pawn);
         body_grab_tick(pawn, cfg);
         for (int side = 0; side < 2; ++side) check_object_grab(side, pawn);
@@ -15617,6 +15626,52 @@ namespace
         return c.run();
     }
 
+    // After a no-scabbard take: the game breaks the slot joint on its next Check tick. If it has not
+    // within 0.4 s (the item still in its Weapon Slot while this hand holds it), the mod frees it as that
+    // break does (hs_draw_sheathe_calls.md, Drawn / break): BreakConstraint + destroy, Weapon Slot = None,
+    // Sheath Slot = 3, Concrete = 11, flags off, Unsheathed Mode on the weapon.
+    void slot_take_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        static bool tracked0 = track_freed(&g_slot_take[0].weapon), tracked1 = track_freed(&g_slot_take[1].weapon);
+        (void)tracked0;
+        (void)tracked1;
+        for (int side = 0; side < 2; ++side)
+        {
+            SlotTake& st = g_slot_take[side];
+            if (!st.weapon) continue;
+            const SlotDef& sd = k_slots[st.slot];
+            UObject* held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (held != st.weapon || object_property(pawn, sd.var) != st.weapon)
+            {
+                if (object_property(pawn, sd.var) != st.weapon)
+                    HSVR_LOG("Draw: %ls off %ls: the game freed its slot after %.2f s", st.weapon->GetName().c_str(), sd.var, now_seconds() - st.t0);
+                st = SlotTake{};
+                continue;
+            }
+            if (now_seconds() - st.t0 < 0.4) continue;
+            const TCHAR* S = sd.side == 0 ? STR("L") : STR("R");
+            UObject* joint = object_property(pawn, sd.constraint);
+            if (joint)
+            {
+                Call(joint, STR("BreakConstraint")).run();
+                Call(joint, STR("K2_DestroyComponent")).run();
+            }
+            set_variable(pawn, sd.constraint, 0.0, nullptr, nullptr);
+            set_variable(pawn, sd.var, 0.0, nullptr, nullptr);
+            set_variable(pawn, (std::wstring(L"Sheath Slot ") + S).c_str(), 3.0);
+            set_variable(pawn, (std::wstring(S) + L" Sheath Slot Concrete").c_str(), 11.0);
+            set_bool_property(pawn, (std::wstring(L"Weapon UnSheathing ") + S).c_str(), false);
+            set_bool_property(pawn, (std::wstring(S) + L" Weapon Sheathing").c_str(), false);
+            set_bool_property(pawn, (std::wstring(L"Block ") + S + L" Weapon From Sheathing").c_str(), false);
+            set_bool_property(pawn, STR("Cross Unsheath"), false);
+            bool um = Call(st.weapon, STR("Unsheathed Mode")).run();
+            HSVR_LOG("Draw: the game had not freed %ls from %ls after %.2f s: the mod broke %ls (joint %s, Unsheathed Mode %s)", st.weapon->GetName().c_str(), sd.var,
+                     now_seconds() - st.t0, sd.constraint, joint ? "broken" : "missing", um ? "run" : "missing");
+            st = SlotTake{};
+        }
+    }
+
     bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Vec3& palm, const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -15732,6 +15787,13 @@ namespace
                 return true;
             }
             const char* hname = side == 0 ? "left" : "right";
+            // What the game's own attach does for a weapon taken off Weapon Slot R1/R2/Back (L1/L2: the L
+            // flags; they follow the SLOT's side): without UnSheathing, Check Scabbard Unsheath State's
+            // "lock as seated" ((Back ? true : Z <= 20) and !UnSheathing) re-seated a back shield every
+            // tick and never broke its joint (test 2026-11-21 21:40Z: the pavise stayed on his back).
+            set_bool_property(pawn, name(L"Weapon UnSheathing %ls").c_str(), true);
+            set_bool_property(pawn, (std::wstring(sd.side == 0 ? STR("Block L") : STR("Block R")) + STR(" Weapon From Sheathing")).c_str(), true);
+            g_slot_take[side] = SlotTake{w, best, now_seconds()};
             controllers_buzz(side, 0.3f);
             if (class_name_starts(w, STR("Shield")) && pavise_on_forearm(w, side, cfg))
             {
