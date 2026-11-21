@@ -125,6 +125,11 @@ namespace
                                         // are one-handed, type 2; 15 and 20 cm grips two-handed, type 11)
         double long_handle_cm = 30.0;   // sword handle at least this long: hands at the pommel end for reach,
                                         // half-sword grip = pommel + guard (Matthew 2026-11-21, Spit)
+        // Long handles: the main hand rests by the guard and slides down to the off hand during a swing
+        // (Matthew 2026-11-21). Swing = weapon turning faster than swing_slide_start_dps.
+        int swing_slide = 1;
+        double swing_slide_start_dps = 400.0, swing_slide_end_dps = 150.0, swing_slide_hold_s = 0.25;
+        double swing_slide_down_s = 0.12, swing_slide_up_s = 0.4;
         std::wstring offhand = L"pommel"; // pommel: off hand at the handle's end (Matthew 2026-11-19); next: beside the main hand (game spacing)
     };
     Settings g_settings;
@@ -164,6 +169,12 @@ namespace
             else if (k == "own_textures") g_settings.own_textures = atoi(v.c_str());
             else if (k == "fit_hands") g_settings.fit_hands = atoi(v.c_str());
             else if (k == "two_hand_grip_cm") g_settings.two_hand_grip_cm = atof(v.c_str());
+            else if (k == "swing_slide") g_settings.swing_slide = atoi(v.c_str());
+            else if (k == "swing_slide_start_dps") g_settings.swing_slide_start_dps = atof(v.c_str());
+            else if (k == "swing_slide_end_dps") g_settings.swing_slide_end_dps = atof(v.c_str());
+            else if (k == "swing_slide_hold_s") g_settings.swing_slide_hold_s = atof(v.c_str());
+            else if (k == "swing_slide_down_s") g_settings.swing_slide_down_s = atof(v.c_str());
+            else if (k == "swing_slide_up_s") g_settings.swing_slide_up_s = atof(v.c_str());
             else if (k == "long_handle_cm") g_settings.long_handle_cm = atof(v.c_str());
             else if (k == "offhand") g_settings.offhand = std::wstring(v.begin(), v.end());
         }
@@ -420,6 +431,16 @@ namespace
                 log("  ! function %s not found on %s", label.c_str(), name_of(object).c_str());
                 ok = false;
             }
+            size_t size = 16;
+            if (fn)
+                for (FProperty* p : fn->ForEachProperty())
+                    size = (std::max)(size, (size_t)p->GetOffset_Internal() + (size_t)p->GetSize());
+            buffer.assign(size + 16, 0);
+        }
+        // Per-tick calls: the function looked up once by the caller (name lookups are slow).
+        Call(UObject* object, UFunction* function, const char* what) : target(object), fn(function), label(what)
+        {
+            ok = object && function;
             size_t size = 16;
             if (fn)
                 for (FProperty* p : fn->ForEachProperty())
@@ -1264,6 +1285,93 @@ namespace
     //   along the head's axis onto the model's handle; a hand already attached is let go (Break L
     //   Constraint, what the game itself does) so it re-attaches at the new place.
     // Positions along the model: model cm, guard bottom 0, handle down to numbers["handle_bottom"].
+    // The main hand sliding down a long handle during a swing. The game has no slide for swords (only
+    // polearm handles: custom_weapon_hand_spots.md 4b, which moves the right constraint's weapon-side
+    // reference with SetConstraintReferencePosition(Frame1)). Here the same reference point is moved
+    // along the handle from the main hand's marker (by the guard) to just above the off hand, and back
+    // when the swing ends. Frame1 = component 1 = the weapon's BaseMesh (SetConstrainedComponents(BaseMesh,
+    // Mesh, hand_r)), so the point is in BaseMesh space, where the hand markers live.
+    struct SwingSlide
+    {
+        UObject* pawn = nullptr;
+        UObject* weapon = nullptr;
+        UObject* base = nullptr;
+        V3 top{}, bottom{};
+        double a = 0, target = 0, calm = 0;
+        bool touched = false;
+        UFunction* set_ref = nullptr;
+        UFunction* ang_vel = nullptr;
+        FProperty* blockers[4] = {};
+        double log_t = 0;
+    };
+    SwingSlide g_slide;
+
+    bool pawn_flag(UObject* pawn, FProperty* p)
+    {
+        if (!p) return false;
+        auto* b = static_cast<FBoolProperty*>(p);
+        return (*(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal() + b->GetByteOffset()) & b->GetFieldMask()) != 0;
+    }
+
+    void slide_tick(float dt)
+    {
+        SwingSlide& s = g_slide;
+        if (!s.weapon || !g_settings.swing_slide) return;
+        UObject* pawn = player_pawn();
+        if (pawn != s.pawn || object_property(pawn, STR("Weapon R")) != s.weapon)
+        {
+            log("Swing slide: weapon no longer held, stopped");
+            s = SwingSlide{};
+            return;
+        }
+        UObject* rc = object_property(pawn, STR("PhysicsConstraint R Hand"));
+        bool blocked = !rc;
+        for (FProperty* p : s.blockers) blocked = blocked || pawn_flag(pawn, p);
+        if (blocked)
+        {
+            // Half-sword, Mordhau, swapped hands or a hand re-gripping: the game owns the grip; it re-makes
+            // the constraint at the marker, so start again from the top.
+            s.a = s.target = 0;
+            s.touched = false;
+            return;
+        }
+        V3 w{};
+        {
+            Call c(s.base, s.ang_vel, "GetPhysicsAngularVelocityInDegrees");
+            if (c.run())
+                if (FProperty* r = c.param(STR("ReturnValue"))) w = read_three(c.buffer.data() + r->GetOffset_Internal(), r);
+        }
+        double dps = std::sqrt(w.x * w.x + w.y * w.y + w.z * w.z);
+        if (dps >= g_settings.swing_slide_start_dps)
+        {
+            s.target = 1;
+            s.calm = 0;
+        }
+        else if (dps <= g_settings.swing_slide_end_dps)
+        {
+            s.calm += dt;
+            if (s.calm >= g_settings.swing_slide_hold_s) s.target = 0;
+        }
+        double was = s.a;
+        double rate = dt / (std::max)(0.01, s.target > s.a ? g_settings.swing_slide_down_s : g_settings.swing_slide_up_s);
+        s.a = s.target > s.a ? (std::min)(s.target, s.a + rate) : (std::max)(s.target, s.a - rate);
+        if (s.a == was && !(s.a > 0 && !s.touched)) return;
+        V3 ref{s.top.x + (s.bottom.x - s.top.x) * s.a, s.top.y + (s.bottom.y - s.top.y) * s.a, s.top.z + (s.bottom.z - s.top.z) * s.a};
+        Call c(rc, s.set_ref, "SetConstraintReferencePosition");
+        c.byte(STR("Frame"), 0).three(STR("RefPosition"), ref.x, ref.y, ref.z);
+        bool ok = c.run();
+        if (!c.ok)
+        {
+            log("Swing slide: SetConstraintReferencePosition could not be called, slide switched off");
+            s = SwingSlide{};
+            return;
+        }
+        s.touched = s.a > 0;
+        if ((was == 0 && s.a > 0) || (s.a == 0 && was > 0) || (s.a == 1 && was < 1))
+            log("Swing slide: %s (weapon turning %.0f deg/s), hand point z %.1f%s", s.a > was ? "down" : "up", dps, ref.z,
+                ok ? "" : " (call FAILED)");
+    }
+
     void fit_hands(UObject* pawn, UObject* weapon, const Xf& head_xf, V3 hs, double shift, std::map<std::string, double>& numbers)
     {
         if (!g_settings.fit_hands) return;
@@ -1334,14 +1442,14 @@ namespace
         double r_target = rz, off_target = oz, l_alt_target = 0, r_alt_target = 0;
         if (long_handle)
         {
-            // Full reach: both hands down at the pommel end, main hand above the off hand.
-            r_target = lo + hand;
+            // Main hand by the guard (its own marker), off hand at the pommel end; the main hand slides down
+            // to just above the off hand during a swing (slide_tick).
             off_target = lo;
-            // Half-sword grip on a long handle: main hand stays at the pommel end, off hand just under the guard.
+            // Half-sword grip on a long handle: main hand at the pommel end, off hand just under the guard.
             r_alt_target = lo;
             l_alt_target = -half_hand;
-            log("  long handle (%.1f cm >= %.1f): normal grip at the pommel end, half-sword grip pommel + guard",
-                grip_len, g_settings.long_handle_cm);
+            log("  long handle (%.1f cm >= %.1f): main hand by the guard, off hand at the pommel end, main hand slides "
+                "down in swings; half-sword grip pommel + guard", grip_len, g_settings.long_handle_cm);
         }
         else
         {
@@ -1354,7 +1462,37 @@ namespace
             l_alt_target = (std::min)((std::max)(blade_from + 0.5 * blade, blade_from + hand), tip - hand);
             r_alt_target = r_target;
         }
-        if (long_handle) place(r_mark, "main hand", r_target);
+        g_slide = SwingSlide{};
+        if (long_handle && g_settings.swing_slide)
+        {
+            UObject* base = object_property(weapon, STR("BaseMesh"));
+            UObject* rc = object_property(pawn, STR("PhysicsConstraint R Hand"));
+            FProperty* rel = r_mark->GetPropertyByNameInChain(STR("RelativeLocation"));
+            if (base && rel)
+            {
+                SwingSlide& sl = g_slide;
+                sl.pawn = pawn;
+                sl.weapon = weapon;
+                sl.base = base;
+                sl.top = read_three(reinterpret_cast<uint8_t*>(r_mark) + rel->GetOffset_Internal(), rel);
+                V3 w = transform_point(head_xf, V3{rhl.x, rhl.y, (lo + hand + shift) / hs.z}, false);
+                sl.bottom = transform_point(world_transform(base), w, true);
+                UObject* pc = find(STR("/Script/Engine.Default__PhysicsConstraintComponent"));
+                if (pc) sl.set_ref = pc->GetFunctionByNameInChain(STR("SetConstraintReferencePosition"));
+                sl.ang_vel = base->GetFunctionByNameInChain(STR("GetPhysicsAngularVelocityInDegrees"));
+                const TCHAR* names[4] = {STR("R Alt Grip"), STR("Mordhau Grip"), STR("2H Switched Hands (Temp)"),
+                                         STR("R Offhand Searching Grip")};
+                for (int i = 0; i < 4; ++i)
+                {
+                    sl.blockers[i] = pawn->GetPropertyByNameInChain(names[i]);
+                    if (!sl.blockers[i]) log("  ! pawn has no %s flag", narrow(names[i]).c_str());
+                }
+                log("  swing slide: hand point (BaseMesh) z %.1f -> %.1f (model %.1f -> %.1f cm); constraint %s; functions %s/%s",
+                    sl.top.z, sl.bottom.z, rz, lo + hand, rc ? "found" : "NOT found", sl.set_ref ? "ok" : "MISSING",
+                    sl.ang_vel ? "ok" : "MISSING");
+                if (!sl.set_ref || !sl.ang_vel) g_slide = SwingSlide{};
+            }
+        }
         place(off_mark, "off hand", off_target);
         if (!hafted && blade_from < tip)
         {
@@ -1374,15 +1512,6 @@ namespace
             Call brk(pawn, STR("Break L Constraint"));
             brk.flag(STR("Destroy Constraint"), true);
             log("  off hand was attached: let go so it re-attaches at the new place (%s)", brk.run() ? "ok" : "FAILED");
-        }
-        if (long_handle)
-        {
-            // The game's own grip switch (Release type, UG @454737) breaks the right constraint and the hand
-            // re-grips at its marker once within 50 cm (UG @466185); the weapon stays Weapon R.
-            Call brk(pawn, STR("Break R Constraint"));
-            brk.flag(STR("Destroy Constraint"), true);
-            log("  main hand let go so it re-grips at the pommel end (%s); if it does not, drop and pick the weapon up",
-                brk.run() ? "ok" : "FAILED");
         }
     }
 
@@ -1607,9 +1736,10 @@ namespace
 
     bool g_key_was_down = false;
 
-    void tick(UObject* engine)
+    void tick(UObject* engine, float dt)
     {
         g_engine = engine;
+        slide_tick(dt);
         bool down = (GetAsyncKeyState(g_settings.key) & 0x8000) != 0;
         if (down && !g_key_was_down) apply();
         g_key_was_down = down;
@@ -1635,7 +1765,7 @@ class HalfSwordCustomWeapon : public CppUserModBase
     auto on_unreal_init() -> void override
     {
         Hook::RegisterEngineTickPreCallback(
-                [](auto&, UEngine* engine, float, bool) { tick(reinterpret_cast<UObject*>(engine)); },
+                [](auto&, UEngine* engine, float dt, bool) { tick(reinterpret_cast<UObject*>(engine), dt); },
                 {false, false, STR("HalfSwordCustomWeapon"), STR("Tick")});
         log("Ready: hold a weapon in the right hand and press key 0x%X", g_settings.key);
     }
