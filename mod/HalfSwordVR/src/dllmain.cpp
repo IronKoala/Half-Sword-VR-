@@ -7256,6 +7256,51 @@ namespace
     // calf_r/l) reads: the bone's forward (X) in its parent bone's space, dotted with X. Only a bend
     // moves it; a twist about the bone's own X does not. Logged for the Willies you hold, with the
     // twist about X (swing-twist split) and his Strain / Dislocation State / part health.
+    // Test (dev_script "hsvr.joint_torque <bone> <x|y|z> <N m> <seconds>"): that torque, about the
+    // bone's own axis, on that bone of the first passive foe, every tick for that long. The foe is
+    // looked up again each tick (no Willie pointer kept across frames) and logged with the Joints lines.
+    struct JointTorqueTest
+    {
+        bool on = false;
+        std::string bone;
+        int axis = 0;
+        double nm = 0.0, until = 0.0;
+    };
+    JointTorqueTest g_joint_torque;
+
+    UObject* joint_torque_foe(UObject* pawn)
+    {
+        std::vector<UObject*> foes;
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), foes);
+        for (UObject* foe : foes)
+            if (foe && foe != pawn && foe->GetName().rfind(STR("Default__"), 0) != 0 && object_alive(foe)) return foe;
+        return nullptr;
+    }
+
+    void joint_torque_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        if (!g_joint_torque.on) return;
+        if (now_seconds() > g_joint_torque.until)
+        {
+            g_joint_torque.on = false;
+            HSVR_LOG("Script: hsvr.joint_torque: done");
+            return;
+        }
+        UObject* foe = joint_torque_foe(pawn);
+        UObject* mesh = foe ? object_property(foe, STR("Mesh")) : nullptr;
+        if (!mesh) return;
+        FName bone = bone_fname(g_joint_torque.bone.c_str());
+        Quat q = socket_rotation(mesh, bone);
+        Vec3 a{g_joint_torque.axis == 0 ? 1.0 : 0.0, g_joint_torque.axis == 1 ? 1.0 : 0.0, g_joint_torque.axis == 2 ? 1.0 : 0.0};
+        Vec3 t = q.rotate(a) * (g_joint_torque.nm * 10000.0); // N m -> kg cm^2 / s^2
+        Call c(mesh, STR("AddTorqueInRadians"));
+        c.three(STR("Torque"), t.x, t.y, t.z);
+        c.name(STR("BoneName"), bone);
+        c.flag(STR("bAccelChange"), false);
+        c.run();
+    }
+
     void joint_strain_log(UObject* pawn)
     {
         using namespace hsvr;
@@ -7265,9 +7310,9 @@ namespace
         if (now - last < 0.2) return;
         last = now;
         UObject* done = nullptr;
-        for (int side = 0; side < 2; ++side)
+        for (int side = 0; side < 3; ++side)
         {
-            UObject* w = g_body_grab[side].on ? g_body_grab[side].victim : nullptr;
+            UObject* w = side < 2 ? (g_body_grab[side].on ? g_body_grab[side].victim : nullptr) : (g_joint_torque.on ? joint_torque_foe(pawn) : nullptr);
             if (!w || w == done || !object_alive(w)) continue;
             done = w;
             UObject* mesh = object_property(w, STR("Mesh"));
@@ -14542,7 +14587,7 @@ namespace
             { HSVR_SUB("after:swing_speed_after_tick"); swing_speed_after_tick(context); }
             { HSVR_SUB("after:fist_flags_after_tick"); fist_flags_after_tick(context); }
             { HSVR_SUB("after:body_grab_after_tick"); body_grab_after_tick(context); }
-            { HSVR_SUB("after:joint_strain_log"); joint_strain_log(context); }
+            { HSVR_SUB("after:joint_strain_log"); joint_torque_tick(context); joint_strain_log(context); }
             { HSVR_SUB("after:body_hit_watch"); body_hit_watch(context); }
             { HSVR_SUB("after:elbow_tick"); elbow_tick(context); }
             { HSVR_SUB("after:stump_blood_tick"); stump_blood_tick(context); }
@@ -17450,6 +17495,21 @@ namespace
             if (entry.command.rfind("hsvr.joint_trace ", 0) == 0)
             {
                 g_joint_trace.store(atoi(entry.command.c_str() + 17) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.joint_torque ", 0) == 0)
+            {
+                char bone[64] = {}, axis[8] = {};
+                double nm = 0.0, secs = 0.0;
+                if (std::sscanf(entry.command.c_str() + 18, "%63s %7s %lf %lf", bone, axis, &nm, &secs) == 4)
+                {
+                    g_joint_torque.bone = bone;
+                    g_joint_torque.axis = axis[0] == 'y' ? 1 : axis[0] == 'z' ? 2 : 0;
+                    g_joint_torque.nm = nm;
+                    g_joint_torque.until = hsvr::now_seconds() + secs;
+                    g_joint_torque.on = true;
+                    HSVR_LOG("Script: hsvr.joint_torque: %s about %s, %.0f N m for %.1f s", bone, axis, nm, secs);
+                }
                 continue;
             }
             if (entry.command == "hsvr.passive_foe")
