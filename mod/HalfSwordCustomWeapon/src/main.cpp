@@ -1405,6 +1405,46 @@ namespace
         else
             log("  hafted model: the held weapon's grip type is kept");
 
+        if (hafted)
+        {
+            // Hafted: the game's own hand spots (spears: R -10, L 45, off hand 60, alt 45/95 ...) keep their
+            // distance from the head (the model is lined up by the head); any that would be off the model's
+            // haft is pulled onto it, half a hand from either end.
+            double lo = handle_bottom + half_hand, hi = numbers["guard_bottom"] - half_hand;
+            bool moved_l = false;
+            for (const TCHAR* n : {STR("Grip R Hand Default Pos"), STR("Grip L Hand Default Pos"), STR("Grip L Hand Off Hand"),
+                                   STR("Grip L Hand Alt Pos"), STR("Grip R Hand Alt Pos")})
+            {
+                UObject* mark = object_property(weapon, n);
+                if (!mark) continue;
+                V3 hl{};
+                double z = model_z(mark, hl);
+                double want = (std::min)((std::max)(z, lo), hi);
+                if (hi < lo) want = 0.5 * (lo + hi);
+                if (std::fabs(want - z) < 0.5)
+                {
+                    log("  %s at %.1f cm: on the haft", narrow(n).c_str(), z);
+                    continue;
+                }
+                V3 w = transform_point(head_xf, V3{hl.x, hl.y, (want + shift) / hs.z}, false);
+                Call move(mark, STR("K2_SetWorldLocation"));
+                move.three(STR("NewLocation"), w.x, w.y, w.z).flag(STR("bTeleport"), true);
+                move.run();
+                log("  %s %.1f -> %.1f cm (was off the model's haft %.1f..%.1f)", narrow(n).c_str(), z, want, lo, hi);
+                moved_l = moved_l || narrow(n).find(" L ") != std::string::npos;
+            }
+            if (moved_l && off_mark)
+            {
+                FProperty* p = pawn->GetPropertyByNameInChain(STR("L Hand In Offhand Attached"));
+                if (pawn_flag(pawn, p))
+                {
+                    Call brk(pawn, STR("Break L Constraint"));
+                    brk.flag(STR("Destroy Constraint"), true);
+                    log("  off hand let go so it re-attaches at the new place (%s)", brk.run() ? "ok" : "FAILED");
+                }
+            }
+            return;
+        }
         if (!off_mark || !r_mark)
         {
             log("  ! weapon has no %s marker", r_mark ? "off hand" : "main hand");
@@ -1557,6 +1597,11 @@ namespace
         return mesh;
     }
 
+    bool has_mesh(UObject* component)
+    {
+        return component && object_property(component, STR("StaticMesh"));
+    }
+
     void hide(UObject* component)
     {
         if (!component) return;
@@ -1582,21 +1627,82 @@ namespace
         log("Model %s: %zu collision pieces, guard top %.1f cm, tip %.1f cm, mass %.2f kg", narrow(base_name).c_str(),
             hulls.size(), guard_top, tip, mass_total);
 
-        // The parts, as the forge builds them (ModularWeaponBP slots).
-        const TCHAR* slot_names[] = {STR("Head"), STR("Guard"), STR("Grip"), STR("Pommel")};
-        UObject* slots[4];
+        // The weapon's parts (decompile: defaults\custom_weapon_hafted.md). Three layouts:
+        //   A modular (forge swords, pollaxes, maces, *_Tier_*): Head / Guard / Grip / Pommel slots
+        //     (+ "Sub Module 1 Mesh"/"SubModule 2 Mesh" side pieces on pollaxes);
+        //   B reforged two-piece (spears, halberds, billhooks, war staffs, axes): "Blade" + "Grip_0"
+        //     (+ "Spike"), the inherited slots empty;
+        //   C one piece (tools, hurlbat, staff): "Weapon" (or Blade / Grip_0 alone).
+        // New collision goes into those components with SetStaticMesh, which keeps their hit bindings,
+        // tags, collision profile and Tip children. Flails (simulating chain) are refused.
+        if (has_mesh(object_property(weapon, STR("Blade1"))) || object_property(weapon, STR("Link 1")))
+        {
+            log("  ! flails are not supported (their head hangs on a simulating chain)");
+            return;
+        }
+        struct Part
+        {
+            const char* name;
+            UObject* comp;
+            std::vector<std::string> model_slots; // which model parts' collision pieces it gets
+        };
+        std::vector<Part> parts;
+        UObject* head = nullptr;
+        bool one_piece = false;
+        auto comp = [&](const TCHAR* n) { return object_property(weapon, n); };
+        if (has_mesh(comp(STR("Head"))))
+        {
+            head = comp(STR("Head"));
+            parts = {{"Head", head, {"Head"}}, {"Guard", comp(STR("Guard")), {"Guard"}},
+                     {"Grip", comp(STR("Grip")), {"Grip"}}, {"Pommel", comp(STR("Pommel")), {"Pommel"}}};
+            if (!has_mesh(parts[1].comp) && !has_mesh(parts[3].comp) && !has_mesh(parts[2].comp))
+                parts[0].model_slots = {"Head", "Guard", "Grip", "Pommel"}; // a bare head (old test weapons)
+        }
+        else if (has_mesh(comp(STR("Blade"))) && has_mesh(comp(STR("Grip_0"))))
+        {
+            head = comp(STR("Blade"));
+            parts = {{"Blade", head, {"Head"}}, {"Grip_0", comp(STR("Grip_0")), {"Guard", "Grip", "Pommel"}}};
+        }
+        else
+        {
+            for (const TCHAR* n : {STR("Weapon"), STR("Blade"), STR("Grip_0")})
+                if (has_mesh(comp(n)))
+                {
+                    head = comp(n);
+                    static std::string one_names[3] = {"Weapon", "Blade", "Grip_0"};
+                    const char* label = "Weapon";
+                    for (auto& on : one_names)
+                        if (narrow(n) == on) label = on.c_str();
+                    parts = {{label, head, {"Head", "Guard", "Grip", "Pommel"}}};
+                    one_piece = true;
+                    break;
+                }
+        }
+        if (!head)
+        {
+            log("  ! no weapon part with a mesh found (Head, Blade, Weapon), or it was already replaced");
+            return;
+        }
+        // Extra pieces the model has nothing for: shrunk to a 1 cm box inside the model and made light.
+        for (const TCHAR* extra : {STR("Sub Module 1 Mesh"), STR("SubModule 2 Mesh"), STR("Spike")})
+            if (has_mesh(comp(extra)))
+            {
+                static std::string names[3] = {"Sub Module 1 Mesh", "SubModule 2 Mesh", "Spike"};
+                for (auto& n : names)
+                    if (narrow(extra) == n) parts.push_back({n.c_str(), comp(extra), {}});
+            }
+
         UObject* base = object_property(weapon, STR("BaseMesh"));
         double parts_before = 0;
-        for (int i = 0; i < 4; ++i)
+        for (Part& pt : parts)
         {
-            slots[i] = object_property(weapon, slot_names[i]);
             float kg = 0;
-            body_mass(slots[i], false, kg);
+            body_mass(pt.comp, false, kg);
             parts_before += kg;
             V3 lo{}, hi{};
-            mesh_box(object_property(slots[i], STR("StaticMesh")), lo, hi);
-            log("  slot %s: mesh %s, own mass setting %.3f kg, mesh z %.1f to %.1f", narrow(slot_names[i]).c_str(),
-                name_of(object_property(slots[i], STR("StaticMesh"))).c_str(), kg, lo.z, hi.z);
+            mesh_box(object_property(pt.comp, STR("StaticMesh")), lo, hi);
+            log("  part %s: mesh %s, own mass setting %.3f kg, mesh z %.1f to %.1f", pt.name,
+                name_of(object_property(pt.comp, STR("StaticMesh"))).c_str(), kg, lo.z, hi.z);
         }
         // BaseMesh (the grip dummy) has a mass of its own, which stays; the parts get the rest.
         double whole_before = mass_of(base);
@@ -1604,19 +1710,8 @@ namespace
         double parts_target = mass_total - base_share;
         if (base_share < 0 || parts_target < 0.25 * mass_total) parts_target = mass_total;
         log("  whole weapon %.3f kg (BaseMesh's own %.3f kg; parts get %.3f kg)", whole_before, base_share, parts_target);
-        for (const TCHAR* extra : {STR("Sub Module 1 Mesh"), STR("SubModule 2 Mesh")})
-            if (UObject* c = object_property(weapon, extra))
-                if (UObject* m = object_property(c, STR("StaticMesh")))
-                    log("  also on this weapon: %s, mesh %s (left as it is)", narrow(extra).c_str(), name_of(m).c_str());
-        UObject* head = slots[0];
-        UObject* old_head_mesh = object_property(head, STR("StaticMesh"));
-        if (!head || !old_head_mesh)
-        {
-            log("  ! this weapon has no head part (or it was already replaced)");
-            return;
-        }
         V3 olo{}, ohi{};
-        mesh_box(old_head_mesh, olo, ohi);
+        mesh_box(object_property(head, STR("StaticMesh")), olo, ohi);
         log_tips(weapon);
 
         // The head's scale (the forge's size sliders) must not stretch the model: model points are in
@@ -1636,87 +1731,118 @@ namespace
         }
         auto to_head_local = [&](V3 u) { return V3{u.x / hs.x, u.y / hs.y, u.z / hs.z}; };
 
-        // Where the game's own guard starts, along the head's axis: the model's guard goes there, so
-        // the hands (placed by the game's grip) stay below it.
-        double shift = -guard_top;
-        if (UObject* guard = slots[1])
+        // Lining the model up along the head's axis:
+        // - a sword model on a weapon with a guard: the model's guard goes where the game's guard starts,
+        //   so the hands (placed by the game's grip) stay below it;
+        // - one-piece weapons: the model's bottom end on the game mesh's bottom end;
+        // - otherwise (hafted heads): the model's head starts where the game's head mesh starts, so the
+        //   reach and the game's hand spots keep their distance from the head.
+        bool model_hafted = numbers.count("hafted") && numbers["hafted"] > 0.5;
+        double shift = olo.z * hs.z - guard_top;
+        const char* how = "head bottoms";
+        UObject* guard = comp(STR("Guard"));
+        if (one_piece)
+        {
+            shift = olo.z * hs.z - numbers["pommel_end"];
+            how = "bottom ends";
+        }
+        else if (!model_hafted && has_mesh(guard))
         {
             V3 glo{}, ghi{};
             if (mesh_box(object_property(guard, STR("StaticMesh")), glo, ghi))
             {
                 V3 w = transform_point(world_transform(guard), V3{0, 0, glo.z}, false);
                 V3 h = transform_point(head_xf, w, true);
-                double hs_guard_bottom = h.z * hs.z;
-                shift = hs_guard_bottom - numbers["guard_bottom"];
-                log("  game guard starts at z %.1f cm on the head axis; model guard %.1f..%.1f cm -> shift %.1f cm", hs_guard_bottom,
-                    numbers["guard_bottom"], guard_top, shift);
+                shift = h.z * hs.z - numbers["guard_bottom"];
+                how = "guards";
             }
         }
+        log("  model lined up by the %s: shift %.1f cm (game head mesh z %.1f..%.1f)", how, shift, olo.z * hs.z, ohi.z * hs.z);
 
         Call get_mat(head, STR("GetMaterial"));
         get_mat.i32(STR("ElementIndex"), 0);
         UObject* material = get_mat.run() ? get_mat.ret_object() : nullptr;
 
-        // Mass: shared between the parts by the volume of their pieces (one material throughout).
-        double volume_all = 0, volume[4] = {0, 0, 0, 0};
-        for (Hull& h : hulls)
+        // Mass: shared between the parts by the volume of their pieces (one material throughout); parts the
+        // model has nothing for get a token 10 g.
+        const double token_kg = 0.01;
+        double volume_all = 0;
+        std::vector<double> volume(parts.size(), 0.0);
+        int empty_parts = 0;
+        for (Hull& h : hulls) volume_all += h.volume;
+        for (size_t i = 0; i < parts.size(); ++i)
         {
-            volume_all += h.volume;
-            for (int i = 0; i < 4; ++i)
-                if (narrow(slot_names[i]) == h.slot) volume[i] += h.volume;
+            for (Hull& h : hulls)
+                for (auto& ms : parts[i].model_slots)
+                    if (ms == h.slot) volume[i] += h.volume;
+            if (volume[i] <= 0 && parts[i].comp) ++empty_parts;
         }
+        double share_target = (std::max)(0.05, parts_target - token_kg * empty_parts);
 
-        for (int i = 0; i < 4; ++i)
+        for (size_t i = 0; i < parts.size(); ++i)
         {
-            if (!slots[i]) continue;
-            Xf slot_xf = i == 0 ? head_xf : world_transform(slots[i]);
+            Part& pt = parts[i];
+            if (!pt.comp) continue;
+            Xf slot_xf = pt.comp == head ? head_xf : world_transform(pt.comp);
+            auto to_slot = [&](V3 p) {
+                p.z += shift;
+                V3 hl = to_head_local(p);
+                return pt.comp == head ? hl : transform_point(slot_xf, transform_point(head_xf, hl, false), true);
+            };
             std::vector<std::vector<V3>> pieces;
             for (Hull& h : hulls)
             {
-                if (narrow(slot_names[i]) != h.slot) continue;
+                bool mine = false;
+                for (auto& ms : pt.model_slots) mine = mine || ms == h.slot;
+                if (!mine) continue;
                 std::vector<V3> local;
-                for (V3 p : h.points)
-                {
-                    p.z += shift;
-                    V3 hl = to_head_local(p);
-                    local.push_back(i == 0 ? hl : transform_point(slot_xf, transform_point(head_xf, hl, false), true));
-                }
+                for (V3 p : h.points) local.push_back(to_slot(p));
                 pieces.push_back(local);
             }
+            float kg = volume_all > 0 ? (float)(share_target * volume[i] / volume_all) : 0.0f;
             if (pieces.empty())
             {
-                log("  %s: no pieces in the model; left as it is but hidden", narrow(slot_names[i]).c_str());
-                hide(slots[i]);
-                continue;
+                // Nothing in the model for this part (no guard, no side pieces): a 1 cm box inside the
+                // model where the handle meets the head, so it neither shows nor hits anything of its own.
+                std::vector<V3> cube;
+                for (int k = 0; k < 8; ++k)
+                    cube.push_back(to_slot(V3{(k & 1) ? 0.5 : -0.5, (k & 2) ? 0.5 : -0.5, guard_top + ((k & 4) ? 0.5 : -0.5)}));
+                pieces.push_back(cube);
+                kg = (float)token_kg;
             }
-            UObject* mesh = build_part_mesh(weapon, slots[i], pieces);
+            UObject* mesh = build_part_mesh(weapon, pt.comp, pieces);
             if (!mesh) continue;
-            float kg = volume_all > 0 ? (float)(parts_target * volume[i] / volume_all) : 0.0f;
-            body_mass(slots[i], true, kg);
-            Call set(slots[i], STR("SetStaticMesh"));
+            body_mass(pt.comp, true, kg);
+            Call set(pt.comp, STR("SetStaticMesh"));
             set.object(STR("NewMesh"), mesh);
             set.run();
-            hide(slots[i]);
-            log("  %s: new collision in place (%s), mass setting %.3f kg", narrow(slot_names[i]).c_str(),
-                set.ret_bool() ? "changed" : "NOT changed", kg);
+            hide(pt.comp);
+            log("  %s: new collision in place (%s; %zu pieces%s), mass setting %.3f kg", pt.name,
+                set.ret_bool() ? "changed" : "NOT changed", pieces.size(), volume[i] > 0 ? "" : ", none in the model: 1 cm box", kg);
         }
         log("Whole weapon mass now %.3f kg (target %.3f kg)", mass_of(base), mass_total);
 
-        // Damage points on the head move with the blade: same layout, stretched to the new length.
-        double old_len = ohi.z, new_len = (tip + shift) / hs.z; // both in the head's unscaled local units
+        // Damage points (Tip/Base scenes, damage boxes) on the head move with it: the game head's length
+        // [olo, ohi] maps onto the model's head [head start, tip] (one piece: the whole model). Found by
+        // parent, not by name: reforged weapons' tips are plain components (Tip1, Tip2, Box), modular
+        // ones are NODE_AddSceneComponent copies.
+        double from_lo = olo.z, from_hi = ohi.z;
+        double to_lo = ((one_piece ? numbers["pommel_end"] : guard_top) + shift) / hs.z, to_hi = (tip + shift) / hs.z;
         std::vector<UObject*> comps;
         UObjectGlobals::FindAllOf(STR("SceneComponent"), comps);
         for (UObject* c : comps)
         {
             if (object_property(c, STR("AttachParent")) != head) continue;
-            if (c->GetName().find(STR("NODE_AddSceneComponent")) == std::wstring::npos) continue;
+            std::wstring cls = c->GetClassPrivate()->GetName();
+            if (cls.find(STR("ProceduralMesh")) != std::wstring::npos || cls.find(STR("StaticMesh")) != std::wstring::npos) continue;
             FProperty* rp = c->GetPropertyByNameInChain(STR("RelativeLocation"));
-            if (!rp || old_len < 1.0) continue;
+            if (!rp || from_hi - from_lo < 1.0) continue;
             V3 r = read_three(reinterpret_cast<uint8_t*>(c) + rp->GetOffset_Internal(), rp);
+            double z = to_lo + (r.z - from_lo) * (to_hi - to_lo) / (from_hi - from_lo);
             Call move(c, STR("K2_SetRelativeLocation"));
-            move.three(STR("NewLocation"), r.x, r.y, r.z * new_len / old_len).flag(STR("bTeleport"), true);
+            move.three(STR("NewLocation"), r.x, r.y, z).flag(STR("bTeleport"), true);
             move.run();
-            log("  head damage point %s: z %.1f -> %.1f (head units)", narrow(c->GetName()).c_str(), r.z, r.z * new_len / old_len);
+            log("  damage point %s (%s): z %.1f -> %.1f (head units)", narrow(c->GetName()).c_str(), narrow(cls).c_str(), r.z, z);
         }
 
         // The visible model in the head's local units; normals and tangents adjusted so that, after the
