@@ -1379,7 +1379,8 @@ namespace
         UObject* rc = object_property(pawn, STR("PhysicsConstraint R Hand"));
         FProperty* rel = mark ? mark->GetPropertyByNameInChain(STR("RelativeLocation")) : nullptr;
         if (!rc || !rel) return;
-        for (const TCHAR* f : {STR("R Alt Grip"), STR("Mordhau Grip"), STR("2H Switched Hands (Temp)"), STR("R Offhand Searching Grip")})
+        for (const TCHAR* f : {STR("R Alt Grip"), STR("Mordhau Grip"), STR("2H Switched Hands (Temp)"), STR("R Offhand Searching Grip"),
+                               STR("R Hand Grip Slide"), STR("Hands Switching (2H)")})
             if (pawn_flag(pawn, pawn->GetPropertyByNameInChain(f)))
             {
                 log("  main hand: in another grip now (%s); the new spot is used at the next grip change", narrow(f).c_str());
@@ -1439,7 +1440,10 @@ namespace
             uint8_t l_default = 0;
             byte_property(weapon, STR("Grip L Hand Default"), false, l_default);
             auto spot_for = [&](const std::string& n) -> const char* {
-                if (n == "Grip R Hand Default Pos" || (n == "Grip L Hand Default Pos" && l_default == 3)) return "spot_main";
+                // L Default 3 (spears, polearms): the main hand holds at L Default Pos; R Default Pos is also the
+                // game's slide distance and hands-switch reference there, so it stays.
+                if ((n == "Grip R Hand Default Pos" && l_default != 3) || (n == "Grip L Hand Default Pos" && l_default == 3))
+                    return "spot_main";
                 if (n == "Grip L Hand Off Hand") return "spot_off";
                 if (n == "Grip L Hand Alt Pos") return "spot_half_off";
                 if (n == "Grip R Hand Alt Pos") return "spot_half_main";
@@ -1586,7 +1590,7 @@ namespace
                     if (!sl.blockers[i]) log("  ! pawn has no %s flag", narrow(names[i]).c_str());
                 }
                 log("  swing slide: hand point (BaseMesh) z %.1f -> %.1f (model %.1f -> %.1f cm); constraint %s; functions %s/%s",
-                    sl.top.z, sl.bottom.z, rz, lo + hand, rc ? "found" : "NOT found", sl.set_ref ? "ok" : "MISSING",
+                    sl.top.z, sl.bottom.z, r_target, lo + hand, rc ? "found" : "NOT found", sl.set_ref ? "ok" : "MISSING",
                     sl.ang_vel ? "ok" : "MISSING");
                 if (!sl.set_ref || !sl.ang_vel) g_slide = SwingSlide{};
             }
