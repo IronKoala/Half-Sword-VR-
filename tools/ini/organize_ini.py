@@ -196,6 +196,9 @@ LAYOUT = [
         ("pose_wrap_refresh_s", ""),
         ("pose_wrap_finger_radius_cm", "0 = auto."),
         ("pose_wrap_open_base", ""),
+        ("pose_grab_seat_palm", "1 = what you grab sits on your palm, not inside the fist."),
+        ("pose_grab_palm_cm", ""),
+        ("pose_grab_palm_along", ""),
         ("pose_fingers_anim_only", ""),
     ]),
     ("Holding: weight, strength, stamina", "The main feel values are in Quick settings.", [

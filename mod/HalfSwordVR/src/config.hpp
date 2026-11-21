@@ -715,6 +715,11 @@ namespace hsvr
         double pose_wrap_refresh_s = 0.5;
         double pose_wrap_finger_radius_cm = 0.0;
         bool pose_wrap_open_base = true;
+        // What the game's grab holds is pulled onto the palm (the spot on it nearest the palm), not into
+        // the fist: palm = hand bone + along x (middle knuckle - hand bone) + palm_cm toward the palm.
+        bool pose_grab_seat_palm = true;
+        double pose_grab_palm_cm = 2.0;
+        double pose_grab_palm_along = 0.5;
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;

@@ -8816,6 +8816,8 @@ namespace
         int next = 0;
         int queries = 0, solves = 0;
         double w_off = 0.0, ease = 0.12;
+        bool seated = false;
+        int seat_tries = 0;
         double last_log = -10.0;
     };
     WrapGrab g_wrap[2];
@@ -9022,6 +9024,7 @@ namespace
         return w;
     }
 
+    bool seat_on_palm(int side, UObject* pawn, WrapGrab& g, const hsvr::Config& cfg);
     // Game tick: a hand the game's grab holds something with (a body, a loose object) wraps it.
     void wrap_tick(const hsvr::Config& cfg, UObject* pawn)
     {
@@ -9049,6 +9052,11 @@ namespace
                 g.ease = (std::max)(0.01, cfg.pose_wrap_ease_s);
                 if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str());
             }
+            if (g.on && !g.seated && g.seat_tries < 5 && cfg.pose_grab_seat_palm)
+            {
+                ++g.seat_tries;
+                g.seated = seat_on_palm(side, pawn, g, cfg);
+            }
             else if (!comp && g.on)
             {
                 double ease = (std::max)(0.01, cfg.pose_wrap_ease_s);
@@ -9060,6 +9068,56 @@ namespace
             }
         }
     }
+    // Seat what the game's grab holds onto the palm (B&S; his framework's palm_on, translation only).
+    // The game's build (grab_pickup.md section 2, UF @525067-526604) joins hand_r (Frame1) to the held
+    // bone (Frame2) at weapon_rSocket - 5 x lowerarm forward, with the held thing at the spot the
+    // search hit (its GrabPoint), angular locked, and reels the linear limit to 0 over 0.2 s: the spot
+    // ends inside the fist and the thing floats there (Matthew 2026-11-21). Once the joint exists, its
+    // hand end goes to the palm's surface and its other end to the spot on the thing nearest the palm,
+    // so the reel brings that spot onto the palm; the thing keeps its turn in the hand, and the fingers
+    // wrap it from there.
+    bool seat_on_palm(int side, UObject* pawn, WrapGrab& g, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        bool L = side == 0;
+        const char* hand = L ? "left" : "right";
+        UObject* joint = object_property(pawn, L ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand"));
+        UObject* mesh = g_pose.mesh;
+        if (!joint || !mesh || !g.comp) return false;
+        std::string sx = L ? "_l" : "_r";
+        FName hb = bone_fname("hand" + sx);
+        Vec3 hp = socket_location(mesh, hb);
+        Quat hq = socket_rotation(mesh, hb);
+        Vec3 knuckle = socket_location(mesh, bone_fname("middle_01" + sx));
+        Vec3 palm_dir = normalized(hq.rotate(Vec3{0, 0, -1}));
+        Vec3 palm = hp + (knuckle - hp) * cfg.pose_grab_palm_along + palm_dir * cfg.pose_grab_palm_cm;
+        Call cp(g.comp, STR("GetClosestPointOnCollision"));
+        cp.three(STR("Point"), palm.x, palm.y, palm.z);
+        cp.name(STR("BoneName"), g.bone);
+        cp.run();
+        double d = cp.number();
+        if (d < 0.0) return false;
+        Vec3 spot = d > 0.0 ? cp.vec(STR("OutPointOnBody")) : palm;
+        static const FName none_bone = FName(STR("None"), FNAME_Add);
+        bool boned = !(g.bone == none_bone) && func_chain(g.comp, STR("FindClosestBone_K2")) != nullptr;
+        Vec3 bp = boned ? socket_location(g.comp, g.bone) : component_location(g.comp);
+        Quat bq = boned ? socket_rotation(g.comp, g.bone) : component_rotation(g.comp);
+        Vec3 f1 = hq.inverse().rotate(palm - hp), f2 = bq.inverse().rotate(spot - bp);
+        Call a(joint, STR("SetConstraintReferencePosition"));
+        Call b(joint, STR("SetConstraintReferencePosition"));
+        if (!a.fn) return false;
+        a.byte(STR("Frame"), 0);
+        a.three(STR("RefPosition"), f1.x, f1.y, f1.z);
+        a.run();
+        b.byte(STR("Frame"), 1);
+        b.three(STR("RefPosition"), f2.x, f2.y, f2.z);
+        b.run();
+        if (cfg.log_wrap)
+            HSVR_LOG("Wrap: %s hand seats %ls bone %ls on the palm: spot %.1f cm from the palm (hand end %.1f %.1f %.1f, held end %.1f %.1f %.1f)", hand,
+                     g.comp->GetName().c_str(), g.bone.ToString().c_str(), d, f1.x, f1.y, f1.z, f2.x, f2.y, f2.z);
+        return true;
+    }
+
     bool wrap_active(int side)
     {
         const WrapGrab& g = g_wrap[side];
