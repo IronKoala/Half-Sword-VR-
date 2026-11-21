@@ -728,6 +728,8 @@ namespace hsvr
         num("pose_teleport_above_cm", c.pose_teleport_above_cm);
         flag("pose_crouch", c.pose_crouch);
         num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
+        num("pose_crouch_max_cm", c.pose_crouch_max_cm);
+        flag("pose_crouch_bend_for_depth", c.pose_crouch_bend_for_depth);
         num("pose_crouch_button_cm", c.pose_crouch_button_cm);
         num("pose_crouch_button_cms", c.pose_crouch_button_cms);
         flag("kick_on_a", c.kick_on_a);
@@ -750,6 +752,7 @@ namespace hsvr
         num("pose_forearm_twist_share", c.pose_forearm_twist_share);
         num("pose_torso_twist", c.pose_torso_twist);
         flag("pose_feet", c.pose_feet);
+        flag("pose_feet_free_on_kick", c.pose_feet_free_on_kick);
         num("pose_step_distance_cm", c.pose_step_distance_cm);
         num("pose_step_angle_deg", c.pose_step_angle_deg);
         num("pose_step_time_s", c.pose_step_time_s);

@@ -1239,6 +1239,7 @@ namespace
         double pitch = 0.0, roll = 0.0; // your head's pitch down and roll right (degrees)
         double t = 0.0;
         double held = 1.0;       // share of the wanted bend allowed by the head height
+        double reach_fwd = 0.0;  // forward bend forced by a crouch deeper than his legs go (pose_crouch_bend_for_depth)
         hsvr::Vec3 offset;       // your neck away from where his hips stand (body frame, cm; pose_lean_step_radius_cm)
         double off_fwd = 0.0, off_side = 0.0; // the bend that offset asks for (degrees)
     };
@@ -1552,6 +1553,7 @@ namespace
         bool have_ground = false;
         double ground_t = -100.0; // when a trace last found the floor under this foot
         int steps = 0;
+        bool kicking = false;   // the game's kick has this leg (Kicking L/R): no planting, no flat foot
     };
     FootState g_feet[2];
     std::atomic<bool> g_feet_active{false};
@@ -1634,7 +1636,7 @@ namespace
             // The foot that needs it most; after a step the other foot goes next if it needs it at all.
             int pick = need[0] >= need[1] ? 0 : 1;
             if (pick == g_last_foot && need[1 - pick] >= 0.5 && need[pick] < 2.0 * need[1 - pick]) pick = 1 - pick;
-            if (need[pick] >= 1.0)
+            if (need[pick] >= 1.0 && !g_feet[pick].kicking)
             {
                 FootState& f = g_feet[pick];
                 f.stepping = true;
@@ -1652,6 +1654,27 @@ namespace
         {
             FootState& f = g_feet[side];
             f.lift = 0.0;
+            // The game's kick (right A, or its tap-kick) swings this leg: leave the leg to it. Planting
+            // the foot at its old spot and holding it flat turned the foot backwards mid-kick
+            // (playtest 2026-11-21 11:39). Afterwards the foot stands where the kick put it down.
+            bool kicking = cfg.pose_feet_free_on_kick && bool_property(pawn, side == 0 ? STR("Kicking L") : STR("Kicking R"));
+            if (kicking)
+            {
+                if (!f.kicking) HSVR_LOG("Kick: %s leg left to the game's kick (no foot planting)", side == 0 ? "left" : "right");
+                f.kicking = true;
+                f.stepping = false;
+                if (ModifyBoneNode* n = chain_node(side == 0 ? "foot_l" : "foot_r")) node_release(*n);
+                continue;
+            }
+            if (f.kicking)
+            {
+                f.kicking = false;
+                Vec3 foot_at = socket_location(g_pose.mesh, bone_fname(side == 0 ? "foot_l" : "foot_r"));
+                f.at = {foot_at.x, foot_at.y, 0.0};
+                f.yaw = heading;
+                HSVR_LOG("Kick: %s kick over; foot planted where it came down (%.0f cm from its home spot)", side == 0 ? "left" : "right",
+                         length(Vec3{f.at.x - want[side].x, f.at.y - want[side].y, 0.0}));
+            }
             if (f.stepping)
             {
                 f.t += dt;
@@ -1913,7 +1936,7 @@ namespace
         {
             FProperty* p = g_effector[side];
             FootState& f = g_feet[side];
-            if (!p || !f.valid) continue;
+            if (!p || !f.valid || f.kicking) continue;
             uint8_t* field = reinterpret_cast<uint8_t*>(context) + p->GetOffset_Internal();
             if (!f.have_ground) continue; // no floor found yet: the game's own target this frame
             Call to(mesh, STR("TransformToBoneSpace"));
@@ -3338,7 +3361,7 @@ namespace
     // Torso lean for this frame: how far to bend (from your head's pitch and roll, smoothed), held to
     // what the head height allows (his hips can't rise above standing: drop + head_moved.z >= -slack),
     // and the twist share (pose_torso_twist). Fills g_lean.q / head_moved.
-    void lean_update(const hsvr::Config& cfg, bool have_head, const hsvr::Quat& head_rot, double heading, double drop)
+    void lean_update(const hsvr::Config& cfg, bool have_head, const hsvr::Quat& head_rot, double heading, double drop, double deficit)
     {
         using namespace hsvr;
         double now = now_seconds(), dt = now - g_lean.t;
@@ -3389,6 +3412,25 @@ namespace
             auto merge = [](double a, double b) { return a * b > 0.0 ? (std::fabs(a) > std::fabs(b) ? a : b) : a + b; };
             want_f = (std::min)(cfg.pose_lean_max_deg, merge(want_f, g_lean.off_fwd));
             want_s = (std::max)(-cfg.pose_lean_side_max_deg - 15.0, (std::min)(cfg.pose_lean_side_max_deg + 15.0, merge(want_s, g_lean.off_side)));
+        }
+        // Deeper than his legs can crouch (deficit): he bends forward until his head is down there too, so
+        // his shoulders and hands come down with your view (playtest 2026-11-21: crouch button plus a real
+        // crouch, and his hands still could not reach the ground).
+        g_lean.reach_fwd = 0.0;
+        if (cfg.pose_lean && g_lean.calibrated && cfg.pose_crouch_bend_for_depth && deficit > 0.5)
+        {
+            Quat tq[6];
+            double lo = 0.0, hi = (std::max)(cfg.pose_lean_max_deg, 85.0);
+            if (lean_fk(hi, want_s, 0.0, tq).z > -deficit) lo = hi; // even the deepest bend is not enough
+            else
+                for (int it = 0; it < 12; ++it)
+                {
+                    double mid = 0.5 * (lo + hi);
+                    if (lean_fk(mid, want_s, 0.0, tq).z > -deficit) lo = mid;
+                    else hi = mid;
+                }
+            g_lean.reach_fwd = lo;
+            want_f = (std::max)(want_f, lo);
         }
         g_lean.want_fwd = want_f;
         g_lean.want_side = want_s;
@@ -3617,13 +3659,14 @@ namespace
         place.y = actor.y - pelvis_off.y;
         // Crouching: the body goes down by as much as your headset is below where you stood when
         // you recentred. His leg IK keeps the feet planted, so the knees bend. Never raised above
-        // standing (the leg IK only stretches 1.1x), and at most 55 cm (times his size) down.
+        // standing (the leg IK only stretches 1.1x), and at most pose_crouch_max_cm (times his size) down;
+        // deeper than that he bends forward (pose_crouch_bend_for_depth).
         g_crouch_drop = 0.0;
         if (cfg.pose_crouch && cfg.dev_pose_fake_tracking)
         {
             // Made-up path: slowly down to 40 cm and back up; hsvr.fake_head_drop <cm> holds a depth.
             double held = g_fake_head_drop.load();
-            g_crouch_drop = held >= 0.0 ? (std::min)(55.0 * component_scale_z(mesh), held) : 20.0 - 20.0 * std::cos(now_seconds() * 0.4);
+            g_crouch_drop = held >= 0.0 ? held : 20.0 - 20.0 * std::cos(now_seconds() * 0.4);
         }
         else if (cfg.pose_crouch && (state.head_valid || g_fake_head_pose.load()))
         {
@@ -3638,7 +3681,8 @@ namespace
                 double neck_now_z = (head_world - head_rot.rotate(eye_offset)).z;
                 double neck_then_z = view_anchor.z - cfg.eye_up_cm;
                 double drop = (neck_then_z - neck_now_z) - cfg.pose_crouch_dead_zone_cm;
-                g_crouch_drop = (std::min)(55.0 * scale, (std::max)(0.0, drop));
+                (void)scale;
+                g_crouch_drop = (std::max)(0.0, drop);
             }
         }
         if (cfg.pose_crouch && cfg.pose_crouch_button_cm > 0.0)
@@ -3660,18 +3704,22 @@ namespace
         }
         else
             g_button_crouch = 0.0;
-        g_crouch_drop = (std::min)(55.0 * component_scale_z(mesh), g_crouch_drop + g_button_crouch);
+        // How far your view went down (real crouch plus the button), and how far his legs can take him:
+        // the rest he bends forward for (lean_update's deficit).
+        double crouch_want = g_crouch_drop + g_button_crouch;
+        double crouch_cap = (std::max)(10.0, cfg.pose_crouch_max_cm) * component_scale_z(mesh);
+        g_crouch_drop = (std::min)(crouch_cap, crouch_want);
         // Torso lean: the bend carries his head forward and down; his hips go back by the forward part
         // and stay up by the downward part, so his head still ends at your neck and the chest moves in.
         {
             Vec3 hw;
             Quat hr;
             bool have_head = !cfg.dev_pose_fake_tracking && head_pose_world(cfg, state, hw, hr);
-            lean_update(cfg, have_head, hr, heading, g_crouch_drop);
+            lean_update(cfg, have_head, hr, heading, crouch_want, (std::max)(0.0, crouch_want - crouch_cap));
             Vec3 m = g_lean.head_moved;
             // His head goes over your neck: hips at the capsule, less the bend's carry, plus your offset.
             place = place - body.rotate(Vec3{m.x - g_lean.offset.x, m.y - g_lean.offset.y, 0.0});
-            g_crouch_drop = (std::max)(0.0, g_crouch_drop + m.z);
+            g_crouch_drop = (std::min)(crouch_cap, (std::max)(0.0, crouch_want + m.z));
         }
         if (g_crouch_drop > 10.0) crouch_push_log(pawn, mesh);
         place.z -= g_crouch_drop;
@@ -3843,10 +3891,10 @@ namespace
                     Vec3 cr = body.inverse().rotate(socket_location(mesh, bone_fname("clavicle_r")) - hw);
                     HSVR_LOG("Lean: your head pitch %.0f roll %.0f; wanted forward %.0f side %.0f, bent forward %.0f side %.0f (%.0f%% allowed by head height); "
                              "head carried (%.1f, %.1f, %.1f) cm, crouch %.0f cm; chest (spine_05) %.1f cm in front of your eyes, %.1f below; clavicles %.1f / %.1f in front; "
-                             "your neck (%.1f, %.1f) cm from his hips -> lean forward %.0f side %.0f; capsule (%.0f, %.0f)",
+                             "your neck (%.1f, %.1f) cm from his hips -> lean forward %.0f side %.0f; capsule (%.0f, %.0f); bend for a crouch past his legs %.0f",
                              g_lean.pitch, g_lean.roll, g_lean.want_fwd, g_lean.want_side, g_lean.fwd, g_lean.side, g_lean.held * 100.0, g_lean.head_moved.x,
                              g_lean.head_moved.y, g_lean.head_moved.z, g_crouch_drop, c.x, -c.z, cl.x, cr.x, g_lean.offset.x, g_lean.offset.y, g_lean.off_fwd,
-                             g_lean.off_side, actor.x, actor.y);
+                             g_lean.off_side, actor.x, actor.y, g_lean.reach_fwd);
                 }
             }
             HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d, torso twist %.0f deg asked; on screen: head %.0f, chest %.0f, hips %.0f (chest %+.0f from hips)",

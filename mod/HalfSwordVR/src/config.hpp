@@ -876,6 +876,11 @@ namespace hsvr
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;
         double pose_crouch_dead_zone_cm = 3.0;
+        // How far his legs crouch him (cm, times his size). Deeper than that (your view lower still), he
+        // bends forward until his head is down with your view, so his hands reach as low as yours
+        // (pose_crouch_bend_for_depth; playtest 2026-11-21: he could not reach the ground).
+        double pose_crouch_max_cm = 55.0;
+        bool pose_crouch_bend_for_depth = true;
         // Left stick click toggles a button crouch this deep (cm, eased at _cms); 0 = off.
         double pose_crouch_button_cm = 40.0;
         double pose_crouch_button_cms = 120.0;
@@ -928,6 +933,9 @@ namespace hsvr
         // Feet stay where they were put down and step (lift and place) when the hips have moved or
         // turned away from them: 1 = on, 0 = the game's own feet.
         bool pose_feet = true;
+        // 1 = while the game's kick has a leg (Kicking L/R), the mod stops planting that foot and holding
+        // it flat; it is planted again where the kick put it down (playtest 2026-11-21: foot turned backwards).
+        bool pose_feet_free_on_kick = true;
         double pose_step_distance_cm = 10.0, pose_step_angle_deg = 30.0; // when a foot steps
         double pose_step_time_s = 0.3;  // how long a step takes standing (shorter when moving)
         double pose_step_lift_cm = 10.0; // how high the foot lifts
