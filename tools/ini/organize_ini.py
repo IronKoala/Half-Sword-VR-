@@ -209,6 +209,7 @@ LAYOUT = [
         ("pose_grab_drive_ang_accel", ""),
         ("pose_grab_body_pull_n", ""),
         ("pose_grab_body_pull_hz", ""),
+        ("pose_grab_body_pull_min_kg", "The body pull pulls as if the held part weighed at least this (kg): a neck moves his whole upper body."),
         ("pose_fingers_anim_only", ""),
     ]),
     ("Holding: weight, strength, stamina", "The main feel values are in Quick settings.", [

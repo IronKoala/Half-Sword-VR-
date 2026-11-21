@@ -9157,7 +9157,10 @@ namespace
             Vec3 hv = (g_pose.target[side] - g.last_hand) * (1.0 / dt);
             if (!g.have_last_hand) hv = Vec3{0, 0, 0};
             Vec3 acc = to * (w * w) + (hv - v) * (2.0 * w);
-            Vec3 f = clamp_length(acc * g.mass, fmax);
+            // (Sized for the weight that really has to move: a 0.9 kg neck bone drags his whole upper body,
+            // and at its own mass the spring gave 40-120 N, leaving the throat 6-8 cm off the palm.)
+            double pull_kg = (std::max)(g.mass, cfg.pose_grab_body_pull_min_kg);
+            Vec3 f = clamp_length(acc * pull_kg, fmax);
             Call wake(g.comp, STR("WakeAllRigidBodies"));
             wake.run();
             Call af(g.comp, STR("AddForce"));

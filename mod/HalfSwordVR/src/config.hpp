@@ -743,6 +743,9 @@ namespace hsvr
         double pose_grab_drive_ang_accel = 1200.0;
         double pose_grab_body_pull_n = 600.0;
         double pose_grab_body_pull_hz = 4.0;
+        // The body pull's spring is sized for at least this many kg: a throat or chest bone is light
+        // (0.9 kg), but pulling it means moving his whole upper body.
+        double pose_grab_body_pull_min_kg = 12.0;
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;
