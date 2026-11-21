@@ -203,6 +203,12 @@ LAYOUT = [
         ("pose_grab_seat_palm", "1 = what you grab sits on your palm, not inside the fist."),
         ("pose_grab_palm_cm", ""),
         ("pose_grab_palm_along", ""),
+        ("pose_grab_drive", "1 = the mod holds grabbed objects/bodies to your palm (B&S-style)."),
+        ("pose_grab_drive_heft", ""),
+        ("pose_grab_drive_accel", ""),
+        ("pose_grab_drive_ang_accel", ""),
+        ("pose_grab_body_pull_n", ""),
+        ("pose_grab_body_pull_hz", ""),
         ("pose_fingers_anim_only", ""),
     ]),
     ("Holding: weight, strength, stamina", "The main feel values are in Quick settings.", [

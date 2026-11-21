@@ -733,6 +733,16 @@ namespace hsvr
         bool pose_grab_seat_palm = true;
         double pose_grab_palm_cm = 2.0;
         double pose_grab_palm_along = 0.5;
+        // The mod holds what the game's grab holds (its hand joint lets things hang off the hand). Loose
+        // objects: driven to their place in the hand (framework physics.track): accel cap accel/heft m/s^2,
+        // turn ang_accel/heft rad/s^2, heft = (1 + 2 x heft x kg)^2. Bodies: the held bone is also pulled
+        // to the palm by a spring of pull_hz, capped at pull_n N x his grip strength / 121.
+        bool pose_grab_drive = true;
+        double pose_grab_drive_heft = 0.1;
+        double pose_grab_drive_accel = 600.0;
+        double pose_grab_drive_ang_accel = 1200.0;
+        double pose_grab_body_pull_n = 600.0;
+        double pose_grab_body_pull_hz = 4.0;
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;

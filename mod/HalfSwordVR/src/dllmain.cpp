@@ -8867,6 +8867,13 @@ namespace
         double last_log = -10.0;
         double seated_at = -1.0;
         int checks = 0;
+        // The mod's own hold (grab_drive): where the held bone sits in the hand (hand bone frame).
+        bool drive = false, body = false, boned = false;
+        hsvr::Vec3 rel_pos;
+        hsvr::Quat rel_rot;
+        double mass = 1.0, last_drive_log = -10.0;
+        hsvr::Vec3 last_hand;
+        bool have_last_hand = false;
     };
     WrapGrab g_wrap[2];
     const double kWrapSamples[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
@@ -9079,6 +9086,145 @@ namespace
     }
 
     bool seat_on_palm(int side, UObject* pawn, WrapGrab& g, const hsvr::Config& cfg);
+    // The first enum (byte) parameter of a call, whatever the engine named it.
+    void first_byte(Call& c, uint8_t v)
+    {
+        if (!c.fn) return;
+        for (FProperty* p : c.fn->ForEachProperty())
+        {
+            auto k = p->GetClass().GetName();
+            if (k == STR("ByteProperty") || k == STR("EnumProperty"))
+            {
+                *(c.buffer.data() + p->GetOffset_Internal()) = v;
+                return;
+            }
+        }
+    }
+    void first_number(Call& c, double v)
+    {
+        if (!c.fn) return;
+        for (FProperty* p : c.fn->ForEachProperty())
+        {
+            auto k = p->GetClass().GetName();
+            uint8_t* at = c.buffer.data() + p->GetOffset_Internal();
+            if (k == STR("FloatProperty")) { *reinterpret_cast<float*>(at) = (float)v; return; }
+            if (k == STR("DoubleProperty")) { *reinterpret_cast<double*>(at) = v; return; }
+        }
+    }
+
+    // The mod holds what the game's grab holds (playtest-free test 2026-11-21: the game's hand joint,
+    // even locked at limit 0, let a 22 kg rock hang 15-47 cm off his kinematic hand, and a held arm
+    // 5-11 cm: that is the "floats" Matthew felt). A loose object: the game's joint is left free and
+    // the object is driven to the hand (his framework's physics.track: velocity to the target,
+    // braked to stop there, the change capped by an acceleration that falls with its weight,
+    // heft = (1 + 2 x pose_grab_drive_heft x kg)^2). A body: the game's joint stays (its throat,
+    // limb and slip rules read it) and the held bone is also pulled to the palm by a capped spring,
+    // up to pose_grab_body_pull_n x his grip strength / 121 (the game's T for a healthy arm).
+    void grab_drive(int side, UObject* pawn, WrapGrab& g, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        bool L = side == 0;
+        if (!g_pose.hand_valid[side] || !g_pose.mesh) return;
+        double dt = world_delta_seconds(pawn);
+        if (!(dt > 1e-4)) dt = 1.0 / 72.0;
+        dt = (std::min)(dt, 0.05);
+        Quat hq = g_pose.hand_rot[side];
+        Vec3 hp = g_pose.target[side];
+        Vec3 tp = hp + hq.rotate(g.rel_pos);
+        Quat tq = (hq * g.rel_rot).normalized();
+        Vec3 p = g.boned ? socket_location(g.comp, g.bone) : component_location(g.comp);
+        Quat q = g.boned ? socket_rotation(g.comp, g.bone) : component_rotation(g.comp);
+        Call lv(g.comp, STR("GetPhysicsLinearVelocity"));
+        lv.name(STR("BoneName"), g.bone);
+        lv.run();
+        Vec3 v = lv.vec();
+        Vec3 to = tp - p;
+        double now = now_seconds();
+        const char* hand = L ? "left" : "right";
+        if (g.body)
+        {
+            double t_grip = g_body_grab[side].on ? g_body_grab[side].grip_t : 121.0;
+            double fmax = cfg.pose_grab_body_pull_n * 100.0 * (std::min)(2.0, (std::max)(0.1, t_grip / 121.0)); // kg cm/s^2
+            double w = 2.0 * 3.14159265 * (std::max)(0.5, cfg.pose_grab_body_pull_hz);
+            Vec3 hv = (g_pose.target[side] - g.last_hand) * (1.0 / dt);
+            if (!g.have_last_hand) hv = Vec3{0, 0, 0};
+            Vec3 acc = to * (w * w) + (hv - v) * (2.0 * w);
+            Vec3 f = clamp_length(acc * g.mass, fmax);
+            Call wake(g.comp, STR("WakeAllRigidBodies"));
+            wake.run();
+            Call af(g.comp, STR("AddForce"));
+            af.three(STR("Force"), f.x, f.y, f.z);
+            af.name(STR("BoneName"), g.bone);
+            af.flag(STR("bAccelChange"), false);
+            af.run();
+            if (cfg.log_wrap && now - g.last_drive_log >= 0.5)
+            {
+                g.last_drive_log = now;
+                HSVR_LOG("Grab hold: %s hand pulls %ls bone %ls: %.1f cm off the palm spot, %.0f N (cap %.0f, grip T %.0f, bone %.1f kg)", hand, g.comp->GetName().c_str(),
+                         g.bone.ToString().c_str(), length(to), length(f) / 100.0, fmax / 100.0, t_grip, g.mass);
+            }
+        }
+        else
+        {
+            // The game's joint left free (its 0.2 s reel sets the limit again; this runs every tick).
+            if (UObject* joint = object_property(pawn, L ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand")))
+            {
+                for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit"), STR("SetAngularSwing1Limit"), STR("SetAngularSwing2Limit"),
+                                        STR("SetAngularTwistLimit")})
+                {
+                    Call c(joint, fn);
+                    first_byte(c, 0);
+                    first_number(c, 0.0);
+                    c.run();
+                }
+            }
+            double heft = std::pow(1.0 + 2.0 * cfg.pose_grab_drive_heft * g.mass, 2.0);
+            double amax = (std::max)(cfg.pose_grab_drive_accel * 100.0 / heft, 1500.0);  // cm/s^2
+            double aamax = (std::max)(cfg.pose_grab_drive_ang_accel / heft, 40.0);       // rad/s^2
+            Call av(g.comp, STR("GetPhysicsAngularVelocityInRadians"));
+            av.name(STR("BoneName"), g.bone);
+            av.run();
+            Vec3 w_now = av.vec();
+            Quat dq = (tq * q.inverse()).normalized();
+            if (dq.w < 0.0) dq = Quat{-dq.x, -dq.y, -dq.z, -dq.w};
+            Vec3 sa = scaled_axis(dq);
+            double angle = length(sa);
+            Vec3 ang = sa * (1.0 / dt);
+            double abrake = std::sqrt(2.0 * aamax * angle);
+            if (length(ang) > abrake) ang = clamp_length(ang, abrake);
+            Vec3 dw = ang - w_now;
+            if (length(dw) > aamax * dt) ang = w_now + clamp_length(dw, aamax * dt);
+            ang = clamp_length(ang, 60.0);
+            Vec3 want = to * (1.0 / dt);
+            double brake = std::sqrt(2.0 * amax * length(to));
+            if (length(want) > brake) want = clamp_length(want, brake);
+            Vec3 dv = want - v;
+            if (length(dv) > amax * dt) want = v + clamp_length(dv, amax * dt);
+            want = clamp_length(want, 2000.0);
+            want.z += 980.0 * dt; // the step's gravity, which the framework turns off while held
+            Call wake(g.comp, STR("WakeRigidBody"));
+            wake.name(STR("BoneName"), g.bone);
+            wake.run();
+            Call slv(g.comp, STR("SetPhysicsLinearVelocity"));
+            slv.three(STR("NewVel"), want.x, want.y, want.z);
+            slv.flag(STR("bAddToCurrent"), false);
+            slv.name(STR("BoneName"), g.bone);
+            slv.run();
+            Call sav(g.comp, STR("SetPhysicsAngularVelocityInRadians"));
+            sav.three(STR("NewAngVel"), ang.x, ang.y, ang.z);
+            sav.flag(STR("bAddToCurrent"), false);
+            sav.name(STR("BoneName"), g.bone);
+            sav.run();
+            if (cfg.log_wrap && now - g.last_drive_log >= 0.5)
+            {
+                g.last_drive_log = now;
+                HSVR_LOG("Grab hold: %s hand carries %ls (%.1f kg): %.1f cm / %.0f deg off its place in the hand, accel cap %.0f m/s^2", hand, g.comp->GetName().c_str(),
+                         g.mass, length(to), angle * 57.2958, amax / 100.0);
+            }
+        }
+        g.last_hand = g_pose.target[side];
+        g.have_last_hand = true;
+    }
     // Game tick: a hand the game's grab holds something with (a body, a loose object) wraps it.
     void wrap_tick(const hsvr::Config& cfg, UObject* pawn)
     {
@@ -9167,7 +9313,8 @@ namespace
                              nested_number(joint, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("bEnableProjection")}), mass.number());
                 }
             }
-            else if (!comp && g.on)
+            if (comp && g.on && g.seated && g.drive && cfg.pose_grab_drive) grab_drive(side, pawn, g, cfg);
+            if (!comp && g.on)
             {
                 double ease = (std::max)(0.01, cfg.pose_wrap_ease_s);
                 g.w_off = wrap_smooth((now - g.since) / ease);
@@ -9213,6 +9360,32 @@ namespace
         Vec3 bp = boned ? socket_location(g.comp, g.bone) : component_location(g.comp);
         Quat bq = boned ? socket_rotation(g.comp, g.bone) : component_rotation(g.comp);
         Vec3 f1 = hq.inverse().rotate(palm - hp), f2 = bq.inverse().rotate(spot - bp);
+        // The mod's hold keeps the bone where it is now, moved so the spot is on the palm, relative
+        // to the hand (his framework's take(): rel = inverse(hand) o object; palm_on shift).
+        g.boned = boned;
+        g.rel_pos = hq.inverse().rotate((bp + (palm - spot)) - hp);
+        g.rel_rot = (hq.inverse() * bq).normalized();
+        {
+            Call owner_call(g.comp, STR("GetOwner"));
+            owner_call.run();
+            g.body = is_a(owner_call.object_result(), STR("Willie_BP_C"));
+            if (boned && func_chain(g.comp, STR("GetBoneMass")))
+            {
+                Call m(g.comp, STR("GetBoneMass"));
+                m.name(STR("BoneName"), g.bone);
+                m.flag(STR("bScaleMass"), true);
+                m.run();
+                g.mass = m.number();
+            }
+            else
+            {
+                Call m(g.comp, STR("GetMass"));
+                m.run();
+                g.mass = m.number();
+            }
+            if (!(g.mass > 0.0)) g.mass = 1.0;
+        }
+        g.drive = cfg.pose_grab_drive;
         Call a(joint, STR("SetConstraintReferencePosition"));
         Call b(joint, STR("SetConstraintReferencePosition"));
         if (!a.fn) return false;
