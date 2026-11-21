@@ -1,6 +1,8 @@
 # Test room (ini `test_room=1`)
 
-Launching the game with `test_room=1` in `HalfSwordVR.ini` goes from the first menu straight into a Free Mode arena set up for testing:
+**The way in: the Train button (Free Mode).** In Free Mode the tavern's Train (the fencer) opens a dialog that the game made without a Train button (only Play Progression and Leave). With `test_room_button=1` (default) the mod adds a **Train** button there, above Leave and drawn like it. Clicking it, with the mouse or the VR panel pointer, takes you into the test room instead of the cellar. The game's own Training is never run, so neither Training mode nor the cellar is written into the save. Progression's Train still goes to the cellar. Details: `defaults\train_button.md` in the decompile folder.
+
+With `test_room=1` the game instead goes from the first menu straight into the test room. Either way the room is a Free Mode arena set up for testing:
 
 - `test_room_foes` Willies (default 4, 1-10) whose AI is switched off. They never attack, move, kick or block, but keep the game's own physics: they stand, balance, fall when hit or pushed, get up again, can be grabbed, punched, stabbed and killed. They are stood in an arc 2.2 m behind you, facing you. A foe whose AI comes back on (zombie revive) is switched off again.
 - Two of the game's weapon tables (`BP_Container_Weapon_Table_1`) 1.1 m in front of you, 35 cm apart, stocked through the game's own loot point (`BP_Loot_Weapon`, Spawn Chance 1) with one of each: 1H sword, 2H sword, 1H mace, 2H mace, shield, 1H hafted, 2H hafted, polearm, secondary (the game's secondary kind can be a bottle). The tables' own random loot is switched off (it landed on the same spots and threw the weapons). When the game has no weapon of a kind at the chosen tier, the nearest other tier is used (log: `the game has none at tier N`).
@@ -12,7 +14,8 @@ Launching the game with `test_room=1` in `HalfSwordVR.ini` goes from the first m
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `test_room` | 0 | 1 = boot into the test room. Read at launch. |
+| `test_room` | 0 | 1 = boot straight into the test room. Read at launch. |
+| `test_room_button` | 1 | 1 = in Free Mode the fencer's dialog has a Train button that opens the test room. |
 | `test_room_map` | /Game/Maps/Arenas/Map_Arena_Yard | The arena (Yard and Pit are flat and open; up to 10 foes in any arena). |
 | `test_room_foes` | 4 | Number of passive Willies (1-10). |
 | `test_room_tier` | -1 | Their tier (armour, weapons): -1 random each, 0 Beggar .. 8 Lord. |
@@ -26,3 +29,5 @@ Launching the game with `test_room=1` in `HalfSwordVR.ini` goes from the first m
 The mod never saves the test settings. At boot it copies `GameProgress.sav` to `save_backups\GameProgress.sav.<UTC time>.bak` in the mod folder (one per launch, never deleted); without that copy there is no test room. The Free Mode values go into the game instance only, and a hook on GI_Settings "Load Game" (which the arena calls on start) puts them back after the arena reads the save. Every save the game writes while the room is up (arena start, ~1 s, death, pause menu) is undone at once by copying that launch's copy back. Leaving the room map (pause menu > Menu) puts the save back, loads it into the game instance and restores every game-instance value the room changed, so normal play after it starts from your real save. Log lines start with `TestRoom:`.
 
 Facts from the decompile: `defaults\test_room.md` in the decompile folder.
+
+Test commands: `hsvr.widget_call <widget class> <function>` (for example the tavern's `UI_Hub_Tavern_C` Fencer click event), `hsvr.train_click` (what the Train button does). The button logs where it is on the desktop (`TestRoom: Train button at desktop (x, y)`).

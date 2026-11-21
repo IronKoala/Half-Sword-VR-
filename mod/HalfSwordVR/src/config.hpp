@@ -154,6 +154,9 @@ namespace hsvr
         // write the game makes to it in the room is undone; leaving the room puts it all back.
         // Read at launch. 0 = normal game.
         bool test_room = false;
+        // 1 = in Free Mode the fencer's dialog (the tavern's "Train") gets a Train button that takes
+        // you into the test room instead of the cellar (progression's Train is not changed).
+        bool test_room_button = true;
         std::string test_room_map = "/Game/Maps/Arenas/Map_Arena_Yard";
         int test_room_foes = 4;
         // The foes' tier (armour and weapons): -1 = a random tier each, 0 Beggar .. 8 Lord.
@@ -535,6 +538,13 @@ namespace hsvr
         // exp(-c dt / mass) of its motion along it each frame (replaces keep_light/full; 0 = use those).
         double pose_slide_damper_light = 300.0;
         double pose_slide_damper_full = 20.0;
+        // B&S's slide along the handle (Handle.cs UpdateSliding): spring 0, damper 300 -> 20 N s/m over trigger
+        // 0.2 -> 1, so gravity pulls an upright weapon through the hand and a level one is dragged along with it.
+        // 0 = the old free axis (no damper, and the arm also carried its weight along the handle, so it never fell).
+        bool pose_slide_bs_damper = true;
+        // Draw: the scabbard seat's SetConstraintReferencePosition call with parameter names that match the
+        // engine (the old names may write nothing). Off by default: draws feel as they do now.
+        bool draw_seat_ref_fix = false;
         // A grab leaves the item where it was and the hold pulls it into the hand over this long (B&S);
         // also a hand-over. 0 = put it in the hand at once.
         double pose_grab_settle_s = 0.08;
@@ -725,6 +735,8 @@ namespace hsvr
         // just behind it, the knuckle starts at curl mcp_lag (a half curl is a hook, not a circle).
         // 0 = every joint the same fraction (the framework's way).
         bool pose_finger_schedule = true;
+        // With SteamVR's hand skeleton: each finger joint follows your own joint (not one curl per finger).
+        bool pose_fingers_per_joint = true;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
@@ -750,6 +762,18 @@ namespace hsvr
         double pose_grab_drive_ang_accel = 1200.0;
         double pose_grab_body_pull_n = 600.0;
         double pose_grab_body_pull_hz = 4.0;
+        // The body pull's spring is sized for at least this many kg: a throat or chest bone is light
+        // (0.9 kg), but pulling it means moving his whole upper body.
+        double pose_grab_body_pull_min_kg = 12.0;
+        // His drawn hand rides a held body (his framework): it stays with the palm on the held spot, fully
+        // once the body is ride_full_cm from where your hand wants it (from ride_from_cm). If the body gets
+        // ride_max_cm further away than its closest since the grab, for pose_grab_slip_s, the grip slips.
+        bool pose_grab_ride = true;
+        bool pose_grab_ride_objects = false;
+        double pose_grab_ride_from_cm = 0.5;
+        double pose_grab_ride_full_cm = 2.0;
+        double pose_grab_ride_max_cm = 20.0;
+        double pose_grab_slip_s = 0.3; // held past ride_max_cm this long: the grip slips (let go)
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;
@@ -940,11 +964,23 @@ namespace hsvr
         // An open hand, forearm or arm on a person buzzes only when it strikes this fast (m/s,
         // against him at the contact).
         double hit_buzz_limb_min_ms = 3.0;
+        // Swing whoosh (hs_whoosh_sound.md). The game whooshes only when the weapon's centre moves faster than
+        // 1.5 x its "Sound Woosh Threshold" (7.5 m/s for most weapons, 5.25 for an arming sword): flat
+        // Willie's mouse swings reach 10-20 m/s, a human VR cut often doesn't (Matthew 2026-11-21: most VR
+        // swings were silent). A weapon in a tracked hand has its threshold x this during its tick
+        // (1 = the game's own; lower = slower swings whoosh; the one-shot is also that much quieter).
+        double whoosh_vr_threshold_scale = 0.6;
+        // "Whoosh:" lines every 0.5 s while a held weapon moves faster than whoosh_log_min_speed (cm/s).
+        bool whoosh_log = true;
+        double whoosh_log_min_speed = 300.0;
         // Log every hit buzz ("Hit buzz:" lines).
         bool hit_buzz_log = true;
         // Every this many seconds a "Perf:" line: frame rate, the mod's own time per frame by part, and
         // how many objects, actors and simulating bodies the game has (0 = off).
         double perf_log_seconds = 10.0;
+        // Every this many seconds a "Strength: training:" line: his strength (Muscle Rate), the growth the
+        // game has banked (Muscle Growth Due) and every input to it (0 = off).
+        double strength_log_seconds = 10.0;
         // Troubleshooting: time every Blueprint call the game makes on its main thread, per class and
         // function ("Perf events" lines with each Perf line). Costs about 1 ms a frame in big fights.
         bool perf_events = false;
@@ -1004,10 +1040,52 @@ namespace hsvr
         // physics (Root Mesh, Get Damage @540-@584); the posed body does not, so without this the
         // player only lost limb health and could die only by losing his head.
         bool player_takes_damage = true;
+        // 1 = your posed body bumping into a person counts by how fast it moves into him, as a
+        // simulated body would. The posed body is kinematic: when it sinks into a Willie the physics
+        // pushes him out with an impulse set by how deep it went, not how fast (the game caps it at
+        // 1500 standing), and his body-hit block (Willie_BP UG @741800-@746500) passes any contact of
+        // your arm, hand, calf or foot ('Beig Hit By Limbs') to Deal Complex Damage with that impulse:
+        // walking slowly into him knocked his consciousness down (Matthew 2026-11-21). With this the
+        // contact's impulse is at most reduced mass x closing speed (each side's body mass, your
+        // contact body's x player_body_contact_mass_scale), the impulse a free body of that mass
+        // would give; it is never raised. Both ways: him hitting your body too.
+        bool player_body_contact_speed = true;
+        double player_body_contact_mass_scale = 1.0;
+        bool player_body_contact_log = true;
+        // 1 = an item touching you (someone else's weapon, tool, a thrown thing) hurts by how fast it
+        // comes into your body part, not by how hard your posed body squeezes it out (a passive
+        // Willie's tongs pinned between you took your consciousness 95 -> 55 in 2 s). Real blows unchanged.
+        bool player_item_contact_speed = true;
         // 1 = blood from your own cut-off limb stays at the stump. The game sticks the fountain to a
         // bone of the cut-off limb, which it only hides; the posed body keeps moving that hidden
         // bone (hand to controller, head to headset), so the blood floated in mid-air.
         bool player_stump_blood = true;
+        // Your own injuries, with the game's own limb values (Willie_BP; injuries.md). A limb counts as
+        // badly hurt when its health is below injury_limb_health (the game's own bone-break
+        // threshold, Get Damage: bones only break at limb health <= 25; a bone put back is set to 25),
+        // or it is broken, dislocated or cut off (the game holds that limb's health at 0 then). 0 = off.
+        bool injury_limbs = true;
+        double injury_limb_health = 25.0;
+        // One leg badly hurt: you walk at this share of your normal speed (stick walking).
+        double injury_one_leg_speed = 0.5;
+        // Both legs badly hurt (or the back broken, which drops both legs' tonus in the game): no
+        // walking and he falls over (physics on, the view stays on his head) until a leg recovers.
+        bool injury_two_legs_fall = true;
+        bool injury_back_broken_falls = true;
+        // A broken, cut-off or badly hurt arm: the controller no longer moves it; it hangs and swings
+        // from the shoulder and its hand lets go. (Dislocated without broken: it flops after your
+        // controller, this lag, s, and this much sag, cm; normal Willies never get that flag.)
+        double injury_dislocated_follow_s = 0.15;
+        double injury_dislocated_sag_cm = 12.0;
+        // Swing a broken arm back in, the game's own rule (his tick, UG @358184..358825): while that
+        // hand swings at Aim Swing Speed > 60 it calls Restore Bone(arm, MRC(speed, 60..90 -> 0..50)
+        // x dt); at Dislocation State 0 the game clears Broken, sets health 25 and the joint "Motor".
+        // The game gates it on "R/L Hand Active" (mouse buttons, always 0 in VR), so the mod makes the
+        // call with your controller's speed (pose_swing_speed_lo..hi m/s -> 0..75, as the swing feed).
+        bool injury_swing_relocate = true;
+        // You die: the mod stops posing you, physics goes on and he falls as a ragdoll; the view stays
+        // on his head (no fade).
+        bool death_ragdoll = true;
     };
 
     // Current settings (copy). Cheap enough to call once per frame.
