@@ -147,6 +147,7 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `hsvr.stamina_trace <seconds>` | Every <seconds> (0 = off; flat mode too) logs "StaminaTrace:" with his variables named *stamina*, *burn* or *swing*, Muscle Rate, Fat Rate, Liver Pain, Fisting Rate and each hand joint's GetConstraintForce (lin, ang), to compare the flat game's drain with VR |
 | `hsvr.pawn_pin <variable> <value>` / `hsvr.pawn_pin off` | Holds a number variable of his pawn at a value every tick, after his tick (e.g. `Stamina 10`, `Arm R Tonus 0.25`), to test the strength scaling |
 | `hsvr.spawn <class path> [left]` | Spawns an actor of that class just above that hand (e.g. food: /Game/Assets/Food/Blueprints/BP_Food_Apple_Red.BP_Food_Apple_Red_C). `hsvr.give_weapon` now refuses anything that is not a ModularWeaponBP (an apple through Set Up Hand Weapon is a fatal engine error). |
+| `hsvr.arm_move 21 <rad/s>` | Fake arms: a wide cut side to side and down (hand peak speed 55 cm x rad/s; 20 = 11 m/s), for the whoosh test |
 | `hsvr.arm_move 8` | Fake arms: both hands at his mouth (eating and drinking tests); `9` the same with the hands turning over (a full turn in 6 s) so a bottle tips |
 | `hsvr.bring_object [left] food` | As bring_object, food items only |
 | `hsvr.bring_object [left] shield (or weapon) [rim] [at x y z]` | The nearest loose shield (or non-shield weapon) kept at that hand (up to 8 s, until the hand holds it): its middle, with `rim` a point on its edge, or with `at x y z` that point of it (BaseMesh frame, cm) |
