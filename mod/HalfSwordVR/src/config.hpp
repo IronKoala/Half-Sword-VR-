@@ -285,7 +285,10 @@ namespace hsvr
         // this scale, kept from pose_stamina_gate up (the game's 10); the game then applies its swing
         // speed, fat, temperature and armour factors and regenerates as usual.
         double pose_stamina_scale = 1.0;
-        double pose_stamina_gate = 10.0;
+        // The game keeps a hand burn only from 10 up. Its hand joint is spiky (flat runs 2026-11-21: 30%
+        // of fast-swing ticks over 10), the mod's spring hold smooth (never over 10 at the same
+        // swings), so with the gate VR never paid; with none its mean matches the flat game's.
+        double pose_stamina_gate = 0.0;
         // A fist's burn x this, on top of the game's own fist factor (Hands Rigidity x Fisting Rate).
         double pose_stamina_fist_scale = 1.0;
         double pose_stamina_force_cap_n = 1000.0;

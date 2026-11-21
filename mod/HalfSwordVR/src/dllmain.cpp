@@ -11230,7 +11230,11 @@ namespace
             bool has_rig = false;
             rigidity = number_var(pawn, STR("Hands Rigidity (Gauntlets)"), has_rig); // 0.4 bare-handed
             if (!has_rig) rigidity = -1.0;
-            kind = 100.0 * (has_rig ? rigidity : 0.0) * map_range(g_fisting_rate[side], 0.1, 1.0, 0.0, 1.0) * cfg.pose_stamina_fist_scale;
+            // The game's Fisting Rate rises with a mouse thrust (R Thrust Alpha), which VR never makes,
+            // so in VR it stays under the 0.1 floor (stamina runs 2026-11-21: 0.02-0.06 vs flat 0.38):
+            // the punching hand's speed counts too, over the B&S punch range 2..9 m/s.
+            double rate = (std::max)(map_range(g_fisting_rate[side], 0.1, 1.0, 0.0, 1.0), map_range(g_hand_world_v[side], 2.0, 9.0, 0.0, 1.0));
+            kind = 100.0 * (has_rig ? rigidity : 0.0) * rate * cfg.pose_stamina_fist_scale;
         }
         double raw = (f + 100.0 * t) / 60.0 * kind * strength * cfg.pose_stamina_scale;
         double burn = raw >= cfg.pose_stamina_gate ? raw : 0.0;
