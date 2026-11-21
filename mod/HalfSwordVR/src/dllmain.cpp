@@ -15634,33 +15634,99 @@ namespace
     // after Sheathe on Spawn Back and after every take; the hand's joint had nothing to pull and the slot
     // joint's break left it hanging in the air). A belt mace stays simulating. Taken into a hand, the item
     // is let off any parent it hangs from (keeping where it is) and made to simulate, as a loose one does.
-    void make_loose_simulating(UObject* w, const char* why)
+    // A body's state for the log: collision enabled (0 none .. 3 query+physics), simulating, mass.
+    std::string body_state(UObject* base)
     {
-        UObject* base = w ? object_property(w, STR("BaseMesh")) : nullptr;
-        if (!base) return;
+        Call ce(base, STR("GetCollisionEnabled"));
+        ce.run();
+        FProperty* cp = ce.param(STR("ReturnValue"));
         Call sim(base, STR("IsSimulatingPhysics"));
         sim.run();
         FProperty* sp = sim.param(STR("ReturnValue"));
-        if (sp && *(sim.buffer.data() + sp->GetOffset_Internal())) return;
-        Call ap(base, STR("GetAttachParent"));
-        ap.run();
-        UObject* parent = ap.object_result();
-        if (parent)
-        {
-            Call det(base, STR("K2_DetachFromComponent"));
-            det.byte(STR("LocationRule"), 1); // KeepWorld
-            det.byte(STR("RotationRule"), 1);
-            det.byte(STR("ScaleRule"), 1);
-            det.run();
-        }
+        Call m(base, STR("GetMass"));
+        m.run();
+        FProperty* mp = m.param(STR("ReturnValue"));
+        char buf[128];
+        std::snprintf(buf, sizeof buf, "collision %d, simulating %d, mass %.2f kg", cp ? (int)*(ce.buffer.data() + cp->GetOffset_Internal()) : -1,
+                      sp ? (int)*(sim.buffer.data() + sp->GetOffset_Internal()) : -1, mp ? (double)*reinterpret_cast<float*>(m.buffer.data() + mp->GetOffset_Internal()) : -1.0);
+        return buf;
+    }
+    bool is_simulating(UObject* base)
+    {
+        Call sim(base, STR("IsSimulatingPhysics"));
+        sim.run();
+        FProperty* sp = sim.param(STR("ReturnValue"));
+        return sp && *(sim.buffer.data() + sp->GetOffset_Internal());
+    }
+
+    // Off the back slot the shield's BaseMesh has no live physics body (test 2026-11-21: "simulating 0";
+    // SetSimulatePhysics(true) only stores the flag until the body is recreated) and its child meshes
+    // are unwelded (mass 0.05 kg: the 2 cm dummy): Sheathed Mode toggles each child's collision 0 -> 3
+    // (ModularWeaponBP @72062/@72695), which recreates them apart. The weapon's own rebuild, Refresh
+    // Collisions (@68979-71215), recreates BaseMesh's body (collision 0 then 3) and welds every child back
+    // (defaults\back_slot_physics.md). So: flag, Refresh Collisions, flag again, then the game's pick-up
+    // damping.
+    bool make_loose_simulating(UObject* w, const char* why)
+    {
+        UObject* base = w ? object_property(w, STR("BaseMesh")) : nullptr;
+        if (!base) return false;
+        std::string before = body_state(base);
         Call on(base, STR("SetSimulatePhysics"));
         on.first_flag(true);
         on.run();
-        Call again(base, STR("IsSimulatingPhysics"));
-        again.run();
-        FProperty* ap2 = again.param(STR("ReturnValue"));
-        HSVR_LOG("Draw: %ls was not simulating (%s): %s, physics on (now simulating %d)", w->GetName().c_str(), why,
-                 parent ? "let off what it hung from" : "hung from nothing", ap2 ? (int)*(again.buffer.data() + ap2->GetOffset_Internal()) : -1);
+        if (FProperty* vp = prop_chain(w, STR("Weapon Velocity"))) write_three(reinterpret_cast<uint8_t*>(w) + vp->GetOffset_Internal(), vp, 0.0, 0.0, 0.0);
+        bool refreshed = Call(w, STR("Refresh Collisions")).run();
+        Call on2(base, STR("SetSimulatePhysics"));
+        on2.first_flag(true);
+        on2.run();
+        bool damp = Call(w, STR("Set Weapon Damping Pick Up")).run();
+        bool ok = is_simulating(base);
+        HSVR_LOG("Draw: %ls (%s): before %s; Refresh Collisions %s, pick-up damping %s; after %s%s", w->GetName().c_str(), why, before.c_str(),
+                 refreshed ? "run" : "MISSING", damp ? "set" : "missing", body_state(base).c_str(), ok ? "" : " - STILL NOT SIMULATING");
+        return ok;
+    }
+
+    // The game's draw-off-a-slot bookkeeping, done by the mod (Check Scabbard Unsheath State's break,
+    // Enum 2 @6020-6458, back_slot_physics.md step 1-2; WeaponsinSlots is left to the game's next save).
+    void free_slot(UObject* pawn, int slot, UObject* w, const char* why)
+    {
+        const SlotDef& sd = k_slots[slot];
+        const TCHAR* S = sd.side == 0 ? STR("L") : STR("R");
+        UObject* joint = object_property(pawn, sd.constraint);
+        if (joint)
+        {
+            Call(joint, STR("BreakConstraint")).run();
+            Call(joint, STR("K2_DestroyComponent")).run();
+        }
+        set_variable(pawn, sd.constraint, 0.0, nullptr, nullptr);
+        if (UObject* beacon = object_property(w, STR("SearchBeacon")))
+        {
+            Call sb(beacon, STR("SetCollisionEnabled"));
+            sb.byte(STR("NewType"), 1);
+            sb.run();
+        }
+        bool um = Call(w, STR("Unsheathed Mode")).run();
+        Call weights(pawn, STR("Add and Remove Weapon Weights"));
+        bool wt = false;
+        if (weights.fn)
+        {
+            for (FProperty* p : weights.fn->ForEachProperty())
+                if (p->GetClass().GetName() == STR("ObjectProperty"))
+                {
+                    *reinterpret_cast<UObject**>(weights.buffer.data() + p->GetOffset_Internal()) = w;
+                    break;
+                }
+            wt = weights.run(); // its bool (add) left false: remove
+        }
+        set_variable(pawn, sd.var, 0.0, nullptr, nullptr);
+        set_variable(pawn, (std::wstring(L"Sheath Slot ") + S).c_str(), 3.0);
+        set_variable(pawn, (std::wstring(S) + L" Sheath Slot Concrete").c_str(), 11.0);
+        set_bool_property(pawn, (std::wstring(L"Weapon UnSheathing ") + S).c_str(), false);
+        set_bool_property(pawn, (std::wstring(S) + L" Weapon Sheathing").c_str(), false);
+        set_bool_property(pawn, (std::wstring(L"Block ") + S + L" Weapon From Sheathing").c_str(), false);
+        set_bool_property(pawn, STR("Cross Unsheath"), false);
+        HSVR_LOG("Draw: the mod freed %ls from %ls (%s): joint %s, Unsheathed Mode %s, weights %s", w->GetName().c_str(), sd.var, why, joint ? "broken" : "missing",
+                 um ? "run" : "missing", wt ? "removed" : "call missing");
     }
 
     void slot_take_tick(UObject* pawn)
@@ -15683,25 +15749,8 @@ namespace
                 continue;
             }
             if (now_seconds() - st.t0 < 0.4) continue;
-            const TCHAR* S = sd.side == 0 ? STR("L") : STR("R");
-            UObject* joint = object_property(pawn, sd.constraint);
-            if (joint)
-            {
-                Call(joint, STR("BreakConstraint")).run();
-                Call(joint, STR("K2_DestroyComponent")).run();
-            }
-            set_variable(pawn, sd.constraint, 0.0, nullptr, nullptr);
-            set_variable(pawn, sd.var, 0.0, nullptr, nullptr);
-            set_variable(pawn, (std::wstring(L"Sheath Slot ") + S).c_str(), 3.0);
-            set_variable(pawn, (std::wstring(S) + L" Sheath Slot Concrete").c_str(), 11.0);
-            set_bool_property(pawn, (std::wstring(L"Weapon UnSheathing ") + S).c_str(), false);
-            set_bool_property(pawn, (std::wstring(S) + L" Weapon Sheathing").c_str(), false);
-            set_bool_property(pawn, (std::wstring(L"Block ") + S + L" Weapon From Sheathing").c_str(), false);
-            set_bool_property(pawn, STR("Cross Unsheath"), false);
-            bool um = Call(st.weapon, STR("Unsheathed Mode")).run();
+            free_slot(pawn, st.slot, st.weapon, "the game had not after 0.4 s");
             make_loose_simulating(st.weapon, "after the mod's slot break");
-            HSVR_LOG("Draw: the game had not freed %ls from %ls after %.2f s: the mod broke %ls (joint %s, Unsheathed Mode %s)", st.weapon->GetName().c_str(), sd.var,
-                     now_seconds() - st.t0, sd.constraint, joint ? "broken" : "missing", um ? "run" : "missing");
             st = SlotTake{};
         }
     }
@@ -15814,7 +15863,21 @@ namespace
             UObject* base0 = object_property(w, STR("BaseMesh"));
             Vec3 p0 = component_location(base0);
             Quat q0 = component_rotation(base0);
-            make_loose_simulating(w, sd.var == k_slots[4].var ? "on his back" : "on his belt");
+            bool freed = false;
+            if (!is_simulating(base0))
+            {
+                freed = true;
+                // Off the back (or any slot that left it without a live body): freed and rebuilt first,
+                // else the hand holds a body that cannot move (back_slot_physics.md).
+                free_slot(pawn, best, w, "it was not simulating");
+                if (!make_loose_simulating(w, best == 4 ? "off his back" : "off his belt"))
+                {
+                    HSVR_LOG("Draw: %s hand: %ls could not be made to simulate; not taken", side == 0 ? "left" : "right", w->GetName().c_str());
+                    return true;
+                }
+                p0 = component_location(base0);
+                q0 = component_rotation(base0);
+            }
             bool ok0 = give_hand_weapon(side, pawn, w);
             if (!ok0 || object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != w)
             {
@@ -15826,9 +15889,12 @@ namespace
             // flags; they follow the SLOT's side): without UnSheathing, Check Scabbard Unsheath State's
             // "lock as seated" ((Back ? true : Z <= 20) and !UnSheathing) re-seated a back shield every
             // tick and never broke its joint (test 2026-11-21 21:40Z: the pavise stayed on his back).
-            set_bool_property(pawn, name(L"Weapon UnSheathing %ls").c_str(), true);
-            set_bool_property(pawn, (std::wstring(sd.side == 0 ? STR("Block L") : STR("Block R")) + STR(" Weapon From Sheathing")).c_str(), true);
-            g_slot_take[side] = SlotTake{w, best, now_seconds()};
+            if (!freed)
+            {
+                set_bool_property(pawn, name(L"Weapon UnSheathing %ls").c_str(), true);
+                set_bool_property(pawn, (std::wstring(sd.side == 0 ? STR("Block L") : STR("Block R")) + STR(" Weapon From Sheathing")).c_str(), true);
+                g_slot_take[side] = SlotTake{w, best, now_seconds()};
+            }
             controllers_buzz(side, 0.3f);
             if (class_name_starts(w, STR("Shield")) && pavise_on_forearm(w, side, cfg))
             {
