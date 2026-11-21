@@ -1431,7 +1431,7 @@ namespace
                 move.three(STR("NewLocation"), w.x, w.y, w.z).flag(STR("bTeleport"), true);
                 move.run();
                 log("  %s %.1f -> %.1f cm (was off the model's haft %.1f..%.1f)", narrow(n).c_str(), z, want, lo, hi);
-                moved_l = moved_l || narrow(n).find(" L ") != std::string::npos;
+                moved_l = moved_l || narrow(n) == "Grip L Hand Off Hand";
             }
             if (moved_l && off_mark)
             {
@@ -1443,6 +1443,7 @@ namespace
                     log("  off hand let go so it re-attaches at the new place (%s)", brk.run() ? "ok" : "FAILED");
                 }
             }
+            log("  a main hand spot that moved takes effect at the next grab (drop and pick up, or a grip change)");
             return;
         }
         if (!off_mark || !r_mark)
@@ -1635,7 +1636,15 @@ namespace
         //   C one piece (tools, hurlbat, staff): "Weapon" (or Blade / Grip_0 alone).
         // New collision goes into those components with SetStaticMesh, which keeps their hit bindings,
         // tags, collision profile and Tip children. Flails (simulating chain) are refused.
-        if (has_mesh(object_property(weapon, STR("Blade1"))) || object_property(weapon, STR("Link 1")))
+        bool flail = has_mesh(object_property(weapon, STR("Blade1"))) || object_property(weapon, STR("Link 1"));
+        if (UObject* h = object_property(weapon, STR("Head")))
+        {
+            Call tag(h, STR("ComponentHasTag"));
+            static FName flail_tag(STR("Flail"), FNAME_Add);
+            if (FProperty* p = tag.param(STR("Tag"))) *reinterpret_cast<FName*>(tag.buffer.data() + p->GetOffset_Internal()) = flail_tag;
+            flail = flail || (tag.run() && tag.ret_bool()); // Tool_Flail: its Head is the swinging part
+        }
+        if (flail)
         {
             log("  ! flails are not supported (their head hangs on a simulating chain)");
             return;
@@ -1775,7 +1784,7 @@ namespace
             for (Hull& h : hulls)
                 for (auto& ms : parts[i].model_slots)
                     if (ms == h.slot) volume[i] += h.volume;
-            if (volume[i] <= 0 && parts[i].comp) ++empty_parts;
+            if (volume[i] <= 0 && has_mesh(parts[i].comp)) ++empty_parts;
         }
         double share_target = (std::max)(0.05, parts_target - token_kg * empty_parts);
 
@@ -1783,6 +1792,7 @@ namespace
         {
             Part& pt = parts[i];
             if (!pt.comp) continue;
+            if (!has_mesh(pt.comp)) continue; // an empty slot (maces' Guard/Pommel): no body, keep it that way
             Xf slot_xf = pt.comp == head ? head_xf : world_transform(pt.comp);
             auto to_slot = [&](V3 p) {
                 p.z += shift;
@@ -1843,6 +1853,28 @@ namespace
             move.three(STR("NewLocation"), r.x, r.y, z).flag(STR("bTeleport"), true);
             move.run();
             log("  damage point %s (%s): z %.1f -> %.1f (head units)", narrow(c->GetName()).c_str(), narrow(cls).c_str(), r.z, z);
+        }
+        // Reforged hafts keep blunt tips on Grip_0 (Spear_B Tip2 at 112, Base1_1 at 150): any that would
+        // sit beyond the model's haft top (inside the new head) or below its bottom is pulled onto the haft.
+        for (Part& pt : parts)
+        {
+            if (pt.comp == head || std::string(pt.name) != "Grip_0") continue;
+            Xf gx = world_transform(pt.comp);
+            for (UObject* c : comps)
+            {
+                if (object_property(c, STR("AttachParent")) != pt.comp) continue;
+                std::wstring cls = c->GetClassPrivate()->GetName();
+                if (cls.find(STR("ProceduralMesh")) != std::wstring::npos || cls.find(STR("StaticMesh")) != std::wstring::npos) continue;
+                V3 hl = transform_point(head_xf, world_location(c), true);
+                double mz = hl.z * hs.z - shift; // model cm
+                double want = (std::min)((std::max)(mz, numbers["pommel_end"] + 1.0), numbers["guard_bottom"] - 1.0);
+                if (std::fabs(want - mz) < 0.5) continue;
+                V3 w = transform_point(head_xf, V3{hl.x, hl.y, (want + shift) / hs.z}, false);
+                Call move(c, STR("K2_SetWorldLocation"));
+                move.three(STR("NewLocation"), w.x, w.y, w.z).flag(STR("bTeleport"), true);
+                move.run();
+                log("  haft damage point %s: model z %.1f -> %.1f cm (kept on the haft)", narrow(c->GetName()).c_str(), mz, want);
+            }
         }
 
         // The visible model in the head's local units; normals and tangents adjusted so that, after the
