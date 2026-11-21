@@ -9649,6 +9649,29 @@ namespace
     }
 
     std::unordered_map<UObject*, std::vector<Handle>> g_item_handles;
+    // What a weapon is, from the game's own data (sword_dagger_grip_zones.md): a sword is a ModularWeaponBP
+    // with a Guard part and a Weapon_Sword_Grip_* grip module (Grip_8 short sword, Grip_12 arming sword,
+    // Grip_15 bastard sword, Grip_20* longsword / Grip_20GS greatsword). Daggers are one-mesh weapons
+    // with no grip module whose Icon is a dagger or rondel icon (rondels, tool knives, Baurnwehrs).
+    enum class ItemKind { Other, Sword1H, SwordHandAndHalf, Sword2H, Dagger };
+    std::unordered_map<UObject*, ItemKind> g_item_kind;
+    bool g_item_kind_tracked = on_freed([] { erase_gone_keys(g_item_kind); });
+    ItemKind item_kind(UObject* item)
+    {
+        auto f = g_item_kind.find(item);
+        return f != g_item_kind.end() ? f->second : ItemKind::Other;
+    }
+    // The name of what a plain object or class property points at; empty when it is not one (a soft
+    // reference holds no plain pointer) or is unset. Read once per weapon (item_handles is cached).
+    std::wstring object_name_or_empty(UObject* owner, const TCHAR* prop)
+    {
+        FProperty* p = owner ? prop_chain(owner, prop) : nullptr;
+        if (!p) return std::wstring();
+        std::wstring kind = p->GetClass().GetName();
+        if (kind != STR("ObjectProperty") && kind != STR("ClassProperty")) return STR("(") + kind + STR(")");
+        UObject* o = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal());
+        return o ? o->GetName() : std::wstring();
+    }
     std::wstring shield_class(UObject* shield);
     const std::vector<Handle>& item_handles(UObject* item, UObject* base)
     {
@@ -9688,7 +9711,18 @@ namespace
             {
                 double g0 = (std::min)(0.0, lo + half), g1 = (std::max)(0.0, hi - half);
                 hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, g1}, "grip", -1, 2});
-                bool hafted = hi - lo >= 30.0;
+                // The game's data first (read once per weapon; item_handles is cached).
+                std::wstring grip_cls = object_name_or_empty(item, STR("Grip Module"));
+                std::wstring icon = object_name_or_empty(item, STR("Icon"));
+                bool sword_grip = grip_cls.rfind(STR("Weapon_Sword_Grip"), 0) == 0;
+                if (!grip_cls.empty() && grip_cls[0] == L'(') grip_cls.clear();
+                // A sword is never a haft, however long its grip (greatswords: 34-38 cm, so their blade
+                // was taken for a polearm's head and had no handle: 7 refused blade grabs in a play log).
+                bool hafted = hi - lo >= 30.0 && !(sword_grip && wide_hi && weapon_has_guard(item));
+                bool dagger = cfg.pose_grip_dagger_fixed && grip_cls.empty() && !weapon_has_guard(item) &&
+                              (icon.find(STR("Dagger")) != std::wstring::npos || icon.find(STR("Rondel")) != std::wstring::npos);
+                HSVR_LOG("Handles: %ls: grip module %ls, icon %ls, Search Priority %.0f%s", item->GetName().c_str(), grip_cls.empty() ? STR("none") : grip_cls.c_str(),
+                         icon.empty() ? STR("none") : icon.c_str(), read_number_variable(item, STR("Search Priority")), dagger ? " -> dagger" : "");
                 // One-handed sword (a Guard, a blade past it, not hafted) by the game's own grip type, which
                 // ModularWeaponBP copies from its grip module (UG @19423 Grip R Hand Default = Spawned Weapon
                 // Grip.Grip R Hand Default). The game two-hands only types 10-16 (Willie_BP UG @494280 maps
@@ -9696,15 +9730,24 @@ namespace
                 double grip_type = read_number_variable(item, STR("Grip R Hand Default"));
                 bool two_hand_type = grip_type >= 10.0 && grip_type <= 16.0;
                 bool sword = !hafted && wide_hi && weapon_has_guard(item);
+                // Hand-and-a-half = the bastard sword's grip family (Grip_15); the game's grip type is 11 for
+                // every two-hander, so it cannot tell them apart (sword_dagger_grip_zones.md).
+                bool hand_and_half = sword && grip_cls.rfind(STR("Weapon_Sword_Grip_15"), 0) == 0;
+                bool two_zones = sword && two_hand_type && (hand_and_half || cfg.pose_grip_two_zones_2h_sword >= 2) && cfg.pose_grip_two_zones_2h_sword >= 1;
+                g_item_kind[item] = dagger ? ItemKind::Dagger
+                                    : !sword ? ItemKind::Other
+                                    : !two_hand_type ? ItemKind::Sword1H
+                                    : hand_and_half ? ItemKind::SwordHandAndHalf : ItemKind::Sword2H;
                 if (sword)
                     HSVR_LOG("Handles: %ls: sword, game grip type %.0f (%s), grip %.1f..%.1f cm", item->GetName().c_str(), grip_type,
-                             grip_type < 0.0 ? "not found" : two_hand_type ? "two-handed: guard and pommel zones" : "one-handed", g0, g1);
+                             grip_type < 0.0 ? "not found" : !two_hand_type ? "one-handed" : two_zones ? (hand_and_half ? "hand-and-a-half: guard and pommel zones" : "two-handed: guard and pommel zones")
+                                                                                   : "two-handed: grip slides", g0, g1);
                 if (sword && cfg.pose_slide_fixed_1h_sword && grip_type >= 0.0 && !two_hand_type && g1 - g0 > 1e-3)
                 {
                     hs.back().fixed = true;
                     hs.back().fixed_t = (std::min)(1.0, (std::max)(0.0, (0.0 - g0) / (g1 - g0))); // the game's grip point
                 }
-                else if (sword && cfg.pose_grip_two_zones_2h_sword && two_hand_type && g1 - g0 >= 2.0 * half)
+                else if (two_zones && g1 - g0 >= 2.0 * half)
                 {
                     // Hand-and-a-half and two-handed swords (Matthew 2026-11-21): two fixed zones, no slide:
                     // one under the guard (the grip's top, where the game's grip point is) and one above the
@@ -9718,7 +9761,20 @@ namespace
                     hs.back().fixed = true;
                     hs.back().fixed_t = 0.0;
                 }
-                if (hafted)
+                if (dagger)
+                {
+                    // A dagger (Matthew 2026-11-21): one fixed zone at the game's grip point, taken by a touch
+                    // anywhere from its pommel ("Length to Bottom") to half a hand past the grip point. Its
+                    // parts are measured wrongly (a rondel's grip -0.5..0.5, a Baurnwehr's -5.5..53.5), so not
+                    // from the walk.
+                    double bottom = 0.0;
+                    if (FProperty* bp = prop_chain(item, STR("Length to Bottom"))) bottom = number_property(item, bp);
+                    double d0 = -(std::max)(half, bottom > 0.0 ? bottom - 1.0 : -g0);
+                    hs.back() = Handle{Vec3{0, 0, d0}, Vec3{0, 0, half}, "grip", -1, 2};
+                    hs.back().fixed = true;
+                    hs.back().fixed_t = (0.0 - d0) / (half - d0);
+                }
+                else if (hafted)
                 {
                     // Every further haft stretch is a handle of its own; the head is not (B&S).
                     for (const auto& e : extra)
@@ -12516,6 +12572,14 @@ namespace
             else if (!h.free.set || h.free.forearm) why = "not held by a handle";
             else if (bool_property(weapon, STR("Stuck In Body"))) why = "it is stuck in a body";
             else if (g_two.active && g_two.weapon == weapon) why = "held in two hands";
+            else if (cfg.grip_flip_short_only)
+            {
+                // Matthew 2026-11-21: only daggers, short swords and one-handed swords turn to an ice-pick grip.
+                UObject* bm = object_property(weapon, STR("BaseMesh"));
+                if (bm) item_handles(weapon, bm);
+                ItemKind k = item_kind(weapon);
+                if (k != ItemKind::Dagger && k != ItemKind::Sword1H) why = "only daggers and one-handed swords turn";
+            }
             if (why)
             {
                 HSVR_LOG("Flip: %s hand: no flip (%s)", side == 0 ? "left" : "right", why);

@@ -513,7 +513,8 @@ namespace hsvr
         flag("pose_slide_rondel_stops", c.pose_slide_rondel_stops);
         flag("pose_slide_butt_is_haft", c.pose_slide_butt_is_haft);
         flag("pose_slide_fixed_1h_sword", c.pose_slide_fixed_1h_sword);
-        flag("pose_grip_two_zones_2h_sword", c.pose_grip_two_zones_2h_sword);
+        integer("pose_grip_two_zones_2h_sword", c.pose_grip_two_zones_2h_sword);
+        flag("pose_grip_dagger_fixed", c.pose_grip_dagger_fixed);
         num("pose_slide_rate_min", c.pose_slide_rate_min);
         num("pose_slide_rate_max", c.pose_slide_rate_max);
         num("pose_slide_max_cm_s", c.pose_slide_max_cm_s);
@@ -580,6 +581,7 @@ namespace hsvr
         num("cut_release_cm", c.cut_release_cm);
         num("cut_release_after_s", c.cut_release_after_s);
         flag("grip_flip", c.grip_flip);
+        flag("grip_flip_short_only", c.grip_flip_short_only);
         num("stab_yank_cm", c.stab_yank_cm);
         num("stab_yank_s", c.stab_yank_s);
         num("grip_flip_s", c.grip_flip_s);
