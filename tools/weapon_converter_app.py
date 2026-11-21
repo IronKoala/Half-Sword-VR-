@@ -8,6 +8,7 @@ model the mod uses (model= in CustomWeapon.ini). Nothing reaches the mod folder 
 import glob
 import io
 import json
+import multiprocessing
 import os
 import queue
 import re
@@ -44,6 +45,7 @@ TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or 
 # (half-swording), reverse = Grip R Hand Default Pos Reverse (reverse/Mordhau grip).
 SPOTS = [("main", "Main hand", "#e74c3c"), ("off", "Off hand", "#3498db"), ("half_main", "Half-sword main", "#e67e22"),
          ("half_off", "Half-sword off", "#1abc9c"), ("reverse", "Reverse grip", "#9b59b6")]
+PARTS = ("pommel", "grip", "guard", "blade")
 ZONE_COLOURS = {"Pommel": "#b07a3c", "Grip": "#7a4a2a", "Guard": "#c9a227", "Head": "#8fa3b8"}
 # Display units. Everything inside stays centimetres and kilograms; only what is shown and typed changes.
 UNIT_SYSTEMS = {"Metric (cm, kg)": ("cm", 1.0, "kg", 1.0), "Imperial (inches, pounds)": ("in", 2.54, "lb", 0.45359237)}
@@ -304,6 +306,20 @@ class App:
                   foreground="#777", wraplength=640).grid(
             row=7, column=1, columnspan=2, sticky="w", padx=8)
         self.placing = None
+        ttk.Label(form, text="Part lengths").grid(row=8, column=0, sticky="w", **pad)
+        lens = ttk.Frame(form)
+        lens.grid(row=8, column=1, columnspan=2, sticky="w", **pad)
+        self.len_vars = {}
+        for part in PARTS:
+            ttk.Label(lens, text=part.capitalize()).pack(side="left", padx=(0, 3))
+            v = tk.StringVar()
+            ttk.Entry(lens, textvariable=v, width=7).pack(side="left", padx=(0, 10))
+            v.trace_add("write", lambda *_, p=part: self.part_length_typed(p))
+            self.len_vars[part] = v
+        ttk.Button(lens, text="Reset parts", command=self.reset_parts).pack(side="left")
+        ttk.Label(form, text="type a new length to stretch or shrink just that part; drag the white marks between the "
+                             "coloured parts under the picture to move where one part ends and the next begins.",
+                  foreground="#777", wraplength=640).grid(row=9, column=1, columnspan=2, sticky="w", padx=8)
         ttk.Label(form, text="Units").grid(row=3, column=0, sticky="w", **pad)
         unit_name = self.settings.get("units")
         self.units_var = tk.StringVar(value=unit_name if unit_name in UNIT_SYSTEMS else next(iter(UNIT_SYSTEMS)))
@@ -328,6 +344,9 @@ class App:
 
         self.preview = ttk.Label(main, anchor="center")
         self.preview.bind("<Button-1>", self.preview_clicked)
+        self.preview.bind("<B1-Motion>", self.preview_dragged)
+        self.preview.bind("<ButtonRelease-1>", self.preview_released)
+        self.dragging = None
         self.preview.grid(row=7, column=0, columnspan=3, sticky="nsew")
         main.rowconfigure(7, weight=1)
         self.summary = ttk.Label(main, text="", justify="left", wraplength=880)
@@ -392,7 +411,7 @@ class App:
                 name, n = f"{base}_{n}", n + 1
             names.add(name.lower())
             item = {"path": f, "name": name, "raw": None, "length_cm": None, "mass_kg": None,
-                    "type": TYPES[0][0], "flip": False, "slide": False, "spots": {}, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
+                    "type": TYPES[0][0], "flip": False, "slide": False, "spots": {}, "splits": None, "part_len": {}, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
                     "result": None, "result_inputs": None, "views": None, "status": "reading the model...",
                     "iid": f"item{id(f)}_{len(self.items)}"}
             self.items.append(item)
@@ -467,6 +486,7 @@ class App:
         self.slide_var.set(it["slide"])
         self.quiet = False
         self.show_model_info()
+        self.show_part_lengths()
         if self.result is not None:
             self.redraw_result()
             self.flip_btn.config(state="normal")
@@ -535,6 +555,7 @@ class App:
         self.converting_units = False
         self.show_unit_labels()
         self.show_model_info()
+        self.show_part_lengths()
         if self.result is not None:
             self.redraw_result()
         self.inputs_changed()
@@ -632,7 +653,9 @@ class App:
             if not 0.05 <= kg <= 50:
                 return None, f"The weight should be between {self.fmt_mass(0.05)} and {self.fmt_mass(50)}."
             mass = f"{kg:.4f}"
-        return (length, mass, dict(TYPES)[self.type_var.get()], self.flip, self.slide_var.get()), None
+        it = self.cur
+        return (length, mass, dict(TYPES)[self.type_var.get()], self.flip, self.slide_var.get(),
+                it["splits"] if it else None, self.lens_tuple(it)), None
 
     def same_inputs(self, a, b):
         """Equal apart from unit-conversion rounding (switching units must not ask for a new Convert)."""
@@ -673,7 +696,7 @@ class App:
         self.run(self.convert_worker, self.argv_for(it, values), values, it)
 
     def argv_for(self, it, values):
-        length, mass, kind, flip, slide = values
+        length, mass, kind, flip, slide, splits, lens = values
         argv = [it["path"], it["work"], "--length-cm", f"{length:g}", "--name", it["name"]]
         if mass:
             argv += ["--mass-kg", mass]
@@ -683,6 +706,10 @@ class App:
             argv.append("--flip")
         if slide:
             argv.append("--hand-slide")
+        if splits:
+            argv += ["--splits", ",".join(f"{v * length:.2f}" for v in splits)]  # shares of the length -> cm
+        if any(lens):
+            argv += ["--part-lengths", ",".join(f"{v:.2f}" if v else "" for v in lens)]
         return argv
 
     def item_values(self, it):
@@ -694,7 +721,8 @@ class App:
         mass = "" if it["mass_kg"] is None else f"{it['mass_kg']:.4f}"
         if mass and not 0.05 <= it["mass_kg"] <= 50:
             return None, "weight out of range"
-        return (round(it["length_cm"], 2), mass, dict(TYPES)[it["type"]], it["flip"], it["slide"]), None
+        return (round(it["length_cm"], 2), mass, dict(TYPES)[it["type"]], it["flip"], it["slide"],
+                it["splits"], self.lens_tuple(it)), None
 
     def convert_all(self):
         if self.busy:
@@ -733,19 +761,30 @@ class App:
         for f in os.listdir(it["work"]):
             os.remove(os.path.join(it["work"], f))
 
-        class Out(io.TextIOBase):
-            def write(s, text):
+        # The conversion runs in a process of its own: a big model takes a few GB while converting, and a
+        # process that ends gives all of it back (in this one it stayed taken, conversion after conversion).
+        ctx = multiprocessing.get_context("spawn")
+        q = ctx.Queue()
+        proc = ctx.Process(target=convert_in_child, args=(argv, q), daemon=True)
+        proc.start()
+        problem, finished = None, False
+        while not finished:
+            try:
+                kind, text = q.get(timeout=0.5)
+            except queue.Empty:
+                if not proc.is_alive():
+                    problem = problem or f"the converter stopped unexpectedly (exit code {proc.exitcode})"
+                    break
+                continue
+            if kind == "log":
                 self.events.put(("log", text, None))
-                return len(text)
-
-        old = sys.stdout
-        sys.stdout = Out()
-        try:
-            model_to_weapon.main(argv)
-        except SystemExit as e:
-            raise RuntimeError(str(e))
-        finally:
-            sys.stdout = old
+            else:
+                problem, finished = (text if kind == "error" else None), True
+        proc.join()
+        q.close()
+        q.join_thread()
+        if problem:
+            raise RuntimeError(problem)
         name, work = it["name"], it["work"]
         info = json.load(open(os.path.join(work, name + ".json"), encoding="utf-8"))
         pos, nrm, uv, tris = read_obj(os.path.join(work, name + ".obj"))
@@ -776,6 +815,7 @@ class App:
         self.result, self.result_inputs = (name, info), values
         self.result_views = views
         self.redraw_result()
+        self.show_part_lengths()
         self.flip_btn.config(state="normal")
         self.install_btn.config(state="normal")
         self.status.config(text="Check the picture, then Install.")
@@ -835,7 +875,21 @@ class App:
 
     def preview_clicked(self, event):
         it = self.cur
-        if not self.placing or it is None or it["result"] is None or not self.result_views:
+        if it is None or it["result"] is None or not self.result_views or self.busy:
+            return
+        if not self.placing:
+            # Near a line between two parts (within 8 pixels): drag it.
+            s = self.result_views[4]
+            z = self.event_z(event)
+            b = self.boundaries()
+            near = [(abs(z - bz) * s, i) for i, bz in enumerate(b)]
+            d, i = min(near)
+            if d <= 8:
+                # Lines on top of each other (no guard): the one on the side of the click.
+                same = [j for dj, j in near if abs(dj - d) < 1e-6]
+                if len(same) > 1:
+                    i = same[0] if z < b[i] else same[-1]
+                self.dragging = (i, b[i])
             return
         flat, edge, zones, zmin, s, width = self.result_views
         pw, ph = getattr(self, "pic_size", (width, 0))
@@ -852,6 +906,115 @@ class App:
         self.write_spots(it)
         self.redraw_result()
         self.status.config(text=f"{label} placed. Press Install to use it in the game.")
+
+    # ---- part boundaries and lengths ----------------------------------------------------------------
+    def lens_tuple(self, it):
+        if it is None:
+            return (0.0, 0.0, 0.0, 0.0)
+        return tuple(round(it["part_len"].get(p, 0.0), 2) for p in PARTS)
+
+    def result_part_lengths(self, info):
+        zn = info["zones_cm"]
+        return {"pommel": zn["handle_bottom"] - zn["pommel_end"], "grip": zn["guard_bottom"] - zn["handle_bottom"],
+                "guard": zn["guard_top"] - zn["guard_bottom"], "blade": zn["tip"] - zn["guard_top"]}
+
+    def show_part_lengths(self):
+        it = self.cur
+        k = self.units()[1]
+        have = self.result_part_lengths(it["result"][1]) if it is not None and it["result"] is not None else {}
+        self.quiet = True
+        for p in PARTS:
+            v = it["part_len"].get(p) if it is not None else None
+            if v is None:
+                v = have.get(p)
+            self.len_vars[p].set("" if v is None else f"{v / k:.1f}")
+        self.quiet = False
+
+    def part_length_typed(self, part):
+        it = self.cur
+        if self.quiet or it is None or it["result"] is None:
+            return
+        try:
+            cm = float(self.len_vars[part].get().replace(",", ".")) * self.units()[1]
+        except ValueError:
+            return
+        now = self.result_part_lengths(it["result"][1])[part]
+        if part not in it["part_len"] and abs(cm - now) < 0.06 * self.units()[1]:
+            return  # just the length shown (unit rounding)
+        if now < 0.05:
+            self.status.config(text=f"This weapon has no {part} to stretch.")
+            return
+        it["part_len"][part] = max(0.5, cm)
+        self.inputs_changed()
+
+    def reset_parts(self):
+        it = self.cur
+        if it is None:
+            return
+        it["splits"], it["part_len"] = None, {}
+        self.show_part_lengths()
+        self.inputs_changed()
+        self.status.config(text="Parts back to what the converter found. Press Convert.")
+
+    def boundaries(self):
+        """The part boundaries of the picture shown, cm along the weapon: pommel|grip, grip|guard, guard|blade."""
+        zn = self.cur["result"][1]["zones_cm"]
+        return [zn["handle_bottom"], zn["guard_bottom"], zn["guard_top"]]
+
+    def event_z(self, event):
+        flat, edge, zones, zmin, s, width = self.result_views
+        pw, ph = getattr(self, "pic_size", (width, 0))
+        x = event.x - (self.preview.winfo_width() - pw) / 2
+        return zmin + (x - 10) / s
+
+    def preview_dragged(self, event):
+        if self.dragging is None or not self.result_views:
+            return
+        i, _ = self.dragging
+        b = self.boundaries()
+        zn = self.cur["result"][1]["zones_cm"]
+        z = self.event_z(event)
+        lo = b[i - 1] if i > 0 else zn["pommel_end"]
+        hi = b[i + 1] if i < 2 else zn["tip"]
+        self.dragging = (i, min(max(z, lo), hi))
+        self.redraw_result()
+        names = ("pommel | grip", "grip | guard", "guard | blade")
+        self.status.config(text=f"Moving {names[i]}: {self.fmt_len(self.dragging[1] - zn['pommel_end'], 1)} up from the pommel end")
+
+    def preview_released(self, event):
+        if self.dragging is None:
+            return
+        i, z = self.dragging
+        self.dragging = None
+        it = self.cur
+        zn = it["result"][1]["zones_cm"]
+        b = self.boundaries()
+        if abs(b[i] - z) < 0.05:
+            self.redraw_result()
+            return
+        b[i] = z
+        # The splits go to the converter before any stretching, so a picture with stretched parts is
+        # mapped back to the model's own lengths, part by part.
+        p0 = zn["pommel_end"]
+        shown = [p0] + self.boundaries() + [zn["tip"]]
+        raw_lens = it["result"][1].get("lengths_before_stretch_cm")
+        if raw_lens:
+            raw = [p0]
+            for l in raw_lens:
+                raw.append(raw[-1] + l)
+            def unstretch(v):
+                for j in range(4):
+                    lo, hi = shown[j], shown[j + 1]
+                    if v <= hi + 1e-6 or j == 3:
+                        k = raw_lens[j] / (hi - lo) if hi - lo > 1e-6 else 0.0
+                        return raw[j] + (v - lo) * k
+            b = [unstretch(v) for v in b]
+        span = sum(raw_lens) if raw_lens else zn["tip"] - p0
+        it["part_len"] = {}  # lengths typed earlier went with the old boundaries
+        # Kept as shares of the whole length, so a new real length moves the lines with it.
+        it["splits"] = tuple(round((v - p0) / span, 5) for v in b)
+        self.show_part_lengths()
+        self.convert()
 
     def short_summary(self, info):
         zn = info["zones_cm"]
@@ -880,13 +1043,23 @@ class App:
             x = 10 + (z - zmin) * s
             d.line([(x, 4), (x, flat.height + edge.height - 2)], fill=colour, width=3)
             d.text((x + 4, 4 + 12 * [k for k, _, _ in SPOTS].index(key)), label, fill=colour)
+        if self.cur is not None and self.cur["result"] is not None:
+            y0 = flat.height + edge.height
+            for i, bz in enumerate(self.boundaries()):
+                if self.dragging is not None and self.dragging[0] == i:
+                    bz = self.dragging[1]
+                    xd = 10 + (bz - zmin) * s
+                    d.line([(xd, 0), (xd, pic.size[1])], fill=(255, 255, 255), width=2)
+                x = 10 + (bz - zmin) * s
+                d.rectangle([x - 3, y0, x + 3, y0 + 14], fill=(240, 240, 240))
         self.refresh_spot_buttons()
         photo = ImageTk.PhotoImage(pic)
         self.photos = [photo]
         self.preview.config(image=photo)
         zn = info["zones_cm"]
         hafted = info["type"] == "hafted"
-        how = "found by the model's part names" if info["parts_by_name"] else "found from the model's shape"
+        how = ("set by hand" if self.cur is not None and (self.cur["splits"] or self.cur["part_len"]) else
+               "found by the model's part names" if info["parts_by_name"] else "found from the model's shape")
         mass = self.fmt_mass(info["mass_kg"])
         if info["mass_note"] != "given":
             mass += (" (estimated: type the real weight if you know it)" if info["mass_kg"] <= 6 else
@@ -1053,7 +1226,24 @@ class App:
         self.root.destroy()
 
 
+def convert_in_child(argv, q):
+    """Runs model_to_weapon in the conversion process; its printout and the outcome go back through q."""
+    class Out(io.TextIOBase):
+        def write(s, text):
+            q.put(("log", text))
+            return len(text)
+    sys.stdout = sys.stderr = Out()  # the windowed exe has no console to print to
+    try:
+        model_to_weapon.main(argv)
+        q.put(("done", None))
+    except SystemExit as e:
+        q.put(("done", None) if e.code in (None, 0) else ("error", str(e.code)))
+    except Exception:
+        q.put(("error", traceback.format_exc()))
+
+
 def main():
+    multiprocessing.freeze_support()  # the exe starts itself again for each conversion
     root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
     try:
         ttk.Style(root).theme_use("vista")

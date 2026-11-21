@@ -352,6 +352,10 @@ def main(argv=None):
                     help="sword: guard between grip and blade; hafted: head on the end of a haft (axe, mace, "
                          "hammer, spear). Default: detected")
     ap.add_argument("--handle-bottom-cm", type=float)
+    ap.add_argument("--splits", help="where the parts meet, chosen by hand: 'A,B,C' = cm up from the pommel end to "
+                                     "the grip's start, the guard's start and the blade's start (A<=B<=C)")
+    ap.add_argument("--part-lengths", help="'pommel,grip,guard,blade' new lengths in cm; empty or 0 keeps that part "
+                                           "(each part is stretched or shrunk along the weapon on its own)")
     ap.add_argument("--metallic", type=float, default=1.0)
     ap.add_argument("--roughness", type=float, default=0.35)
     args = ap.parse_args(argv)
@@ -589,6 +593,46 @@ def main(argv=None):
         print(f"grip width {grip_w:.1f} cm; handle bottom {handle_bottom:.1f} cm, pommel end {end:.1f} cm"
               + ("" if handle_bottom > end else " (no wider pommel found: whole handle is grip)"))
 
+    # ---- part boundaries chosen by hand ----------------------------------------------------------------
+    if args.splits:
+        a, b, c = sorted(float(v) for v in args.splits.split(","))
+        span = guard_bottom - end + (float(z.max()) - guard_bottom)
+        a, b, c = (min(max(v, 0.0), span) for v in (a, b, c))
+        hb, gb, gt = end + a, end + b, end + c
+        frame_pos[:, 2] -= gb  # the frame's origin is the guard's start (the top of the grip)
+        z = frame_pos[:, 2]
+        end, handle_bottom, guard_bottom, guard_top = end - gb, hb - gb, 0.0, gt - gb
+        named = False  # the parts now come from the boundaries, not the mesh names
+        print(f"part boundaries chosen by hand: pommel {handle_bottom - end:.1f} cm, grip {-handle_bottom:.1f} cm, "
+              f"guard {guard_top:.1f} cm, blade {float(z.max()) - guard_top:.1f} cm")
+
+    # ---- part lengths chosen by hand: each part stretched along the weapon on its own --------------------
+    lens_before = None
+    if args.part_lengths:
+        want = [float(v) if v.strip() else 0.0 for v in args.part_lengths.split(",")] + [0.0] * 4
+        top_ = float(z.max())
+        old = [(end, handle_bottom), (handle_bottom, guard_bottom), (guard_bottom, guard_top), (guard_top, top_)]
+        lens = [hi - lo for lo, hi in old]
+        new_lens = [w if w > 0 and l > 0.05 else l for w, l in zip(want[:4], lens)]
+        # The guard's start stays at 0: the grip and pommel grow downward, the guard and blade upward.
+        nb = [-(new_lens[0] + new_lens[1]), -new_lens[1], 0.0, new_lens[2], new_lens[2] + new_lens[3]]
+        zz = z.copy()
+        nz = frame_nrm[:, 2].copy()
+        for i, (lo, hi) in enumerate(old):
+            sel = (zz >= lo - 1e-6) & (zz <= hi + 1e-6) if i == 0 else (zz > lo) & (zz <= hi + 1e-6)
+            if i == 3:
+                sel = zz > lo
+            k = new_lens[i] / lens[i] if lens[i] > 0.05 else 1.0
+            frame_pos[sel, 2] = nb[i] + (zz[sel] - lo) * k
+            nz[sel] = frame_nrm[sel, 2] / k  # a stretch along z tilts the normals toward the sides
+        frame_nrm[:, 2] = nz
+        frame_nrm /= np.maximum(np.linalg.norm(frame_nrm, axis=1, keepdims=True), 1e-12)
+        z = frame_pos[:, 2]
+        end, handle_bottom, guard_bottom, guard_top = nb[0], nb[1], 0.0, nb[3]
+        lens_before = [round(l, 3) for l in lens]
+        names_ = ("pommel", "grip", "guard", "blade")
+        print("part lengths: " + ", ".join(f"{n} {l:.1f} -> {nl:.1f} cm" for n, l, nl in zip(names_, lens, new_lens)))
+
     # ---- collision pieces -----------------------------------------------------------------------------
     if named:
         # Each part from its own meshes; a mesh with no recognised name goes by where it sits.
@@ -728,7 +772,8 @@ def main(argv=None):
     wp.write_numbers(os.path.join(args.out, name + ".txt"), f"{name}: written by tools/model_to_weapon.py", numbers)
     json.dump({"source": os.path.basename(args.model), "scale": scale_note, "mass_kg": mass, "mass_note": mass_note,
                "zones_cm": numbers, "volumes_cm3": {s: round(v, 1) for s, v in volume.items()},
-               "parts_by_name": named, "type": "hafted" if hafted else "sword", "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
+               "parts_by_name": named, "lengths_before_stretch_cm": lens_before,
+               "type": "hafted" if hafted else "sword", "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
               open(os.path.join(args.out, name + ".json"), "w"), indent=2)
     if hafted:
         print(f"length {top - end:.1f} cm: butt end {end:.1f}, haft {handle_bottom:.1f}..0, head 0..{top:.1f} cm; "
