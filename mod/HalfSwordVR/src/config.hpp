@@ -280,15 +280,19 @@ namespace hsvr
         bool pose_body_strength = true;
         double pose_body_stamina_floor = 0.5;
         double pose_body_strength_min = 0.1;
-        // Holding and swinging cost stamina by the game's own formula, run on the hold's force and
-        // torque (capped) and the controller's speed at the grip, smoothed (lo..hi cm/s -> x10..x85),
-        // times this scale (3-5 if continuous swinging should empty the bar in 10-20 s).
+        // Holding and swinging cost stamina through the game's own rules: the hold's force and torque
+        // (capped) go into the game's per-hand burn (as its hand joint would), x Muscle Rate's factor x
+        // this scale, kept from pose_stamina_gate up (the game's 10); the game then applies its swing
+        // speed, fat, temperature and armour factors and regenerates as usual.
         double pose_stamina_scale = 1.0;
-        double pose_stamina_swing_lo_cm_s = 200.0;
-        double pose_stamina_swing_hi_cm_s = 700.0;
-        double pose_stamina_speed_smooth_s = 0.7;
-        double pose_stamina_force_cap_n = 150.0;
-        double pose_stamina_torque_cap_nm = 15.0;
+        // The game keeps a hand burn only from 10 up. Its hand joint is spiky (flat runs 2026-11-21: 30%
+        // of fast-swing ticks over 10), the mod's spring hold smooth (never over 10 at the same
+        // swings), so with the gate VR never paid; with none its mean matches the flat game's.
+        double pose_stamina_gate = 0.0;
+        // A fist's burn x this, on top of the game's own fist factor (Hands Rigidity x Fisting Rate).
+        double pose_stamina_fist_scale = 1.0;
+        double pose_stamina_force_cap_n = 1000.0;
+        double pose_stamina_torque_cap_nm = 100.0;
         // Exact hold (B&S-style): each frame the weapon gets the velocity that puts it exactly where
         // the hand is drawn at the end of this frame's physics, limited only by the hand's strength
         // (pose_hold_max_force / max_torque). 0 = the spring below.
@@ -329,11 +333,12 @@ namespace hsvr
         // Reverse grip flip (S&S): a tap (shorter than grip_flip_tap_s) of the holding hand's B / Y
         // turns a one-handed weapon end for end at the same spot on its handle, gliding over grip_flip_s.
         bool grip_flip = true;
+        bool grip_flip_short_only = true; // only daggers, short swords and one-handed swords flip (Matthew 2026-11-21)
         // A blade stuck in someone is torn out when your hand is more than stab_yank_cm from its grip
         // for stab_yank_s (0 = never).
         double stab_yank_cm = 35.0;
         double stab_yank_s = 0.25;
-        double grip_flip_s = 0.3;
+        double grip_flip_s = 0.4; // Matthew 2026-11-21: 0.3 flipped too fast, 25% slower
         double grip_flip_tap_s = 0.4;
         double stab_wound_settle_s = 0.2; // no pulling out for this long after it goes in
         double stab_wound_settle_max_s = 0.8; // a young stick is held open until the game's own keep trace passes, at most this long
@@ -499,6 +504,12 @@ namespace hsvr
         // no trigger slide along the grip (Matthew 2026-11-20). Hand-and-a-half and two-handed swords, and
         // every non-sword, keep the slide. The blade (half-swording) is unchanged.
         bool pose_slide_fixed_1h_sword = true;
+        // Two fixed grip zones, under the guard and above the pommel, no slide (Matthew 2026-11-21):
+        // 0 = off (grip slides), 1 = hand-and-a-half (bastard sword, Grip_15) only, 2 = every two-handed
+        // sword (also longswords and greatswords).
+        int pose_grip_two_zones_2h_sword = 1; // Matthew 2026-11-21: bastard swords only
+        // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
+        bool pose_grip_dagger_fixed = true;
         double pose_slide_rate_min = 3.0;
         double pose_slide_rate_max = 40.0;
         double pose_slide_max_cm_s = 250.0; // fastest the hand runs along a weapon
@@ -707,10 +718,59 @@ namespace hsvr
         double pose_elbow_velocity_scale = 0.9375;
         bool pose_fingers_tracked = true;
         double pose_fingers_tau_s = 0.05;
+        // A finger's joints from one curl: the middle joint is fully bent at curl pip_full, the end joint
+        // just behind it, the knuckle starts at curl mcp_lag (a half curl is a hook, not a circle).
+        // 0 = every joint the same fraction (the framework's way).
+        bool pose_finger_schedule = true;
+        double pose_finger_mcp_lag = 0.25;
+        double pose_finger_pip_full = 0.75;
+        // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
+        // loose object with curl until they touch it. Ease in/out time, how often all five are re-solved,
+        // finger radius (0 = 9.5% of the hand's length, the framework's), and the open hand as its base.
+        bool pose_wrap = true;
+        double pose_wrap_ease_s = 0.12;
+        double pose_wrap_refresh_s = 0.5;
+        double pose_wrap_finger_radius_cm = 0.0;
+        bool pose_wrap_open_base = true;
+        // What the game's grab holds is pulled onto the palm (the spot on it nearest the palm), not into
+        // the fist: palm = hand bone + along x (middle knuckle - hand bone) + palm_cm toward the palm.
+        bool pose_grab_seat_palm = true;
+        double pose_grab_palm_cm = 2.0;
+        double pose_grab_palm_along = 0.5;
+        // The mod holds what the game's grab holds (its hand joint lets things hang off the hand). Loose
+        // objects: driven to their place in the hand (framework physics.track): accel cap accel/heft m/s^2,
+        // turn ang_accel/heft rad/s^2, heft = (1 + 2 x heft x kg)^2. Bodies: the held bone is also pulled
+        // to the palm by a spring of pull_hz, capped at pull_n N x his grip strength / 121.
+        bool pose_grab_drive = true;
+        double pose_grab_drive_heft = 0.1;
+        double pose_grab_drive_accel = 600.0;
+        double pose_grab_drive_ang_accel = 1200.0;
+        double pose_grab_body_pull_n = 600.0;
+        double pose_grab_body_pull_hz = 4.0;
+        bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;
         // Body grabs (a Willie's throat, arm...): what the game's grab joint feels, logged every 0.1 s.
         bool log_body_grab = true;
+        // While you hold a Willie: his joints as the game's Dislocate Bone reads them (each bone's forward
+        // against its parent's, the bend; and its twist), with Strain / Dislocation State / part health.
+        bool log_joint_strain = true;
+        // Joint breaking by grappling. The game's own joint strain (Dislocate Bone) was emptied out in
+        // the 11-17 update, so the mod runs the old game's rules for a Willie you hold: his neck_01,
+        // upperarms, spine_03 (and calves with joint_break_legs) bent against their parent bone, or
+        // twisted past joint_break_twist_free_*_deg from how they sat when you took hold, build his
+        // Strain and a Dislocation State the mod keeps per part (easing off at 0.05/s); at 1 the neck snaps (the game's Snap Neck: he dies), a shoulder
+        // or knee dislocates (the game relocates it by its own rules), or the back breaks (Break Back).
+        // A twist's excess counts as a bend of excess x joint_break_twist_gain degrees.
+        bool joint_break = true;
+        double joint_break_twist_free_neck_deg = 60.0;
+        double joint_break_twist_free_arm_deg = 60.0;
+        double joint_break_twist_free_back_deg = 30.0;
+        double joint_break_twist_gain = 2.0;
+        // Knees too (the old rule read the calf's bend against the thigh).
+        bool joint_break_legs = false;
+        // Every part's strain rate x this (1 = the old game).
+        double joint_break_scale = 1.0;
         // Every other Willie's body hits (impulse, health, consciousness, what hit him), when they change.
         bool log_body_hits = true;
         // 1 = the game's grab joint is made soft (a capped spring, B&S-like) 0.25 s after it latches, so
@@ -798,6 +858,13 @@ namespace hsvr
         // A short tap (under kick_tap_s) of right A kicks: the game's Kick Event.
         bool kick_on_a = true;
         double kick_tap_s = 0.35;
+        // Left X is the game's Jump key (Space): hold to gather, let go to leap (the game jumps only
+        // once its Jump Rate has reached 0.5; a quick tap is the game's own tap-kick). 0 = off.
+        bool jump_on_x = true;
+        // Right stick click is the game's SloMo key (F): toggles its slow motion (Slomo Timeline:
+        // time slows to 0.75..0.25 by his Body Skill, stamina drains faster, it ends by itself at
+        // stamina 0.5 or consciousness 50). 0 = off.
+        bool slowmo_on_right_stick_click = true;
         // Crouching keeps his legs on the leg IK: the animation's kneel and falling leg poses are kept
         // off (they sank the whole body 50-100 cm at a deep crouch). And the capsule is never put more
         // than 15 cm below its standing height over the floor (the game drops it ~77 cm when its foot
@@ -885,6 +952,9 @@ namespace hsvr
         // Every this many seconds a "Perf:" line: frame rate, the mod's own time per frame by part, and
         // how many objects, actors and simulating bodies the game has (0 = off).
         double perf_log_seconds = 10.0;
+        // Every this many seconds a "Strength: training:" line: his strength (Muscle Rate), the growth the
+        // game has banked (Muscle Growth Due) and every input to it (0 = off).
+        double strength_log_seconds = 10.0;
         // Troubleshooting: time every Blueprint call the game makes on its main thread, per class and
         // function ("Perf events" lines with each Perf line). Costs about 1 ms a frame in big fights.
         bool perf_events = false;
