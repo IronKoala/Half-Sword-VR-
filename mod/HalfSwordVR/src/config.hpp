@@ -468,6 +468,24 @@ namespace hsvr
         // While a held weapon is stopped, the hold uses its measured motion, not the velocity it last
         // set (which never drops while it is blocked, so the hold wound up to 20 m/s). 0 = old.
         bool pose_hold_measured_v = true;
+        // Experimental (hold rebuild, Matthew 2026-11-21): the held weapon is held by engine joints, B&S
+        // style. Each hand gets an invisible kinematic body that follows the controller; a Chaos joint
+        // with spring drives ties it to the weapon and the physics solves it with the collisions. One
+        // hand: pose_hold_spring/damper/max_force and turn_spring/damper/max_torque; two hands: each
+        // hand pulls (pose_bs_two_pos_*), only the main hand turns (pose_bs_two_rot_*). Caps scale with
+        // strength/stamina/injury. Not used while drawing, sliding or stuck in a wound. 0 = the old hold.
+        bool pose_hold_joint = false;
+        double pose_hold_joint_stiffness = 1.0; // multiplies the springs
+        double pose_hold_joint_damping = 1.0;   // multiplies the dampers (the lag in a steady swing is about damper / spring x speed)
+        double pose_hold_joint_max = 1.0;       // multiplies the force and torque caps
+        // Two hands: the turning hand only twists the weapon about the line between the hands; where it
+        // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
+        // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
+        bool pose_two_hand_twist_only = true;
+        double pose_two_hand_swing_share = 0.0;
+        // Whoosh judged on the weapon's speed against your body: the game's whoosh threshold for a weapon in
+        // a tracked hand is raised by your walking speed x this (0 = off).
+        double whoosh_walk_speed_scale = 1.0;
         // Something is in the held weapon's way when it ends a tick this far (cm) short of where the
         // hold sent it; the stuck rule only lets go of a weapon that is in contact like that.
         double pose_hold_contact_cm = 0.5;
