@@ -16499,10 +16499,18 @@ namespace
                 last_floor_t = t_now;
             }
             double standing = floor ? floor_z + half : -1e9;
+            // Held up, never lifted: he may not go lower than he was last tick while under standing
+            // height (the sink), and rises toward it at most 60 cm/s. A wrong floor (a table edge,
+            // the feet's traces starting higher once he rose) lifted him 340 cm in one tick and
+            // fed on itself up to 9 m (table test T2, 2026-11-21 07:14Z).
             if (floor && keep.z < standing - 15.0)
             {
-                kept_up_max = (std::max)(kept_up_max, standing - 15.0 - keep.z);
-                keep.z = standing - 15.0;
+                double up_to = (std::min)(standing - 15.0, g_hold_location.z + (std::max)(0.5, 60.0 * dt));
+                if (up_to > keep.z)
+                {
+                    kept_up_max = (std::max)(kept_up_max, up_to - keep.z);
+                    keep.z = up_to;
+                }
                 fall_v = 0.0;
             }
             else if (!airborne_by_choice && keep.z > standing + 5.0)
