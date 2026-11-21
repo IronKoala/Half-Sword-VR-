@@ -4,7 +4,9 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <algorithm>
 #include <map>
+#include <vector>
 #include <mutex>
 #include <string>
 
@@ -56,6 +58,32 @@ namespace hsvr
         if (g_log_file) return;
         now_seconds();
         std::wstring path = mod_dir() + L"HalfSwordVR.log";
+        // Every earlier run is also kept in logs\ under the time it ended (the newest 40), so a
+        // headset session is not lost to the unattended tests that follow it.
+        WIN32_FILE_ATTRIBUTE_DATA info{};
+        if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info))
+        {
+            std::wstring dir = mod_dir() + L"logs\\";
+            CreateDirectoryW(dir.c_str(), nullptr);
+            FILETIME local{};
+            SYSTEMTIME st{};
+            FileTimeToLocalFileTime(&info.ftLastWriteTime, &local);
+            FileTimeToSystemTime(&local, &st);
+            wchar_t name[64];
+            swprintf(name, 64, L"HalfSwordVR-%04u-%02u-%02u_%02u-%02u-%02u.log", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+            CopyFileW(path.c_str(), (dir + name).c_str(), FALSE);
+            std::vector<std::wstring> kept;
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((dir + L"HalfSwordVR-*.log").c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                do kept.push_back(fd.cFileName);
+                while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+            std::sort(kept.begin(), kept.end());
+            for (size_t i = 0; i + 40 < kept.size(); ++i) DeleteFileW((dir + kept[i]).c_str());
+        }
         // Keep the previous run's log, so a quick restart does not lose a test.
         MoveFileExW(path.c_str(), (mod_dir() + L"HalfSwordVR.previous.log").c_str(), MOVEFILE_REPLACE_EXISTING);
         g_log_file = _wfopen(path.c_str(), L"w");

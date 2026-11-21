@@ -1,5 +1,7 @@
 # Phase 2 tests: controller tracking and the player physics test
 
+> **Removed 2026-11-18:** the player physics test (`dev_player_physics_off`, `dev_player_arm_physics`, `arm_bone_left/right`, the script step `hsvr.physics_off`). The body code from Phase 3 keeps physics off by itself. `log_body` stays.
+
 Phase 2 adds two things, neither of which changes how the game plays by default:
 
 1. **Controller tracking (read only).** The mod now asks SteamVR for both controllers through an OpenXR action set: grip and pointer poses, trigger, grip button, stick, stick click, A/X, B/Y, menu and vibration. Nothing is sent to the game yet; everything goes to `HalfSwordVR.log`.

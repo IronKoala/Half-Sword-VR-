@@ -19,6 +19,10 @@ namespace hsvr
     };
     using AnchorProvider = bool (*)(PlayerAnchor& out);
     void stereo_set_anchor_provider(AnchorProvider provider);
+    // Called on the game thread right after this frame's headset pose is latched for the views (once
+    // per frame, before the frame is drawn): the game glue can still move things to match it.
+    using LatchCallback = void (*)();
+    void stereo_set_latch_callback(LatchCallback callback);
 
     // Called once per engine tick on the game thread, before the frame is drawn.
     void stereo_begin_game_frame(double delta_seconds);
@@ -29,6 +33,8 @@ namespace hsvr
     // Where the view is anchored this frame (the point between the eyes at the recenter pose) and
     // the heading "straight ahead" maps to. Game thread. False until a frame has been placed.
     bool stereo_view_anchor(Vec3& anchor, double& base_yaw);
+    // Where the engine last drew eye 0 or 1 (world location and rotation). Game thread.
+    bool stereo_last_eye(int index, Vec3& location, Quat& rotation);
 
     // True while the engine draws the eyes into their own full-size target (settings key
     // separate_render_target) rather than side by side into the game window.
