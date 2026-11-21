@@ -438,9 +438,8 @@ namespace hsvr
         num("pose_body_stamina_floor", c.pose_body_stamina_floor);
         num("pose_body_strength_min", c.pose_body_strength_min);
         num("pose_stamina_scale", c.pose_stamina_scale);
-        num("pose_stamina_swing_lo_cm_s", c.pose_stamina_swing_lo_cm_s);
-        num("pose_stamina_swing_hi_cm_s", c.pose_stamina_swing_hi_cm_s);
-        num("pose_stamina_speed_smooth_s", c.pose_stamina_speed_smooth_s);
+        num("pose_stamina_gate", c.pose_stamina_gate);
+        num("pose_stamina_fist_scale", c.pose_stamina_fist_scale);
         num("pose_stamina_force_cap_n", c.pose_stamina_force_cap_n);
         num("pose_stamina_torque_cap_nm", c.pose_stamina_torque_cap_nm);
         flag("pose_hold_exact", c.pose_hold_exact);
@@ -671,6 +670,14 @@ namespace hsvr
         flag("log_wrap", c.log_wrap);
         flag("log_fingers", c.log_fingers);
         flag("log_body_grab", c.log_body_grab);
+        flag("log_joint_strain", c.log_joint_strain);
+        flag("joint_break", c.joint_break);
+        num("joint_break_twist_free_neck_deg", c.joint_break_twist_free_neck_deg);
+        num("joint_break_twist_free_arm_deg", c.joint_break_twist_free_arm_deg);
+        num("joint_break_twist_free_back_deg", c.joint_break_twist_free_back_deg);
+        num("joint_break_twist_gain", c.joint_break_twist_gain);
+        flag("joint_break_legs", c.joint_break_legs);
+        num("joint_break_scale", c.joint_break_scale);
         flag("log_body_hits", c.log_body_hits);
         integer("pose_grab_body_hold", c.pose_grab_body_hold);
         num("pose_grab_body_spring", c.pose_grab_body_spring);
@@ -720,6 +727,8 @@ namespace hsvr
         num("pose_crouch_button_cms", c.pose_crouch_button_cms);
         flag("kick_on_a", c.kick_on_a);
         num("kick_tap_s", c.kick_tap_s);
+        flag("jump_on_x", c.jump_on_x);
+        flag("slowmo_on_right_stick_click", c.slowmo_on_right_stick_click);
         flag("pose_crouch_keep_leg_ik", c.pose_crouch_keep_leg_ik);
         flag("pose_player_no_kneel", c.pose_player_no_kneel);
         flag("pose_capsule_floor_clamp", c.pose_capsule_floor_clamp);

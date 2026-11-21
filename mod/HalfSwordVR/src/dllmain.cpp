@@ -1972,6 +1972,9 @@ namespace
     std::atomic<int> g_count_letgo{0}, g_count_kicks{0};
     std::atomic<double> g_worst_lag[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
+    double g_jump_until = -1.0;               // a jump released by left X: until then the capsule's rise is the game's jump, not a climb
+    std::atomic<bool> g_fake_x{false};        // test: hsvr.press_x 1 holds left X (jump)
+    std::atomic<bool> g_fake_rstick{false};   // test: hsvr.press_rstick 1 holds the right stick click (slow motion)
     std::atomic<bool> g_fake_stick_click{false}; // test: hsvr.stick_click 1 holds the left stick click
     std::atomic<double> g_fake_stick[2] = {-9.0, 0.0}; // test: hsvr.stick <x> <y> holds the left stick (x -9 = off)
     std::string g_park_socket;                  // test: hsvr.arm_park <socket> (arm mode 13): right hand there
@@ -3933,15 +3936,78 @@ namespace
         }
     }
 
+    // ---- Stamina trace (hsvr.stamina_trace <seconds>, 0 = off) ----------------------------------
+    // For matching the VR drain to the flat game: every <seconds>, in flat mode too, logs his
+    // number variables whose names contain "stamina", "burn" or "swing", plus Muscle Rate, Fat
+    // Rate, Liver Pain, Aim Swing Speed, the frame time and each hand joint's GetConstraintForce
+    // (linear and angular, as the game's hand burn reads them, @407166).
+    double watch_read(UObject* owner, FProperty* p);
+    double g_stamina_trace_s = 0.0;
+    double g_stamina_trace_last = -1e9;
+    std::vector<FProperty*> g_stamina_trace_props;
+    UObject* g_stamina_trace_pawn = nullptr;
+    void stamina_trace(UObject* pawn)
+    {
+        if (g_stamina_trace_s <= 0.0 || !pawn) return;
+        double now = hsvr::now_seconds();
+        if (now - g_stamina_trace_last < g_stamina_trace_s) return;
+        double frame = g_stamina_trace_last > 0.0 ? now - g_stamina_trace_last : 0.0;
+        g_stamina_trace_last = now;
+        if (pawn != g_stamina_trace_pawn)
+        {
+            g_stamina_trace_pawn = pawn;
+            g_stamina_trace_props.clear();
+            for (UStruct* level = static_cast<UStruct*>(pawn->GetClassPrivate()); level; level = level->GetSuperStruct())
+                for (FProperty* p : level->ForEachProperty())
+                {
+                    auto kind = p->GetClass().GetName();
+                    if (kind != STR("DoubleProperty") && kind != STR("FloatProperty")) continue;
+                    std::wstring lower;
+                    for (wchar_t ch : std::wstring(p->GetName())) lower += (wchar_t)towlower(ch);
+                    if (lower.find(STR("stamina")) != std::wstring::npos || lower.find(STR("burn")) != std::wstring::npos ||
+                        lower.find(STR("swing")) != std::wstring::npos || lower == STR("muscle rate") || lower == STR("fat rate") ||
+                        lower == STR("liver pain") || lower.find(STR("fisting rate")) != std::wstring::npos)
+                        g_stamina_trace_props.push_back(p);
+                }
+            HSVR_LOG("StaminaTrace: %d variables", (int)g_stamina_trace_props.size());
+        }
+        std::string line;
+        char buf[160];
+        for (FProperty* p : g_stamina_trace_props)
+        {
+            double v = watch_read(pawn, p);
+            std::string n;
+            for (wchar_t ch : std::wstring(p->GetName())) n += (char)(ch < 128 ? ch : '?');
+            snprintf(buf, sizeof(buf), "%s=%.4g; ", n.c_str(), v);
+            line += buf;
+        }
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* joint = object_property(pawn, side == 0 ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand"));
+            if (!joint) continue;
+            Call f(joint, STR("GetConstraintForce"));
+            if (!f.run()) continue;
+            snprintf(buf, sizeof(buf), "joint%s lin=%.1f ang=%.1f; ", side == 0 ? "L" : "R", hsvr::length(f.vec(STR("OutLinearForce"))),
+                     hsvr::length(f.vec(STR("OutAngularForce"))));
+            line += buf;
+        }
+        UObject* wr = object_property(pawn, STR("Weapon R"));
+        HSVR_LOG("StaminaTrace: %.3f (%.2f s) weaponR %ls; %s", now, frame, wr ? wr->GetName().c_str() : STR("none"), line.c_str());
+    }
+
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         gc_sync();
         HSVR_PROF(PerfCapsuleBefore);
         // Test input runs in flat mode too (no posed body): the player's pawn's own tick.
-        if ((!g_test_inputs.empty() || g_input_list_now) && context && function && function->GetName() == STR("ReceiveTick"))
+        if ((!g_test_inputs.empty() || g_input_list_now || g_stamina_trace_s > 0.0) && context && function && function->GetName() == STR("ReceiveTick"))
         {
             UObject* pc = find_player_controller();
-            if (pc && object_property(pc, STR("Pawn")) == context) input_before_tick(context);
+            if (pc && object_property(pc, STR("Pawn")) == context)
+            {
+                input_before_tick(context);
+                stamina_trace(context);
+            }
         }
         if (!is_receive_tick(context, function)) return;
         g_hold_location = actor_location(context);
@@ -7279,6 +7345,345 @@ namespace
         lin.number(STR("VelocityStrength"), cfg.pose_grab_body_damper);
         lin.number(STR("InForceLimit"), cap);
         lin.run();
+    }
+
+    // What the game's Dislocate Bone (run in every Willie's tick over neck_01, upperarm_r/l, spine_03,
+    // calf_r/l) reads: the bone's forward (X) in its parent bone's space, dotted with X. Only a bend
+    // moves it; a twist about the bone's own X does not. Logged for the Willies you hold, with the
+    // twist about X (swing-twist split) and his Strain / Dislocation State / part health.
+    // Test (dev_script "hsvr.joint_torque <bone> <x|y|z> <N m> <seconds>"): that torque, about the
+    // bone's own axis, on that bone of the first passive foe, every tick for that long. The foe is
+    // looked up again each tick (no Willie pointer kept across frames) and logged with the Joints lines.
+    struct JointTorqueTest
+    {
+        bool on = false;
+        std::string bone;
+        int axis = 0;
+        double nm = 0.0, until = 0.0;
+    };
+    JointTorqueTest g_joint_torque;
+
+    UObject* joint_torque_foe(UObject* pawn)
+    {
+        std::vector<UObject*> foes;
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), foes);
+        for (UObject* foe : foes)
+            if (foe && foe != pawn && foe->GetName().rfind(STR("Default__"), 0) != 0 && object_alive(foe) && !bool_property(foe, STR("Neck Snapped")) &&
+                read_number_variable(foe, STR("Health")) > 0.0)
+                return foe;
+        return nullptr;
+    }
+
+    void joint_torque_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        if (!g_joint_torque.on) return;
+        if (now_seconds() > g_joint_torque.until)
+        {
+            g_joint_torque.on = false;
+            HSVR_LOG("Script: hsvr.joint_torque: done");
+            return;
+        }
+        UObject* foe = joint_torque_foe(pawn);
+        UObject* mesh = foe ? object_property(foe, STR("Mesh")) : nullptr;
+        if (!mesh) return;
+        FName bone = bone_fname(g_joint_torque.bone.c_str());
+        Quat q = socket_rotation(mesh, bone);
+        Vec3 a{g_joint_torque.axis == 0 ? 1.0 : 0.0, g_joint_torque.axis == 1 ? 1.0 : 0.0, g_joint_torque.axis == 2 ? 1.0 : 0.0};
+        Vec3 t = q.rotate(a) * (g_joint_torque.nm * 10000.0); // N m -> kg cm^2 / s^2
+        Call c(mesh, STR("AddTorqueInRadians"));
+        c.three(STR("Torque"), t.x, t.y, t.z);
+        c.name(STR("BoneName"), bone);
+        c.flag(STR("bAccelChange"), false);
+        c.run();
+    }
+
+    void joint_strain_log(UObject* pawn)
+    {
+        using namespace hsvr;
+        if (!config().log_joint_strain) return;
+        static double last = -10.0;
+        double now = now_seconds();
+        if (now - last < 0.2) return;
+        last = now;
+        UObject* done = nullptr;
+        for (int side = 0; side < 3; ++side)
+        {
+            UObject* w = side < 2 ? (g_body_grab[side].on ? g_body_grab[side].victim : nullptr) : (g_joint_torque.on ? joint_torque_foe(pawn) : nullptr);
+            if (!w || w == done || !object_alive(w)) continue;
+            done = w;
+            UObject* mesh = object_property(w, STR("Mesh"));
+            if (!mesh) continue;
+            struct Part { const char* bone; const TCHAR* strain; const TCHAR* state; const TCHAR* health; };
+            static const Part parts[] = {
+                {"neck_01", STR("Neck Strain"), STR("Neck Dislocation State"), STR("Neck Health")},
+                {"neck_02", nullptr, nullptr, nullptr},
+                {"Head", nullptr, nullptr, nullptr},
+                {"upperarm_r", STR("Arm R Strain"), STR("Arm R Dislocation State"), STR("Arm_R Health")},
+                {"upperarm_l", STR("Arm L Strain"), STR("Arm L Dislocation State"), STR("Arm_L Health")},
+                {"spine_03", STR("Back Strain"), STR("Back Dislocation State"), STR("Back Health")},
+            };
+            std::string line;
+            for (const Part& p : parts)
+            {
+                FName bone = bone_fname(p.bone);
+                Call pb(mesh, STR("GetParentBone"));
+                pb.name(STR("BoneName"), bone);
+                pb.run();
+                FProperty* rp = pb.param(STR("ReturnValue"));
+                if (!rp) continue;
+                FName parent = *reinterpret_cast<FName*>(pb.buffer.data() + rp->GetOffset_Internal());
+                Quat qb = socket_rotation(mesh, bone), qp = socket_rotation(mesh, parent);
+                Quat rel = (qp.inverse() * qb).normalized();
+                Vec3 f = rel.rotate({1.0, 0.0, 0.0});
+                // Twist about X: the X part of the relative rotation.
+                double tw = 2.0 * std::atan2(rel.x, rel.w) * 57.2958;
+                if (tw > 180.0) tw -= 360.0;
+                if (tw < -180.0) tw += 360.0;
+                char buf[256];
+                std::snprintf(buf, sizeof(buf), " %s(of %ls): bend %.0f deg (dot %.2f) twist %.0f", p.bone, parent.ToString().c_str(),
+                              std::acos((std::max)(-1.0, (std::min)(1.0, f.x))) * 57.2958, f.x, tw);
+                line += buf;
+                if (p.strain)
+                {
+                    std::snprintf(buf, sizeof(buf), " [strain %.2f state %.2f health %.0f]", read_number_variable(w, p.strain), read_number_variable(w, p.state),
+                                  read_number_variable(w, p.health));
+                    line += buf;
+                }
+            }
+            HSVR_LOG("Joints: %ls (neck dislocated %d, snapped %d, arm R/L dislocated %d/%d, invulnerable %d, dislocation blocked %d):%s", w->GetName().c_str(),
+                     (int)bool_property(w, STR("Neck Dislocated")), (int)bool_property(w, STR("Neck Snapped")), (int)bool_property(w, STR("Arm R Dislocated")),
+                     (int)bool_property(w, STR("Arm L Dislocated")), (int)bool_property(w, STR("Invulnerable")), (int)bool_property(w, STR("Dislocation Blocked")),
+                     line.c_str());
+        }
+    }
+
+    // Joint breaking by grappling (joint_break). The game's Dislocate Bone is emptied out since the
+    // 11-17 update (extracted-2026-11-19\listing\fn_Willie_BP_Dislocate_Bone.txt: it sets Bone
+    // Dislocation 0 and returns), so for a Willie you hold the mod runs the old game's rules
+    // (decompiled\functions\Willie_BP\Dislocate Bone.txt), with a twist past the free range counted as a
+    // bend (Matthew 2026-11-21 04:23Z). Per part, every tick:
+    //   d = the bone's forward (X) in its parent bone's space . X, or cos(twist excess x gain) if lower
+    //   BD = MapRangeClamped(d, 1, -1, State x 0.125, Strain + 1) x part factor (neck 0.375, arm 0.025,
+    //        back 0.125, leg 0.25) x (Skeletron ? 1.5 : 1) x MapRangeClamped(Strain, 0, 1, 0.5, 5)
+    //   BD >= 0.1: health -= BD x 666 x dt, pain += BD x 1000 x dt, Strain += BD x 100 x dt,
+    //              State += min(BD x 666 x dt, 0.1); State >= 1: the part goes (below)
+    //   else:      Strain += BD x 25 x dt, pain += BD x 10 x dt
+    // The game itself still eases every Strain back to 0 (FInterpTo speed 5, UG 358852) and relocates a
+    // dislocated shoulder or knee by its Restore Bone (swinging the arm, crouching), which sets the
+    // joint's "Motor" profile again.
+    struct JointPart
+    {
+        const char* bone;
+        const char* twist_bones[3]; // their twists about X (each against its parent) add up
+        const TCHAR* strain;
+        const TCHAR* state;
+        const TCHAR* health;
+        const TCHAR* pain;
+        const TCHAR* dislocated; // nullptr: the outcome is a game event
+        const char* joint;       // its constraint, set to "Broken" when it dislocates
+        double factor;
+        int kind; // 0 neck, 1 arm, 2 back, 3 leg
+    };
+    static const JointPart k_joint_parts[] = {
+        {"neck_01", {"neck_01", "neck_02", "head"}, STR("Neck Strain"), STR("Neck Dislocation State"), STR("Neck Health"), STR("Pain Neck"), nullptr, nullptr, 0.375, 0},
+        {"upperarm_r", {"upperarm_r", nullptr, nullptr}, STR("Arm R Strain"), STR("Arm R Dislocation State"), STR("Arm_R Health"), STR("Pain Arm R"), STR("Arm R Dislocated"), "UserConstraint_10", 0.025, 1},
+        {"upperarm_l", {"upperarm_l", nullptr, nullptr}, STR("Arm L Strain"), STR("Arm L Dislocation State"), STR("Arm_L Health"), STR("Pain Arm L"), STR("Arm L Dislocated"), "UserConstraint_14", 0.025, 1},
+        {"spine_03", {"spine_03", "spine_04", "spine_05"}, STR("Back Strain"), STR("Back Dislocation State"), STR("Back Health"), STR("Pain Lower Body"), nullptr, nullptr, 0.125, 2},
+        {"calf_r", {"calf_r", nullptr, nullptr}, STR("Leg R Strain"), STR("Leg R Dislocation State"), STR("Leg_R Health"), STR("Pain Leg R"), STR("Leg R Dislocated"), "UserConstraint_0", 0.25, 3},
+        {"calf_l", {"calf_l", nullptr, nullptr}, STR("Leg L Strain"), STR("Leg L Dislocation State"), STR("Leg_L Health"), STR("Pain Leg L"), STR("Leg L Dislocated"), "UserConstraint_18", 0.25, 3},
+    };
+    constexpr int k_joint_part_count = sizeof(k_joint_parts) / sizeof(k_joint_parts[0]);
+
+    // Per Willie held (whichever hand, or both): the twists his parts had when you took hold of him
+    // (the rest the free range counts from) and the mod's own Dislocation State per part. The game's
+    // "Dislocation State" variables mean something else since 11-17 (they grow from stamina burn), so
+    // the old rule's State is kept here: it eases to 0 at joint_state_decay per second and the entry
+    // is dropped 30 s after his last hold. The pointer is only compared, never read, once he's let go;
+    // a hold that starts more than 0.5 s after the last one takes a fresh rest.
+    struct JointVictim
+    {
+        UObject* who = nullptr;
+        double seen = -100.0;
+        double twist[k_joint_part_count] = {};
+        double state[k_joint_part_count] = {};
+    };
+    std::vector<JointVictim> g_joint_victims;
+    constexpr double joint_state_decay = 0.05;
+
+    JointVictim& joint_victim(UObject* w, double now, bool& fresh)
+    {
+        g_joint_victims.erase(std::remove_if(g_joint_victims.begin(), g_joint_victims.end(), [&](const JointVictim& v) { return now - v.seen > 30.0; }),
+                              g_joint_victims.end());
+        for (JointVictim& v : g_joint_victims)
+            if (v.who == w)
+            {
+                double idle = now - v.seen;
+                for (double& st : v.state) st = (std::max)(0.0, st - joint_state_decay * idle);
+                fresh = idle > 0.5;
+                v.seen = now;
+                return v;
+            }
+        g_joint_victims.push_back({});
+        g_joint_victims.back().who = w;
+        g_joint_victims.back().seen = now;
+        fresh = true;
+        return g_joint_victims.back();
+    }
+
+    // A bone's forward . X and its twist about X (degrees), both in its parent bone's space.
+    bool bone_bend_twist(UObject* mesh, const char* bone_text, double& dot_x, double& twist_deg)
+    {
+        using namespace hsvr;
+        FName bone = bone_fname(bone_text);
+        Call pb(mesh, STR("GetParentBone"));
+        pb.name(STR("BoneName"), bone);
+        pb.run();
+        FProperty* rp = pb.param(STR("ReturnValue"));
+        if (!rp) return false;
+        FName parent = *reinterpret_cast<FName*>(pb.buffer.data() + rp->GetOffset_Internal());
+        Quat rel = (socket_rotation(mesh, parent).inverse() * socket_rotation(mesh, bone)).normalized();
+        dot_x = rel.rotate({1.0, 0.0, 0.0}).x;
+        twist_deg = normalize_axis(2.0 * std::atan2(rel.x, rel.w) * 57.29577951308232);
+        return true;
+    }
+
+    double map_range_clamped(double v, double in_a, double in_b, double out_a, double out_b)
+    {
+        double t = (v - in_a) / (in_b - in_a);
+        t = (std::max)(0.0, (std::min)(1.0, t));
+        return out_a + (out_b - out_a) * t;
+    }
+
+    void joint_crack_sound(UObject* mesh, const char* bone, double volume)
+    {
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        static UObject* cue = nullptr;
+        if (!cue) cue = load_asset_object(STR("/Game/Sounds/Gore/Knee/sound_knee_crush_Cue.sound_knee_crush_Cue"));
+        if (!gs || !cue || !mesh) return;
+        Call c(gs, STR("SpawnSoundAttached"));
+        c.object(STR("Sound"), cue);
+        c.object(STR("AttachToComponent"), mesh);
+        c.name(STR("AttachPointName"), bone_fname(bone));
+        c.byte(STR("LocationType"), 0); // KeepRelativeOffset
+        c.flag(STR("bStopWhenAttachedToDestroyed"), false);
+        c.number(STR("VolumeMultiplier"), volume);
+        c.number(STR("PitchMultiplier"), 1.0);
+        c.flag(STR("bAutoDestroy"), true);
+        c.run();
+    }
+
+    void joint_break_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        const Config& cfg = config();
+        if (!cfg.joint_break) return;
+        static double last = -1.0;
+        double now = now_seconds();
+        double dt = last < 0.0 ? 0.0 : (std::min)(0.05, now - last);
+        last = now;
+        if (dt <= 0.0) return;
+        UObject* done[3] = {};
+        static double log_at[3][k_joint_part_count] = {};
+        for (int side = 0; side < 3; ++side)
+        {
+            UObject* w = nullptr;
+            if (side < 2) w = g_body_grab[side].on ? g_body_grab[side].victim : nullptr;
+            else if (g_joint_torque.on) w = joint_torque_foe(pawn);
+            if (!w || w == done[0] || w == done[1] || !object_alive(w) || w == pawn) continue;
+            done[side] = w;
+            UObject* mesh = object_property(w, STR("Mesh"));
+            if (!mesh || bool_property(w, STR("Immortal"))) continue;
+            bool skeletron = bool_property(w, STR("Skeletron"));
+            bool fresh = false;
+            JointVictim& rest = joint_victim(w, now, fresh);
+            for (double& st : rest.state) st = (std::max)(0.0, st - joint_state_decay * dt);
+            for (int i = 0; i < k_joint_part_count; ++i)
+            {
+                const JointPart& p = k_joint_parts[i];
+                if (p.kind == 3 && !cfg.joint_break_legs) continue;
+                // Already gone: the game owns it now (Restore Bone relocates, a snapped neck is dead).
+                if (p.kind == 0 && (bool_property(w, STR("Neck Snapped")) || bool_property(w, STR("Neck Dislocated")))) continue;
+                if (p.kind == 2 && bool_property(w, STR("Back Broken"))) continue;
+                if (p.dislocated && bool_property(w, p.dislocated)) continue;
+                double dot = 1.0, tw = 0.0, twist = 0.0;
+                if (!bone_bend_twist(mesh, p.bone, dot, tw)) continue;
+                for (const char* tb : p.twist_bones)
+                {
+                    double d2 = 1.0, t2 = 0.0;
+                    if (tb && bone_bend_twist(mesh, tb, d2, t2)) twist += t2;
+                }
+                if (fresh) rest.twist[i] = twist;
+                double free = p.kind == 0 ? cfg.joint_break_twist_free_neck_deg : p.kind == 1 ? cfg.joint_break_twist_free_arm_deg
+                            : p.kind == 2 ? cfg.joint_break_twist_free_back_deg : 1e9;
+                double excess = (std::max)(0.0, std::fabs(normalize_axis(twist - rest.twist[i])) - free);
+                double twist_dot = std::cos((std::min)(180.0, excess * cfg.joint_break_twist_gain) * kDegToRad);
+                double d = (std::min)(dot, twist_dot);
+                double strain = read_number_variable(w, p.strain);
+                double& state = rest.state[i];
+                if (strain < 0.0) continue; // no such variable
+                double bd = map_range_clamped(d, 1.0, -1.0, state * 0.125, strain + 1.0) * p.factor * (skeletron ? 1.5 : 1.0) *
+                            map_range_clamped(strain, 0.0, 1.0, 0.5, 5.0) * cfg.joint_break_scale;
+                if (bd <= 0.0) continue;
+                double pain = read_number_variable(w, p.pain);
+                if (bd >= 0.1)
+                {
+                    double health = read_number_variable(w, p.health);
+                    if (health >= 0.0) set_variable(w, p.health, (std::max)(0.0, (std::min)(100.0, health - bd * 666.0 * dt)));
+                    if (pain >= 0.0) set_variable(w, p.pain, pain + bd * 1000.0 * dt);
+                    set_variable(w, p.strain, (std::min)(1.0, strain + bd * 100.0 * dt));
+                    state = (std::min)(1.0, state + (std::min)(0.1, bd * 666.0 * dt));
+                    if (state >= 1.0)
+                    {
+                        HSVR_LOG("Joints: %ls's %s goes (bend dot %.2f, twist %.0f deg from rest, strain %.2f)", w->GetName().c_str(), p.bone, dot,
+                                 normalize_axis(twist - rest.twist[i]), strain);
+                        if (p.kind == 0)
+                        {
+                            Call c(w, STR("Snap Neck"));
+                            c.run();
+                        }
+                        else if (p.kind == 2)
+                        {
+                            Call c(w, STR("Break Back"));
+                            c.run();
+                        }
+                        else
+                        {
+                            // As the game's own breaks do: the part's Dislocation State at 1, which its
+                            // Restore Bone (swinging the arm, crouching) works back down to relocate it.
+                            set_variable(w, p.state, 1.0);
+                            set_variable(w, p.health, 0.0);
+                            if (pain >= 0.0) set_variable(w, p.pain, read_number_variable(w, p.pain) + 20.0);
+                            set_bool_property(w, p.dislocated, true);
+                            Call prof(mesh, STR("SetConstraintProfile"));
+                            prof.name(STR("JointName"), bone_fname(p.joint));
+                            prof.name(STR("ProfileName"), bone_fname(skeletron ? "Skeletron" : "Broken"));
+                            prof.flag(STR("bDefaultIfNotFound"), false);
+                            prof.run();
+                            joint_crack_sound(mesh, p.bone, 1.0);
+                        }
+                    }
+                }
+                else
+                {
+                    set_variable(w, p.strain, (std::min)(1.0, strain + bd * 25.0 * dt));
+                    if (pain >= 0.0) set_variable(w, p.pain, pain + bd * 10.0 * dt);
+                    // The old game's crack at 0.05 (volume = BD), at most every 0.5 s per part.
+                    static double crack_at[3][k_joint_part_count] = {};
+                    if (bd >= 0.05 && now - crack_at[side][i] > 0.5)
+                    {
+                        crack_at[side][i] = now;
+                        joint_crack_sound(mesh, p.bone, (std::min)(1.0, bd));
+                    }
+                }
+                if (bd >= 0.005 && now - log_at[side][i] > 0.5)
+                {
+                    log_at[side][i] = now;
+                    HSVR_LOG("Joints: %ls %s strains: BD %.3f (bend dot %.2f, twist %.0f deg from rest -> dot %.2f), strain %.2f, state %.2f", w->GetName().c_str(), p.bone, bd,
+                             dot, normalize_axis(twist - rest.twist[i]), twist_dot, strain, state);
+                }
+            }
+        }
     }
 
     // Willie's tick re-shapes his hand joints every tick (as for weapons, @454086), so a softened body
@@ -10840,23 +11245,20 @@ namespace
         return b;
     }
 
-    // Holding and swinging tire him, by the game's own drain (stamina_calibration.md, Willie @441248,
-    // "R Hand Stamina Burn Rate f", @354657), which reads the hand joint (0 under the mod's hold) and
-    // the mouse's "Aim Swing Speed" (never moved in VR). Per hand:
-    //   burn B = (F + 100 tau) / 60 x MRC(Muscle Rate, 0..3 -> 1..0.1), kept only from 10 up
-    //     (the game's joint "force" is an impulse per step, so at 60 fps it is (F N + 100 tau N m) / 60);
-    //     F and tau the hold's own, capped at pose_stamina_force_cap_n / pose_stamina_torque_cap_nm
-    //     (a weapon snagged or blocked made 680 N and emptied the bar in a second, playtest 2026-11-18);
-    //   swing M = the controller's speed at the grip, smoothed over pose_stamina_speed_smooth_s,
-    //     lo..hi cm/s -> x10..x85 (the game's Aim Swing Speed builds up the same way: one swing stays near x10);
-    //   per second = B x M x 0.0125 x MRC(Fat Rate, -1..10 -> 0.5..2.25) x pose_stamina_scale.
-    struct StaminaHand
-    {
-        bool have = false;
-        hsvr::Vec3 last;
-        double speed = 0.0;
-    };
-    StaminaHand g_stamina_hand[2];
+    // Holding and swinging tire him through the game's own stamina rules (stamina_tick_order.md,
+    // Willie 11-19 listing). The game's per-hand burn "R/L Hand Stamina Burn Rate" (HandBurn, pin
+    // @394236: (|lin| + |ang| of GetConstraintForce(PhysicsConstraint R Hand)) x 0.01 x MRC(Muscle
+    // Rate, 0..3 -> 1..0.1), kept only from 10 up) reads the hand joint, which the mod's hold frees
+    // (force ~0). After his tick the mod writes the hold's own value there instead:
+    //   HandBurn = (F + 100 tau) / 60 x MRC(Muscle Rate, 0..3 -> 1..0.1) x pose_stamina_scale,
+    //   kept only from pose_stamina_gate up (the game's 10; GetConstraintForce is an impulse per
+    //   step, so at 60 fps it is (F N + 100 tau N m) / 60, stamina_calibration.md 1.2);
+    //   F and tau the hold's own, capped at pose_stamina_force_cap_n / pose_stamina_torque_cap_nm.
+    // The next tick's "R Hand Stamina Burn Rate f" (@630756) reads it before the game recomputes it
+    // and turns it into Stamina Burn Swing R with the game's own multipliers (Aim Swing Speed 35..70
+    // -> x10..x85, now fed from the controllers; x0.0125; Lawnmower Rate; swing direction change;
+    // plus the arm armour term), which Stamina Burn sums (x fat, temperature) and the tick takes off
+    // the bar, and which also drives his muscle growth, hunger and sweat.
     double number_var(UObject* owner, const TCHAR* name, bool& found)
     {
         FProperty* p = owner ? prop_chain(owner, name) : nullptr;
@@ -10868,42 +11270,45 @@ namespace
         double t = (std::min)(1.0, (std::max)(0.0, (v - a) / (b - a)));
         return x + (y - x) * t;
     }
-    void drain_stamina(int side, UObject* pawn, double force_n, double torque_nm, const hsvr::Vec3& grip_target, double dt, const hsvr::Config& cfg)
+    void drain_stamina(int side, UObject* pawn, UObject* weapon, double force_n, double torque_nm, const hsvr::Config& cfg)
     {
-        using namespace hsvr;
-        StaminaHand& sh = g_stamina_hand[side];
-        if (!pawn || dt <= 0.0) return;
-        if (sh.have)
-        {
-            double inst = length(grip_target - sh.last) / dt;
-            if (inst > 3000.0) inst = sh.speed; // a recentre or teleport, not a swing
-            double a = (std::min)(1.0, dt / (std::max)(0.01, cfg.pose_stamina_speed_smooth_s));
-            sh.speed += (inst - sh.speed) * a;
-        }
-        sh.last = grip_target;
-        sh.have = true;
-        if (cfg.pose_stamina_scale <= 0.0) return;
-        bool has_mr = false, has_fat = false;
+        if (!pawn || cfg.pose_stamina_scale <= 0.0) return;
+        bool has_mr = false;
         double mr = number_var(pawn, STR("Muscle Rate"), has_mr);
-        double fat = number_var(pawn, STR("Fat Rate"), has_fat);
         double strength = has_mr ? map_range(mr, 0.0, 3.0, 1.0, 0.1) : 1.0;
-        double fat_k = has_fat ? map_range(fat, -1.0, 10.0, 0.5, 2.25) : 1.0;
         double f = (std::min)(force_n, cfg.pose_stamina_force_cap_n), t = (std::min)(torque_nm, cfg.pose_stamina_torque_cap_nm);
-        double burn = (f + 100.0 * t) / 60.0 * strength;
-        double lo = cfg.pose_stamina_swing_lo_cm_s, hi = (std::max)(lo + 1.0, cfg.pose_stamina_swing_hi_cm_s);
-        double swing = map_range(sh.speed, lo, hi, 10.0, 85.0);
-        double per_s = burn >= 10.0 ? burn * swing * 0.0125 * fat_k * cfg.pose_stamina_scale : 0.0;
-        double st = read_number_variable(pawn, STR("Stamina"));
-        if (st < 0.0) return;
-        if (per_s > 0.0) set_variable(pawn, STR("Stamina"), (std::max)(0.0, st - per_s * dt));
+        // A fist (grip 0, nothing grabbed): the game's factor is Hands Rigidity (Gauntlets) x MRC(R/L Fisting Rate,
+        // 0.1..1 -> 0..1) in place of the weapon's 0.01 (@407212, fists_eating.md 1.5), i.e. 100x it
+        // here; Fisting Rate is the mod's own (fist_flags_after_tick), as the tick zeroes the game's.
+        double kind = 1.0, rigidity = -1.0;
+        bool fist = is_fist(weapon);
+        if (fist)
+        {
+            bool has_rig = false;
+            rigidity = number_var(pawn, STR("Hands Rigidity (Gauntlets)"), has_rig); // 0.4 bare-handed
+            if (!has_rig) rigidity = -1.0;
+            // The game's Fisting Rate rises with a mouse thrust (R Thrust Alpha), which VR never makes,
+            // so in VR it stays under the 0.1 floor (stamina runs 2026-11-21: 0.02-0.06 vs flat 0.38):
+            // the punching hand's speed counts too, over the B&S punch range 2..9 m/s.
+            double rate = (std::max)(map_range(g_fisting_rate[side], 0.1, 1.0, 0.0, 1.0), map_range(g_hand_world_v[side], 2.0, 9.0, 0.0, 1.0));
+            kind = 100.0 * (has_rig ? rigidity : 0.0) * rate * cfg.pose_stamina_fist_scale;
+        }
+        double raw = (f + 100.0 * t) / 60.0 * kind * strength * cfg.pose_stamina_scale;
+        double burn = raw >= cfg.pose_stamina_gate ? raw : 0.0;
+        const TCHAR* name = side == 0 ? STR("L Hand Stamina Burn Rate") : STR("R Hand Stamina Burn Rate");
+        bool ok = set_variable(pawn, name, burn, nullptr, nullptr);
         static double last_line[2] = {0.0, 0.0};
-        double now = now_seconds();
+        double now = hsvr::now_seconds();
         if (now - last_line[side] >= 1.0)
         {
             last_line[side] = now;
-            HSVR_LOG("Stamina: %s hand: %.1f, taking %.1f a second (burn %.1f from %.0f N, %.1f N m; speed %.0f cm/s -> x%.0f; Muscle Rate %s%.2f x%.2f, Fat Rate %s%.2f x%.2f)",
-                     side == 0 ? "left" : "right", st, per_s, burn, force_n, torque_nm, sh.speed, swing, has_mr ? "" : "(not found) ", mr, strength,
-                     has_fat ? "" : "(not found) ", fat, fat_k);
+            bool has_swing = false;
+            double swing = number_var(pawn, side == 0 ? STR("Stamina Burn Swing L") : STR("Stamina Burn Swing R"), has_swing);
+            HSVR_LOG("Stamina: %s hand%s: bar %.1f, burn %.1f%s (%.1f from %.0f N, %.1f N m x%.2f; Muscle Rate %s%.2f x%.2f; gate %.0f); game's swing burn last tick %.2f a second, Stamina Burn %.2f, Aim Swing Speed %.0f",
+                     side == 0 ? "left" : "right", fist ? (rigidity < 0.0 ? " (fist; Hands Rigidity (Gauntlets) NOT FOUND)" : " (fist)") : "", read_number_variable(pawn, STR("Stamina")), burn,
+                     ok ? "" : " (NOT WRITTEN: variable not found)", raw, force_n,
+                     torque_nm, kind, has_mr ? "" : "(not found) ", mr, strength, cfg.pose_stamina_gate, has_swing ? swing : -1.0,
+                     read_number_variable(pawn, STR("Stamina Burn")), read_number_variable(pawn, STR("Aim Swing Speed")));
         }
     }
 
@@ -11844,7 +12249,7 @@ namespace
         }
         h.expected_com = com_next;
         h.have_expected = true;
-        drain_stamina(side, pawn, h.force_n, h.torque_nm, target_pivot, dt, cfg);
+        drain_stamina(side, pawn, weapon, h.force_n, h.torque_nm, cfg);
         // Wake it first: a body the solver has put to sleep (a weapon lying still on the ground) may
         // keep the velocity it is given without moving (run 29: the knife stayed frozen on the floor).
         Call wake(base, STR("WakeRigidBody"));
@@ -15307,6 +15712,7 @@ namespace
             { HSVR_SUB("after:swing_speed_after_tick"); swing_speed_after_tick(context); }
             { HSVR_SUB("after:fist_flags_after_tick"); fist_flags_after_tick(context); }
             { HSVR_SUB("after:body_grab_after_tick"); body_grab_after_tick(context); }
+            { HSVR_SUB("after:joint_strain_log"); joint_torque_tick(context); joint_break_tick(context); joint_strain_log(context); }
             { HSVR_SUB("after:body_hit_watch"); body_hit_watch(context); }
             { HSVR_SUB("after:elbow_tick"); elbow_tick(context); }
             { HSVR_SUB("after:stump_blood_tick"); stump_blood_tick(context); }
@@ -15332,11 +15738,17 @@ namespace
         // than 30 cm in one tick (the game's climb over an opponent's head), which is undone.
         Vec3 moved{now_at.x - g_hold_location.x, now_at.y - g_hold_location.y, 0.0};
         double rise = now_at.z - g_hold_location.z;
-        Vec3 keep{g_hold_location.x, g_hold_location.y, rise > 30.0 ? g_hold_location.z : now_at.z};
+        // A jump (the game's Jump: Last Jump Power lifts the capsule, often more than 30 cm in a tick)
+        // is not a climb: from the release (the mod's left X, or the game's own Dolphin Dive Interval /
+        // Jump Pressed flags for Space) the rise is the game's. Unattended test 2026-11-21: undoing it
+        // kept a 60 cm jump to 13 cm.
+        bool jumping = now_seconds() < g_jump_until || bool_property(context, STR("Jump Pressed")) || bool_property(context, STR("Dolphin Dive Interval"));
+        bool climb = rise > 30.0 && !jumping;
+        Vec3 keep{g_hold_location.x, g_hold_location.y, climb ? g_hold_location.z : now_at.z};
         // Take the game's step term back out of the height (pose_capsule_no_step_offset): it bobbed the
         // capsule ~3 cm down through every step and snapped it back up as each foot landed.
         static double step_off_max = 0.0;
-        if (hsvr::config().pose_capsule_no_step_offset && g_step_h2_have && rise <= 30.0)
+        if (hsvr::config().pose_capsule_no_step_offset && g_step_h2_have && !climb)
         {
             auto flag_on = [&](const TCHAR* name) {
                 FProperty* p = prop_chain(context, name);
@@ -15380,7 +15792,7 @@ namespace
         // leaving him floating where the game keeps him.
         static double fall_v = 0.0, fall_t = 0.0;
         static double kept_up_max = 0.0, fell_max = 0.0;
-        if (hsvr::config().pose_capsule_keep_on_floor && g_pose.mesh && rise <= 30.0)
+        if (hsvr::config().pose_capsule_keep_on_floor && g_pose.mesh && !climb)
         {
             auto flag_on = [&](const TCHAR* name) {
                 FProperty* p = prop_chain(context, name);
@@ -15389,7 +15801,7 @@ namespace
             double t_now = now_seconds();
             double dt = (std::min)(0.05, (std::max)(0.0, t_now - fall_t));
             fall_t = t_now;
-            bool airborne_by_choice = flag_on(STR("Climbing In Air")) || flag_on(STR("Jump Pressed"));
+            bool airborne_by_choice = flag_on(STR("Climbing In Air")) || flag_on(STR("Jump Pressed")) || jumping;
             double floor_z = 0.0;
             double half = 90.0 * component_scale_z(g_pose.mesh);
             bool floor = ground_below(context, keep.x, keep.y, (std::max)(g_hold_location.z, keep.z) + 40.0, floor_z);
@@ -15441,7 +15853,7 @@ namespace
         static double moved_max = 0.0;
         static int climbs = 0;
         moved_max = (std::max)(moved_max, length(moved));
-        if (rise > 30.0) ++climbs;
+        if (climb) ++climbs;
         double now = now_seconds();
         if (now - last_line >= 0.25)
         {
@@ -18190,6 +18602,13 @@ namespace
                 HSVR_LOG("Script: hsvr.pawn_pin %ls = %g", name.c_str(), value);
                 continue;
             }
+            if (entry.command.rfind("hsvr.stamina_trace", 0) == 0)
+            {
+                g_stamina_trace_s = entry.command.size() > 19 ? atof(entry.command.c_str() + 19) : 0.0;
+                g_stamina_trace_pawn = nullptr;
+                HSVR_LOG("Script: hsvr.stamina_trace every %.2f s", g_stamina_trace_s);
+                continue;
+            }
             if (entry.command.rfind("hsvr.watch_vars", 0) == 0)
             {
                 // hsvr.watch_vars grip,offhand,stuck  (words, comma separated; none = stop)
@@ -18214,6 +18633,21 @@ namespace
             if (entry.command.rfind("hsvr.joint_trace ", 0) == 0)
             {
                 g_joint_trace.store(atoi(entry.command.c_str() + 17) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.joint_torque ", 0) == 0)
+            {
+                char bone[64] = {}, axis[8] = {};
+                double nm = 0.0, secs = 0.0;
+                if (std::sscanf(entry.command.c_str() + 18, "%63s %7s %lf %lf", bone, axis, &nm, &secs) == 4)
+                {
+                    g_joint_torque.bone = bone;
+                    g_joint_torque.axis = axis[0] == 'y' ? 1 : axis[0] == 'z' ? 2 : 0;
+                    g_joint_torque.nm = nm;
+                    g_joint_torque.until = hsvr::now_seconds() + secs;
+                    g_joint_torque.on = true;
+                    HSVR_LOG("Script: hsvr.joint_torque: %s about %s, %.0f N m for %.1f s", bone, axis, nm, secs);
+                }
                 continue;
             }
             if (entry.command == "hsvr.passive_foe")
@@ -19194,6 +19628,18 @@ namespace
                 g_fake_continue.store(atoi(entry.command.c_str() + 13) != 0);
                 continue;
             }
+            if (entry.command.rfind("hsvr.press_x ", 0) == 0)
+            {
+                g_fake_x.store(atoi(entry.command.c_str() + 13) != 0);
+                HSVR_LOG("Script: hsvr.press_x %d", (int)g_fake_x.load());
+                continue;
+            }
+            if (entry.command.rfind("hsvr.press_rstick ", 0) == 0)
+            {
+                g_fake_rstick.store(atoi(entry.command.c_str() + 18) != 0);
+                HSVR_LOG("Script: hsvr.press_rstick %d", (int)g_fake_rstick.load());
+                continue;
+            }
             if (entry.command.rfind("hsvr.match_won", 0) == 0)
             {
                 // What the GameMode's Minus Enemy sets when the last enemy dies, so the "Hold G to
@@ -19765,6 +20211,95 @@ namespace
         controllers_buzz(1, 0.6f);
         HSVR_LOG("Menu: A held %.1f s after a won fight: VO Deescalate called (Player Match End now %d)", cfg.menu_continue_hold_s,
                  (int)bool_property(pawn, STR("Player Match End")));
+    }
+
+    // Jump and slow motion on the controllers: the game's own input events, called the way a key
+    // press calls them (InputAction "Jump" = Space, "SloMo" = F in DefaultInput.ini). Nothing of
+    // either is redone by the mod: the game's own rules decide (Willie UG, extract 2026-11-19):
+    // - Jump press (K2Node_InputActionEvent_14, UG @226650): Rest and Is Crouched?? off, Timeline_4
+    //   from the start, which raises Jump Rate. Release (_15, UG @225874): with Jump Rate >= 0.5, a
+    //   foot near the ground and not already Jump Pressed, Last Jump Power = Jump Rate and 0.2 s later
+    //   Jump Pressed for 0.4 s (UG @113555); with less Jump Rate it is the game's tap-kick (Kick Event).
+    // - SloMo press (_8, UG @228079): a toggle allowed while Stamina > 0.5 and Consciousness > 50;
+    //   on: SlowMoEffect sound, Slomo Active, Slomo Timeline plays (GI Settings' Time Dilation =
+    //   clamp(track, MapRange(Body Skill 0..1 -> 0.75..0.25), 1), SetGlobalTimeDilation, vignette and
+    //   fringe on his cameras, stamina use x up to 10); off: NoSlowMo sound, timeline back.
+    //   It ends itself through End Arrow Time Event at stamina 0.5 or consciousness 50 (UG @620089).
+    void jump_slowmo_buttons(const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        static bool x_down = false, stick_down = false;
+        static double x_since = -1.0;
+        static double watch_until = -1.0, watch_start_z = 0.0, watch_peak = 0.0, watch_rate = 0.0;
+        ControllerState state = controllers_state();
+        bool live = state.active && state.focused;
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        auto call = [&](const TCHAR* name) -> bool {
+            UFunction* fn = pawn ? func_chain(pawn, name) : nullptr;
+            if (!fn) return false;
+            std::vector<uint8_t> block = param_block(fn);
+            pawn->ProcessEvent(fn, block.data());
+            return true;
+        };
+        double now = now_seconds();
+
+        bool x = (cfg.jump_on_x && live && state.hand[0].primary) || g_fake_x.load();
+        if (x && !x_down)
+        {
+            x_down = true;
+            x_since = now;
+            bool ok = call(STR("InpActEvt_Jump_K2Node_InputActionEvent_14"));
+            HSVR_LOG("Jump: left X down: game's Jump press %s", ok ? "called" : (pawn ? "NOT FOUND on the character" : "skipped (no character)"));
+        }
+        else if (!x && x_down)
+        {
+            x_down = false;
+            double rate = read_number_variable(pawn, STR("Jump Rate"));
+            bool ok = call(STR("InpActEvt_Jump_K2Node_InputActionEvent_15"));
+            HSVR_LOG("Jump: left X up after %.2f s (Jump Rate %.2f: %s): game's Jump release %s", now - x_since, rate,
+                     rate >= 0.5 ? "a jump if a foot is near the ground" : (rate > 0.0 ? "the game's tap-kick" : "nothing"),
+                     ok ? "called" : (pawn ? "NOT FOUND on the character" : "skipped (no character)"));
+            if (ok && pawn && rate >= 0.5)
+            {
+                g_jump_until = now + 1.5;
+                watch_until = now + 1.5;
+                watch_start_z = actor_location(pawn).z;
+                watch_peak = 0.0;
+                watch_rate = rate;
+            }
+        }
+        if (watch_until > 0.0 && pawn)
+        {
+            watch_peak = (std::max)(watch_peak, actor_location(pawn).z - watch_start_z);
+            if (now >= watch_until)
+            {
+                watch_until = -1.0;
+                HSVR_LOG("Jump: capsule rose at most %.1f cm in the 1.5 s after the release (Jump Rate %.2f, Last Jump Power %.2f)", watch_peak, watch_rate,
+                         read_number_variable(pawn, STR("Last Jump Power")));
+            }
+        }
+
+        bool stick = (cfg.slowmo_on_right_stick_click && live && state.hand[1].stick_click) || g_fake_rstick.load();
+        if (stick && !stick_down)
+        {
+            bool was = bool_property(pawn, STR("Slomo Active"));
+            bool ok = call(STR("InpActEvt_SloMo_K2Node_InputActionEvent_8"));
+            bool is = bool_property(pawn, STR("Slomo Active"));
+            HSVR_LOG("SloMo: right stick click: game's SloMo %s, Slomo Active %d -> %d (stamina %.2f, consciousness %.0f, Body Skill %.2f)",
+                     ok ? "called" : (pawn ? "NOT FOUND on the character" : "skipped (no character)"), (int)was, (int)is,
+                     read_number_variable(pawn, STR("Stamina")), read_number_variable(pawn, STR("Consciousness")), read_number_variable(pawn, STR("Body Skill (Temp)")));
+        }
+        stick_down = stick;
+        // How slow it is, every second while on (the game's own value, GI Settings' Time Dilation).
+        static double slomo_logged = 0.0;
+        if (pawn && now - slomo_logged >= 1.0 && bool_property(pawn, STR("Slomo Active")))
+        {
+            slomo_logged = now;
+            UObject* gi = object_property(pawn, STR("GI Settings"));
+            HSVR_LOG("SloMo: on, time dilation %.2f, stamina %.2f", gi ? read_number_variable(gi, STR("Time Dilation")) : -1.0,
+                     read_number_variable(pawn, STR("Stamina")));
+        }
     }
 
     // Drops every object the game has freed (the batch in g_freed_now) from the mod's global holders.
@@ -20629,9 +21164,11 @@ namespace
         if (front_process != GetCurrentProcessId())
         {
             menu_buttons(cfg, nullptr); // lets a held Escape go
+            jump_slowmo_buttons(cfg);
             return;
         }
         menu_buttons(cfg, GetForegroundWindow());
+        jump_slowmo_buttons(cfg);
         if (recenter)
         {
             shared.recenter_requested.store(true);

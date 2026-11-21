@@ -280,15 +280,19 @@ namespace hsvr
         bool pose_body_strength = true;
         double pose_body_stamina_floor = 0.5;
         double pose_body_strength_min = 0.1;
-        // Holding and swinging cost stamina by the game's own formula, run on the hold's force and
-        // torque (capped) and the controller's speed at the grip, smoothed (lo..hi cm/s -> x10..x85),
-        // times this scale (3-5 if continuous swinging should empty the bar in 10-20 s).
+        // Holding and swinging cost stamina through the game's own rules: the hold's force and torque
+        // (capped) go into the game's per-hand burn (as its hand joint would), x Muscle Rate's factor x
+        // this scale, kept from pose_stamina_gate up (the game's 10); the game then applies its swing
+        // speed, fat, temperature and armour factors and regenerates as usual.
         double pose_stamina_scale = 1.0;
-        double pose_stamina_swing_lo_cm_s = 200.0;
-        double pose_stamina_swing_hi_cm_s = 700.0;
-        double pose_stamina_speed_smooth_s = 0.7;
-        double pose_stamina_force_cap_n = 150.0;
-        double pose_stamina_torque_cap_nm = 15.0;
+        // The game keeps a hand burn only from 10 up. Its hand joint is spiky (flat runs 2026-11-21: 30%
+        // of fast-swing ticks over 10), the mod's spring hold smooth (never over 10 at the same
+        // swings), so with the gate VR never paid; with none its mean matches the flat game's.
+        double pose_stamina_gate = 0.0;
+        // A fist's burn x this, on top of the game's own fist factor (Hands Rigidity x Fisting Rate).
+        double pose_stamina_fist_scale = 1.0;
+        double pose_stamina_force_cap_n = 1000.0;
+        double pose_stamina_torque_cap_nm = 100.0;
         // Exact hold (B&S-style): each frame the weapon gets the velocity that puts it exactly where
         // the hand is drawn at the end of this frame's physics, limited only by the hand's strength
         // (pose_hold_max_force / max_torque). 0 = the spring below.
@@ -758,6 +762,25 @@ namespace hsvr
         bool log_fingers = true;
         // Body grabs (a Willie's throat, arm...): what the game's grab joint feels, logged every 0.1 s.
         bool log_body_grab = true;
+        // While you hold a Willie: his joints as the game's Dislocate Bone reads them (each bone's forward
+        // against its parent's, the bend; and its twist), with Strain / Dislocation State / part health.
+        bool log_joint_strain = true;
+        // Joint breaking by grappling. The game's own joint strain (Dislocate Bone) was emptied out in
+        // the 11-17 update, so the mod runs the old game's rules for a Willie you hold: his neck_01,
+        // upperarms, spine_03 (and calves with joint_break_legs) bent against their parent bone, or
+        // twisted past joint_break_twist_free_*_deg from how they sat when you took hold, build his
+        // Strain and a Dislocation State the mod keeps per part (easing off at 0.05/s); at 1 the neck snaps (the game's Snap Neck: he dies), a shoulder
+        // or knee dislocates (the game relocates it by its own rules), or the back breaks (Break Back).
+        // A twist's excess counts as a bend of excess x joint_break_twist_gain degrees.
+        bool joint_break = true;
+        double joint_break_twist_free_neck_deg = 60.0;
+        double joint_break_twist_free_arm_deg = 60.0;
+        double joint_break_twist_free_back_deg = 30.0;
+        double joint_break_twist_gain = 2.0;
+        // Knees too (the old rule read the calf's bend against the thigh).
+        bool joint_break_legs = false;
+        // Every part's strain rate x this (1 = the old game).
+        double joint_break_scale = 1.0;
         // Every other Willie's body hits (impulse, health, consciousness, what hit him), when they change.
         bool log_body_hits = true;
         // 1 = the game's grab joint is made soft (a capped spring, B&S-like) 0.25 s after it latches, so
@@ -845,6 +868,13 @@ namespace hsvr
         // A short tap (under kick_tap_s) of right A kicks: the game's Kick Event.
         bool kick_on_a = true;
         double kick_tap_s = 0.35;
+        // Left X is the game's Jump key (Space): hold to gather, let go to leap (the game jumps only
+        // once its Jump Rate has reached 0.5; a quick tap is the game's own tap-kick). 0 = off.
+        bool jump_on_x = true;
+        // Right stick click is the game's SloMo key (F): toggles its slow motion (Slomo Timeline:
+        // time slows to 0.75..0.25 by his Body Skill, stamina drains faster, it ends by itself at
+        // stamina 0.5 or consciousness 50). 0 = off.
+        bool slowmo_on_right_stick_click = true;
         // Crouching keeps his legs on the leg IK: the animation's kneel and falling leg poses are kept
         // off (they sank the whole body 50-100 cm at a deep crouch). And the capsule is never put more
         // than 15 cm below its standing height over the floor (the game drops it ~77 cm when its foot
