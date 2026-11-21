@@ -1049,6 +1049,10 @@ namespace hsvr
         bool player_body_contact_speed = true;
         double player_body_contact_mass_scale = 1.0;
         bool player_body_contact_log = true;
+        // 1 = an item touching you (someone else's weapon, tool, a thrown thing) hurts by how fast it
+        // comes into your body part, not by how hard your posed body squeezes it out (a passive
+        // Willie's tongs pinned between you took your consciousness 95 -> 55 in 2 s). Real blows unchanged.
+        bool player_item_contact_speed = true;
         // 1 = blood from your own cut-off limb stays at the stump. The game sticks the fountain to a
         // bone of the cut-off limb, which it only hides; the posed body keeps moving that hidden
         // bone (hand to controller, head to headset), so the blood floated in mid-air.

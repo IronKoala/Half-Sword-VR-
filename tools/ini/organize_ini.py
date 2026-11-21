@@ -165,6 +165,7 @@ LAYOUT = [
         ("player_body_contact_speed", "1 = bumping into people counts by how fast your body moves into them, not how deep it sinks in (walking into someone no longer hurts him)."),
         ("player_body_contact_mass_scale", "Your body part's mass in those bumps is x this (1 = its own mass; higher = harder bumps and kicks)."),
         ("player_body_contact_log", "1 = log each changed bump (\"Body contact:\" lines)."),
+        ("player_item_contact_speed", "1 = an item pinned or squeezed against you hurts only by how fast it comes into you (real blows unchanged)."),
         ("player_stump_blood", "1 = blood from your own cut-off limb stays at the stump (not floating where the limb was)."),
         ("injury_limbs", "1 = your bad injuries cripple you: a limb below injury_limb_health, broken, dislocated or cut off."),
         ("injury_limb_health", "Limb health below this counts as badly hurt (25 = the game's own bone-break threshold; a bone put back gets 25)."),
