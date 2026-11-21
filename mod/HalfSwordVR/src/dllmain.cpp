@@ -4720,9 +4720,11 @@ namespace
         hsvr::Vec3 err;    // held point minus its target
         hsvr::Vec3 vt;     // the target's velocity
         double k = 0.0, c = 0.0, fmax = 0.0;
-        bool slide = false; // free along `axis` (the hand sliding on the handle)
+        bool slide = false; // no spring along `axis` (the hand sliding on the handle)
         hsvr::Vec3 axis;
+        double slide_c = 0.0; // B&S's slide damper along `axis` (N s/m, against the hand's motion along it); 0 = free
         hsvr::Vec3 acc;    // accumulated impulse
+        double acc_ax = 0.0; // accumulated impulse along `axis` while sliding
     };
     inline Mat3 skew(const hsvr::Vec3& r)
     {
@@ -4746,7 +4748,20 @@ namespace
             double gamma = 1.0 / (dt * (p.c + dt * p.k) + 1e-12);
             Ksoft[i] = (K + I3 * gamma).inverse();
             p.acc = Vec3{};
+            p.acc_ax = 0.0;
+            if (p.slide) p.axis = normalized(p.axis);
         }
+        // The slide's damper (B&S Handle.UpdateSliding: the Y drive gets spring 0 and damper 300 -> 20): a
+        // soft constraint along the handle with no bias, so only gravity, the swing and contacts move the
+        // weapon through the hand, slowed by the damper against the hand's own motion along it.
+        double kax[4] = {0, 0, 0, 0};
+        for (int i = 0; i < n; ++i)
+            if (pts[i].slide && pts[i].slide_c > 0.0)
+            {
+                Mat3 S = skew(pts[i].r);
+                Mat3 K = I3 * (1.0 / mass) + (S * invI * S) * -1.0;
+                kax[i] = dot(pts[i].axis, K * pts[i].axis);
+            }
         double ga = ka > 0.0 ? 1.0 / (dt * (ca + dt * ka) + 1e-12) : 0.0;
         Mat3 Kang = ka > 0.0 ? (invI + I3 * ga).inverse() : Mat3{};
         ang_acc = Vec3{};
@@ -4765,6 +4780,17 @@ namespace
                 lam = p.acc - old;
                 v = v + lam * (1.0 / mass);
                 w = w + invI * cross(p.r, lam);
+                if (p.slide && p.slide_c > 0.0)
+                {
+                    double gax = 1.0 / (dt * p.slide_c);
+                    double cax = dot(v + cross(w, p.r) - p.vt, p.axis);
+                    double l = -(cax + p.acc_ax * gax) / (kax[i] + gax);
+                    double o = p.acc_ax;
+                    p.acc_ax = (std::min)(p.fmax * dt, (std::max)(-p.fmax * dt, p.acc_ax + l));
+                    Vec3 J = p.axis * (p.acc_ax - o);
+                    v = v + J * (1.0 / mass);
+                    w = w + invI * cross(p.r, J);
+                }
             }
             if (ka > 0.0)
             {
@@ -10444,8 +10470,10 @@ namespace
                     h.handle_axis = bq.rotate(normalized(ab));
                     double squeeze = (std::min)(1.0, (std::max)(0.0, (trig - 0.15) / 0.85));
                     h.handle_keep = cfg.pose_slide_keep_light + (cfg.pose_slide_keep_full - cfg.pose_slide_keep_light) * squeeze;
-                    // B&S (Handle.cs:1053-1087): the axis drive's damper goes 300 -> 20 N s/m as the trigger goes in.
-                    h.handle_damp = cfg.pose_slide_damper_light + (cfg.pose_slide_damper_full - cfg.pose_slide_damper_light) * squeeze;
+                    // B&S (Handle.cs UpdateSliding): the axis drive's damper goes 300 -> 20 N s/m as the trigger
+                    // goes 0.2 -> 1 (Utils.CalculateRatio, clamped).
+                    double bs_sq = (std::min)(1.0, (std::max)(0.0, (trig - 0.2) / 0.8));
+                    h.handle_damp = cfg.pose_slide_damper_light + (cfg.pose_slide_damper_full - cfg.pose_slide_damper_light) * bs_sq;
                 }
             }
         }
@@ -11064,6 +11092,7 @@ namespace
                     p.fmax = pf * st * body.total * 100.0 * draw_scale;
                     p.slide = h.handle_slide;
                     p.axis = h.handle_axis;
+                    p.slide_c = (h.handle_slide && cfg.pose_slide_bs_damper) ? (std::max)(0.0, h.handle_damp) : 0.0;
                 }
                 if (two)
                 {
@@ -11090,9 +11119,26 @@ namespace
                 {
                     // The arm carries the weapon's weight at the grip (the soft arm spring would let the hand
                     // sag g / omega^2, 7 cm for a polearm); its lever about the grip is still the turn's to hold.
+                    // A hand sliding on the handle (B&S) can't carry the weight along it: that share falls
+                    // through the hand (the slide's damper slows it); the other hand, if any, carries it.
+                    int firm = 0;
+                    for (int i = 0; i < n; ++i) firm += !(pts[i].slide && cfg.pose_slide_bs_damper);
                     for (int i = 0; i < n; ++i)
                     {
                         Vec3 J = g * (-mass * DT / n);
+                        if (pts[i].slide && cfg.pose_slide_bs_damper)
+                        {
+                            Vec3 ax = normalized(pts[i].axis);
+                            Vec3 along = ax * dot(J, ax);
+                            J = J - along;
+                            for (int j = 0; j < n; ++j)
+                                if (j != i && !(pts[j].slide && cfg.pose_slide_bs_damper))
+                                {
+                                    Vec3 Jo = along * (1.0 / firm);
+                                    vb = vb + Jo * (1.0 / mass);
+                                    wb = wb + invI * cross(pts[j].r, Jo);
+                                }
+                        }
                         vb = vb + J * (1.0 / mass);
                         wb = wb + invI * cross(pts[i].r, J);
                     }
@@ -11132,6 +11178,16 @@ namespace
                          (std::max)(1, cfg.pose_bs_iterations), ang);
                 exact_v = clamp_length(vb - g * DT, 2000.0);
                 w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
+                if (pts[0].slide && pts[0].slide_c > 0.0)
+                {
+                    // How it slides: the handle's tilt from level, and the grip's speed along it against the hand's.
+                    Vec3 ax = normalized(pts[0].axis);
+                    double tilt = std::asin((std::min)(1.0, std::fabs(ax.z))) * 57.2958;
+                    double slip = dot(exact_v + g * DT + cross(w_next, pts[0].r) - pts[0].vt, ax);
+                    HSVR_LOG_EVERY(0.25, "Slide: %s hand on %ls: handle %.0f deg from level, slips %.0f cm/s along it (damper %.0f N s/m, %.0f N)%s",
+                                   side == 0 ? "left" : "right", weapon->GetName().c_str(), tilt, slip, pts[0].slide_c,
+                                   std::fabs(pts[0].acc_ax) / DT / 100.0, two ? ", other hand holds" : "");
+                }
                 h.force_n = length(pts[0].acc) / DT / 100.0;
                 h.force_capped = length(pts[0].acc) >= pts[0].fmax * DT * 0.999;
                 h.torque_nm = length(ang) / DT / 1e4;

@@ -528,6 +528,10 @@ namespace hsvr
         // exp(-c dt / mass) of its motion along it each frame (replaces keep_light/full; 0 = use those).
         double pose_slide_damper_light = 300.0;
         double pose_slide_damper_full = 20.0;
+        // B&S's slide along the handle (Handle.cs UpdateSliding): spring 0, damper 300 -> 20 N s/m over trigger
+        // 0.2 -> 1, so gravity pulls an upright weapon through the hand and a level one is dragged along with it.
+        // 0 = the old free axis (no damper, and the arm also carried its weight along the handle, so it never fell).
+        bool pose_slide_bs_damper = true;
         // A grab leaves the item where it was and the hold pulls it into the hand over this long (B&S);
         // also a hand-over. 0 = put it in the hand at once.
         double pose_grab_settle_s = 0.08;
