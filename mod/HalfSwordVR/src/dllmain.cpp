@@ -7423,6 +7423,7 @@ namespace
     UFunction* g_get_damage_fn = nullptr;
     std::atomic<uint64_t> g_player_damage_overrides{0};
     int g_in_player_get_damage = 0; // game thread only: depth of his Get Damage calls
+    UObject* g_pd_pawn = nullptr;   // whose Get Damage set it (compared only, never read through)
     // Counters for the "Player damage: checks" line (which test fails when no hit is counted).
     std::atomic<uint64_t> g_pd_sim_calls{0}, g_pd_sim_in_gd{0}, g_pd_sim_on_mesh{0}, g_pd_gd_calls{0}, g_pd_gd_player{0};
     std::wstring g_pd_first_in_gd;
@@ -7453,8 +7454,20 @@ namespace
         g_pd_gd_calls.fetch_add(1);
         g_player_hit_pawn = nullptr;
         UObject* pawn = context.Context;
-        if (!pawn || !g_pose_active.load() || pawn != g_pose.pawn) return;
+        if (!pawn) return;
+        if (g_pose_active.load())
+        {
+            if (pawn != g_pose.pawn) return;
+        }
+        else
+        {
+            // Unposed (pose_body=0, flat comparison runs): the player controller's pawn, logged only.
+            UObject* player = nullptr;
+            find_pawn_mesh(&player);
+            if (pawn != player) return;
+        }
         g_pd_gd_player.fetch_add(1);
+        g_pd_pawn = pawn;
         ++g_in_player_get_damage;
         g_player_hit_pawn = pawn;
         // What hit him, for the "Player hit:" line.
@@ -7494,7 +7507,7 @@ namespace
     }
     void player_get_damage_post(Unreal::UnrealScriptFunctionCallableContext& context, void*)
     {
-        if (g_in_player_get_damage > 0 && context.Context && context.Context == g_pose.pawn) --g_in_player_get_damage;
+        if (g_in_player_get_damage > 0 && context.Context && context.Context == g_pd_pawn) --g_in_player_get_damage;
         UObject* pawn = g_player_hit_pawn;
         g_player_hit_pawn = nullptr;
         if (!pawn || context.Context != pawn) return;
@@ -7504,13 +7517,13 @@ namespace
                  (int)hsvr::config().player_takes_damage, g_player_hit_what.c_str());
     }
 
-    void install_player_damage()
+    void install_player_damage(bool after_his_tick)
     {
         static bool installed = false;
         static double last_try = -10.0;
         double now = hsvr::now_seconds();
-        // Runs after his tick, outside any Get Damage: the flag can never stay on.
-        if (g_in_player_get_damage != 0)
+        // After his tick nothing of his Get Damage is running: the flag can never stay on.
+        if (after_his_tick && g_in_player_get_damage != 0)
         {
             HSVR_LOG_EVERY(10.0, "Player damage: Get Damage flag was left at %d after his tick; cleared", g_in_player_get_damage);
             g_in_player_get_damage = 0;
@@ -7794,6 +7807,18 @@ namespace
             first = 13;
             count = 13;
         }
+        else if (arg == "foot_r")
+        {
+            t.part = 11; // Spawn Bone foot_r, Hide Bone Local None (the cut Matthew had at 392 s)
+            prefix = STR("DM Sphere Foot_R "); // 1-10
+            count = 10;
+        }
+        else if (arg == "neck")
+        {
+            t.part = 0; // Spawn Bone neck_01, Hide Bone Local None (beheading)
+            prefix = STR("DM Sphere Neck_01 "); // 1-6
+            count = 6;
+        }
         else if (arg == "calf_r")
         {
             t.part = 10; // Spawn Bone calf_r
@@ -7802,7 +7827,7 @@ namespace
         }
         else
         {
-            HSVR_LOG("Script: hsvr.player_dismember: use lowerarm_l or calf_r (got '%s')", arg.c_str());
+            HSVR_LOG("Script: hsvr.player_dismember: use lowerarm_l, calf_r, foot_r or neck (got '%s')", arg.c_str());
             return;
         }
         auto marker = [&](int i) { return object_property(pawn, (std::wstring(prefix) + std::to_wstring(i)).c_str()); };
@@ -8235,6 +8260,218 @@ namespace
         if (!c.run()) return false;
         std::memcpy(&out, c.buffer.data() + r->GetOffset_Internal(), sizeof(out));
         return true;
+    }
+
+    // ---- Test log: what his own blood does after a cut (stump blood investigation) ----------------
+    // For 5 s after his "Dismembered Limb" changes, every 0.5 s: every Blood_BP_P4 / RunningBlood_BP
+    // attached to his mesh or to the cut-off copy (position, parent and bone), the stump (parent joint
+    // of the part's Spawn Bone), the copy, his -61 hold constraint, and each nearby bone's hidden flag
+    // and world scale (how the cut-off part disappears from his mesh).
+    // ---- His cut-off limb falls (player_stump_blood) -----------------------------------------------
+    // Dismember Function Delayed makes a copy of the cut-off part (Dismembered Limb, template -39) and
+    // holds it to his mesh's Spawn Bone with a locked constraint (template -61, break 100000); the game
+    // also re-attaches his Attached Blood Emitters to that copy. His cut bones are physics-disabled on
+    // his non-simulating posed mesh, so the hold never moves or breaks: the copy and all its blood hung
+    // in the air where the cut happened (test cut-dbg5: arm and neck copies did not move in 5 s while
+    // he walked on; only the foot's broke under its weight). 0.2 s after a new copy appears, his holds
+    // to it are broken, so it falls with its blood like a flat-game limb that tears off.
+    void player_cut_release_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        static UObject* last_limb = nullptr;
+        static double release_at = -1.0;
+        UObject* mesh = g_pose.mesh;
+        if (!pawn || !mesh || !config().player_stump_blood) return;
+        UObject* limb = object_property(pawn, STR("Dismembered Limb"));
+        double now = now_seconds();
+        if (limb && limb != last_limb)
+        {
+            last_limb = limb;
+            release_at = now + 0.2;
+        }
+        // Blood on any of his cut-off copies goes to his stump: his mesh at the same bone (the cut
+        // part's Spawn Bone, whose origin is the stump joint: elbow, ankle, neck base) and follows
+        // his body there. The copy never simulates for him (test cut-dbg7: simulating 0 even after
+        // SetAllBodiesSimulatePhysics), so it stays where it was made, and the game keeps moving his
+        // Attached Blood Emitters onto the newest copy: checked every 0.25 s.
+        static double next_scan = 0.0;
+        if (now >= next_scan)
+        {
+            next_scan = now + 0.25;
+            for (const TCHAR* cls : {STR("Blood_BP_P4_C"), STR("RunningBlood_BP_C")})
+            {
+                std::vector<UObject*> all;
+                UObjectGlobals::FindAllOf(cls, all);
+                for (UObject* a : all)
+                {
+                    if (!a || gone(a) || a->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                    Call root(a, STR("K2_GetRootComponent"));
+                    root.run();
+                    UObject* comp = root.object_result();
+                    if (!comp) continue;
+                    Call ap(comp, STR("GetAttachParent"));
+                    ap.run();
+                    UObject* parent = ap.object_result();
+                    if (!parent || parent == mesh || parent->GetOuterPrivate() != pawn ||
+                        parent->GetName().find(STR("AddSkeletalMeshComponent-39")) == std::wstring::npos)
+                        continue;
+                    Call sn(comp, STR("GetAttachSocketName"));
+                    sn.run();
+                    FProperty* rp = sn.param(STR("ReturnValue"));
+                    if (!rp) continue;
+                    FName bone = *reinterpret_cast<FName*>(sn.buffer.data() + rp->GetOffset_Internal());
+                    if (bone.ToString() == STR("None")) continue;
+                    Call wl(comp, STR("K2_GetComponentLocation"));
+                    wl.run();
+                    Vec3 was = wl.vec();
+                    Vec3 stump = socket_location(mesh, bone);
+                    Call at_call(comp, STR("K2_AttachToComponent"));
+                    at_call.object(STR("Parent"), mesh);
+                    at_call.name(STR("SocketName"), bone);
+                    at_call.byte(STR("LocationRule"), 2); // SnapToTarget: onto the joint
+                    at_call.byte(STR("RotationRule"), 1); // KeepWorld
+                    at_call.byte(STR("ScaleRule"), 1);
+                    at_call.flag(STR("bWeldSimulatedBodies"), false);
+                    at_call.run();
+                    HSVR_LOG("Stump blood: %ls was on his cut-off %ls:%ls %.0f cm from his stump; now on his %ls (stump)", a->GetName().c_str(), parent->GetName().c_str(),
+                             bone.ToString().c_str(), length(was - stump), bone.ToString().c_str());
+                }
+            }
+        }
+        if (release_at < 0.0 || now < release_at) return;
+        release_at = -1.0;
+        if (!limb || gone(limb)) return;
+        std::vector<UObject*> cons;
+        UObjectGlobals::FindAllOf(STR("PhysicsConstraintComponent"), cons);
+        for (UObject* c : cons)
+        {
+            if (!c || gone(c) || c->GetOuterPrivate() != pawn || c->GetName().find(STR("PhysicsConstraintComponent-61")) == std::wstring::npos) continue;
+            Call cc(c, STR("GetConstrainedComponents"));
+            if (!cc.run()) continue;
+            UObject* c1 = cc.object_result(STR("OutComponent1"));
+            UObject* c2 = cc.object_result(STR("OutComponent2"));
+            if (!((c1 == limb && c2 == mesh) || (c1 == mesh && c2 == limb))) continue;
+            Call br(c, STR("IsBroken"));
+            br.run();
+            FProperty* r = br.param(STR("ReturnValue"));
+            if (r && read_param_bool(br.buffer.data(), r)) continue;
+            Call b(c, STR("BreakConstraint"));
+            b.run();
+            HSVR_LOG("Stump blood: let go of his cut-off %ls (hold %ls broken) so it falls with its blood", limb->GetName().c_str(), c->GetName().c_str());
+        }
+    }
+
+    void dismember_watch_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        static UObject* last_limb = nullptr;
+        static double until = 0.0, next = 0.0;
+        UObject* mesh = g_pose.mesh;
+        if (!pawn || !mesh) return;
+        UObject* limb = object_property(pawn, STR("Dismembered Limb"));
+        double now = now_seconds();
+        if (limb && limb != last_limb)
+        {
+            last_limb = limb;
+            until = now + 5.0;
+            next = now;
+        }
+        if (now > until || now < next) return;
+        next = now + 0.5;
+        FName spawn = FName(STR("None"), FNAME_Add);
+        if (FProperty* p = prop_chain(pawn, STR("Spawn Bone")); p && p->GetClass().GetName() == STR("NameProperty"))
+            spawn = *reinterpret_cast<FName*>(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal());
+        FName joint = parent_bone(mesh, spawn);
+        Vec3 stump = socket_location(mesh, joint), spawn_on_mesh = socket_location(mesh, spawn);
+        Vec3 limb_at{0, 0, 0}, limb_vel{0, 0, 0}, limb_comp{0, 0, 0};
+        int limb_sim = -1;
+        if (limb && !gone(limb))
+        {
+            limb_at = socket_location(limb, spawn);
+            Call v(limb, STR("GetPhysicsLinearVelocity"));
+            v.name(STR("BoneName"), spawn);
+            v.run();
+            limb_vel = v.vec();
+            Call s(limb, STR("IsSimulatingPhysics"));
+            s.name(STR("BoneName"), spawn);
+            s.run();
+            FProperty* r = s.param(STR("ReturnValue"));
+            limb_sim = r ? (int)read_param_bool(s.buffer.data(), r) : -1;
+            Call wl(limb, STR("K2_GetComponentLocation"));
+            wl.run();
+            limb_comp = wl.vec();
+        }
+        HSVR_LOG("Cut watch: copy simulating %d at its %ls, velocity %.0f cm/s, component at %.0f %.0f %.0f", limb_sim, spawn.ToString().c_str(), length(limb_vel), limb_comp.x,
+                 limb_comp.y, limb_comp.z);
+        HSVR_LOG("Cut watch: Spawn Bone %ls, stump joint %ls at %.0f %.0f %.0f; his %ls at %.0f %.0f %.0f (%.0f cm from the stump); cut-off copy %ls, its %ls at %.0f %.0f %.0f "
+                 "(%.0f cm from the stump)",
+                 spawn.ToString().c_str(), joint.ToString().c_str(), stump.x, stump.y, stump.z, spawn.ToString().c_str(), spawn_on_mesh.x, spawn_on_mesh.y, spawn_on_mesh.z,
+                 length(spawn_on_mesh - stump), limb ? limb->GetName().c_str() : STR("none"), spawn.ToString().c_str(), limb_at.x, limb_at.y, limb_at.z, length(limb_at - stump));
+        std::wstring bones;
+        for (const char* b : {"upperarm_l", "lowerarm_l", "hand_l", "thigh_r", "calf_r", "foot_r", "ball_r", "neck_01", "neck_02", "head"})
+        {
+            Call h(mesh, STR("IsBoneHiddenByName"));
+            h.name(STR("BoneName"), bone_fname(b));
+            h.run();
+            FProperty* r = h.param(STR("ReturnValue"));
+            bool hid = r && read_param_bool(h.buffer.data(), r);
+            Call c(mesh, STR("GetSocketTransform"));
+            c.name(STR("InSocketName"), bone_fname(b));
+            c.byte(STR("TransformSpace"), 0); // RTS_World
+            FProperty* rt = c.param(STR("ReturnValue"));
+            double scale = -1.0;
+            if (rt && rt->GetSize() == (int)sizeof(XForm96) && c.run())
+            {
+                XForm96 x;
+                std::memcpy(&x, c.buffer.data() + rt->GetOffset_Internal(), sizeof(x));
+                scale = x.sx;
+            }
+            wchar_t buf[96];
+            swprintf(buf, 96, L"%hs %ls%.2f, ", b, hid ? L"HIDDEN " : L"", scale);
+            bones += buf;
+        }
+        HSVR_LOG("Cut watch: his bones (hidden, world scale): %ls", bones.c_str());
+        std::vector<UObject*> cons;
+        UObjectGlobals::FindAllOf(STR("PhysicsConstraintComponent"), cons);
+        for (UObject* c : cons)
+        {
+            if (!c || c->GetOuterPrivate() != pawn || c->GetName().find(STR("PhysicsConstraintComponent-61")) == std::wstring::npos) continue;
+            Call br(c, STR("IsBroken"));
+            br.run();
+            FProperty* r = br.param(STR("ReturnValue"));
+            Call cc(c, STR("GetConstrainedComponents"));
+            cc.run();
+            UObject* c1 = cc.object_result(STR("OutComponent1"));
+            UObject* c2 = cc.object_result(STR("OutComponent2"));
+            HSVR_LOG("Cut watch: hold constraint %ls broken %d, links %ls and %ls", c->GetName().c_str(), r ? (int)read_param_bool(br.buffer.data(), r) : -1,
+                     c1 ? c1->GetName().c_str() : STR("none"), c2 ? c2->GetName().c_str() : STR("none"));
+        }
+        for (const TCHAR* cls : {STR("Blood_BP_P4_C"), STR("RunningBlood_BP_C")})
+        {
+            std::vector<UObject*> all;
+            UObjectGlobals::FindAllOf(cls, all);
+            for (UObject* a : all)
+            {
+                if (!a || gone(a) || a->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                Call root(a, STR("K2_GetRootComponent"));
+                root.run();
+                UObject* comp = root.object_result();
+                if (!comp) continue;
+                Call ap(comp, STR("GetAttachParent"));
+                ap.run();
+                UObject* parent = ap.object_result();
+                if (parent != mesh && (!limb || parent != limb)) continue;
+                Call sn(comp, STR("GetAttachSocketName"));
+                sn.run();
+                FProperty* rp = sn.param(STR("ReturnValue"));
+                FName bone = rp ? *reinterpret_cast<FName*>(sn.buffer.data() + rp->GetOffset_Internal()) : FName(STR("None"), FNAME_Add);
+                Call wl(comp, STR("K2_GetComponentLocation"));
+                wl.run();
+                Vec3 at = wl.vec();
+                HSVR_LOG("Cut watch: %ls on %ls:%ls at %.0f %.0f %.0f, %.0f cm from the stump", a->GetName().c_str(), parent == mesh ? STR("his mesh") : STR("cut-off copy"),
+                         bone.ToString().c_str(), at.x, at.y, at.z, length(at - stump));
+            }
+        }
     }
 
     bool readable(const void* p, size_t n)
@@ -14141,6 +14378,10 @@ namespace
     {
         gc_sync();
         HSVR_PROF(PerfCapsuleAfter);
+        // Unposed (pose_body=0 comparison runs): still install the hit log; no flag reset here, as this
+        // runs after every ProcessEvent (the override is posed-only, so the flag is never set unposed
+        // except by his own Get Damage pre/post, which pairs it).
+        if (!g_pose_active.load()) install_player_damage(false);
         if (!is_receive_tick(context, function)) return;
         for (auto& pin : g_pawn_pins) set_variable(context, pin.first.c_str(), pin.second, nullptr, nullptr);
         if (g_pose_active.load())
@@ -14153,12 +14394,14 @@ namespace
             { HSVR_SUB("after:body_grab_after_tick"); body_grab_after_tick(context); }
             { HSVR_SUB("after:body_hit_watch"); body_hit_watch(context); }
             { HSVR_SUB("after:elbow_tick"); elbow_tick(context); }
-            { HSVR_SUB("after:install_player_damage"); install_player_damage(); }
             { HSVR_SUB("after:stump_blood_tick"); stump_blood_tick(context); }
             { HSVR_SUB("after:player_dismember_tick"); player_dismember_tick(context); }
+            { HSVR_SUB("after:player_cut_release_tick"); player_cut_release_tick(context); }
+            { HSVR_SUB("after:dismember_watch_tick"); dismember_watch_tick(context); }
             { HSVR_SUB("after:thrown_tick"); thrown_tick(context); }
             { HSVR_SUB("after:frames_tick"); frames_tick(context); }
         }
+        { HSVR_SUB("after:install_player_damage"); install_player_damage(true); }
         { HSVR_SUB("after:stab_no_rubber_band"); stab_no_rubber_band(context); }
         { HSVR_SUB("after:cut_through_tick"); cut_through_tick(context); }
         { HSVR_SUB("after:stab_log_tick"); stab_log_tick(context); }
