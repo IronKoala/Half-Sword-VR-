@@ -10037,7 +10037,9 @@ namespace
                     if (e < be) be = e, best = &s;
                 }
                 double e = std::sqrt(be), plane = hsvr::dot(p - best->p, best->n);
-                if (plane < 0.0) return e < 3.0 ? 0.0 : e / cs;
+                // Behind the nearest sample's face = inside the beam (a finger deeper than 3 cm in a
+                // fence rail counted as outside and kept curling through it, 13:58 playtest).
+                if (plane < 0.0) return 0.0;
                 return (std::max)(plane, e - 1.5) / cs;
             }
             write_three(query->buffer.data() + q_point->GetOffset_Internal(), q_point, p.x, p.y, p.z);
@@ -10641,6 +10643,22 @@ namespace
         Vec3 spot;
         double d = closest_point_any(g.comp, g.bone, palm, 30.0, &spot);
         if (d < 0.0) return false;
+        {
+            // Triangles only: the face the palm looks at, found from behind the hand (a palm already
+            // pushed into the rail found the nearest face from inside, and the hand sat half in
+            // the fence, 13:58 playtest).
+            Call probe(g.comp, STR("GetClosestPointOnCollision"));
+            probe.three(STR("Point"), palm.x, palm.y, palm.z);
+            probe.name(STR("BoneName"), g.bone);
+            probe.run();
+            Vec3 pd = normalized(hq.rotate(Vec3{0, 0, -1})), h, n;
+            if (probe.number() < 0.0 && trace_component(g.comp, palm - pd * 12.0, palm + pd * 20.0, h, n) && dot(n, pd) < 0.0)
+            {
+                if (cfg.log_wrap) HSVR_LOG("Wrap: %s palm faces the surface %.1f cm along it (nearest point was %.1f cm)", L ? "left" : "right", dot(h - palm, pd), d);
+                spot = h;
+                d = length(h - palm);
+            }
+        }
         // Triangles only: the fingers measure against the surface round the spot, sampled once here
         // (rays from 12 cm out through three points across the hand's width).
         g.cloud.clear();
