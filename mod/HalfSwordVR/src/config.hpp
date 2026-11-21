@@ -329,11 +329,12 @@ namespace hsvr
         // Reverse grip flip (S&S): a tap (shorter than grip_flip_tap_s) of the holding hand's B / Y
         // turns a one-handed weapon end for end at the same spot on its handle, gliding over grip_flip_s.
         bool grip_flip = true;
+        bool grip_flip_short_only = true; // only daggers, short swords and one-handed swords flip (Matthew 2026-11-21)
         // A blade stuck in someone is torn out when your hand is more than stab_yank_cm from its grip
         // for stab_yank_s (0 = never).
         double stab_yank_cm = 35.0;
         double stab_yank_s = 0.25;
-        double grip_flip_s = 0.3;
+        double grip_flip_s = 0.4; // Matthew 2026-11-21: 0.3 flipped too fast, 25% slower
         double grip_flip_tap_s = 0.4;
         double stab_wound_settle_s = 0.2; // no pulling out for this long after it goes in
         double stab_wound_settle_max_s = 0.8; // a young stick is held open until the game's own keep trace passes, at most this long
@@ -499,6 +500,12 @@ namespace hsvr
         // no trigger slide along the grip (Matthew 2026-11-20). Hand-and-a-half and two-handed swords, and
         // every non-sword, keep the slide. The blade (half-swording) is unchanged.
         bool pose_slide_fixed_1h_sword = true;
+        // Two fixed grip zones, under the guard and above the pommel, no slide (Matthew 2026-11-21):
+        // 0 = off (grip slides), 1 = hand-and-a-half (bastard sword, Grip_15) only, 2 = every two-handed
+        // sword (also longswords and greatswords).
+        int pose_grip_two_zones_2h_sword = 1; // Matthew 2026-11-21: bastard swords only
+        // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
+        bool pose_grip_dagger_fixed = true;
         double pose_slide_rate_min = 3.0;
         double pose_slide_rate_max = 40.0;
         double pose_slide_max_cm_s = 250.0; // fastest the hand runs along a weapon
@@ -707,10 +714,59 @@ namespace hsvr
         double pose_elbow_velocity_scale = 0.9375;
         bool pose_fingers_tracked = true;
         double pose_fingers_tau_s = 0.05;
+        // A finger's joints from one curl: the middle joint is fully bent at curl pip_full, the end joint
+        // just behind it, the knuckle starts at curl mcp_lag (a half curl is a hook, not a circle).
+        // 0 = every joint the same fraction (the framework's way).
+        bool pose_finger_schedule = true;
+        double pose_finger_mcp_lag = 0.25;
+        double pose_finger_pip_full = 0.75;
+        // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
+        // loose object with curl until they touch it. Ease in/out time, how often all five are re-solved,
+        // finger radius (0 = 9.5% of the hand's length, the framework's), and the open hand as its base.
+        bool pose_wrap = true;
+        double pose_wrap_ease_s = 0.12;
+        double pose_wrap_refresh_s = 0.5;
+        double pose_wrap_finger_radius_cm = 0.0;
+        bool pose_wrap_open_base = true;
+        // What the game's grab holds is pulled onto the palm (the spot on it nearest the palm), not into
+        // the fist: palm = hand bone + along x (middle knuckle - hand bone) + palm_cm toward the palm.
+        bool pose_grab_seat_palm = true;
+        double pose_grab_palm_cm = 2.0;
+        double pose_grab_palm_along = 0.5;
+        // The mod holds what the game's grab holds (its hand joint lets things hang off the hand). Loose
+        // objects: driven to their place in the hand (framework physics.track): accel cap accel/heft m/s^2,
+        // turn ang_accel/heft rad/s^2, heft = (1 + 2 x heft x kg)^2. Bodies: the held bone is also pulled
+        // to the palm by a spring of pull_hz, capped at pull_n N x his grip strength / 121.
+        bool pose_grab_drive = true;
+        double pose_grab_drive_heft = 0.1;
+        double pose_grab_drive_accel = 600.0;
+        double pose_grab_drive_ang_accel = 1200.0;
+        double pose_grab_body_pull_n = 600.0;
+        double pose_grab_body_pull_hz = 4.0;
+        bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;
         // Body grabs (a Willie's throat, arm...): what the game's grab joint feels, logged every 0.1 s.
         bool log_body_grab = true;
+        // While you hold a Willie: his joints as the game's Dislocate Bone reads them (each bone's forward
+        // against its parent's, the bend; and its twist), with Strain / Dislocation State / part health.
+        bool log_joint_strain = true;
+        // Joint breaking by grappling. The game's own joint strain (Dislocate Bone) was emptied out in
+        // the 11-17 update, so the mod runs the old game's rules for a Willie you hold: his neck_01,
+        // upperarms, spine_03 (and calves with joint_break_legs) bent against their parent bone, or
+        // twisted past joint_break_twist_free_*_deg from how they sat when you took hold, build his
+        // Strain and a Dislocation State the mod keeps per part (easing off at 0.05/s); at 1 the neck snaps (the game's Snap Neck: he dies), a shoulder
+        // or knee dislocates (the game relocates it by its own rules), or the back breaks (Break Back).
+        // A twist's excess counts as a bend of excess x joint_break_twist_gain degrees.
+        bool joint_break = true;
+        double joint_break_twist_free_neck_deg = 60.0;
+        double joint_break_twist_free_arm_deg = 60.0;
+        double joint_break_twist_free_back_deg = 30.0;
+        double joint_break_twist_gain = 2.0;
+        // Knees too (the old rule read the calf's bend against the thigh).
+        bool joint_break_legs = false;
+        // Every part's strain rate x this (1 = the old game).
+        double joint_break_scale = 1.0;
         // Every other Willie's body hits (impulse, health, consciousness, what hit him), when they change.
         bool log_body_hits = true;
         // 1 = the game's grab joint is made soft (a capped spring, B&S-like) 0.25 s after it latches, so
