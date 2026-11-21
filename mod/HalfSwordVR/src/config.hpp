@@ -284,15 +284,15 @@ namespace hsvr
         // (capped) go into the game's per-hand burn (as its hand joint would), x Muscle Rate's factor x
         // this scale, kept from pose_stamina_gate up (the game's 10); the game then applies its swing
         // speed, fat, temperature and armour factors and regenerates as usual.
-        double pose_stamina_scale = 12.0; // Matthew 2026-11-21: 12x the flat game (1 = the game exactly; its regen ~26/s outruns swinging)
+        double pose_stamina_scale = 4.0; // Matthew 2026-11-21: 12 was far too much in play (one swing emptied the bar), back to 4
         // The game keeps a hand burn only from 10 up. Its hand joint is spiky (flat runs 2026-11-21: 30%
         // of fast-swing ticks over 10), the mod's spring hold smooth (never over 10 at the same
         // swings), so with the gate VR never paid; with none its mean matches the flat game's.
         double pose_stamina_gate = 0.0;
         // A fist's burn x this, on top of the game's own fist factor (Hands Rigidity x Fisting Rate).
         double pose_stamina_fist_scale = 1.0;
-        double pose_stamina_force_cap_n = 1000.0;
-        double pose_stamina_torque_cap_nm = 100.0;
+        double pose_stamina_force_cap_n = 250.0;  // playtest 2026-11-21: clean holds p90 60 N, real swings 36-216 N, snags up to 1019 N
+        double pose_stamina_torque_cap_nm = 30.0; // clean holds p90 26.5 N m, swings 8-32, snags up to 290
         // Exact hold (B&S-style): each frame the weapon gets the velocity that puts it exactly where
         // the hand is drawn at the end of this frame's physics, limited only by the hand's strength
         // (pose_hold_max_force / max_torque). 0 = the spring below.
