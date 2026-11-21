@@ -123,6 +123,8 @@ namespace
         int fit_hands = 1;
         double two_hand_grip_cm = 14.0; // handle at least this long -> two-handed sword grip (game: 12 cm grips
                                         // are one-handed, type 2; 15 and 20 cm grips two-handed, type 11)
+        double long_handle_cm = 30.0;   // sword handle at least this long: hands at the pommel end for reach,
+                                        // half-sword grip = pommel + guard (Matthew 2026-11-21, Spit)
         std::wstring offhand = L"pommel"; // pommel: off hand at the handle's end (Matthew 2026-11-19); next: beside the main hand (game spacing)
     };
     Settings g_settings;
@@ -162,6 +164,7 @@ namespace
             else if (k == "own_textures") g_settings.own_textures = atoi(v.c_str());
             else if (k == "fit_hands") g_settings.fit_hands = atoi(v.c_str());
             else if (k == "two_hand_grip_cm") g_settings.two_hand_grip_cm = atof(v.c_str());
+            else if (k == "long_handle_cm") g_settings.long_handle_cm = atof(v.c_str());
             else if (k == "offhand") g_settings.offhand = std::wstring(v.begin(), v.end());
         }
         fclose(f);
@@ -1297,35 +1300,90 @@ namespace
         else
             log("  hafted model: the held weapon's grip type is kept");
 
-        if (off_mark && r_mark)
+        if (!off_mark || !r_mark)
         {
-            double lo = handle_bottom + half_hand;
-            double target = g_settings.offhand == L"pommel" ? lo : oz;
-            target = (std::max)(target, lo);
-            target = (std::min)(target, rz - 5.0); // never on top of the main hand
-            if (target < lo) target = lo; // handle shorter than two hands: as low as it goes
-            V3 w = transform_point(head_xf, V3{ohl.x, ohl.y, (target + shift) / hs.z}, false);
-            Call move(off_mark, STR("K2_SetWorldLocation"));
+            log("  ! weapon has no %s marker", r_mark ? "off hand" : "main hand");
+            return;
+        }
+        // Hand spots (decompile: defaults\custom_weapon_hand_spots.md). All are fixed scene markers under
+        // the weapon's BaseMesh, read fresh on every pick-up, re-grip and off-hand attach:
+        //   Grip R Hand Default Pos  main hand, normal grip
+        //   Grip L Hand Off Hand     off hand, normal grip (Current Offhand Position Scene)
+        //   Grip L Hand Alt Pos      off hand while half-swording (R Alt Grip): the game's +45/+50/+60 cm
+        //   Grip R Hand Alt Pos      main hand while half-swording (0 on every game sword)
+        // Swords never slide a hand (only polearm handles do), so a long handle gets its spots placed
+        // where they give the reach: normal grip at the pommel end, half-sword grip pommel + guard.
+        UObject* l_alt = object_property(weapon, STR("Grip L Hand Alt Pos"));
+        UObject* r_alt = object_property(weapon, STR("Grip R Hand Alt Pos"));
+        auto place = [&](UObject* mark, const char* what, double target) {
+            if (!mark) { log("  ! weapon has no %s marker", what); return; }
+            V3 hl{};
+            double was = model_z(mark, hl);
+            V3 w = transform_point(head_xf, V3{hl.x, hl.y, (target + shift) / hs.z}, false);
+            Call move(mark, STR("K2_SetWorldLocation"));
             move.three(STR("NewLocation"), w.x, w.y, w.z).flag(STR("bTeleport"), true);
             move.run();
             V3 dummy{};
-            log("  off hand marker %.1f -> %.1f cm (%s); now reads %.1f cm", oz, target, narrow(g_settings.offhand).c_str(),
-                model_z(off_mark, dummy));
-            bool attached = false;
-            if (FProperty* p = pawn->GetPropertyByNameInChain(STR("L Hand In Offhand Attached")))
-            {
-                auto* b = static_cast<FBoolProperty*>(p);
-                attached = (*(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal() + b->GetByteOffset()) & b->GetFieldMask()) != 0;
-            }
-            if (attached)
-            {
-                Call brk(pawn, STR("Break L Constraint"));
-                brk.flag(STR("Destroy Constraint"), true);
-                log("  off hand was attached: let go so it re-attaches at the new place (%s)", brk.run() ? "ok" : "FAILED");
-            }
+            log("  %s marker %.1f -> %.1f cm; now reads %.1f cm", what, was, target, model_z(mark, dummy));
+        };
+        double lo = handle_bottom + half_hand;     // lowest hand centre on the handle
+        double hand = 2.0 * half_hand;             // one hand's width
+        double tip = numbers["tip"];
+        double blade_from = numbers["guard_top"];
+        bool long_handle = !hafted && grip_len >= g_settings.long_handle_cm;
+        double r_target = rz, off_target = oz, l_alt_target = 0, r_alt_target = 0;
+        if (long_handle)
+        {
+            // Full reach: both hands down at the pommel end, main hand above the off hand.
+            r_target = lo + hand;
+            off_target = lo;
+            // Half-sword grip on a long handle: main hand stays at the pommel end, off hand just under the guard.
+            r_alt_target = lo;
+            l_alt_target = -half_hand;
+            log("  long handle (%.1f cm >= %.1f): normal grip at the pommel end, half-sword grip pommel + guard",
+                grip_len, g_settings.long_handle_cm);
         }
         else
-            log("  ! weapon has no %s marker", r_mark ? "off hand" : "main hand");
+        {
+            if (g_settings.offhand == L"pommel") off_target = lo;
+            off_target = (std::min)((std::max)(off_target, lo), r_target - 5.0); // never on top of the main hand
+            if (off_target < lo) off_target = lo;
+            // Half-sword: the game puts the off hand at about half a game blade (+50 cm on 85-110 cm blades).
+            // Same share of the model's blade, kept a hand away from the guard and the tip.
+            double blade = tip - blade_from;
+            l_alt_target = (std::min)((std::max)(blade_from + 0.5 * blade, blade_from + hand), tip - hand);
+            r_alt_target = r_target;
+        }
+        if (long_handle) place(r_mark, "main hand", r_target);
+        place(off_mark, "off hand", off_target);
+        if (!hafted && blade_from < tip)
+        {
+            place(l_alt, "half-sword off hand", l_alt_target);
+            place(r_alt, "half-sword main hand", r_alt_target);
+        }
+        // A hand already holding keeps its old spot until it grips again: let go the way the game itself
+        // does when it switches grips (Break R/L Constraint); each hand re-attaches at its new marker.
+        auto attached = [&](const TCHAR* name) {
+            FProperty* p = pawn->GetPropertyByNameInChain(name);
+            if (!p) return false;
+            auto* b = static_cast<FBoolProperty*>(p);
+            return (*(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal() + b->GetByteOffset()) & b->GetFieldMask()) != 0;
+        };
+        if (attached(STR("L Hand In Offhand Attached")))
+        {
+            Call brk(pawn, STR("Break L Constraint"));
+            brk.flag(STR("Destroy Constraint"), true);
+            log("  off hand was attached: let go so it re-attaches at the new place (%s)", brk.run() ? "ok" : "FAILED");
+        }
+        if (long_handle)
+        {
+            // The game's own grip switch (Release type, UG @454737) breaks the right constraint and the hand
+            // re-grips at its marker once within 50 cm (UG @466185); the weapon stays Weapon R.
+            Call brk(pawn, STR("Break R Constraint"));
+            brk.flag(STR("Destroy Constraint"), true);
+            log("  main hand let go so it re-grips at the pommel end (%s); if it does not, drop and pick the weapon up",
+                brk.run() ? "ok" : "FAILED");
+        }
     }
 
     UObject* build_part_mesh(UObject* weapon, UObject* slot, const std::vector<std::vector<V3>>& pieces)
