@@ -20102,6 +20102,35 @@ namespace
                 script_dump();
                 continue;
             }
+            if (entry.command.rfind("hsvr.photo_cam ", 0) == 0)
+            {
+                // Test pictures: "hsvr.photo_cam <side> <cm> <deg> [<up cm>]": both eyes <cm> from that
+                // hand bone, around it by <deg> from his heading (0 = in front of the hand, 90 = to his
+                // right), <up> above it, looking at the hand; "hsvr.photo_cam off".
+                if (entry.command == "hsvr.photo_cam off") { hsvr::shared().photo_on.store(false); continue; }
+                int side = 1;
+                double cm = 30.0, deg = 90.0, up = 0.0;
+                sscanf(entry.command.c_str() + 15, "%d %lf %lf %lf", &side, &cm, &deg, &up);
+                UObject* player = nullptr;
+                UObject* pm = find_pawn_mesh(&player);
+                if (!player || !pm) continue;
+                hsvr::Vec3 hand = socket_location(pm, bone_fname(side ? "middle_metacarpal_r" : "middle_metacarpal_l"));
+                double heading = actor_heading(player);
+                double a = (heading + deg) * 3.14159265 / 180.0;
+                hsvr::Vec3 at{hand.x + cm * std::cos(a), hand.y + cm * std::sin(a), hand.z + up};
+                hsvr::Vec3 d = hand - at;
+                double yaw = std::atan2(d.y, d.x) * 57.29577951308232;
+                double pitch = std::atan2(d.z, std::sqrt(d.x * d.x + d.y * d.y)) * 57.29577951308232;
+                hsvr::shared().photo_x.store(at.x);
+                hsvr::shared().photo_y.store(at.y);
+                hsvr::shared().photo_z.store(at.z);
+                hsvr::shared().photo_yaw.store(yaw);
+                hsvr::shared().photo_pitch.store(pitch);
+                hsvr::shared().photo_on.store(true);
+                HSVR_LOG("Script: hsvr.photo_cam %d %.0f %.0f %.0f: camera at (%.0f, %.0f, %.0f) yaw %.0f pitch %.0f, looking at (%.0f, %.0f, %.0f)", side, cm, deg, up,
+                         at.x, at.y, at.z, yaw, pitch, hand.x, hand.y, hand.z);
+                continue;
+            }
             if (entry.command.rfind("hsvr.third_person ", 0) == 0)
             {
                 // The game's own camera behind him (like the Insert key), so test pictures show his body.
