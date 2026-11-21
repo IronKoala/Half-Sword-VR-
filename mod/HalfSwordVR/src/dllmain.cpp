@@ -5392,6 +5392,12 @@ namespace
         // that only lags (a long spear swinging up at the hand's torque limit) is never let go.
         bool have_expected = false;
         hsvr::Vec3 expected_com;
+        // Where it really was last tick (measured velocity while it is stopped, pose_hold_measured_v).
+        bool have_prev_pose = false;
+        hsvr::Vec3 prev_com;
+        hsvr::Quat prev_rot;
+        double prev_t = 0.0;
+        UObject* prev_item = nullptr;
         hsvr::Vec3 last_set_v, last_set_w;
         std::string last_responses;
         double miss_cm = 0.0, last_contact = -100.0;
@@ -11273,6 +11279,26 @@ namespace
                              side == 0 ? "left" : "right", h.weapon->GetName().c_str(), h.blocked_cm, from_shoulder, reach, from_hand, h.miss_cm);
                     h.stuck_since = -1.0;
                     g_count_letgo.fetch_add(1);
+                    if (cfg.pose_hold_let_go_dead)
+                    {
+                        // It was stopped: it leaves the hand where it is, not with the speed the hold was
+                        // chasing your hand with (playtest 2026-11-21: 10-20 m/s set while stopped, so
+                        // every let-go threw it, once into him). Matthew 2026-11-20: a stuck weapon must
+                        // never fly off away from his hand.
+                        Call lv0(base, STR("GetPhysicsLinearVelocity"));
+                        lv0.run();
+                        Vec3 was = lv0.vec();
+                        Call slv(base, STR("SetPhysicsLinearVelocity"));
+                        slv.three(STR("NewVel"), 0.0, 0.0, 0.0);
+                        slv.flag(STR("bAddToCurrent"), false);
+                        slv.run();
+                        Call sav(base, STR("SetPhysicsAngularVelocityInRadians"));
+                        sav.three(STR("NewAngVel"), 0.0, 0.0, 0.0);
+                        sav.flag(STR("bAddToCurrent"), false);
+                        sav.run();
+                        HSVR_LOG("Hold: %s hand's %ls let go dead (it had %.1f m/s from the hold)", side == 0 ? "left" : "right", h.weapon->GetName().c_str(),
+                                 length(was) / 100.0);
+                    }
                     drop_weapon(side, g_pose.pawn);
                     return false;
                 }
@@ -12642,8 +12668,34 @@ namespace
                 h.last_responses = resp;
             }
         }
+        Vec3 v_lin = lv.vec();
+        {
+            // A stopped weapon (it did not get where it was sent last tick) reports the velocity the hold
+            // set, not how it moved, so the hold built on it and wound up to its 20 m/s clamp while the
+            // weapon sat against something (playtest 2026-11-21 frames: reported 11-20 m/s, moved 1-3 m/s);
+            // when it came free, or was let go, it shot off. While it is stopped its motion is measured.
+            double tn = now;
+            if (cfg.pose_hold_measured_v && h.have_prev_pose && h.prev_item == weapon && h.have_expected && h.miss_cm > cfg.pose_hold_contact_cm)
+            {
+                double gap = tn - h.prev_t;
+                if (gap > 0.003 && gap < 0.1)
+                {
+                    Vec3 v_meas = (com - h.prev_com) * (1.0 / gap);
+                    Vec3 w_meas = scaled_axis((rot * h.prev_rot.inverse()).normalized()) * (1.0 / gap);
+                    HSVR_LOG_EVERY(0.5, "Hold: %s weapon stopped (%.1f cm off where it was sent): using its measured %.1f m/s / %.1f rad/s, not the reported %.1f m/s / %.1f rad/s",
+                                   side == 0 ? "left" : "right", h.miss_cm, length(v_meas) / 100.0, length(w_meas), length(v_lin) / 100.0, length(w_now));
+                    v_lin = v_meas;
+                    w_now = w_meas;
+                }
+            }
+            h.prev_com = com;
+            h.prev_rot = rot;
+            h.prev_t = tn;
+            h.prev_item = weapon;
+            h.have_prev_pose = true;
+        }
         Vec3 pivot_now = pos + rot.rotate(pivot);
-        Vec3 v = lv.vec() + cross(w_now, pivot_now - com);
+        Vec3 v = v_lin + cross(w_now, pivot_now - com);
         Vec3 w = w_now;
 
         // The spring pulls the point held onto where the controller has it at the end of the step:
@@ -12719,7 +12771,7 @@ namespace
                 rot_t = (from_scaled_axis(scaled_axis((target_rot * h.settle_from_rot.inverse()).normalized()) * u) * h.settle_from_rot).normalized();
             }
             Vec3 g{0.0, 0.0, gz};
-            Vec3 v_com_now = lv.vec();
+            Vec3 v_com_now = v_lin;
             Vec3 v_need = (com_t - com) * (1.0 / DT) - g * (DT * 0.5);
             if (h.handle_slide)
             {

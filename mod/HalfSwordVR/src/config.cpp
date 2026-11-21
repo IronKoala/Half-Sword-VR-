@@ -481,6 +481,8 @@ namespace hsvr
         num("pose_hold_let_go_s", c.pose_hold_let_go_s);
         flag("pose_hold_let_go_ignore_self", c.pose_hold_let_go_ignore_self);
         num("pose_hold_let_go_grace_s", c.pose_hold_let_go_grace_s);
+        flag("pose_hold_let_go_dead", c.pose_hold_let_go_dead);
+        flag("pose_hold_measured_v", c.pose_hold_measured_v);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
         flag("pose_hold_ignore_hand", c.pose_hold_ignore_hand);
         flag("pose_hold_block_offhand_search", c.pose_hold_block_offhand_search);
