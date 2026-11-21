@@ -1556,6 +1556,7 @@ namespace
         bool kicking = false;   // the game's kick has this leg (Kicking L/R): no planting, no flat foot
     };
     FootState g_feet[2];
+    double g_kick_fired_at = -100.0; // when right A last fired the game's Kick Event (pose_feet_free_on_kick)
     std::atomic<bool> g_feet_active{false};
     int g_last_foot = -1;
     double g_feet_time = 0.0;
@@ -1657,7 +1658,14 @@ namespace
             // The game's kick (right A, or its tap-kick) swings this leg: leave the leg to it. Planting
             // the foot at its old spot and holding it flat turned the foot backwards mid-kick
             // (playtest 2026-11-21 11:39). Afterwards the foot stands where the kick put it down.
-            bool kicking = cfg.pose_feet_free_on_kick && bool_property(pawn, side == 0 ? STR("Kicking L") : STR("Kicking R"));
+            // Kicking L/R read 0 right after the Kick Event (playtest log), so the legs are also left to
+            // the game for pose_feet_kick_free_s after right A fires it.
+            bool flag = bool_property(pawn, side == 0 ? STR("Kicking L") : STR("Kicking R"));
+            static bool flag_was[2] = {false, false};
+            if (flag != flag_was[side])
+                HSVR_LOG("Kick: Kicking %s %d (%.2f s after right A)", side == 0 ? "L" : "R", (int)flag, now - g_kick_fired_at);
+            flag_was[side] = flag;
+            bool kicking = cfg.pose_feet_free_on_kick && (flag || now - g_kick_fired_at < cfg.pose_feet_kick_free_s);
             if (kicking)
             {
                 if (!f.kicking) HSVR_LOG("Kick: %s leg left to the game's kick (no foot planting)", side == 0 ? "left" : "right");
@@ -21604,6 +21612,7 @@ namespace
                     else
                     {
                         pawn->ProcessEvent(kick, block.data());
+                        g_kick_fired_at = now_seconds();
                         HSVR_LOG("Kick: right A tapped: Kick Event (kicking L %d R %d)", (int)bool_property(pawn, STR("Kicking L")),
                                  (int)bool_property(pawn, STR("Kicking R")));
                     }

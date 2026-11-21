@@ -185,6 +185,7 @@ LAYOUT = [
         ("pose_hold_capsule", ""),
         ("pose_feet", "1 = feet stay planted and step."),
         ("pose_feet_free_on_kick", "1 = the game's kick moves the leg freely; the foot is planted again where it lands."),
+        ("pose_feet_kick_free_s", ""),
         ("pose_step_distance_cm", ""),
         ("pose_step_angle_deg", ""),
         ("pose_step_time_s", ""),

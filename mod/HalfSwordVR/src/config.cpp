@@ -756,6 +756,7 @@ namespace hsvr
         num("pose_torso_twist", c.pose_torso_twist);
         flag("pose_feet", c.pose_feet);
         flag("pose_feet_free_on_kick", c.pose_feet_free_on_kick);
+        num("pose_feet_kick_free_s", c.pose_feet_kick_free_s);
         num("pose_step_distance_cm", c.pose_step_distance_cm);
         num("pose_step_angle_deg", c.pose_step_angle_deg);
         num("pose_step_time_s", c.pose_step_time_s);
