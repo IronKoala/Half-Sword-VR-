@@ -12584,7 +12584,9 @@ namespace
         bool two = g_two.active && g_two.main == side && g_two.weapon == weapon && g_two.bs_valid && g_pose.hand_valid[g_two.second];
         JointHand& m = g_jh[side][0];
         Vec3 pivot_world = pos + rot.rotate(pivot);
-        if (!m.con || m.weapon != weapon || length(m.made_at - pivot) > 10.0)
+        // (Not remade as the hand slides: the rest pose is "weapon on its sphere" whatever point is held;
+        // the sphere is put where the point held now goes. Its joint's anchor only sets where it pulls from.)
+        if (!m.con || m.weapon != weapon)
             if (!jh_make(m, pawn, base, weapon, pivot_world, pivot, pos, rot, true, side)) return false;
         m.touched = true;
         BodyStrength s2b = two ? body_strength(pawn, g_two.second, cfg) : BodyStrength{};
@@ -12609,7 +12611,7 @@ namespace
         {
             JointHand& o = g_jh[g_two.second][1];
             Vec3 at_world = pos + rot.rotate(g_two.bs_local);
-            if (!o.con || o.weapon != weapon || length(o.made_at - g_two.bs_local) > 10.0)
+            if (!o.con || o.weapon != weapon)
                 jh_make(o, pawn, base, weapon, at_world, g_two.bs_local, at_world, rot, false, g_two.second);
             if (o.con)
             {
@@ -13622,9 +13624,12 @@ namespace
         wake.run();
         Vec3 set_v = exact_set ? exact_v : (com_next - com) * (1.0 / dt);
         // The joint hold (experimental): the engine's joint holds it instead of the velocity set here.
-        // Not while drawing or sheathing, sliding on a handle, or in a wound: those still run the old hold.
+        // Sliding on a handle works as it is: the point held is re-found under the palm each tick, so
+        // along the handle the sphere goes with the weapon (gravity slides it) and the clamp at the
+        // handle's ends stops it. Not while drawing or sheathing (the scabbard's own slide joint) or in
+        // a wound (the game's stuck joint): those still run the old hold.
         bool by_joint = false;
-        if (cfg.pose_hold_joint && g_pose.hand_valid[side] && !is_fist(weapon) && !h.handle_slide && !(g_draw[side].active && g_draw[side].weapon == weapon) &&
+        if (cfg.pose_hold_joint && g_pose.hand_valid[side] && !is_fist(weapon) && !(g_draw[side].active && g_draw[side].weapon == weapon) &&
             !(cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon)))
         {
             Vec3 rp = pivot_now - com;
