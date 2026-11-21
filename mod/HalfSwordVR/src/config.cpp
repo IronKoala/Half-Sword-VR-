@@ -699,6 +699,7 @@ namespace hsvr
         num("pose_drink_sip_s", c.pose_drink_sip_s);
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
         flag("pose_grab_objects", c.pose_grab_objects);
+        flag("pose_grab_world", c.pose_grab_world);
         flag("pose_ghost_hand", c.pose_ghost_hand);
         num("pose_ghost_from_cm", c.pose_ghost_from_cm);
         text("pose_ghost_mesh", c.pose_ghost_mesh);

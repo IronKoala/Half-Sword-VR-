@@ -294,6 +294,7 @@ LAYOUT = [
         ("pose_grab_button", ""),
         ("pose_grab_release_drops", ""),
         ("pose_grab_objects", ""),
+        ("pose_grab_world", ""),
         ("pose_grab_radius_cm", ""),
         ("pose_grab_handles", "1 = B&S-style handle grabbing."),
         ("pose_grab_handle_cm", ""),

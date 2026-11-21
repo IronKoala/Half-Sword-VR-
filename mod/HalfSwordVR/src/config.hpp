@@ -579,6 +579,10 @@ namespace hsvr
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;
+        // Fixed scenery (a fence, a table, a wall: anything that blocks and does not move) can be held:
+        // his drawn hand stays put on it with the fingers wrapped round it until you let go or pull your
+        // hand pose_grab_ride_max_cm away from it.
+        bool pose_grab_world = true;
         // Two hands on one weapon (B&S rules): squeeze the free hand on a weapon the other hand holds,
         // on its grip or anywhere along its blade (half-swording, Matthew 2026-11-18). The weapon then
         // lies along the line between the hands, the first hand sets its roll, and the hold is
@@ -769,8 +773,10 @@ namespace hsvr
         bool pose_grab_ride_objects = false;
         double pose_grab_ride_from_cm = 0.5;
         double pose_grab_ride_full_cm = 2.0;
-        double pose_grab_ride_max_cm = 20.0;
-        double pose_grab_slip_s = 0.3; // held past ride_max_cm this long: the grip slips (let go)
+        // (20 dropped ~25 body grabs in 0.4-1.8 s in a real fight, 2026-11-21 11:28-11:34: fighting Willies
+        // move 35-92 cm away; the 'pushed away' reaching was his hat's collision, not the ride.)
+        double pose_grab_ride_max_cm = 40.0;
+        double pose_grab_slip_s = 0.5; // held past ride_max_cm this long: the grip slips (let go)
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;
