@@ -729,6 +729,7 @@ namespace hsvr
         num("hit_buzz", c.hit_buzz);
         num("hit_buzz_scrape", c.hit_buzz_scrape);
         flag("hit_buzz_blade_on_plate", c.hit_buzz_blade_on_plate);
+        flag("hit_buzz_ignore_self", c.hit_buzz_ignore_self);
         num("hit_buzz_impulse_full", c.hit_buzz_impulse_full);
         flag("hit_buzz_log", c.hit_buzz_log);
         num("perf_log_seconds", c.perf_log_seconds);

@@ -875,6 +875,8 @@ namespace hsvr
         double hit_buzz_scrape = 1.0;
         // B&S makes no buzz for a blade on plate armour; 1 = give it the metal-on-metal layer.
         bool hit_buzz_blade_on_plate = true;
+        // 1 = a weapon's own parts hitting each other (flail head on its haft) never buzz.
+        bool hit_buzz_ignore_self = true;
         // The game's impulse (kg cm/s) that counts as a full-strength blow on a held item.
         double hit_buzz_impulse_full = 3000.0;
         // Hits under this intensity (0..1 of B&S's speed range) are touch, not hits: no buzz.
