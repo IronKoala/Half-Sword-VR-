@@ -1970,6 +1970,7 @@ namespace
     std::atomic<int> g_count_letgo{0}, g_count_kicks{0};
     std::atomic<double> g_worst_lag[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
+    double g_jump_until = -1.0;               // a jump released by left X: until then the capsule's rise is the game's jump, not a climb
     std::atomic<bool> g_fake_x{false};        // test: hsvr.press_x 1 holds left X (jump)
     std::atomic<bool> g_fake_rstick{false};   // test: hsvr.press_rstick 1 holds the right stick click (slow motion)
     std::atomic<bool> g_fake_stick_click{false}; // test: hsvr.stick_click 1 holds the left stick click
@@ -15617,11 +15618,17 @@ namespace
         // than 30 cm in one tick (the game's climb over an opponent's head), which is undone.
         Vec3 moved{now_at.x - g_hold_location.x, now_at.y - g_hold_location.y, 0.0};
         double rise = now_at.z - g_hold_location.z;
-        Vec3 keep{g_hold_location.x, g_hold_location.y, rise > 30.0 ? g_hold_location.z : now_at.z};
+        // A jump (the game's Jump: Last Jump Power lifts the capsule, often more than 30 cm in a tick)
+        // is not a climb: from the release (the mod's left X, or the game's own Dolphin Dive Interval /
+        // Jump Pressed flags for Space) the rise is the game's. Unattended test 2026-11-21: undoing it
+        // kept a 60 cm jump to 13 cm.
+        bool jumping = now_seconds() < g_jump_until || bool_property(context, STR("Jump Pressed")) || bool_property(context, STR("Dolphin Dive Interval"));
+        bool climb = rise > 30.0 && !jumping;
+        Vec3 keep{g_hold_location.x, g_hold_location.y, climb ? g_hold_location.z : now_at.z};
         // Take the game's step term back out of the height (pose_capsule_no_step_offset): it bobbed the
         // capsule ~3 cm down through every step and snapped it back up as each foot landed.
         static double step_off_max = 0.0;
-        if (hsvr::config().pose_capsule_no_step_offset && g_step_h2_have && rise <= 30.0)
+        if (hsvr::config().pose_capsule_no_step_offset && g_step_h2_have && !climb)
         {
             auto flag_on = [&](const TCHAR* name) {
                 FProperty* p = prop_chain(context, name);
@@ -15665,7 +15672,7 @@ namespace
         // leaving him floating where the game keeps him.
         static double fall_v = 0.0, fall_t = 0.0;
         static double kept_up_max = 0.0, fell_max = 0.0;
-        if (hsvr::config().pose_capsule_keep_on_floor && g_pose.mesh && rise <= 30.0)
+        if (hsvr::config().pose_capsule_keep_on_floor && g_pose.mesh && !climb)
         {
             auto flag_on = [&](const TCHAR* name) {
                 FProperty* p = prop_chain(context, name);
@@ -15674,7 +15681,7 @@ namespace
             double t_now = now_seconds();
             double dt = (std::min)(0.05, (std::max)(0.0, t_now - fall_t));
             fall_t = t_now;
-            bool airborne_by_choice = flag_on(STR("Climbing In Air")) || flag_on(STR("Jump Pressed"));
+            bool airborne_by_choice = flag_on(STR("Climbing In Air")) || flag_on(STR("Jump Pressed")) || jumping;
             double floor_z = 0.0;
             double half = 90.0 * component_scale_z(g_pose.mesh);
             bool floor = ground_below(context, keep.x, keep.y, (std::max)(g_hold_location.z, keep.z) + 40.0, floor_z);
@@ -15726,7 +15733,7 @@ namespace
         static double moved_max = 0.0;
         static int climbs = 0;
         moved_max = (std::max)(moved_max, length(moved));
-        if (rise > 30.0) ++climbs;
+        if (climb) ++climbs;
         double now = now_seconds();
         if (now - last_line >= 0.25)
         {
@@ -20128,6 +20135,7 @@ namespace
                      ok ? "called" : (pawn ? "NOT FOUND on the character" : "skipped (no character)"));
             if (ok && pawn && rate >= 0.5)
             {
+                g_jump_until = now + 1.5;
                 watch_until = now + 1.5;
                 watch_start_z = actor_location(pawn).z;
                 watch_peak = 0.0;
