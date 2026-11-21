@@ -2445,6 +2445,14 @@ namespace
                 double t = now * (mode == 2 ? 1.2 : 6.0) + side * 0.3;
                 local = Vec3{45.0, out * 10.0 + 35.0 * std::sin(t), 5.0 - 30.0 * std::fabs(std::sin(t))};
             }
+            else if (mode == 21)
+            {
+                // Whoosh test: a wide cut side to side and down, hsvr.arm_move 21 <rad/s> (hand peak
+                // speed 55 cm x that; 20 = 11 m/s, a hard real swing).
+                double w = (std::max)(1.0, g_fake_two_up.load());
+                double t = now * w + side * 0.3;
+                local = Vec3{45.0, out * 10.0 + 55.0 * std::sin(t), 5.0 - 30.0 * std::fabs(std::sin(t))};
+            }
             else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
             else if (mode == 5) local = Vec3{45.0, out * 15.0, -175.0}; // under the floor: the weapon is stopped by the ground
             else if (mode == 6) local = Vec3{62.0 + 8.0 * std::sin(now * 1.0), out * 10.0, 5.0}; // reaching out past his arm: the shoulder reaches
@@ -13753,6 +13761,131 @@ namespace
         HSVR_LOG("Hit buzz: watching the weapons' Collision Hit and Willie's mesh hits (B&S-style hit vibration)");
     }
 
+    // ---- Swing whoosh (HalfSwordDecomp defaults\hs_whoosh_sound.md) ---------------------------------
+    // The game plays a weapon's whoosh from its own tick (ModularWeaponBP ReceiveTick) out of two numbers:
+    // the speed of its BaseMesh (GetPhysicsLinearVelocity, |v|) and how much that velocity changed since
+    // its last tick (dv = |v - "Weapon Velocity_Old"|). With T = "Sound Woosh Threshold" (arming sword
+    // 350, most weapons 500): the air loop sounds once |v| x min(dv/100, 1) > 1.5 T (full at 4.875 T), and
+    // the one-shot whoosh fires when dv > 0.5 T and |v| > 0.5 T (at most 5 a second).
+    // Matthew 2026-11-21: most VR swings make no whoosh. The VR hold moves the weapon smoothly (a spring
+    // toward your hand, the arm lag), so dv per tick stays small however fast the swing; the flat game's
+    // arm joint jerks the weapon and dv is large. whoosh_feed: just before the weapon's tick, for a weapon
+    // in a tracked hand, the mod sets "Weapon Velocity_Old" so that the game's own dv is at least
+    // whoosh_dv_per_speed x |v|. The game's own rules then pick loop volume, pitch, one-shot and its
+    // volume from the real VR speed, exactly as in the flat game. "Whoosh:" lines log what it saw.
+    struct WhooshSide
+    {
+        UObject* weapon = nullptr;
+        UFunction* tick = nullptr; // that weapon's ReceiveTick
+        double win_start = -1.0, max_v = 0.0, max_dv = 0.0, max_fed = 0.0, max_vol = 0.0, threshold = 0.0;
+        int ticks = 0, sliding = 0, shots = 0, fed = 0;
+        bool tracked = false;
+        double gate_until = -1.0;
+    };
+    WhooshSide g_whoosh[2];
+    bool g_whoosh_feed = true;
+    bool g_whoosh_log = true;
+    double g_whoosh_dv_per_speed = 0.25;
+    double g_whoosh_log_min_speed = 300.0;
+
+    // From the engine tick: which weapons are in his hands now, and the settings (config() is a copy,
+    // too dear for every weapon tick).
+    void whoosh_refresh(const hsvr::Config& cfg)
+    {
+        g_whoosh_feed = cfg.whoosh_feed;
+        g_whoosh_log = cfg.whoosh_log;
+        g_whoosh_dv_per_speed = cfg.whoosh_dv_per_speed;
+        g_whoosh_log_min_speed = cfg.whoosh_log_min_speed;
+        UObject* pawn = nullptr;
+        if (g_whoosh_feed || g_whoosh_log) pawn = object_property(find_player_controller(), STR("Pawn"));
+        UObject* held[2] = {nullptr, nullptr};
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* w = pawn ? object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) : nullptr;
+            if (w && !prop_chain(w, STR("Weapon Velocity_Old"))) w = nullptr; // not a ModularWeaponBP
+            held[side] = w;
+        }
+        if (held[0] == held[1]) held[0] = nullptr; // one weapon in both hands: it ticks once
+        for (int side = 0; side < 2; ++side)
+        {
+            WhooshSide& s = g_whoosh[side];
+            if (s.weapon != held[side])
+            {
+                s = WhooshSide{};
+                s.weapon = held[side];
+            }
+            s.tracked = g_pose.hand_valid[side]; // false with mouse and keyboard: the game's own arm moves it
+        }
+    }
+
+    void whoosh_before_weapon_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        if (!context || !function) return;
+        int side = context == g_whoosh[1].weapon ? 1 : context == g_whoosh[0].weapon ? 0 : -1;
+        if (side < 0) return;
+        WhooshSide& s = g_whoosh[side];
+        if (s.tick)
+        {
+            if (function != s.tick) return;
+        }
+        else
+        {
+            if (function->GetName() != STR("ReceiveTick")) return;
+            s.tick = function;
+        }
+        using namespace hsvr;
+        if (bool_property(context, STR("Sheathed"))) return; // the game zeroes it all while sheathed
+        UObject* base = object_property(context, STR("BaseMesh"));
+        FProperty* oldp = prop_chain(context, STR("Weapon Velocity_Old"));
+        FProperty* tp = prop_chain(context, STR("Sound Woosh Threshold"));
+        if (!base || !oldp || !tp) return;
+        Call gv(base, STR("GetPhysicsLinearVelocity"));
+        if (!gv.run()) return;
+        Vec3 v = gv.vec();
+        uint8_t* old_at = reinterpret_cast<uint8_t*>(context) + oldp->GetOffset_Internal();
+        double o[3];
+        read_three(old_at, oldp, o);
+        double speed = length(v);
+        double dv = length(v - Vec3{o[0], o[1], o[2]});
+        double T = number_property(context, tp);
+        double fed = dv;
+        if (g_whoosh_feed && s.tracked && speed > 1.0 && g_whoosh_dv_per_speed > 0.0)
+        {
+            double want = speed * g_whoosh_dv_per_speed;
+            if (want > dv)
+            {
+                // The game takes dv = |v - old|: an old velocity along v, short by want, gives exactly want.
+                Vec3 nv = v * (1.0 - want / speed);
+                if (write_three(old_at, oldp, nv.x, nv.y, nv.z)) fed = want, ++s.fed;
+            }
+        }
+        if (!g_whoosh_log) return;
+        double now = now_seconds();
+        if (s.win_start < 0.0) s.win_start = now;
+        ++s.ticks;
+        s.threshold = T;
+        s.max_v = (std::max)(s.max_v, speed);
+        s.max_dv = (std::max)(s.max_dv, dv);
+        s.max_fed = (std::max)(s.max_fed, fed);
+        if (bool_property(context, STR("Sliding"))) ++s.sliding;
+        if (UObject* slide = object_property(context, STR("Sound Slide")))
+            if (float* vol = value_ptr<float>(slide, STR("VolumeMultiplier"))) s.max_vol = (std::max)(s.max_vol, (double)*vol);
+        // The game's one-shot rule with its 0.2 s gate, on the dv it will see.
+        if (fed > 0.5 * T && speed > 0.5 * T && now >= s.gate_until) ++s.shots, s.gate_until = now + 0.2;
+        if (now - s.win_start >= 0.5)
+        {
+            if (s.max_v >= g_whoosh_log_min_speed)
+                HSVR_LOG("Whoosh: %s %ls (%s, threshold %.0f): speed max %.0f cm/s, game's dv max %.0f cm/s%s, sliding %d/%d ticks, air loop volume max %.2f, "
+                         "one-shots %d",
+                         side == 0 ? "left" : "right", context->GetName().c_str(), s.tracked ? "VR hand" : "game's arm", T, s.max_v, s.max_dv,
+                         s.fed > 0 ? (std::string(" (fed up to ") + std::to_string((int)std::lround(s.max_fed)) + ")").c_str() : "", s.sliding, s.ticks, s.max_vol,
+                         s.shots);
+            s.win_start = now;
+            s.ticks = s.sliding = s.shots = s.fed = 0;
+            s.max_v = s.max_dv = s.max_fed = s.max_vol = 0.0;
+        }
+    }
+
     // Who lets a stuck blade go (stab-test7: the game stuck thrusts, then let them go within 0.15 s).
     // Logs every call of the stuck joint's Release Constraint and the weapon's release functions for
     // a weapon in his hands, with the calling Blueprint function and bytecode offset (the "@" of the
@@ -21586,6 +21719,7 @@ namespace
         { HSVR_SUB("tick:hide_own_head"); hide_own_head(cfg); }
         { HSVR_SUB("tick:grab_button"); grab_button(cfg, hsvr::controllers_state(), shared.menu_up.load()); }
         { HSVR_SUB("tick:watch_vars_tick"); watch_vars_tick(); }
+        { HSVR_SUB("tick:whoosh_refresh"); whoosh_refresh(cfg); }
         if (g_pose.pawn) { HSVR_SUB("tick:strength_growth_log"); strength_growth_log(g_pose.pawn, cfg); }
         if (g_console_done)
         {
@@ -21682,6 +21816,7 @@ class HalfSwordVR : public CppUserModBase
             hsvr::vr_install_present_hook();
         }
         Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});
+        Hook::RegisterProcessEventPreCallback(&whoosh_before_weapon_tick, {false, false, STR("HalfSwordVR"), STR("WhooshBefore")});
         // Cost probe: pre after the mod's pre callbacks, post before its post callbacks (perf_events).
         Hook::RegisterProcessEventPreCallback(&ev_pre, {false, false, STR("HalfSwordVR"), STR("CostProbePre")});
         Hook::RegisterProcessEventPostCallback(&ev_post, {false, false, STR("HalfSwordVR"), STR("CostProbePost")});

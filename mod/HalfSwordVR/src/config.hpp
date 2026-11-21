@@ -937,6 +937,16 @@ namespace hsvr
         // An open hand, forearm or arm on a person buzzes only when it strikes this fast (m/s,
         // against him at the contact).
         double hit_buzz_limb_min_ms = 3.0;
+        // Swing whoosh (hs_whoosh_sound.md). The game sounds a weapon's whoosh from its speed and from how
+        // much its velocity changed since the last tick; the VR hold moves it smoothly, so that change
+        // stays small and most swings were silent (Matthew 2026-11-21). 1 = for a weapon in a tracked
+        // hand, the game is told the change is at least whoosh_dv_per_speed x the weapon's speed, so its
+        // own rules (loop volume, pitch, one-shots) follow the real VR swing speed.
+        bool whoosh_feed = true;
+        double whoosh_dv_per_speed = 0.25;
+        // "Whoosh:" lines every 0.5 s while a held weapon moves faster than whoosh_log_min_speed (cm/s).
+        bool whoosh_log = true;
+        double whoosh_log_min_speed = 300.0;
         // Log every hit buzz ("Hit buzz:" lines).
         bool hit_buzz_log = true;
         // Every this many seconds a "Perf:" line: frame rate, the mod's own time per frame by part, and
