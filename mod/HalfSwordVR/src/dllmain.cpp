@@ -2551,8 +2551,11 @@ namespace
                 // At his mouth (eating and drinking tests): the hand a little in front of and below it.
                 local = body.inverse().rotate(grip - shoulder) + Vec3{6.0, 0.0, -4.0};
             }
-            else if (mode == 7)
+            else if (mode == 7 || mode == 23 || mode == 24)
             {
+                // (23: as 7, the right wrist rolling +-45 deg about the controller's forward axis at 1 Hz, the
+                // hands still: a stick must only roll. 24: as 7, the left hand pushing 15 cm side to side at
+                // 0.5 Hz, the right still: a stick must swing about the right hand. War staff tests.)
                 // Two hands on one weapon: the right still (as mode 1); the left hsvr.arm_move 7 <cm>
                 // from it along the weapon the right hand holds (+ toward the tip, - toward the pommel),
                 // or straight up when it holds none.
@@ -2564,6 +2567,7 @@ namespace
                     UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
                     if (UObject* wb = held ? object_property(held, STR("BaseMesh")) : nullptr) along = body.inverse().rotate(component_rotation(wb).rotate(Vec3{0, 0, 1}));
                     local = local + along * g_fake_two_up.load();
+                    if (mode == 24) local = local + Vec3{0.0, 15.0 * std::sin(now * 3.14159265358979), 0.0};
                 }
             }
             else
@@ -2809,6 +2813,7 @@ namespace
                 }
                 grip_rot = (aim * body * rot_to_quat(60.0, 0.0, 0.0)).normalized();
             }
+            if (mode == 23 && side == 1) grip_rot = (grip_rot * quat_axis_angle(Vec3{1, 0, 0}, 0.785 * std::sin(now * 2.0 * 3.14159265358979))).normalized();
             if (mode == 9) grip_rot = (body * quat_axis_angle(Vec3{0, 1, 0}, std::fmod(now, 6.0) / 6.0 * 2.0 * 3.14159265358979) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
         }
         if (cfg.dev_pose_fake_tracking && g_fake_jitter_cm.load() > 0.0)
