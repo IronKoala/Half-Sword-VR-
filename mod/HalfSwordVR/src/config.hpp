@@ -732,6 +732,8 @@ namespace hsvr
         // just behind it, the knuckle starts at curl mcp_lag (a half curl is a hook, not a circle).
         // 0 = every joint the same fraction (the framework's way).
         bool pose_finger_schedule = true;
+        // With SteamVR's hand skeleton: each finger joint follows your own joint (not one curl per finger).
+        bool pose_fingers_per_joint = true;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
@@ -761,12 +763,14 @@ namespace hsvr
         // (0.9 kg), but pulling it means moving his whole upper body.
         double pose_grab_body_pull_min_kg = 12.0;
         // His drawn hand rides a held body (his framework): it stays with the palm on the held spot, fully
-        // once the body is ride_full_cm from where your hand wants it (from ride_from_cm), up to ride_max_cm.
+        // once the body is ride_full_cm from where your hand wants it (from ride_from_cm). If the body gets
+        // ride_max_cm further away than its closest since the grab, for pose_grab_slip_s, the grip slips.
         bool pose_grab_ride = true;
         bool pose_grab_ride_objects = false;
         double pose_grab_ride_from_cm = 0.5;
         double pose_grab_ride_full_cm = 2.0;
-        double pose_grab_ride_max_cm = 40.0;
+        double pose_grab_ride_max_cm = 20.0;
+        double pose_grab_slip_s = 0.3; // held past ride_max_cm this long: the grip slips (let go)
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;
@@ -1033,6 +1037,22 @@ namespace hsvr
         // physics (Root Mesh, Get Damage @540-@584); the posed body does not, so without this the
         // player only lost limb health and could die only by losing his head.
         bool player_takes_damage = true;
+        // 1 = your posed body bumping into a person counts by how fast it moves into him, as a
+        // simulated body would. The posed body is kinematic: when it sinks into a Willie the physics
+        // pushes him out with an impulse set by how deep it went, not how fast (the game caps it at
+        // 1500 standing), and his body-hit block (Willie_BP UG @741800-@746500) passes any contact of
+        // your arm, hand, calf or foot ('Beig Hit By Limbs') to Deal Complex Damage with that impulse:
+        // walking slowly into him knocked his consciousness down (Matthew 2026-11-21). With this the
+        // contact's impulse is at most reduced mass x closing speed (each side's body mass, your
+        // contact body's x player_body_contact_mass_scale), the impulse a free body of that mass
+        // would give; it is never raised. Both ways: him hitting your body too.
+        bool player_body_contact_speed = true;
+        double player_body_contact_mass_scale = 1.0;
+        bool player_body_contact_log = true;
+        // 1 = an item touching you (someone else's weapon, tool, a thrown thing) hurts by how fast it
+        // comes into your body part, not by how hard your posed body squeezes it out (a passive
+        // Willie's tongs pinned between you took your consciousness 95 -> 55 in 2 s). Real blows unchanged.
+        bool player_item_contact_speed = true;
         // 1 = blood from your own cut-off limb stays at the stump. The game sticks the fountain to a
         // bone of the cut-off limb, which it only hides; the posed body keeps moving that hidden
         // bone (hand to controller, head to headset), so the blood floated in mid-air.

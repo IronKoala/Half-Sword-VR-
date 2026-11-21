@@ -648,6 +648,7 @@ namespace hsvr
         num("pose_elbow_velocity_scale", c.pose_elbow_velocity_scale);
         num("pose_fingers_tau_s", c.pose_fingers_tau_s);
         flag("pose_finger_schedule", c.pose_finger_schedule);
+        flag("pose_fingers_per_joint", c.pose_fingers_per_joint);
         num("pose_finger_mcp_lag", c.pose_finger_mcp_lag);
         num("pose_finger_pip_full", c.pose_finger_pip_full);
         flag("pose_wrap", c.pose_wrap);
@@ -670,6 +671,7 @@ namespace hsvr
         num("pose_grab_ride_from_cm", c.pose_grab_ride_from_cm);
         num("pose_grab_ride_full_cm", c.pose_grab_ride_full_cm);
         num("pose_grab_ride_max_cm", c.pose_grab_ride_max_cm);
+        num("pose_grab_slip_s", c.pose_grab_slip_s);
         flag("log_wrap", c.log_wrap);
         flag("log_fingers", c.log_fingers);
         flag("log_body_grab", c.log_body_grab);
@@ -792,6 +794,10 @@ namespace hsvr
         text("helmet_fade_material", c.helmet_fade_material);
         text("hide_own_gore_from", c.hide_own_gore_from);
         flag("player_takes_damage", c.player_takes_damage);
+        flag("player_body_contact_speed", c.player_body_contact_speed);
+        num("player_body_contact_mass_scale", c.player_body_contact_mass_scale);
+        flag("player_body_contact_log", c.player_body_contact_log);
+        flag("player_item_contact_speed", c.player_item_contact_speed);
         flag("player_stump_blood", c.player_stump_blood);
         flag("injury_limbs", c.injury_limbs);
         num("injury_limb_health", c.injury_limb_health);

@@ -2480,6 +2480,17 @@ namespace
                 double t = now * w + side * 0.3;
                 local = Vec3{45.0, out * 10.0 + 55.0 * std::sin(t), 5.0 - 30.0 * std::fabs(std::sin(t))};
             }
+            else if (mode == 22)
+            {
+                // Grab-slip test: hsvr.arm_move 22 <up cm> <cm/s>: as mode 1, the right hand rising <up> cm
+                // at <cm/s> (default 80) from when the command came.
+                static int epoch_seen = -1;
+                static double since = 0.0;
+                if (epoch_seen != g_fake_arm_epoch.load()) epoch_seen = g_fake_arm_epoch.load(), since = now;
+                double speed = g_fake_thrust_pitch.load() > 0.0 ? g_fake_thrust_pitch.load() : 80.0;
+                double up = side == 1 ? (std::min)(g_fake_two_up.load(), speed * (now - since)) : 0.0;
+                local = Vec3{40.0, out * 15.0, -10.0 + up};
+            }
             else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
             else if (mode == 5) local = Vec3{45.0, out * 15.0, -175.0}; // under the floor: the weapon is stopped by the ground
             else if (mode == 6) local = Vec3{62.0 + 8.0 * std::sin(now * 1.0), out * 10.0, 5.0}; // reaching out past his arm: the shoulder reaches
@@ -9183,6 +9194,9 @@ namespace
         double target[5] = {0, 0, 0, 0, 0};
         double splay = 0.0, target_splay = 0.0;
         double at = -1.0;
+        // Per joint from SteamVR's hand skeleton (pose_fingers_per_joint), smoothed; fingers 1..4.
+        bool have_joint = false;
+        double joint[5][3] = {};
     };
     FingerWant g_fwant[2];
     std::atomic<float> g_fake_thumb[2] = {-1.0f, -1.0f}; // test: hsvr.thumb <0|1> <curl>, -1 = the controller
@@ -9727,6 +9741,8 @@ namespace
         hsvr::Vec3 last_hand;
         bool have_last_hand = false;
         double ride = 0.0, ride_off = 0.0; // how much his drawn hand rides the held thing, and how far it is
+        double far_since = -1.0;            // since when the held thing has been past pose_grab_ride_max_cm
+        double far_base = -1.0;             // smallest hand gap since seating: the slip limit counts from it
     };
     WrapGrab g_wrap[2];
     const double kWrapSamples[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
@@ -9871,7 +9887,7 @@ namespace
 
     // In the copy node's update: solve the next finger due, and give the curls to pose with.
     // Returns the wrap's weight (0 = the hand's own curls).
-    double wrap_fingers(const XForm96* B, int side, double joint_out[5][3], const double own[5], double& splay)
+    double wrap_fingers(const XForm96* B, int side, double joint_out[5][3], const double own[5], double& splay, const double (*own_joint)[3] = nullptr)
     {
         using namespace hsvr;
         WrapGrab& g = g_wrap[side];
@@ -9930,7 +9946,8 @@ namespace
         for (int f = 0; f < 5; ++f)
         {
             double base[3] = {(std::max)(-g_finger_lift[f], (std::min)(1.0, own[f])), (std::max)(0.0, (std::min)(1.0, own[f])), (std::max)(0.0, (std::min)(1.0, own[f]))};
-            if (f != 0 && g_finger_schedule.load()) finger_schedule(own[f], base);
+            if (f != 0 && own_joint) for (int k = 0; k < 3; ++k) base[k] = own_joint[f][k];
+            else if (f != 0 && g_finger_schedule.load()) finger_schedule(own[f], base);
             double ww = g.solved[f] ? w : 0.0;
             for (int k = 0; k < 3; ++k) joint_out[f][k] = base[k] + (g.curls[f][k] - base[k]) * ww;
         }
@@ -10125,8 +10142,18 @@ namespace
         double by_gap = (std::max)(0.0, (std::min)(1.0, (off - from) / (full - from)));
         double by_time = wrap_smooth((now_seconds() - g.seated_at) / (std::max)(0.01, cfg.pose_wrap_ease_s));
         double u = by_gap * by_time;
-        // Too far (past your reach of it): left to the slip rule, the hand stays yours.
-        if (off > cfg.pose_grab_ride_max_cm) u = 0.0;
+        // Too far (past ride_max_cm): the grip slips (his framework: REACH for SLIP_TIME), let go in
+        // wrap_tick. The hand keeps riding until then: dropping the ride at the limit made the hand
+        // jump back to your controller, the game's joint yank the body after it, the gap close and the
+        // ride come back, over and over (Matthew 2026-11-21 16:03Z: throat grab, hand raised, the
+        // Willie "glitched out").
+        // The limit counts from the smallest gap since seating, not from 0: a heavy torso grab starts
+        // 12-25 cm from your controller and the pull can't close that in pose_grab_slip_s (072c2c3
+        // test: chest grabs slipped at 0.6 s with the hand still). Only the body pulling FURTHER away
+        // than that (you raising/yanking your hand, or him falling away) slips the grip.
+        if (g.far_base < 0.0 || off < g.far_base) g.far_base = off;
+        if (off - g.far_base > cfg.pose_grab_ride_max_cm) { if (g.far_since < 0.0) g.far_since = now_seconds(); }
+        else g.far_since = -1.0;
         g.ride = u;
         g.ride_off = off;
         if (u <= 0.0) return false;
@@ -10166,7 +10193,7 @@ namespace
             {
                 ++g.seat_tries;
                 g.seated = seat_on_palm(side, pawn, g, cfg);
-                if (g.seated) g.seated_at = now;
+                if (g.seated) { g.seated_at = now; g.far_base = -1.0; g.far_since = -1.0; }
             }
             else if (comp && g.on && g.seated && cfg.log_wrap && g.checks < 3 && now - g.seated_at >= 0.1 + 0.4 * g.checks)
             {
@@ -10221,6 +10248,13 @@ namespace
                              L ? "left" : "right", lm(STR("bSoftConstraint")), lm(STR("Stiffness")), lm(STR("Damping")), lm(STR("Restitution")),
                              nested_number(joint, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("bEnableProjection")}), mass.number());
                 }
+            }
+            if (comp && g.on && g.seated && g.far_since >= 0.0 && now - g.far_since > cfg.pose_grab_slip_s)
+            {
+                HSVR_LOG("Grab hold: %s hand: the held body is %.1f cm from your hand (%.1f cm at its closest) for %.2f s: the grip slips", L ? "left" : "right", g.ride_off, g.far_base, now - g.far_since);
+                g.far_since = -1.0;
+                release_object(side, pawn);
+                comp = nullptr;
             }
             if (comp && g.on && g.seated && g.drive && cfg.pose_grab_drive) grab_drive(side, pawn, g, cfg);
             if (!comp && g.on)
@@ -10378,7 +10412,17 @@ namespace
             const FingerWant& w = g_fwant[side];
             if (!w.on || now - w.at > 0.2) continue;
             double joint[5][3], splay = w.splay;
-            if (wrap_fingers(a->data, side, joint, w.curl, splay) > 0.0) pose_hand_fingers(a->data, side, w.curl, splay, log, joint);
+            if (wrap_fingers(a->data, side, joint, w.curl, splay, w.have_joint ? w.joint : nullptr) > 0.0) pose_hand_fingers(a->data, side, w.curl, splay, log, joint);
+            else if (w.have_joint)
+            {
+                // Your skeleton's joints, the thumb from its one curl.
+                double own[5][3];
+                for (int f = 1; f < 5; ++f)
+                    for (int k = 0; k < 3; ++k) own[f][k] = w.joint[f][k];
+                own[0][0] = (std::max)(-g_finger_lift[0], (std::min)(1.0, w.curl[0]));
+                own[0][1] = own[0][2] = (std::max)(0.0, (std::min)(1.0, w.curl[0]));
+                pose_hand_fingers(a->data, side, w.curl, w.splay, log, own);
+            }
             else pose_hand_fingers(a->data, side, w.curl, w.splay, log);
         }
     }
@@ -10431,10 +10475,24 @@ namespace
             if (!free) { w.on = false; w.at = now; continue; }
             double dt = w.on ? (std::min)(3.0 / 90.0, (std::max)(0.0, now - w.at)) : 1.0; // MAX_DT 3/90 s
             double k = cfg.pose_fingers_tau_s > 0.0 ? 1.0 - std::exp(-dt / cfg.pose_fingers_tau_s) : 1.0;
+            double k_tau = k;
             for (int f = 0; f < 5; ++f)
             {
                 w.target[f] = target[f];
                 w.curl[f] = w.on ? w.curl[f] + (target[f] - w.curl[f]) * k : target[f];
+            }
+            {
+                bool fake = false;
+                for (int f = 0; f < 5; ++f) fake = fake || g_fake_fingers[side][f].load() >= 0.0f;
+                bool per_joint = cfg.pose_fingers_per_joint && h.joints_valid && cfg.input_hand_tracking && !fake;
+                for (int f = 1; f < 5; ++f)
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        double tj = h.joint_frac[f][k];
+                        w.joint[f][k] = (w.on && w.have_joint) ? w.joint[f][k] + (tj - w.joint[f][k]) * k_tau : tj;
+                    }
+                for (int k = 0; k < 3; ++k) w.joint[0][k] = 0.0;
+                w.have_joint = per_joint;
             }
             w.target_splay = 0.5 * open;
             w.splay = w.on ? w.splay + (w.target_splay - w.splay) * k : w.target_splay;
@@ -13489,6 +13547,228 @@ namespace
                      hit.comp ? hit.comp->GetName().c_str() : STR("?"), hit.bone.ToString().c_str(), speed, intensity, vol);
     }
 
+    // ---- Body contact by speed, not depth (player_body_contact_speed) -----------------------------
+    // Matthew 2026-11-21: walking into a Willie, however slowly, hurt him. Every hit on a Willie
+    // (his mesh's OnComponentHit, UG @757869, and his armour proxies' through NewFunction) stores
+    // the contact's NormalImpulse, capped at 1500 standing, as 'Body Hit Normal Impulse'; his
+    // body-hit block (UG @741800-@746500) then passes any contact of the other's arm, hand, calf or
+    // foot ('Beig Hit By Limbs', @738294) to the hitter's Deal Complex Damage with that impulse as
+    // both velocity and impulse. Your posed body is kinematic: when it sinks into him the solver
+    // pushes him out with an impulse set by how deep it went, so a slow step gave 988-1500 (the
+    // session's log: consciousness 92 -> 55 from one bump). A simulated body (the flat game's)
+    // gives at most reduced mass x closing speed. So, for contacts between your Willie and another
+    // one, before the event runs: impulse = min(game's, mu x |closing speed along the normal|),
+    // mu = m_yours m_his / (m_yours + m_his), each the body's own mass (yours x
+    // player_body_contact_mass_scale). Never raised; hits by weapons (other actors) untouched.
+    struct ContactParams
+    {
+        int self_comp = -1, other_actor = -1, other_comp = -1, impulse = -1;
+        FProperty *impulse_p = nullptr, *hit_p = nullptr;
+    };
+    double body_part_mass(UObject* comp, FName bone)
+    {
+        if (!comp) return 0.0;
+        if (bone != FName() && func_chain(comp, STR("GetBoneMass")))
+        {
+            Call m(comp, STR("GetBoneMass"));
+            m.name(STR("BoneName"), bone);
+            m.flag(STR("bScaleMass"), true);
+            m.run();
+            return m.number();
+        }
+        Call m(comp, STR("GetMass"));
+        m.run();
+        return m.number();
+    }
+    void body_contact_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        gc_sync();
+        HSVR_PROF(PerfHitBody);
+        UObject* pawn = g_hitf.pawn;
+        if (!pawn) return;
+        UFunction* fn = static_cast<UFunction*>(custom_data);
+        uint8_t* locals = context.TheStack.Locals();
+        if (!fn || !locals) return;
+        static std::unordered_map<UFunction*, ContactParams> cache;
+        auto it = cache.find(fn);
+        if (it == cache.end())
+        {
+            ContactParams c;
+            for (FProperty* p : fn->ForEachProperty())
+            {
+                std::wstring n = p->GetName();
+                if (n == STR("HitComponent")) c.self_comp = p->GetOffset_Internal();
+                else if (n == STR("OtherActor") || n == STR("Other Actor")) c.other_actor = p->GetOffset_Internal();
+                else if (n == STR("OtherComp") || n == STR("Other Comp")) c.other_comp = p->GetOffset_Internal();
+                else if (n == STR("NormalImpulse") || n == STR("A")) c.impulse = p->GetOffset_Internal(), c.impulse_p = p;
+                else if (n == STR("Hit") || n == STR("Body Hit")) c.hit_p = p;
+            }
+            it = cache.emplace(fn, c).first;
+        }
+        const ContactParams& cp = it->second;
+        if (cp.other_actor < 0 || cp.impulse < 0) return;
+        UObject* self = context.Context;
+        UObject* other = *reinterpret_cast<UObject**>(locals + cp.other_actor);
+        // Only your Willie against another Willie (pointer compares first: this runs for every hit).
+        if (self != pawn && other != pawn) return;
+        if (!self || !other || self == other) return;
+        hsvr::Config cfg = hsvr::config();
+        if (!cfg.player_body_contact_speed) return;
+        if (!is_a(self == pawn ? other : self, STR("Willie_BP_C"))) return;
+        uint8_t* imp_at = locals + cp.impulse;
+        double ni[3];
+        read_three(imp_at, cp.impulse_p, ni);
+        using namespace hsvr;
+        Vec3 n{ni[0], ni[1], ni[2]};
+        double raw = length(n);
+        if (raw < 1.0) return;
+        HitInfo hit = break_hit(context, cp.hit_p);
+        UObject* self_comp = cp.self_comp >= 0 ? *reinterpret_cast<UObject**>(locals + cp.self_comp) : nullptr;
+        if (!self_comp) self_comp = object_property(self, STR("Mesh")); // an armour proxy (NewFunction): his body
+        UObject* other_comp = cp.other_comp >= 0 ? *reinterpret_cast<UObject**>(locals + cp.other_comp) : hit.comp;
+        bool mine_self = self == pawn;
+        UObject* my_comp = mine_self ? self_comp : other_comp;
+        FName my_bone = mine_self ? hit.my_bone : hit.bone;
+        UObject* his_comp = mine_self ? other_comp : self_comp;
+        FName his_bone = mine_self ? hit.bone : hit.my_bone;
+        double m_mine = body_part_mass(my_comp, my_bone);
+        double m_his = body_part_mass(his_comp, his_bone);
+        // A posed (kinematic) body part may report no mass: his matching part's (same skeleton).
+        if (!(m_mine > 0.0)) m_mine = m_his;
+        if (!(m_mine > 0.0) || !(m_his > 0.0)) return;
+        m_mine *= (std::max)(0.0, cfg.player_body_contact_mass_scale);
+        double mu = m_mine * m_his / (m_mine + m_his);
+        Vec3 dir = n * (1.0 / raw);
+        Vec3 v_mine = hit_body_velocity(my_comp, my_bone, hit.point);
+        Vec3 v_his = hit_body_velocity(his_comp, his_bone, hit.point);
+        double closing = std::fabs(dot(v_mine - v_his, dir)); // cm/s along the contact normal
+        double cap = mu * closing;
+        if (cap >= raw) return;
+        double k = cap / raw;
+        write_three(imp_at, cp.impulse_p, ni[0] * k, ni[1] * k, ni[2] * k);
+        if (cfg.player_body_contact_log && raw >= 300.0)
+            HSVR_LOG_EVERY(0.2, "Body contact: your %ls (%.1f kg) %s %ls's %ls (%.1f kg): impulse %.0f -> %.0f (closing %.0f cm/s, your part %.0f cm/s, his %.0f cm/s)%s",
+                           my_bone.ToString().c_str(), m_mine, mine_self ? "hit by" : "into", (mine_self ? other : self)->GetName().c_str(), his_bone.ToString().c_str(),
+                           m_his, raw, cap, closing, length(v_mine), length(v_his), cp.self_comp < 0 ? " [armour proxy]" : "");
+    }
+
+    // ---- Items pinned against your body (player_item_contact_speed) --------------------------------
+    // Matthew 2026-11-21 (yes to the test's finding): a passive Willie's tongs squeezed between him and
+    // your posed body took your consciousness 95 -> 55 in ~2 s with no swing. Every touch of an item on
+    // a Willie runs his 'Deal Complex Damage' (BPI_ComplexCollision; ModularWeaponBP UG @41944 passes
+    // Hit Comp, its own Collision Component, bone, Impact Point, Impact Normal, its velocity and the
+    // contact impulse). The squeezed item is shoved out by the kinematic body every physics step at
+    // whatever speed the push-out gives it, so dozens of 'hits' a second piled Pain up to 2348 (test
+    // h73ilf-bc-speed1b, state.txt) and Pain pulls Consciousness down (Willie UG @314017-@314742).
+    // A simulated body (the flat game) only takes what the item brings in: here, before his Deal
+    // Complex Damage runs on you, the item's Hit Velocity is cut to its closing speed into your body
+    // part (relative velocity against the contact normal, which points out of you toward the item:
+    // an item sliding or being squeezed out brings nothing) and the impulse to reduced mass x that
+    // speed. A real swing or thrust closes at its own speed, so it is unchanged. Never raised.
+    struct ItemDamageParams
+    {
+        FProperty *hit_comp = nullptr, *collided = nullptr, *bone = nullptr, *loc = nullptr, *normal = nullptr, *vel = nullptr, *imp = nullptr;
+        bool ok = false;
+    };
+    void item_contact_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        gc_sync();
+        HSVR_PROF(PerfPunchPre);
+        UObject* pawn = g_hitf.pawn;
+        if (!pawn || context.Context != pawn) return; // only damage to you
+        if (g_elbow_calling.load()) return;
+        UFunction* fn = static_cast<UFunction*>(custom_data);
+        uint8_t* locals = context.TheStack.Locals();
+        if (!fn || !locals) return;
+        static ItemDamageParams P;
+        if (!P.ok)
+        {
+            for (FProperty* p : fn->ForEachProperty())
+            {
+                std::wstring n = p->GetName();
+                if (n == STR("Hit Component")) P.hit_comp = p;
+                else if (n == STR("Collided Component")) P.collided = p;
+                else if (n == STR("Hit Bone")) P.bone = p;
+                else if (n == STR("Location")) P.loc = p;
+                else if (n == STR("Normal")) P.normal = p;
+                else if (n == STR("Hit Velocity")) P.vel = p;
+                else if (n == STR("Hit Impulse")) P.imp = p;
+            }
+            P.ok = true;
+            HSVR_LOG("Pinned item: Deal Complex Damage parameters found: hit comp %d, collided %d, bone %d, location %d, normal %d, velocity %d, impulse %d", P.hit_comp != nullptr,
+                     P.collided != nullptr, P.bone != nullptr, P.loc != nullptr, P.normal != nullptr, P.vel != nullptr, P.imp != nullptr);
+        }
+        if (!P.collided || !P.vel || !P.imp || !P.normal) return;
+        hsvr::Config cfg = hsvr::config();
+        if (!cfg.player_item_contact_speed) return;
+        UObject* item_comp = *reinterpret_cast<UObject**>(locals + P.collided->GetOffset_Internal());
+        UObject* my_comp = P.hit_comp ? *reinterpret_cast<UObject**>(locals + P.hit_comp->GetOffset_Internal()) : nullptr;
+        if (!item_comp) return;
+        Call oc(item_comp, STR("GetOwner"));
+        oc.run();
+        UObject* item = oc.object_result();
+        // Your own things, and other people's bodies (capped at their own hit, body_contact_hook).
+        if (!item || item == pawn || is_a(item, STR("Willie_BP_C"))) return;
+        if (hit_is_his_item(item)) return;
+        using namespace hsvr;
+        Vec3 v_item = read_param_vec(locals, P.vel), imp = read_param_vec(locals, P.imp), nrm = read_param_vec(locals, P.normal);
+        double speed = length(v_item), impulse = length(imp);
+        if (speed < 1.0 && impulse < 1.0) return;
+        Vec3 n_out = length(nrm) > 1e-6 ? nrm * (1.0 / length(nrm)) : impulse > 1e-6 ? imp * (1.0 / impulse) : Vec3{};
+        if (length(n_out) < 0.5) return;
+        FName bone = P.bone ? *reinterpret_cast<FName*>(locals + P.bone->GetOffset_Internal()) : FName();
+        Vec3 at = P.loc ? read_param_vec(locals, P.loc) : Vec3{};
+        if (!my_comp) my_comp = object_property(pawn, STR("Mesh"));
+        Vec3 v_mine = hit_body_velocity(my_comp, bone, at);
+        double closing = (std::max)(0.0, -dot(v_item - v_mine, n_out));
+        double new_speed = (std::min)(speed, closing);
+        // Reduced mass of the item (its root body carries the welded parts) and your body part.
+        double m_item = 0.0;
+        {
+            Call root(item, STR("K2_GetRootComponent"));
+            root.run();
+            UObject* rc = root.object_result();
+            m_item = body_part_mass(rc ? rc : item_comp, FName());
+            if (!(m_item > 0.0)) m_item = body_part_mass(item_comp, FName());
+        }
+        double m_mine = body_part_mass(my_comp, bone) * (std::max)(0.0, cfg.player_body_contact_mass_scale);
+        double new_impulse = impulse;
+        if (m_item > 0.0 && m_mine > 0.0) new_impulse = (std::min)(impulse, m_item * m_mine / (m_item + m_mine) * closing);
+        else if (speed > 1.0) new_impulse = impulse * new_speed / speed;
+        if (new_speed >= speed - 1.0 && new_impulse >= impulse - 1.0) return; // a real blow: untouched
+        double kv = speed > 1e-6 ? new_speed / speed : 0.0, ki = impulse > 1e-6 ? new_impulse / impulse : 0.0;
+        write_three(locals + P.vel->GetOffset_Internal(), P.vel, v_item.x * kv, v_item.y * kv, v_item.z * kv);
+        write_three(locals + P.imp->GetOffset_Internal(), P.imp, imp.x * ki, imp.y * ki, imp.z * ki);
+        if (cfg.player_body_contact_log && (speed >= 200.0 || impulse >= 300.0))
+            HSVR_LOG_EVERY(0.2, "Pinned item: %ls on your %ls: velocity %.0f -> %.0f cm/s, impulse %.0f -> %.0f (closing %.0f cm/s, your part %.0f cm/s, item %.1f kg, part %.1f kg)",
+                           item->GetName().c_str(), bone.ToString().c_str(), speed, new_speed, impulse, new_impulse, closing, length(v_mine), m_item, m_mine);
+    }
+
+    void install_body_contact()
+    {
+        static bool installed[3] = {false, false, false};
+        static double last_try = -10.0;
+        if (installed[0] && installed[1] && installed[2]) return;
+        double now = hsvr::now_seconds();
+        if (now - last_try < 2.0) return;
+        last_try = now;
+        const TCHAR* paths[3] = {
+            STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:BndEvt__BP_ThirdPersonCharacter_Mesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"),
+            STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:NewFunction"), STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:Deal Complex Damage")};
+        for (int i = 0; i < 3; ++i)
+        {
+            if (installed[i]) continue;
+            UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, paths[i]);
+            if (!fn) continue;
+            installed[i] = true;
+            UObjectGlobals::RegisterHook(fn, i == 2 ? &item_contact_hook : &body_contact_hook, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+            std::wstring params;
+            for (FProperty* p : fn->ForEachProperty()) params += p->GetName() + STR(", ");
+            HSVR_LOG("Body contact: watching %ls (parameters %ls)",
+                     i == 0 ? STR("Willie's mesh hits") : i == 1 ? STR("his armour proxies' hits (NewFunction)") : STR("items hitting you (Deal Complex Damage)"), params.c_str());
+        }
+    }
+
     // ---- Stab log (read only) ------------------------------------------------------------------
     // Why VR stabs bounce (defaults\stabbing_and_ss_reference.md in the decompile folder): the game
     // sticks a blade only when CuttingRate * |NormalImpulse| >= 10000 (ModularWeaponBP @44253-@44512)
@@ -16437,6 +16717,7 @@ namespace
         { HSVR_SUB("after:cut_through_tick"); cut_through_tick(context); }
         { HSVR_SUB("after:stab_log_tick"); stab_log_tick(context); }
         { HSVR_SUB("after:install_hit_haptics"); install_hit_haptics(); }
+        { HSVR_SUB("after:install_body_contact"); install_body_contact(); }
         { HSVR_SUB("after:grip_flip_tick"); grip_flip_tick(context); }
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
