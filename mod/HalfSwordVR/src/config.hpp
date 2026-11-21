@@ -463,7 +463,7 @@ namespace hsvr
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
         bool pose_two_hand_twist_only = true;
-        double pose_two_hand_swing_share = 0.1;
+        double pose_two_hand_swing_share = 0.0;
         // Whoosh judged on the weapon's speed against your body: the game's whoosh threshold for a weapon in
         // a tracked hand is raised by your walking speed x this (0 = off).
         double whoosh_walk_speed_scale = 1.0;

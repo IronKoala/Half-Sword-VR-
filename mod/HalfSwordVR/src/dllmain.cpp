@@ -13612,7 +13612,7 @@ namespace
         // The joint hold (experimental): the engine's joint holds it instead of the velocity set here.
         // Not while drawing or sheathing, sliding on a handle, or in a wound: those still run the old hold.
         bool by_joint = false;
-        if (cfg.pose_hold_joint && g_pose.hand_valid[side] && !h.handle_slide && !(g_draw[side].active && g_draw[side].weapon == weapon) &&
+        if (cfg.pose_hold_joint && g_pose.hand_valid[side] && !is_fist(weapon) && !h.handle_slide && !(g_draw[side].active && g_draw[side].weapon == weapon) &&
             !(cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon)))
         {
             Vec3 rp = pivot_now - com;
