@@ -7299,7 +7299,9 @@ namespace
         std::vector<UObject*> foes;
         UObjectGlobals::FindAllOf(STR("Willie_BP_C"), foes);
         for (UObject* foe : foes)
-            if (foe && foe != pawn && foe->GetName().rfind(STR("Default__"), 0) != 0 && object_alive(foe)) return foe;
+            if (foe && foe != pawn && foe->GetName().rfind(STR("Default__"), 0) != 0 && object_alive(foe) && !bool_property(foe, STR("Neck Snapped")) &&
+                read_number_variable(foe, STR("Health")) > 0.0)
+                return foe;
         return nullptr;
     }
 
@@ -7424,14 +7426,41 @@ namespace
     };
     constexpr int k_joint_part_count = sizeof(k_joint_parts) / sizeof(k_joint_parts[0]);
 
-    // Each hand's grab: the twists its Willie's parts had when it took hold (the rest the free range
-    // is counted from), keyed by that grab's start time.
-    struct JointRest
+    // Per Willie held (whichever hand, or both): the twists his parts had when you took hold of him
+    // (the rest the free range counts from) and the mod's own Dislocation State per part. The game's
+    // "Dislocation State" variables mean something else since 11-17 (they grow from stamina burn), so
+    // the old rule's State is kept here: it eases to 0 at joint_state_decay per second and the entry
+    // is dropped 30 s after his last hold. The pointer is only compared, never read, once he's let go;
+    // a hold that starts more than 0.5 s after the last one takes a fresh rest.
+    struct JointVictim
     {
-        double since = -2.0;
+        UObject* who = nullptr;
+        double seen = -100.0;
         double twist[k_joint_part_count] = {};
+        double state[k_joint_part_count] = {};
     };
-    JointRest g_joint_rest[3]; // [2]: the hsvr.joint_torque test's foe
+    std::vector<JointVictim> g_joint_victims;
+    constexpr double joint_state_decay = 0.05;
+
+    JointVictim& joint_victim(UObject* w, double now, bool& fresh)
+    {
+        g_joint_victims.erase(std::remove_if(g_joint_victims.begin(), g_joint_victims.end(), [&](const JointVictim& v) { return now - v.seen > 30.0; }),
+                              g_joint_victims.end());
+        for (JointVictim& v : g_joint_victims)
+            if (v.who == w)
+            {
+                double idle = now - v.seen;
+                for (double& st : v.state) st = (std::max)(0.0, st - joint_state_decay * idle);
+                fresh = idle > 0.5;
+                v.seen = now;
+                return v;
+            }
+        g_joint_victims.push_back({});
+        g_joint_victims.back().who = w;
+        g_joint_victims.back().seen = now;
+        fresh = true;
+        return g_joint_victims.back();
+    }
 
     // A bone's forward . X and its twist about X (degrees), both in its parent bone's space.
     bool bone_bend_twist(UObject* mesh, const char* bone_text, double& dot_x, double& twist_deg)
@@ -7485,29 +7514,21 @@ namespace
         double dt = last < 0.0 ? 0.0 : (std::min)(0.05, now - last);
         last = now;
         if (dt <= 0.0) return;
-        UObject* done = nullptr;
+        UObject* done[3] = {};
         static double log_at[3][k_joint_part_count] = {};
         for (int side = 0; side < 3; ++side)
         {
             UObject* w = nullptr;
-            double since = 0.0;
-            if (side < 2)
-            {
-                w = g_body_grab[side].on ? g_body_grab[side].victim : nullptr;
-                since = g_body_grab[side].since;
-            }
-            else if (g_joint_torque.on)
-            {
-                w = joint_torque_foe(pawn);
-                since = g_joint_torque.until;
-            }
-            if (!w || w == done || !object_alive(w) || w == pawn) continue;
-            done = w;
+            if (side < 2) w = g_body_grab[side].on ? g_body_grab[side].victim : nullptr;
+            else if (g_joint_torque.on) w = joint_torque_foe(pawn);
+            if (!w || w == done[0] || w == done[1] || !object_alive(w) || w == pawn) continue;
+            done[side] = w;
             UObject* mesh = object_property(w, STR("Mesh"));
             if (!mesh || bool_property(w, STR("Immortal"))) continue;
             bool skeletron = bool_property(w, STR("Skeletron"));
-            JointRest& rest = g_joint_rest[side];
-            bool fresh = rest.since != since;
+            bool fresh = false;
+            JointVictim& rest = joint_victim(w, now, fresh);
+            for (double& st : rest.state) st = (std::max)(0.0, st - joint_state_decay * dt);
             for (int i = 0; i < k_joint_part_count; ++i)
             {
                 const JointPart& p = k_joint_parts[i];
@@ -7529,8 +7550,9 @@ namespace
                 double excess = (std::max)(0.0, std::fabs(normalize_axis(twist - rest.twist[i])) - free);
                 double twist_dot = std::cos((std::min)(180.0, excess * cfg.joint_break_twist_gain) * kDegToRad);
                 double d = (std::min)(dot, twist_dot);
-                double strain = read_number_variable(w, p.strain), state = read_number_variable(w, p.state);
-                if (strain < 0.0 || state < 0.0) continue; // no such variable
+                double strain = read_number_variable(w, p.strain);
+                double& state = rest.state[i];
+                if (strain < 0.0) continue; // no such variable
                 double bd = map_range_clamped(d, 1.0, -1.0, state * 0.125, strain + 1.0) * p.factor * (skeletron ? 1.5 : 1.0) *
                             map_range_clamped(strain, 0.0, 1.0, 0.5, 5.0) * cfg.joint_break_scale;
                 if (bd <= 0.0) continue;
@@ -7542,7 +7564,6 @@ namespace
                     if (pain >= 0.0) set_variable(w, p.pain, pain + bd * 1000.0 * dt);
                     set_variable(w, p.strain, (std::min)(1.0, strain + bd * 100.0 * dt));
                     state = (std::min)(1.0, state + (std::min)(0.1, bd * 666.0 * dt));
-                    set_variable(w, p.state, state);
                     if (state >= 1.0)
                     {
                         HSVR_LOG("Joints: %ls's %s goes (bend dot %.2f, twist %.0f deg from rest, strain %.2f)", w->GetName().c_str(), p.bone, dot,
@@ -7559,6 +7580,9 @@ namespace
                         }
                         else
                         {
+                            // As the game's own breaks do: the part's Dislocation State at 1, which its
+                            // Restore Bone (swinging the arm, crouching) works back down to relocate it.
+                            set_variable(w, p.state, 1.0);
                             set_variable(w, p.health, 0.0);
                             if (pain >= 0.0) set_variable(w, p.pain, read_number_variable(w, p.pain) + 20.0);
                             set_bool_property(w, p.dislocated, true);
@@ -7590,7 +7614,6 @@ namespace
                              dot, normalize_axis(twist - rest.twist[i]), twist_dot, strain, state);
                 }
             }
-            rest.since = since;
         }
     }
 

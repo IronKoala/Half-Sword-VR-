@@ -755,7 +755,7 @@ namespace hsvr
         // the 11-17 update, so the mod runs the old game's rules for a Willie you hold: his neck_01,
         // upperarms, spine_03 (and calves with joint_break_legs) bent against their parent bone, or
         // twisted past joint_break_twist_free_*_deg from how they sat when you took hold, build his
-        // Strain / Dislocation State; at 1 the neck snaps (the game's Snap Neck: he dies), a shoulder
+        // Strain and a Dislocation State the mod keeps per part (easing off at 0.05/s); at 1 the neck snaps (the game's Snap Neck: he dies), a shoulder
         // or knee dislocates (the game relocates it by its own rules), or the back breaks (Break Back).
         // A twist's excess counts as a bend of excess x joint_break_twist_gain degrees.
         bool joint_break = true;
