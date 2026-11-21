@@ -729,6 +729,8 @@ namespace hsvr
         // just behind it, the knuckle starts at curl mcp_lag (a half curl is a hook, not a circle).
         // 0 = every joint the same fraction (the framework's way).
         bool pose_finger_schedule = true;
+        // With SteamVR's hand skeleton: each finger joint follows your own joint (not one curl per finger).
+        bool pose_fingers_per_joint = true;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
@@ -764,6 +766,7 @@ namespace hsvr
         double pose_grab_ride_from_cm = 0.5;
         double pose_grab_ride_full_cm = 2.0;
         double pose_grab_ride_max_cm = 40.0;
+        double pose_grab_slip_s = 0.15; // held past ride_max_cm this long: the grip slips (let go)
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;

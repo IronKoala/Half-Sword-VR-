@@ -29,6 +29,7 @@ namespace hsvr
         bool joints_valid = false;  // SteamVR's hand skeleton (XR_EXT_hand_tracking) was read this frame
         float joint_curl[5] = {};   // from the skeleton (when joints_valid)
         float joint_deg[5] = {};    // the skeleton's summed finger bend, degrees (for calibration)
+        float joint_frac[5][3] = {}; // the skeleton's bend at each finger joint (knuckle, middle, end), 0 straight .. 1 the rig's full bend
         float sensor_curl[5] = {};  // from the trigger, grip and touch sensors
         float curl[5] = {};         // what the mod uses: the larger of the two
     };
