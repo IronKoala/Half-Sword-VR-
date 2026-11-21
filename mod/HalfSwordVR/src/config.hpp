@@ -532,6 +532,9 @@ namespace hsvr
         // 0.2 -> 1, so gravity pulls an upright weapon through the hand and a level one is dragged along with it.
         // 0 = the old free axis (no damper, and the arm also carried its weight along the handle, so it never fell).
         bool pose_slide_bs_damper = true;
+        // Draw: the scabbard seat's SetConstraintReferencePosition call with parameter names that match the
+        // engine (the old names may write nothing). Off by default: draws feel as they do now.
+        bool draw_seat_ref_fix = false;
         // A grab leaves the item where it was and the hold pulls it into the hand over this long (B&S);
         // also a hand-over. 0 = put it in the hand at once.
         double pose_grab_settle_s = 0.08;

@@ -976,6 +976,28 @@ namespace
         {
             if (FProperty* p = param(param_name)) *(buffer.data() + p->GetOffset_Internal()) = value;
         }
+        // The first parameter found among a few spellings (reflection names are case-sensitive, and
+        // engine headers don't always name a parameter as its docs do). Returns the name used, or null.
+        const TCHAR* byte_any(std::initializer_list<const TCHAR*> names, uint8_t value)
+        {
+            for (const TCHAR* n : names)
+                if (FProperty* p = param(n))
+                {
+                    *(buffer.data() + p->GetOffset_Internal()) = value;
+                    return n;
+                }
+            return nullptr;
+        }
+        const TCHAR* three_any(std::initializer_list<const TCHAR*> names, double a, double b, double c)
+        {
+            for (const TCHAR* n : names)
+                if (FProperty* p = param(n))
+                {
+                    write_three(buffer.data() + p->GetOffset_Internal(), p, a, b, c);
+                    return n;
+                }
+            return nullptr;
+        }
         void name(const TCHAR* param_name, FName value)
         {
             if (FProperty* p = param(param_name)) *reinterpret_cast<FName*>(buffer.data() + p->GetOffset_Internal()) = value;
@@ -12836,8 +12858,30 @@ namespace
         if (UObject* slide = object_property(pawn, sd.constraint))
         {
             Call ref(slide, STR("SetConstraintReferencePosition"));
-            ref.byte(STR("Frame"), 1);
-            ref.three(STR("RefPos"), 0.0, 0.0, blade_length(w));
+            const TCHAR* fname = nullptr;
+            const TCHAR* pname = nullptr;
+            if (cfg.draw_seat_ref_fix)
+            {
+                // The old call named its parameters "Frame"/"RefPos"; if the engine calls them otherwise,
+                // it wrote nothing and set Frame1's reference to (0,0,0). Matthew likes how draws feel with
+                // that, so the corrected call is opt-in (draw_seat_ref_fix=1) until he has tried it.
+                fname = ref.byte_any({STR("Frame"), STR("frame")}, 1);
+                pname = ref.three_any({STR("RefPosition"), STR("RefPos")}, 0.0, 0.0, blade_length(w));
+            }
+            else
+            {
+                ref.byte(STR("Frame"), 1);
+                ref.three(STR("RefPos"), 0.0, 0.0, blade_length(w));
+            }
+            static bool names_logged = false;
+            if (!names_logged && ref.fn)
+            {
+                names_logged = true;
+                std::wstring list;
+                for (FProperty* p : ref.fn->ForEachProperty()) list += p->GetName() + L" ";
+                HSVR_LOG("Draw: SetConstraintReferencePosition parameters: %ls(fix %d: frame %ls, position %ls)", list.c_str(), (int)cfg.draw_seat_ref_fix,
+                         fname ? fname : L"-", pname ? pname : L"-");
+            }
             if (!ref.run()) HSVR_LOG("Draw: SetConstraintReferencePosition not found on %ls", sd.constraint);
         }
         else
@@ -13965,8 +14009,8 @@ namespace
                         if (want && marker)
                             at = component_rotation(base).inverse().rotate(component_location(marker) - component_location(base));
                         Call rp(joint, STR("SetConstraintReferencePosition"));
-                        rp.byte(STR("Frame"), 0); // Frame1, the weapon's side
-                        rp.three(STR("RefPosition"), at.x, at.y, at.z);
+                        rp.byte_any({STR("Frame"), STR("frame")}, 0); // Frame1, the weapon's side
+                        rp.three_any({STR("RefPosition"), STR("RefPos")}, at.x, at.y, at.z);
                         rp.run();
                         HSVR_LOG("Grip: %s weapon anchor at (%.1f, %.1f, %.1f) in the weapon (%s)", side == 0 ? "left" : "right", at.x, at.y, at.z,
                                  want ? (marker ? "its handle marker" : "no handle marker, the game's anchor") : "the game's anchor");
@@ -13999,8 +14043,8 @@ namespace
                         hsvr::Vec3 at{original.x + g_grip_frame_offset[0].load(), original.y + g_grip_frame_offset[1].load(),
                                       original.z + g_grip_frame_offset[2].load()};
                         Call rp(joint, STR("SetConstraintReferencePosition"));
-                        rp.byte(STR("Frame"), 1); // EConstraintFrame::Frame2, the hand's side
-                        rp.three(STR("RefPosition"), at.x, at.y, at.z);
+                        rp.byte_any({STR("Frame"), STR("frame")}, 1); // EConstraintFrame::Frame2, the hand's side
+                        rp.three_any({STR("RefPosition"), STR("RefPos")}, at.x, at.y, at.z);
                         bool ok = rp.run();
                         HSVR_LOG("Grip: hand anchor moved to (%.1f, %.1f, %.1f) (%d)", at.x, at.y, at.z, (int)ok);
                     }

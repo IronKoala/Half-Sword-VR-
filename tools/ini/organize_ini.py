@@ -275,6 +275,7 @@ LAYOUT = [
         ("pose_slide_damper_light", ""),
         ("pose_slide_damper_full", ""),
         ("pose_slide_bs_damper", "B&S slide: gravity pulls an upright weapon through a loose hand, a level one follows the hand (0 = old free slide)"),
+        ("draw_seat_ref_fix", "1 = scabbard seat reference set with the engine's real parameter names (changes draw feel; 0 = as before)"),
         ("pose_slide_zone_measured", ""),
         ("pose_slide_wide_cm", ""),
         ("pose_slide_ring_max_len_cm", ""),
