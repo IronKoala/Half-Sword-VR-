@@ -329,11 +329,12 @@ namespace hsvr
         // Reverse grip flip (S&S): a tap (shorter than grip_flip_tap_s) of the holding hand's B / Y
         // turns a one-handed weapon end for end at the same spot on its handle, gliding over grip_flip_s.
         bool grip_flip = true;
+        bool grip_flip_short_only = true; // only daggers, short swords and one-handed swords flip (Matthew 2026-11-21)
         // A blade stuck in someone is torn out when your hand is more than stab_yank_cm from its grip
         // for stab_yank_s (0 = never).
         double stab_yank_cm = 35.0;
         double stab_yank_s = 0.25;
-        double grip_flip_s = 0.3;
+        double grip_flip_s = 0.4; // Matthew 2026-11-21: 0.3 flipped too fast, 25% slower
         double grip_flip_tap_s = 0.4;
         double stab_wound_settle_s = 0.2; // no pulling out for this long after it goes in
         double stab_wound_settle_max_s = 0.8; // a young stick is held open until the game's own keep trace passes, at most this long
@@ -499,6 +500,12 @@ namespace hsvr
         // no trigger slide along the grip (Matthew 2026-11-20). Hand-and-a-half and two-handed swords, and
         // every non-sword, keep the slide. The blade (half-swording) is unchanged.
         bool pose_slide_fixed_1h_sword = true;
+        // Two fixed grip zones, under the guard and above the pommel, no slide (Matthew 2026-11-21):
+        // 0 = off (grip slides), 1 = hand-and-a-half (bastard sword, Grip_15) only, 2 = every two-handed
+        // sword (also longswords and greatswords).
+        int pose_grip_two_zones_2h_sword = 1; // Matthew 2026-11-21: bastard swords only
+        // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
+        bool pose_grip_dagger_fixed = true;
         double pose_slide_rate_min = 3.0;
         double pose_slide_rate_max = 40.0;
         double pose_slide_max_cm_s = 250.0; // fastest the hand runs along a weapon
