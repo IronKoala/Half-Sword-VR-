@@ -2018,6 +2018,8 @@ namespace
     // hsvr.arm_move 10 <speed cm/s> <pitch deg> <height cm>: the right hand thrusts (stab tests).
     std::atomic<double> g_fake_thrust_pitch{60.0};
     std::atomic<double> g_fake_thrust_up{-5.0};
+    std::atomic<double> g_fake_roll_deg[2]{0.0, 0.0}; // test aid hsvr.hand_roll: the fake hand turned about the forward axis
+    std::atomic<double> g_carry_log_until{0.0};       // test aid hsvr.carry_log <s>: every-tick carry lines until then
     double blade_length(UObject* w);
     bool mouth_point(UObject* pawn, hsvr::Vec3& out); // hsvr.arm_move 7 <cm>: the left hand this far above the right
     std::atomic<bool> g_contact_log{true};
@@ -2855,6 +2857,8 @@ namespace
             }
             if (mode == 23 && side == 1) grip_rot = (grip_rot * quat_axis_angle(Vec3{1, 0, 0}, 0.785 * std::sin(now * 2.0 * 3.14159265358979))).normalized();
             if (mode == 9) grip_rot = (body * quat_axis_angle(Vec3{0, 1, 0}, std::fmod(now, 6.0) / 6.0 * 2.0 * 3.14159265358979) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
+            if (double roll = g_fake_roll_deg[side].load(); roll != 0.0)
+                grip_rot = (body * quat_axis_angle(Vec3{1, 0, 0}, roll / 57.29578) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
         }
         if (cfg.dev_pose_fake_tracking && g_fake_jitter_cm.load() > 0.0)
         {
@@ -6603,6 +6607,27 @@ namespace
         owner_call.run();
         UObject* owner = owner_call.object_result();
         bool character = is_a(owner, STR("Willie_BP_C"));
+        if (character && !func_chain(best, STR("FindClosestBone_K2")))
+        {
+            // Armour welded to him (14:04: a plate, NODE_AddStaticMeshComponent): the grab goes to his
+            // body under it, the nearest bone, as the game's own grab would take him.
+            UObject* body = object_property(owner, STR("Mesh"));
+            if (body && func_chain(body, STR("FindClosestBone_K2")))
+            {
+                Call fb(body, STR("FindClosestBone_K2"));
+                fb.three(STR("TestLocation"), at.x, at.y, at.z);
+                fb.flag(STR("bRequirePhysicsAsset"), true);
+                fb.run();
+                FName nb = best_bone;
+                if (FProperty* rp = fb.param(STR("ReturnValue"))) nb = *reinterpret_cast<FName*>(fb.buffer.data() + rp->GetOffset_Internal());
+                Vec3 np;
+                double nd = closest_point_any(body, nb, at, 30.0, &np);
+                HSVR_LOG("Grab: %s grip touched %ls on %ls: takes his bone %ls under it (%.1f cm)", hand, best->GetName().c_str(), owner->GetName().c_str(), nb.ToString().c_str(), nd);
+                best = body;
+                best_bone = nb;
+                if (nd >= 0.0) best_point = np, best_d = nd;
+            }
+        }
         bool L = side == 0;
         std::wstring missing;
         auto need = [&](bool ok, const TCHAR* n) { if (!ok) missing += std::wstring(n) + STR(", "); };
@@ -9548,6 +9573,9 @@ namespace
         {1.54, 1.66, 1.05},
     };
     const double g_finger_lift[5] = {1.6, 0.35, 0.35, 0.35, 0.35};
+    // Scales on the four fingers' full bend at the knuckle / middle / end joint (pose_finger_scale_*):
+    // the gauntlet's skin rolls a PIP-heavy finger into a tube (Matthew's 14:10 screenshots).
+    std::atomic<double> g_finger_joint_scale[3] = {1.0, 1.0, 1.0};
     const double g_finger_spread[5] = {0.35, 0.21, 0.03, -0.14, -0.31};
     const char* kFingerNames[5] = {"thumb", "index", "middle", "ring", "pinky"};
 
@@ -10023,7 +10051,7 @@ namespace
                 Vec3 prev = j == 0 ? along : seg(j - 1);
                 double bend = bend_about(prev, seg(j), axis);
                 double c = cj[j];
-                double turn = (j == 0 && thumb) ? c * g_finger_full[0][0] : c * g_finger_full[f][j] - bend;
+                double turn = (j == 0 && thumb) ? c * g_finger_full[0][0] : c * g_finger_full[f][j] * (thumb ? 1.0 : g_finger_joint_scale[j].load()) - bend;
                 before[j] = bend;
                 turn_subtree(B, R.subtree[side][f][j], P(ch[f][j]), quat_axis_angle(axis, turn));
                 after[j] = bend_about(prev, seg(j), axis);
@@ -10135,19 +10163,31 @@ namespace
             hsvr::Vec3 p = cp + cq.rotate(p_cs * cs);
             if (!g->cloud.empty())
             {
-                // Triangles only: the nearest sampled surface point's face (behind it = inside).
+                // Triangles only: the nearest sampled surface points. Inside only when the 4 nearest
+                // all have it behind their faces (one face's plane alone was wrong at a rail's edge:
+                // every finger above the beam counted as inside and stayed straight, 09e4943 test;
+                // and a lone e < 3 cm rule let fingers deep in the beam count as outside, 13:58).
                 ++queries;
-                const SurfacePoint* best = nullptr;
-                double be = 1e18;
-                for (const SurfacePoint& s : g->cloud)
+                const SurfacePoint* near4[4] = {nullptr, nullptr, nullptr, nullptr};
+                double e4[4] = {1e18, 1e18, 1e18, 1e18};
+                for (const SurfacePoint& sp : g->cloud)
                 {
-                    hsvr::Vec3 dv = p - s.p;
+                    hsvr::Vec3 dv = p - sp.p;
                     double e = hsvr::dot(dv, dv);
-                    if (e < be) be = e, best = &s;
+                    for (int k = 0; k < 4; ++k)
+                        if (e < e4[k])
+                        {
+                            for (int m = 3; m > k; --m) e4[m] = e4[m - 1], near4[m] = near4[m - 1];
+                            e4[k] = e, near4[k] = &sp;
+                            break;
+                        }
                 }
-                double e = std::sqrt(be), plane = hsvr::dot(p - best->p, best->n);
-                if (plane < 0.0) return e < 3.0 ? 0.0 : e / cs;
-                return (std::max)(plane, e - 1.5) / cs;
+                int behind = 0, have = 0;
+                for (int k = 0; k < 4; ++k)
+                    if (near4[k]) ++have, behind += hsvr::dot(p - near4[k]->p, near4[k]->n) < 0.0 ? 1 : 0;
+                if (have > 0 && behind == have) return 0.0;
+                double e = std::sqrt(e4[0]), plane = hsvr::dot(p - near4[0]->p, near4[0]->n);
+                return (plane >= 0.0 ? (std::max)(plane, e - 1.5) : e) / cs;
             }
             write_three(query->buffer.data() + q_point->GetOffset_Internal(), q_point, p.x, p.y, p.z);
             *reinterpret_cast<FName*>(query->buffer.data() + q_bone->GetOffset_Internal()) = g->bone;
@@ -10406,7 +10446,9 @@ namespace
             double w = 2.0 * 3.14159265 * (std::max)(0.5, cfg.pose_grab_body_pull_hz);
             Vec3 hv = (g_pose.target[side] - g.last_hand) * (1.0 / dt);
             if (!g.have_last_hand) hv = Vec3{0, 0, 0};
-            Vec3 acc = to * (w * w) + (hv - v) * (2.0 * w);
+            double tl = length(to), slack = (std::max)(0.0, cfg.pose_grab_body_pull_slack_cm);
+            Vec3 to_pull = tl > slack ? to * ((tl - slack) / tl) : Vec3{0, 0, 0};
+            Vec3 acc = to_pull * (w * w) + (hv - v) * (2.0 * w);
             // (Sized for the weight that really has to move: a 0.9 kg neck bone drags his whole upper body,
             // and at its own mass the spring gave 40-120 N, leaving the throat 6-8 cm off the palm.)
             double pull_kg = (std::max)(g.mass, cfg.pose_grab_body_pull_min_kg);
@@ -10481,6 +10523,9 @@ namespace
             sav.flag(STR("bAddToCurrent"), false);
             sav.name(STR("BoneName"), g.bone);
             sav.run();
+            if (cfg.log_wrap && now < g_carry_log_until.load())
+                HSVR_LOG("Grab hold tick: %s %.3f: off (%.1f, %.1f, %.1f) cm %.1f deg, ang vel (%.1f, %.1f, %.1f) rad/s, speed %.0f cm/s", hand, now, to.x, to.y, to.z,
+                         angle * 57.2958, ang.x, ang.y, ang.z, length(v));
             if (cfg.log_wrap && now - g.last_drive_log >= 0.5)
             {
                 g.last_drive_log = now;
@@ -10750,6 +10795,22 @@ namespace
         Vec3 spot;
         double d = closest_point_any(g.comp, g.bone, palm, 30.0, &spot);
         if (d < 0.0) return false;
+        {
+            // Triangles only: the face the palm looks at, found from behind the hand (a palm already
+            // pushed into the rail found the nearest face from inside, and the hand sat half in
+            // the fence, 13:58 playtest).
+            Call probe(g.comp, STR("GetClosestPointOnCollision"));
+            probe.three(STR("Point"), palm.x, palm.y, palm.z);
+            probe.name(STR("BoneName"), g.bone);
+            probe.run();
+            Vec3 pd = normalized(hq.rotate(Vec3{0, 0, -1})), h, n;
+            if (probe.number() < 0.0 && trace_component(g.comp, palm - pd * 12.0, palm + pd * 20.0, h, n) && dot(n, pd) < 0.0)
+            {
+                if (cfg.log_wrap) HSVR_LOG("Wrap: %s palm faces the surface %.1f cm along it (nearest point was %.1f cm)", L ? "left" : "right", dot(h - palm, pd), d);
+                spot = h;
+                d = length(h - palm);
+            }
+        }
         // Triangles only: the fingers measure against the surface round the spot, sampled once here
         // (rays from 12 cm out through three points across the hand's width).
         g.cloud.clear();
@@ -10771,6 +10832,11 @@ namespace
                     }
                 }
             }
+        }
+        if (cfg.pose_grab_scenery_gap_cm > 0.0 && length(palm - spot) > 0.01)
+        {
+            // Off the surface toward where the palm came from (the face's side).
+            spot = spot + normalized(palm - spot) * cfg.pose_grab_scenery_gap_cm;
         }
         Vec3 bp = component_location(g.comp);
         Quat bq = component_rotation(g.comp);
@@ -10811,6 +10877,16 @@ namespace
         Vec3 bp = boned ? socket_location(g.comp, g.bone) : component_location(g.comp);
         Quat bq = boned ? socket_rotation(g.comp, g.bone) : component_rotation(g.comp);
         Vec3 f1 = hq.inverse().rotate(palm - hp), f2 = bq.inverse().rotate(spot - bp);
+        if (length(f2) > 60.0 || length(spot - palm) > 40.0)
+        {
+            // (14:04: a grab on an armour plate welded to him used the neck_02 frame 284 cm away; the
+            // game's joint yanked him across the room.) Leave the game's joint as it built it.
+            if (cfg.log_wrap)
+                HSVR_LOG("Wrap: %s hand: %ls bone %ls is not where it should be (held end %.0f cm from its frame, spot %.0f cm from the palm): not seated", hand,
+                         g.comp->GetName().c_str(), g.bone.ToString().c_str(), length(f2), length(spot - palm));
+            g.seat_tries = 99;
+            return false;
+        }
         // The mod's hold keeps the bone where it is now, moved so the spot is on the palm, relative
         // to the hand (his framework's take(): rel = inverse(hand) o object; palm_on shift).
         g.boned = boned;
@@ -11207,6 +11283,9 @@ namespace
         g_finger_schedule.store(cfg.pose_finger_schedule);
         g_finger_mcp_lag.store(cfg.pose_finger_mcp_lag);
         g_finger_pip_full.store(cfg.pose_finger_pip_full);
+        g_finger_joint_scale[0].store(cfg.pose_finger_scale_mcp);
+        g_finger_joint_scale[1].store(cfg.pose_finger_scale_pip);
+        g_finger_joint_scale[2].store(cfg.pose_finger_scale_dip);
         if (pawn && g_pose_active.load()) wrap_tick(cfg, pawn);
         if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
@@ -21975,6 +22054,84 @@ namespace
                 UObject* pawn = nullptr;
                 find_pawn_mesh(&pawn);
                 if (pawn) weapon_dump(entry.command.size() > 17 && entry.command[17] == '0' ? 0 : 1, pawn);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.hand_roll ", 0) == 0)
+            {
+                int sd = 1;
+                double deg = 0.0;
+                sscanf(entry.command.c_str() + 15, "%d %lf", &sd, &deg);
+                if (sd == 0 || sd == 1) g_fake_roll_deg[sd].store(deg);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.carry_log ", 0) == 0)
+            {
+                g_carry_log_until.store(hsvr::now_seconds() + atof(entry.command.c_str() + 15));
+                continue;
+            }
+            if (entry.command == "hsvr.glove_bones")
+            {
+                // Glove test: for his body and every skeletal piece on it that has right-hand finger bones,
+                // each finger bone's parent, its bend from the parent (deg) and the piece's finger-bone list.
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                if (!mesh) { HSVR_LOG("Script: hsvr.glove_bones: no character"); continue; }
+                std::vector<UObject*> parts{mesh};
+                Call kids(mesh, STR("GetChildrenComponents"));
+                kids.flag(STR("bIncludeAllDescendants"), true);
+                if (kids.run())
+                    if (FProperty* cp = kids.param(STR("Children")))
+                    {
+                        struct RawArray { UObject** data; int32_t num, max; };
+                        RawArray* arr = reinterpret_cast<RawArray*>(kids.buffer.data() + cp->GetOffset_Internal());
+                        for (int32_t i = 0; arr->data && i < arr->num && i < 512; ++i)
+                            if (UObject* c = arr->data[i])
+                                if (c->GetClassPrivate()->GetName().find(STR("SkeletalMeshComponent")) != std::wstring::npos) parts.push_back(c);
+                    }
+                auto bone_index = [](UObject* c, FName b) { Call bi(c, STR("GetBoneIndex")); bi.name(STR("BoneName"), b); bi.run(); return bi.integer(); };
+                auto name_ret = [](Call& c) { FProperty* rp = c.param(STR("ReturnValue")); return rp ? *reinterpret_cast<FName*>(c.buffer.data() + rp->GetOffset_Internal()) : FName(); };
+                for (UObject* c : parts)
+                {
+                    if (bone_index(c, bone_fname("index_02_r")) < 0) continue;
+                    UObject* sk = object_property(c, STR("SkeletalMeshAsset"));
+                    if (!sk) sk = object_property(c, STR("SkeletalMesh"));
+                    Call nb(c, STR("GetNumBones"));
+                    nb.run();
+                    int32_t n = nb.integer();
+                    std::wstring fingers;
+                    for (int32_t i = 0; i < n && i < 400; ++i)
+                    {
+                        Call bn(c, STR("GetBoneName"));
+                        if (FProperty* ip = bn.param(STR("BoneIndex"))) *reinterpret_cast<int32_t*>(bn.buffer.data() + ip->GetOffset_Internal()) = i;
+                        bn.run();
+                        std::wstring nm = name_ret(bn).ToString();
+                        if (nm.size() > 2 && nm.substr(nm.size() - 2) == STR("_r") &&
+                            (nm.find(STR("index")) != std::wstring::npos || nm.find(STR("middle")) != std::wstring::npos || nm.find(STR("ring")) != std::wstring::npos ||
+                             nm.find(STR("pinky")) != std::wstring::npos || nm.find(STR("thumb")) != std::wstring::npos || nm.find(STR("finger")) != std::wstring::npos))
+                            fingers += nm + STR(" ");
+                    }
+                    HSVR_LOG("Glove bones: %ls (mesh %ls, %d bones); right finger bones: %ls", c->GetName().c_str(), sk ? sk->GetName().c_str() : STR("-"), n, fingers.c_str());
+                    std::string row;
+                    for (const char* f : {"thumb", "index", "middle", "ring", "pinky"})
+                        for (int k = 1; k <= 3; ++k)
+                        {
+                            FName b = bone_fname(std::string(f) + "_0" + std::to_string(k) + "_r");
+                            if (bone_index(c, b) < 0) { row += std::string(f) + std::to_string(k) + " - "; continue; }
+                            Call pb(c, STR("GetParentBone"));
+                            pb.name(STR("BoneName"), b);
+                            pb.run();
+                            FName par = name_ret(pb);
+                            hsvr::Quat q = socket_rotation(c, b), qp = socket_rotation(c, par);
+                            hsvr::Quat rel = (qp.inverse() * q).normalized();
+                            double ang = 2.0 * std::acos((std::min)(1.0, std::fabs(rel.w))) * 57.29578;
+                            char buf[96];
+                            std::wstring pw = par.ToString();
+                            std::string ps(pw.begin(), pw.end());
+                            snprintf(buf, sizeof buf, "%s%d<%s %.0f; ", f, k, ps.c_str(), ang);
+                            row += buf;
+                        }
+                    HSVR_LOG("Glove bones: %ls: %s", c->GetName().c_str(), row.c_str());
+                }
                 continue;
             }
             if (entry.command.rfind("hsvr.wear ", 0) == 0)

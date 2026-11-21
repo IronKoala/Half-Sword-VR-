@@ -801,6 +801,10 @@ namespace hsvr
         // With per-joint fingers: the end joint bends this much of the middle joint's angle (the tendon
         // couples them, ~0.67); 0 = as the hand skeleton reports it.
         double pose_finger_dip_coupling = 0.67;
+        // The fingers' full bend at each joint x this (knuckle / middle / end; thumb not included).
+        double pose_finger_scale_mcp = 1.0;
+        double pose_finger_scale_pip = 1.0;
+        double pose_finger_scale_dip = 1.0;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
@@ -815,6 +819,8 @@ namespace hsvr
         // the fist: palm = hand bone + along x (middle knuckle - hand bone) + palm_cm toward the palm.
         bool pose_grab_seat_palm = true;
         double pose_grab_palm_cm = 2.0;
+        // Scenery: the palm point stays this far off the surface (the hand sat half in the fence).
+        double pose_grab_scenery_gap_cm = 1.5;
         double pose_grab_palm_along = 0.5;
         // The mod holds what the game's grab holds (its hand joint lets things hang off the hand). Loose
         // objects: driven to their place in the hand (framework physics.track): accel cap accel/heft m/s^2,
@@ -826,6 +832,10 @@ namespace hsvr
         double pose_grab_drive_ang_accel = 1200.0;
         double pose_grab_body_pull_n = 600.0;
         double pose_grab_body_pull_hz = 4.0;
+        // The pull only takes the part of your hand's distance from the held spot past this (slack):
+        // holding a throat with your hand still 10-13 cm from it pulled at the cap (900+ N with his
+        // trained grip) and the game's strangle knocked them out in 0.45 s (13:50 playtest).
+        double pose_grab_body_pull_slack_cm = 12.0;
         // The body pull's spring is sized for at least this many kg: a throat or chest bone is light
         // (0.9 kg), but pulling it means moving his whole upper body.
         double pose_grab_body_pull_min_kg = 12.0;
