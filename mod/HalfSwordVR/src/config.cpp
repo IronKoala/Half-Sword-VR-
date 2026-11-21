@@ -749,6 +749,14 @@ namespace hsvr
         text("hide_own_gore_from", c.hide_own_gore_from);
         flag("player_takes_damage", c.player_takes_damage);
         flag("player_stump_blood", c.player_stump_blood);
+        flag("injury_limbs", c.injury_limbs);
+        num("injury_limb_health", c.injury_limb_health);
+        num("injury_one_leg_speed", c.injury_one_leg_speed);
+        flag("injury_two_legs_fall", c.injury_two_legs_fall);
+        flag("injury_back_broken_falls", c.injury_back_broken_falls);
+        num("injury_dislocated_follow_s", c.injury_dislocated_follow_s);
+        num("injury_dislocated_sag_cm", c.injury_dislocated_sag_cm);
+        flag("death_ragdoll", c.death_ragdoll);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;

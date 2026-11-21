@@ -936,6 +936,27 @@ namespace hsvr
         // bone of the cut-off limb, which it only hides; the posed body keeps moving that hidden
         // bone (hand to controller, head to headset), so the blood floated in mid-air.
         bool player_stump_blood = true;
+        // Your own injuries, with the game's own limb values (Willie_BP; injuries.md). A limb counts as
+        // badly hurt when its health is at or below injury_limb_health (the game's own bone-break
+        // threshold, Get Damage: bones only break at limb health <= 25), or it is broken, dislocated
+        // or cut off (the game holds that limb's health at 0 then). 0 = off.
+        bool injury_limbs = true;
+        double injury_limb_health = 25.0;
+        // One leg badly hurt: you walk at this share of your normal speed (stick walking).
+        double injury_one_leg_speed = 0.5;
+        // Both legs badly hurt (or the back broken, which drops both legs' tonus in the game): no
+        // walking and he falls over (physics on, the view stays on his head) until a leg recovers.
+        bool injury_two_legs_fall = true;
+        bool injury_back_broken_falls = true;
+        // A broken, cut-off or badly hurt arm: the controller no longer moves it; it hangs and swings
+        // from the shoulder and its hand lets go. A dislocated arm (not broken) flops after your
+        // controller instead (this lag, s, and this much sag, cm), so swinging your arm around can put
+        // it back in, the game's own way (Dislocate Bone reads the posed arm every tick).
+        double injury_dislocated_follow_s = 0.15;
+        double injury_dislocated_sag_cm = 12.0;
+        // You die: the mod stops posing you, physics goes on and he falls as a ragdoll; the view stays
+        // on his head (no fade).
+        bool death_ragdoll = true;
     };
 
     // Current settings (copy). Cheap enough to call once per frame.

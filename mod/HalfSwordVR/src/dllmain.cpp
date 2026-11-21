@@ -2109,6 +2109,223 @@ namespace
     // the hand off the controller (1 on the held item, 2 two hands, 4 on a scabbard).
     hsvr::Vec3 g_solved_S[2], g_solved_E[2], g_solved_H[2];
     int g_solved_on[2] = {0, 0};
+    // ---- Your injuries (Matthew 2026-11-21) -----------------------------------------------------
+    // The game's own limb values (Willie_BP, extracted 2026-11-19; HalfSwordDecomp\defaults\injuries.md):
+    // - Limb health 0..100 per arm and leg. Get Damage only tries to break a bone once that limb's
+    //   health is <= 25 (Leg L @63550: LessEqual(Leg_L Health, 25)), and a break sets <Limb> Broken,
+    //   the joint profile "Broken" and the health to 0 (UG @237298..238581).
+    // - Dislocate Bone runs every tick on his posed mesh (UG @346785 -> @263949, bones neck_01,
+    //   upperarm_r/l, spine_03, calf_r/l) from each bone's component-space direction: an arm pushed
+    //   too far dislocates (<Arm> Dislocated), and a dislocated arm moved through that range again is
+    //   put back by Restore Bone (Dislocate Bone @5712 -> Restore Bone(part, BD x 33 x dt); at state 0
+    //   it clears Dislocated AND Broken, sets profile "Motor" and the health to 25).
+    // - The tick holds a limb's health at 0 while it is broken, dislocated or cut off (Dismembered
+    //   Parts Map / Hand Torn Off; UG @273479 for Arm R), so health covers all three.
+    // - A broken or dislocated leg, or a broken back, drops that leg's tonus to 0 (UG @367031/@367531),
+    //   and walk speed has x MapRange(Leg R Tonus + Leg L Tonus, 0..2 -> Crawl Rate + 1..2) (UG @567651).
+    // So: a limb is badly hurt at health <= injury_limb_health (25), broken, dislocated or cut off.
+    struct InjuryState
+    {
+        UObject* pawn = nullptr; // compared only, never read through
+        int arm[2] = {0, 0};     // 0 fine, 1 dislocated (flops after the controller), 2 useless (hangs)
+        bool leg_out[2] = {false, false};
+        bool back_broken = false, dead = false, down = false, down_now = false;
+        double leg_speed = 1.0;  // share of the stick's walk speed
+        hsvr::Vec3 p[2], v[2];   // the hanging/flopping wrist point
+        bool p_valid[2] = {false, false};
+        double t[2] = {0.0, 0.0};
+        double last_log = -10.0;
+    };
+    InjuryState g_inj;
+
+    // A Double property of his, read without the per-call class-name check (per-frame path).
+    double pawn_double(UObject* pawn, const TCHAR* name)
+    {
+        FProperty* p = pawn ? prop_chain(pawn, name) : nullptr;
+        if (!p) return -1.0;
+        static std::unordered_map<FProperty*, int> kinds;
+        auto it = kinds.find(p);
+        int kind = 0;
+        if (it == kinds.end())
+        {
+            auto k = p->GetClass().GetName();
+            kind = k == STR("DoubleProperty") ? 1 : (k == STR("FloatProperty") ? 2 : 0);
+            kinds.emplace(p, kind);
+        }
+        else
+            kind = it->second;
+        uint8_t* at = reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal();
+        if (kind == 1) return *reinterpret_cast<double*>(at);
+        if (kind == 2) return *reinterpret_cast<float*>(at);
+        return -1.0;
+    }
+
+    void injury_update(const hsvr::Config& cfg, UObject* pawn)
+    {
+        if (pawn != g_inj.pawn)
+        {
+            g_inj = InjuryState{};
+            g_inj.pawn = pawn;
+        }
+        if (!pawn) return;
+        int arm_was[2] = {g_inj.arm[0], g_inj.arm[1]};
+        bool leg_was[2] = {g_inj.leg_out[0], g_inj.leg_out[1]}, back_was = g_inj.back_broken, dead_was = g_inj.dead, down_was = g_inj.down;
+        g_inj.dead = cfg.death_ragdoll && bool_property(pawn, STR("DED"));
+        double hp[4] = {-1, -1, -1, -1};
+        bool brk[4] = {}, dis[4] = {};
+        if (!cfg.injury_limbs)
+        {
+            g_inj.arm[0] = g_inj.arm[1] = 0;
+            g_inj.leg_out[0] = g_inj.leg_out[1] = false;
+            g_inj.back_broken = false;
+        }
+        else
+        {
+            static const TCHAR* health[4] = {STR("Arm_L Health"), STR("Arm_R Health"), STR("Leg_L Health"), STR("Leg_R Health")};
+            static const TCHAR* broken[4] = {STR("Arm L Broken"), STR("Arm R Broken"), STR("Leg L Broken"), STR("Leg R Broken")};
+            static const TCHAR* disloc[4] = {STR("Arm L Dislocated"), STR("Arm R Dislocated"), STR("Leg L Dislocated"), STR("Leg R Dislocated")};
+            double thr = cfg.injury_limb_health;
+            for (int i = 0; i < 4; ++i)
+            {
+                hp[i] = pawn_double(pawn, health[i]);
+                brk[i] = bool_property(pawn, broken[i]);
+                dis[i] = bool_property(pawn, disloc[i]);
+                bool was_bad = i < 2 ? arm_was[i] != 0 : leg_was[i - 2];
+                // 2 points of hysteresis, so a limb healing through the threshold doesn't flicker.
+                bool bad = brk[i] || dis[i] || (hp[i] >= 0.0 && (was_bad ? hp[i] <= thr + 2.0 : hp[i] <= thr));
+                if (i < 2) g_inj.arm[i] = !bad ? 0 : (dis[i] && !brk[i] ? 1 : 2);
+                else g_inj.leg_out[i - 2] = bad;
+            }
+            g_inj.back_broken = bool_property(pawn, STR("Back Broken"));
+        }
+        bool legs_gone = cfg.injury_limbs && ((g_inj.leg_out[0] && g_inj.leg_out[1]) || (cfg.injury_back_broken_falls && g_inj.back_broken));
+        g_inj.down = g_inj.dead || (cfg.injury_two_legs_fall && legs_gone);
+        g_inj.leg_speed = 1.0;
+        double tl = -1.0, tr = -1.0;
+        if (legs_gone)
+            g_inj.leg_speed = 0.0;
+        else if (cfg.injury_limbs && g_inj.leg_out[0] != g_inj.leg_out[1])
+        {
+            // The game already slows him by the bad leg's tonus; scale the stick so the result is
+            // injury_one_leg_speed of what he'd walk with the good leg's tonus on both.
+            tl = pawn_double(pawn, STR("Leg L Tonus"));
+            tr = pawn_double(pawn, STR("Leg R Tonus"));
+            double cr = (std::max)(0.0, pawn_double(pawn, STR("Crawl Rate")));
+            auto f = [cr](double sum) { double u = (std::min)(1.0, (std::max)(0.0, sum / 2.0)); return (cr + 1.0) + u * (1.0 - cr); };
+            double good = (std::max)(0.0, g_inj.leg_out[0] ? tr : tl);
+            double have = f((std::max)(0.0, tl) + (std::max)(0.0, tr)), ref = f(2.0 * good);
+            g_inj.leg_speed = have > 1e-3 ? (std::min)(1.0, (std::max)(0.0, cfg.injury_one_leg_speed * ref / have)) : cfg.injury_one_leg_speed;
+        }
+        bool changed = arm_was[0] != g_inj.arm[0] || arm_was[1] != g_inj.arm[1] || leg_was[0] != g_inj.leg_out[0] || leg_was[1] != g_inj.leg_out[1] ||
+                       back_was != g_inj.back_broken || dead_was != g_inj.dead || down_was != g_inj.down;
+        double now = hsvr::now_seconds();
+        bool any = g_inj.arm[0] || g_inj.arm[1] || g_inj.leg_out[0] || g_inj.leg_out[1] || g_inj.back_broken || g_inj.dead;
+        if (changed || (any && now - g_inj.last_log >= 2.0))
+        {
+            g_inj.last_log = now;
+            static const char* arm_text[3] = {"ok", "DISLOCATED (flops, swing to put back)", "USELESS (hangs)"};
+            HSVR_LOG("Injury%s: left arm %s (health %.0f, broken %d, dislocated %d, disloc state %.2f), right arm %s (health %.0f, broken %d, dislocated %d, disloc state %.2f); "
+                     "left leg %s (health %.0f, broken %d, dislocated %d), right leg %s (health %.0f, broken %d, dislocated %d); back broken %d; walk speed x%.2f; %s",
+                     changed ? " changed" : "", arm_text[g_inj.arm[0]], hp[0], (int)brk[0], (int)dis[0], pawn_double(pawn, STR("Arm L Dislocation State")),
+                     arm_text[g_inj.arm[1]], hp[1], (int)brk[1], (int)dis[1], pawn_double(pawn, STR("Arm R Dislocation State")),
+                     g_inj.leg_out[0] ? "OUT" : "ok", hp[2], (int)brk[2], (int)dis[2], g_inj.leg_out[1] ? "OUT" : "ok", hp[3], (int)brk[3], (int)dis[3],
+                     (int)g_inj.back_broken, g_inj.leg_speed, g_inj.dead ? "DEAD (ragdoll)" : (g_inj.down ? "DOWN (both legs: fallen)" : "standing"));
+        }
+    }
+
+    void set_simulate(UObject* mesh, bool simulate, bool report);
+    // Dead, or fallen with both legs out: the mod stops posing him (the game's body, physics on, as
+    // in the flat game) and the view follows his head bone. Back up when a leg recovers (not dead).
+    // Returns true while he is down (pose_body does nothing else then).
+    bool injury_down_tick(const hsvr::Config& cfg, UObject* pawn, UObject* mesh)
+    {
+        injury_update(cfg, pawn);
+        if (g_inj.down)
+        {
+            if (!g_inj.down_now)
+            {
+                g_inj.down_now = true;
+                for (auto& [bone, n] : g_pose.chain) node_release(n);
+                for (int side = 0; side < 2; ++side) ghost_hand(side, cfg, false, hsvr::Vec3{}, hsvr::Quat{});
+                set_simulate(mesh, true, true);
+                g_pose_anchor_fixed = false; // the view sits on his head bone
+                g_turn_valid = false;
+                HSVR_LOG("Injury: %s: physics on, the mod stops posing you; the view stays on his head", g_inj.dead ? "you died, he ragdolls" : "both legs out, he falls over");
+            }
+            g_pose_active.store(false);
+            g_hold_capsule.store(false);
+            return true;
+        }
+        if (g_inj.down_now)
+        {
+            g_inj.down_now = false;
+            set_simulate(mesh, false, true);
+            g_pose_anchor_fixed = true;
+            feet_reset();
+            HSVR_LOG("Injury: a leg recovered: physics off, posed from the headset again");
+        }
+        return false;
+    }
+
+    // The wrist point of a hurt arm, from his shoulder S (radius R = his arm): mode 2 hangs and swings
+    // under gravity; mode 1 (dislocated) flops after the controller's wrist point.
+    hsvr::Vec3 injury_arm_point(int side, int mode, const hsvr::Config& cfg, const hsvr::Vec3& S, double R, const hsvr::Vec3& controller_wrist,
+                                const hsvr::Quat& body, double out)
+    {
+        using namespace hsvr;
+        double now = now_seconds(), dt = now - g_inj.t[side];
+        g_inj.t[side] = now;
+        Vec3& p = g_inj.p[side];
+        Vec3& v = g_inj.v[side];
+        if (!g_inj.p_valid[side] || !(dt > 0.0 && dt < 0.2))
+        {
+            p = g_pose.target[side];
+            if (length(p - S) < 1.0 || length(p - S) > 3.0 * R) p = controller_wrist;
+            v = Vec3{};
+            g_inj.p_valid[side] = true;
+            dt = 0.0;
+        }
+        int n = (std::max)(1, (int)std::ceil(dt / 0.004));
+        double h = dt / n;
+        double w = 1.0 / (std::max)(0.02, cfg.injury_dislocated_follow_s);
+        Vec3 chest = socket_location(g_pose.driver, bone_fname("spine_05"));
+        Quat inv = body.inverse();
+        double min_side = inv.rotate(S - chest).y * out - 4.0;
+        for (int i = 0; i < n; ++i)
+        {
+            Vec3 acc;
+            if (mode == 1)
+            {
+                Vec3 want = controller_wrist - Vec3{0.0, 0.0, cfg.injury_dislocated_sag_cm};
+                acc = (want - p) * (w * w) - v * (2.0 * 0.5 * w); // under-damped: it flops
+            }
+            else
+                acc = Vec3{0.0, 0.0, -980.0} - v * 2.5;
+            v = v + acc * h;
+            p = p + v * h;
+            Vec3 d = p - S;
+            double L = length(d);
+            if (L > R && L > 1e-6)
+            {
+                Vec3 nrm = d * (1.0 / L);
+                p = S + nrm * R;
+                double vr = dot(v, nrm);
+                if (vr > 0.0) v = v - nrm * vr;
+            }
+            // Not into his side: no nearer his middle than his shoulder (less 4 cm).
+            Vec3 lp = inv.rotate(p - chest);
+            if (lp.y * out < min_side)
+            {
+                lp.y = out * min_side;
+                p = chest + body.rotate(lp);
+                Vec3 lv = inv.rotate(v);
+                if (lv.y * out < 0.0) lv.y = 0.0;
+                v = body.rotate(lv);
+            }
+        }
+        return p;
+    }
+
     void pose_arm(int side, const hsvr::Config& cfg, const hsvr::ControllerState& state, const hsvr::Quat& body, const hsvr::Quat& component_inv)
     {
         using namespace hsvr;
@@ -2434,12 +2651,27 @@ namespace
             cur[side] = cur[side] + (next[side] - cur[side]) * 0.5;
             grip = grip + cur[side];
         }
+        // A badly hurt arm: the controller no longer places it (it hangs, or flops when dislocated).
+        bool limp = false;
+        if (g_inj.arm[side] != 0 && g_inj.pawn == g_pose.pawn)
+        {
+            Vec3 wrist_off{cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm};
+            Vec3 Sx = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
+            Vec3 p = injury_arm_point(side, g_inj.arm[side], cfg, Sx, (a.upper_length + a.lower_length) * 0.97, grip + grip_rot.rotate(wrist_off), body, out);
+            Vec3 dir = p - Sx;
+            dir = length(dir) > 1e-3 ? dir * (1.0 / length(dir)) : Vec3{0.0, 0.0, -1.0};
+            grip_rot = (quat_from_two(Vec3{0.0, 0.0, -1.0}, dir) * body).normalized(); // fingers down the arm, thumb forward
+            grip = p - grip_rot.rotate(wrist_off);
+            limp = true;
+        }
+        else
+            g_inj.p_valid[side] = false;
         Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
         g_pose.raw_target[side] = target;
         Vec3 S = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
         // Your reach scaled to his (once your arm length is measured): from his shoulder, your hand is
         // as far out along his arm as it is along yours.
-        if (cfg.pose_user_arm_cm > 1.0 && tracked) target = S + (target - S) * ((a.upper_length + a.lower_length) / cfg.pose_user_arm_cm);
+        if (cfg.pose_user_arm_cm > 1.0 && tracked && !limp) target = S + (target - S) * ((a.upper_length + a.lower_length) / cfg.pose_user_arm_cm);
         g_pose.target[side] = target;
         g_pose.reach_target[side] = target;
         S = shoulder_reach(side, cfg, S, target, component_inv);
@@ -3100,6 +3332,8 @@ namespace
             g_pose.chain = final_chain_nodes(instance);
             g_pose.calibrated = pose_calibrate(cfg);
         }
+        // Dead, or both legs out: he falls (physics on) and nothing below poses him.
+        if (g_pose.calibrated && injury_down_tick(cfg, pawn, mesh)) return;
         // Keep physics off: the game turns it on again after a spawn and when it rescales the body.
         double now = now_seconds();
         if (now - g_pose.last_check >= 0.5)
@@ -3567,6 +3801,17 @@ namespace
         g_stick_walking = m > dz;
         if (!g_stick_walking) return;
         double scale = (std::min)(1.0, (m - dz) / (1.0 - dz));
+        // A bad leg: slower (injury_one_leg_speed); both: no walking at all.
+        if (g_inj.pawn == pawn && g_inj.leg_speed < 1.0)
+        {
+            scale *= g_inj.leg_speed;
+            HSVR_LOG_EVERY(2.0, "Walk: injured leg(s): stick x%.2f", g_inj.leg_speed);
+            if (scale <= 1e-3)
+            {
+                g_stick_walking = false;
+                return;
+            }
+        }
         double yaw = g_turn_valid ? wrap_deg(g_turn_yaw + g_body_rel) : actor_heading(pawn);
         if (cfg.pose_move_relative == "head")
         {
@@ -8936,6 +9181,15 @@ namespace
         for (int side = 0; side < 2; ++side)
         {
             const hsvr::HandState& h = state.hand[side];
+            if (g_inj.pawn == pawn && g_inj.arm[side] != 0)
+            {
+                // A hurt arm makes no fist.
+                g_finger_fist[side] = false;
+                g_slap_until[side] = -10.0;
+                g_fist_open[side].store(false);
+                if (is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))) remove_fist(side, pawn, "arm hurt");
+                continue;
+            }
             float index = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : h.curl[1];
             float grip = g_fake_squeeze[side].load() >= 0.0f ? g_fake_squeeze[side].load() : (h.curl[2] + h.curl[3] + h.curl[4]) / 3.0f;
             float thumb = g_fake_thumb[side].load() >= 0.0f ? g_fake_thumb[side].load() : h.curl[0];
@@ -9064,6 +9318,22 @@ namespace
         for (int side = 0; side < 2; ++side)
         {
             float squeeze = g_fake_squeeze[side].load() >= 0.0f ? g_fake_squeeze[side].load() : state.hand[side].squeeze;
+            bool hurt = g_inj.pawn == pawn && g_inj.arm[side] != 0; // a hurt arm can't hold: it lets go
+            if (hurt) squeeze = 0.0f;
+            if (hurt && !held[side])
+            {
+                // Held without a squeeze (a weapon he spawned with): it goes too.
+                UObject* m = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+                if (m && !is_fist(m))
+                {
+                    if (g_two.active && (side == g_two.second || side == g_two.main)) end_two_hand("arm hurt");
+                    HSVR_LOG("Injury: %s arm hurt: drops %ls", side == 0 ? "left" : "right", m->GetName().c_str());
+                    drop_weapon(side, pawn, false);
+                }
+                else if (!m && bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")))
+                    release_object(side, pawn);
+                if (scabbard_held(side)) scabbard_let_go(side, "arm hurt");
+            }
             bool now_held = held[side] ? squeeze > 0.35f : squeeze > 0.6f;
             if (now_held == held[side]) continue;
             held[side] = now_held;
@@ -9105,10 +9375,11 @@ namespace
                     if (cfg.pose_grab_release_drops && hand_over(pawn)) continue;
                     end_two_hand("the other hand let go");
                 }
-                if (mine && cfg.pose_grab_release_drops && holster_snap(side, pawn, mesh, mine, cfg)) continue;
-                if (mine && cfg.pose_grab_release_drops)
+                if (mine && cfg.pose_grab_release_drops && !hurt && holster_snap(side, pawn, mesh, mine, cfg)) continue;
+                if (mine && (cfg.pose_grab_release_drops || hurt))
                 {
-                    bool throw_it = cfg.pose_throw && g_hand_world_v[side] >= cfg.pose_throw_speed && !is_fist(mine);
+                    if (hurt) HSVR_LOG("Injury: %s arm hurt: its hand lets go", hand);
+                    bool throw_it = !hurt && cfg.pose_throw && g_hand_world_v[side] >= cfg.pose_throw_speed && !is_fist(mine);
                     drop_weapon(side, pawn, throw_it);
                     HSVR_LOG("Grab: %s grip let go: %s %ls (hand %.1f m/s)", hand, throw_it ? "threw" : "dropped", mine->GetName().c_str(), g_hand_world_v[side]);
                 }
@@ -17335,6 +17606,34 @@ namespace
                 else known = false;
                 if (got_n < 3 || !known) HSVR_LOG("EXPECT FAIL: could not read \"%s\"", entry.command.c_str());
                 else HSVR_LOG("EXPECT %s: %s %s %g (is %g)%s%s", pass ? "PASS" : "FAIL", what, op, want, value, label[0] ? " - " : "", label);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.pawn_set ", 0) == 0)
+            {
+                // Test: sets one of your character's variables once (number or 0/1 yes/no), e.g.
+                // "hsvr.pawn_set Arm L Dislocated 1": the game then carries on from there.
+                std::string rest = entry.command.substr(14);
+                size_t sp = rest.find_last_of(' ');
+                UObject* pawn = nullptr;
+                find_pawn_mesh(&pawn);
+                if (sp == std::string::npos || !pawn) continue;
+                std::wstring name(rest.begin(), rest.begin() + sp);
+                double value = atof(rest.c_str() + sp + 1);
+                bool ok = set_variable(pawn, name.c_str(), value, nullptr, nullptr);
+                HSVR_LOG("Script: hsvr.pawn_set %ls = %g (%s)", name.c_str(), value, ok ? "set" : "NOT FOUND");
+                continue;
+            }
+            if (entry.command == "hsvr.player_kill")
+            {
+                // Test: you die the game's own way (Health 0, then his Death event).
+                UObject* pawn = nullptr;
+                find_pawn_mesh(&pawn);
+                if (!pawn) continue;
+                set_bool_property(pawn, STR("Immortal"), false);
+                set_variable(pawn, STR("Health"), 0.0, nullptr, nullptr);
+                Call death(pawn, STR("Death"));
+                bool ok = death.run();
+                HSVR_LOG("Script: hsvr.player_kill: Health 0, Death %s; DED now %d", ok ? "called" : "NOT FOUND", (int)bool_property(pawn, STR("DED")));
                 continue;
             }
             if (entry.command.rfind("hsvr.pawn_pin ", 0) == 0)
