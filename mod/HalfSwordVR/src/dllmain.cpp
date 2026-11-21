@@ -9742,6 +9742,7 @@ namespace
         bool have_last_hand = false;
         double ride = 0.0, ride_off = 0.0; // how much his drawn hand rides the held thing, and how far it is
         double far_since = -1.0;            // since when the held thing has been past pose_grab_ride_max_cm
+        double far_base = -1.0;             // smallest hand gap since seating: the slip limit counts from it
     };
     WrapGrab g_wrap[2];
     const double kWrapSamples[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
@@ -10146,7 +10147,12 @@ namespace
         // jump back to your controller, the game's joint yank the body after it, the gap close and the
         // ride come back, over and over (Matthew 2026-11-21 16:03Z: throat grab, hand raised, the
         // Willie "glitched out").
-        if (off > cfg.pose_grab_ride_max_cm) { if (g.far_since < 0.0) g.far_since = now_seconds(); }
+        // The limit counts from the smallest gap since seating, not from 0: a heavy torso grab starts
+        // 12-25 cm from your controller and the pull can't close that in pose_grab_slip_s (072c2c3
+        // test: chest grabs slipped at 0.6 s with the hand still). Only the body pulling FURTHER away
+        // than that (you raising/yanking your hand, or him falling away) slips the grip.
+        if (g.far_base < 0.0 || off < g.far_base) g.far_base = off;
+        if (off - g.far_base > cfg.pose_grab_ride_max_cm) { if (g.far_since < 0.0) g.far_since = now_seconds(); }
         else g.far_since = -1.0;
         g.ride = u;
         g.ride_off = off;
@@ -10187,7 +10193,7 @@ namespace
             {
                 ++g.seat_tries;
                 g.seated = seat_on_palm(side, pawn, g, cfg);
-                if (g.seated) g.seated_at = now;
+                if (g.seated) { g.seated_at = now; g.far_base = -1.0; g.far_since = -1.0; }
             }
             else if (comp && g.on && g.seated && cfg.log_wrap && g.checks < 3 && now - g.seated_at >= 0.1 + 0.4 * g.checks)
             {
@@ -10245,7 +10251,7 @@ namespace
             }
             if (comp && g.on && g.seated && g.far_since >= 0.0 && now - g.far_since > cfg.pose_grab_slip_s)
             {
-                HSVR_LOG("Grab hold: %s hand: the held body is %.1f cm from your hand for %.2f s: the grip slips", L ? "left" : "right", g.ride_off, now - g.far_since);
+                HSVR_LOG("Grab hold: %s hand: the held body is %.1f cm from your hand (%.1f cm at its closest) for %.2f s: the grip slips", L ? "left" : "right", g.ride_off, g.far_base, now - g.far_since);
                 g.far_since = -1.0;
                 release_object(side, pawn);
                 comp = nullptr;
