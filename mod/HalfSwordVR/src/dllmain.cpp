@@ -1269,6 +1269,8 @@ namespace
     std::atomic<bool> g_hold_capsule{false}; // see "The capsule stays where you are" below
     // Posed and calibrated this frame (crouch and body turning run around his tick).
     std::atomic<bool> g_pose_active{false};
+    // Until when (now_seconds) the pose checks physics every tick after a strength gain (muscle_gain_post).
+    double g_physics_watch_until = -1.0;
     bool g_body_turning = false;
     // Crouch: how far your headset is below where you stood at recentering (cm, 0 standing).
     double g_crouch_drop = 0.0;
@@ -3118,6 +3120,14 @@ namespace
         }
         // Keep physics off: the game turns it on again after a spawn and when it rescales the body.
         double now = now_seconds();
+        // For a moment after a strength gain the check runs every tick: the game's rescale switches his
+        // ragdoll on ~70 ms after Gain Muscle returns (test eb248e7), past the hook.
+        if (now < g_physics_watch_until && now - g_pose.last_check < 0.5 && is_simulating(mesh, "pelvis") == 1)
+        {
+            set_simulate(mesh, false);
+            HSVR_LOG("Strength: the game switched his physics on %.0f ms after the gain; switched off this tick",
+                     (now - (g_physics_watch_until - 1.5)) * 1000.0);
+        }
         if (now - g_pose.last_check >= 0.5)
         {
             g_pose.last_check = now;
@@ -8096,6 +8106,7 @@ namespace
         if (!context.Context || context.Context != g_pose.pawn || !g_pose.mesh || !g_pose_active.load()) return;
         int was = is_simulating(g_pose.mesh, "pelvis");
         if (was == 1) set_simulate(g_pose.mesh, false);
+        g_physics_watch_until = hsvr::now_seconds() + 1.5;
         HSVR_LOG("Strength: %s ran on him: Muscle Rate now %.4f, Mass Scale %.4f, physics %s", static_cast<const char*>(which),
                  read_number_variable(g_pose.pawn, STR("Muscle Rate")), read_number_variable(g_pose.pawn, STR("Mass Scale (Set in BP)")),
                  was == 1 ? "was switched on; switched off again" : "stayed off");
