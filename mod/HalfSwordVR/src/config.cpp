@@ -569,6 +569,7 @@ namespace hsvr
         num("pose_throw_multiplier", c.pose_throw_multiplier);
         flag("pose_draw", c.pose_draw);
         num("pose_draw_touch_cm", c.pose_draw_touch_cm);
+        num("pose_draw_zone_cm", c.pose_draw_zone_cm);
         num("pose_draw_settle_s", c.pose_draw_settle_s);
         num("pose_draw_step_cm", c.pose_draw_step_cm);
         num("pose_draw_force_scale", c.pose_draw_force_scale);

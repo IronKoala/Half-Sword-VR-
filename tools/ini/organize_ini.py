@@ -360,7 +360,8 @@ LAYOUT = [
     ]),
     ("Drawing, sheathing, belt", "", [
         ("pose_draw", ""),
-        ("pose_draw_touch_cm", ""),
+        ("pose_draw_touch_cm", "A squeeze this near a scabbarded weapon's grip on your belt draws it (cm)."),
+        ("pose_draw_zone_cm", "A squeeze this near any part of a belt weapon without a scabbard, or a shield on your back, takes it off you (cm)."),
         ("pose_draw_settle_s", ""),
         ("pose_draw_step_cm", ""),
         ("pose_draw_force_scale", ""),

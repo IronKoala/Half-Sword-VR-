@@ -648,7 +648,12 @@ namespace hsvr
         // Drawing from a scabbard: a squeeze within this distance of a sheathed weapon's grip draws it
         // (pulled out along the scabbard; the game releases it at 85%), eased into the hand over settle_s.
         bool pose_draw = true;
-        double pose_draw_touch_cm = 8.0;
+        double pose_draw_touch_cm = 10.0;
+        // A weapon WITHOUT a scabbard (axe, mace, hammer on the belt) or a shield on the back is taken off
+        // the body B&S-style (its HolderHips/HolderBack: playerGrabFromHandle false, the holder's touch
+        // zone, Interactable.touchRadius 0.1 m): a squeeze within this distance of any part of it takes it,
+        // and the hand lands on its nearest handle (Matthew 2026-11-21: "I can't grab weapons off my hip").
+        double pose_draw_zone_cm = 10.0;
         double pose_draw_settle_s = 0.15;
         double pose_draw_step_cm = 6.0; // the most it moves along the scabbard per tick
         double pose_draw_force_scale = 0.3; // the hold's force/torque caps while drawing or sheathing
