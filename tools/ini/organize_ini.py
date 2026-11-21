@@ -208,6 +208,7 @@ LAYOUT = [
         ("input_hand_tracking", "Read SteamVR's finger tracking when offered."),
         ("pose_fingers_tracked", "1 = free fingers follow yours."),
         ("pose_fingers_tau_s", ""),
+        ("pose_fingers_per_joint", "1 = with finger tracking, each finger joint follows your own."),
         ("pose_finger_schedule", "1 = finger joints close in a natural order (no round 'circle' fingers)."),
         ("pose_finger_mcp_lag", ""),
         ("pose_finger_pip_full", ""),
@@ -231,6 +232,7 @@ LAYOUT = [
         ("pose_grab_ride_from_cm", ""),
         ("pose_grab_ride_full_cm", ""),
         ("pose_grab_ride_max_cm", ""),
+        ("pose_grab_slip_s", ""),
         ("pose_fingers_anim_only", ""),
     ]),
     ("Holding: weight, strength, stamina", "The main feel values are in Quick settings.", [

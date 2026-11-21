@@ -2480,6 +2480,17 @@ namespace
                 double t = now * w + side * 0.3;
                 local = Vec3{45.0, out * 10.0 + 55.0 * std::sin(t), 5.0 - 30.0 * std::fabs(std::sin(t))};
             }
+            else if (mode == 22)
+            {
+                // Grab-slip test: hsvr.arm_move 22 <up cm> <cm/s>: as mode 1, the right hand rising <up> cm
+                // at <cm/s> (default 80) from when the command came.
+                static int epoch_seen = -1;
+                static double since = 0.0;
+                if (epoch_seen != g_fake_arm_epoch.load()) epoch_seen = g_fake_arm_epoch.load(), since = now;
+                double speed = g_fake_thrust_pitch.load() > 0.0 ? g_fake_thrust_pitch.load() : 80.0;
+                double up = side == 1 ? (std::min)(g_fake_two_up.load(), speed * (now - since)) : 0.0;
+                local = Vec3{40.0, out * 15.0, -10.0 + up};
+            }
             else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
             else if (mode == 5) local = Vec3{45.0, out * 15.0, -175.0}; // under the floor: the weapon is stopped by the ground
             else if (mode == 6) local = Vec3{62.0 + 8.0 * std::sin(now * 1.0), out * 10.0, 5.0}; // reaching out past his arm: the shoulder reaches
@@ -9183,6 +9194,9 @@ namespace
         double target[5] = {0, 0, 0, 0, 0};
         double splay = 0.0, target_splay = 0.0;
         double at = -1.0;
+        // Per joint from SteamVR's hand skeleton (pose_fingers_per_joint), smoothed; fingers 1..4.
+        bool have_joint = false;
+        double joint[5][3] = {};
     };
     FingerWant g_fwant[2];
     std::atomic<float> g_fake_thumb[2] = {-1.0f, -1.0f}; // test: hsvr.thumb <0|1> <curl>, -1 = the controller
@@ -9727,6 +9741,8 @@ namespace
         hsvr::Vec3 last_hand;
         bool have_last_hand = false;
         double ride = 0.0, ride_off = 0.0; // how much his drawn hand rides the held thing, and how far it is
+        double far_since = -1.0;            // since when the held thing has been past pose_grab_ride_max_cm
+        double far_base = -1.0;             // smallest hand gap since seating: the slip limit counts from it
     };
     WrapGrab g_wrap[2];
     const double kWrapSamples[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
@@ -9871,7 +9887,7 @@ namespace
 
     // In the copy node's update: solve the next finger due, and give the curls to pose with.
     // Returns the wrap's weight (0 = the hand's own curls).
-    double wrap_fingers(const XForm96* B, int side, double joint_out[5][3], const double own[5], double& splay)
+    double wrap_fingers(const XForm96* B, int side, double joint_out[5][3], const double own[5], double& splay, const double (*own_joint)[3] = nullptr)
     {
         using namespace hsvr;
         WrapGrab& g = g_wrap[side];
@@ -9930,7 +9946,8 @@ namespace
         for (int f = 0; f < 5; ++f)
         {
             double base[3] = {(std::max)(-g_finger_lift[f], (std::min)(1.0, own[f])), (std::max)(0.0, (std::min)(1.0, own[f])), (std::max)(0.0, (std::min)(1.0, own[f]))};
-            if (f != 0 && g_finger_schedule.load()) finger_schedule(own[f], base);
+            if (f != 0 && own_joint) for (int k = 0; k < 3; ++k) base[k] = own_joint[f][k];
+            else if (f != 0 && g_finger_schedule.load()) finger_schedule(own[f], base);
             double ww = g.solved[f] ? w : 0.0;
             for (int k = 0; k < 3; ++k) joint_out[f][k] = base[k] + (g.curls[f][k] - base[k]) * ww;
         }
@@ -10125,8 +10142,18 @@ namespace
         double by_gap = (std::max)(0.0, (std::min)(1.0, (off - from) / (full - from)));
         double by_time = wrap_smooth((now_seconds() - g.seated_at) / (std::max)(0.01, cfg.pose_wrap_ease_s));
         double u = by_gap * by_time;
-        // Too far (past your reach of it): left to the slip rule, the hand stays yours.
-        if (off > cfg.pose_grab_ride_max_cm) u = 0.0;
+        // Too far (past ride_max_cm): the grip slips (his framework: REACH for SLIP_TIME), let go in
+        // wrap_tick. The hand keeps riding until then: dropping the ride at the limit made the hand
+        // jump back to your controller, the game's joint yank the body after it, the gap close and the
+        // ride come back, over and over (Matthew 2026-11-21 16:03Z: throat grab, hand raised, the
+        // Willie "glitched out").
+        // The limit counts from the smallest gap since seating, not from 0: a heavy torso grab starts
+        // 12-25 cm from your controller and the pull can't close that in pose_grab_slip_s (072c2c3
+        // test: chest grabs slipped at 0.6 s with the hand still). Only the body pulling FURTHER away
+        // than that (you raising/yanking your hand, or him falling away) slips the grip.
+        if (g.far_base < 0.0 || off < g.far_base) g.far_base = off;
+        if (off - g.far_base > cfg.pose_grab_ride_max_cm) { if (g.far_since < 0.0) g.far_since = now_seconds(); }
+        else g.far_since = -1.0;
         g.ride = u;
         g.ride_off = off;
         if (u <= 0.0) return false;
@@ -10166,7 +10193,7 @@ namespace
             {
                 ++g.seat_tries;
                 g.seated = seat_on_palm(side, pawn, g, cfg);
-                if (g.seated) g.seated_at = now;
+                if (g.seated) { g.seated_at = now; g.far_base = -1.0; g.far_since = -1.0; }
             }
             else if (comp && g.on && g.seated && cfg.log_wrap && g.checks < 3 && now - g.seated_at >= 0.1 + 0.4 * g.checks)
             {
@@ -10221,6 +10248,13 @@ namespace
                              L ? "left" : "right", lm(STR("bSoftConstraint")), lm(STR("Stiffness")), lm(STR("Damping")), lm(STR("Restitution")),
                              nested_number(joint, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("bEnableProjection")}), mass.number());
                 }
+            }
+            if (comp && g.on && g.seated && g.far_since >= 0.0 && now - g.far_since > cfg.pose_grab_slip_s)
+            {
+                HSVR_LOG("Grab hold: %s hand: the held body is %.1f cm from your hand (%.1f cm at its closest) for %.2f s: the grip slips", L ? "left" : "right", g.ride_off, g.far_base, now - g.far_since);
+                g.far_since = -1.0;
+                release_object(side, pawn);
+                comp = nullptr;
             }
             if (comp && g.on && g.seated && g.drive && cfg.pose_grab_drive) grab_drive(side, pawn, g, cfg);
             if (!comp && g.on)
@@ -10378,7 +10412,17 @@ namespace
             const FingerWant& w = g_fwant[side];
             if (!w.on || now - w.at > 0.2) continue;
             double joint[5][3], splay = w.splay;
-            if (wrap_fingers(a->data, side, joint, w.curl, splay) > 0.0) pose_hand_fingers(a->data, side, w.curl, splay, log, joint);
+            if (wrap_fingers(a->data, side, joint, w.curl, splay, w.have_joint ? w.joint : nullptr) > 0.0) pose_hand_fingers(a->data, side, w.curl, splay, log, joint);
+            else if (w.have_joint)
+            {
+                // Your skeleton's joints, the thumb from its one curl.
+                double own[5][3];
+                for (int f = 1; f < 5; ++f)
+                    for (int k = 0; k < 3; ++k) own[f][k] = w.joint[f][k];
+                own[0][0] = (std::max)(-g_finger_lift[0], (std::min)(1.0, w.curl[0]));
+                own[0][1] = own[0][2] = (std::max)(0.0, (std::min)(1.0, w.curl[0]));
+                pose_hand_fingers(a->data, side, w.curl, w.splay, log, own);
+            }
             else pose_hand_fingers(a->data, side, w.curl, w.splay, log);
         }
     }
@@ -10431,10 +10475,24 @@ namespace
             if (!free) { w.on = false; w.at = now; continue; }
             double dt = w.on ? (std::min)(3.0 / 90.0, (std::max)(0.0, now - w.at)) : 1.0; // MAX_DT 3/90 s
             double k = cfg.pose_fingers_tau_s > 0.0 ? 1.0 - std::exp(-dt / cfg.pose_fingers_tau_s) : 1.0;
+            double k_tau = k;
             for (int f = 0; f < 5; ++f)
             {
                 w.target[f] = target[f];
                 w.curl[f] = w.on ? w.curl[f] + (target[f] - w.curl[f]) * k : target[f];
+            }
+            {
+                bool fake = false;
+                for (int f = 0; f < 5; ++f) fake = fake || g_fake_fingers[side][f].load() >= 0.0f;
+                bool per_joint = cfg.pose_fingers_per_joint && h.joints_valid && cfg.input_hand_tracking && !fake;
+                for (int f = 1; f < 5; ++f)
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        double tj = h.joint_frac[f][k];
+                        w.joint[f][k] = (w.on && w.have_joint) ? w.joint[f][k] + (tj - w.joint[f][k]) * k_tau : tj;
+                    }
+                for (int k = 0; k < 3; ++k) w.joint[0][k] = 0.0;
+                w.have_joint = per_joint;
             }
             w.target_splay = 0.5 * open;
             w.splay = w.on ? w.splay + (w.target_splay - w.splay) * k : w.target_splay;
