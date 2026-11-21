@@ -7647,6 +7647,43 @@ namespace
         HSVR_LOG("Player damage: his Get Damage counts his posed body as simulating (player_takes_damage)");
     }
 
+    // ---- His strength gains keep his body posed ----------------------------------------------------
+    // When his banked training passes 0.01, the game's Event Gain Muscle reloads Muscle Rate and runs
+    // Rescale Character, which turns his ragdoll back on (SetAllBodiesBelowSimulatePhysics, character_stats.md
+    // §1). The pose check catches that within 0.5 s; these hooks switch it off right after either call on
+    // him, so a strength gain mid-fight never lets his body drop for a moment.
+    void muscle_gain_post(Unreal::UnrealScriptFunctionCallableContext& context, void* which)
+    {
+        if (!context.Context || context.Context != g_pose.pawn || !g_pose.mesh || !g_pose_active.load()) return;
+        int was = is_simulating(g_pose.mesh, "pelvis");
+        if (was == 1) set_simulate(g_pose.mesh, false);
+        HSVR_LOG("Strength: %s ran on him: Muscle Rate now %.4f, Mass Scale %.4f, physics %s", static_cast<const char*>(which),
+                 read_number_variable(g_pose.pawn, STR("Muscle Rate")), read_number_variable(g_pose.pawn, STR("Mass Scale (Set in BP)")),
+                 was == 1 ? "was switched on; switched off again" : "stayed off");
+    }
+    void install_muscle_hooks()
+    {
+        static bool installed = false;
+        static double last_try = -10.0;
+        if (installed) return;
+        double now = hsvr::now_seconds();
+        if (now - last_try < 2.0) return;
+        last_try = now;
+        UFunction* gain = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:Event Gain Muscle"));
+        UFunction* rescale = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:Rescale Character"));
+        if (!gain && !rescale)
+        {
+            static int tries = 0;
+            if (++tries == 5) HSVR_LOG("Strength: Gain Muscle / Rescale Character not found; the pose check alone keeps physics off after a gain");
+            return;
+        }
+        installed = true;
+        static const char kGain[] = "Gain Muscle", kRescale[] = "Rescale Character";
+        if (gain) UObjectGlobals::RegisterHook(gain, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, &muscle_gain_post, (void*)kGain);
+        if (rescale) UObjectGlobals::RegisterHook(rescale, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, &muscle_gain_post, (void*)kRescale);
+        HSVR_LOG("Strength: watching his strength gains (Gain Muscle %s, Rescale Character %s)", gain ? "hooked" : "MISSING", rescale ? "hooked" : "MISSING");
+    }
+
     // ---- Blood at his own stumps ------------------------------------------------------------------
     // Dismember Function Delayed hides the cut-off bones on his mesh (HideBoneByName) and calls Spawn
     // Blood with the closest bone to the cut, often one of the cut-off ones (foot_r, neck_01). The
@@ -9989,8 +10026,16 @@ namespace
     {
         static UObject* last_pawn = nullptr;
         static bool last_pawn_tracked = track_freed(&last_pawn);
-        static double last = 1.0;
-        if (pawn == last_pawn) return last;
+        static double last = 1.0, last_mass_scale = -1.0;
+        // Mass Scale grows with his strength (the game's Gain Muscle -> Rescale Character sets it again from
+        // Muscle Rate mid-fight), so it is read every time and the factor redone when it changes, not kept
+        // per pawn (before 2026-11-21 a strength gain only reached the hold after a respawn).
+        if (pawn == last_pawn)
+        {
+            FProperty* mp = prop_chain(pawn, STR("Mass Scale (Set in BP)"));
+            double ms_now = mp ? number_property(pawn, mp) : last_mass_scale;
+            if (std::fabs(ms_now - last_mass_scale) < 1e-4) return last;
+        }
         double scale = -1.0, mass_scale = -1.0;
         if (FProperty* p = prop_chain(pawn, STR("Character Scale (Set in BP)")))
         {
@@ -10003,17 +10048,58 @@ namespace
         }
         if (FProperty* p = prop_chain(pawn, STR("Mass Scale (Set in BP)"))) mass_scale = number_property(pawn, p);
         // Read too early (before the game sets them) they are 0: try again next time.
-        if (!(scale > 0.3 && scale < 3.0) || !(mass_scale > 0.1 && mass_scale < 5.0)) return 1.0;
+        if (!(scale > 0.3 && scale < 3.0) || !(mass_scale > 0.1 && mass_scale < 5.0)) return pawn == last_pawn ? last : 1.0;
         auto arm = [](double sc, double ms) { return (2.61 * sc * sc * sc + 1.0) * ms; };
         double f = arm(scale, mass_scale) / arm(0.9375, 1.125);
         g_body_dims.scale = scale;
         g_body_dims.mass_scale = mass_scale;
         last_pawn = pawn;
         last = f;
+        last_mass_scale = mass_scale;
         HSVR_LOG("Strength: body size: Character Scale %.4f, Mass Scale %.3f -> arm mass %.2f kg vs %.2f kg for a default body -> hold x%.2f", scale, mass_scale,
                  arm(scale, mass_scale), arm(0.9375, 1.125), f);
         return f;
     }
+    // Strength training (character_stats.md §1; Willie ubergraph 11-19 listing @296713-299105): every tick
+    //   Muscle Growth Due += (|Movement Dislocation| x 100 + Stamina Burn x Stamina x 10 x (thrusting ? 0.1 : 1))
+    //                        x 1e-5 x 0.005 x dt x Muscles Growth Rate x SMH Energy / max(1, Muscle Rate + Due + 1)
+    //                        + min(Nutrients Due - 2, 0) x dt x 2e-6 x MRC(Fat Rate, -1..10 -> 1..0.1)
+    // and once |Due| passes 0.01 the game's Gain Muscle moves it into Muscle Rate (and the passport on save).
+    // Stamina Burn is the sum of Stamina Burn Swing R/L, Thrust R/L, Lower Body and |Control Rotation Z
+    // Additional| (@317774), so VR swinging trains him only if the hand burn reaches Stamina Burn Swing R/L.
+    // This line shows every input, and the gain a minute they make, every strength_log_seconds.
+    void strength_growth_log(UObject* pawn, const hsvr::Config& cfg)
+    {
+        if (!pawn || cfg.strength_log_seconds <= 0.0) return;
+        static double last = -1.0;
+        double now = hsvr::now_seconds();
+        if (last >= 0.0 && now - last < cfg.strength_log_seconds) return;
+        last = now;
+        auto num = [&](const TCHAR* n) {
+            FProperty* p = prop_chain(pawn, n);
+            return p ? number_property(pawn, p) : std::nan("");
+        };
+        double md = std::nan("");
+        if (FProperty* p = prop_chain(pawn, STR("Movement Dislocation")))
+        {
+            if (p->GetClass().GetName() == STR("StructProperty"))
+            {
+                double v[3] = {0, 0, 0};
+                read_three(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal(), p, v);
+                md = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            }
+        }
+        double mr = num(STR("Muscle Rate")), due = num(STR("Muscle Growth Due")), burn = num(STR("Stamina Burn"));
+        double sr = num(STR("Stamina Burn Swing R")), sl = num(STR("Stamina Burn Swing L")), lower = num(STR("Stamina Burn Lower Body"));
+        double st = num(STR("Stamina")), mgr = num(STR("Muscles Growth Rate")), smh = num(STR("SMH Energy")), mass = num(STR("Mass Scale (Set in BP)"));
+        double div = (std::max)(1.0, mr + due + 1.0);
+        double k = 1e-5 * 0.005 * 60.0 * mgr * smh / div; // per minute, without the nutrients term
+        double from_move = md * 100.0 * k, from_burn = burn * st * 10.0 * k;
+        HSVR_LOG("Strength: training: Muscle Rate %.4f, Muscle Growth Due %.5f, Mass Scale %.4f | Stamina Burn %.3f (Swing R %.3f, Swing L %.3f, Lower Body %.3f), "
+                 "Stamina %.1f, Movement Dislocation %.1f, Muscles Growth Rate %.3f, SMH Energy %.3f -> gain a minute %.6f from effort + %.6f from movement",
+                 mr, due, mass, burn, sr, sl, lower, st, md, mgr, smh, from_burn, from_move);
+    }
+
     BodyStrength body_strength(UObject* pawn, int side, const hsvr::Config& cfg)
     {
         BodyStrength b;
@@ -14488,6 +14574,7 @@ namespace
             { HSVR_SUB("after:frames_tick"); frames_tick(context); }
         }
         { HSVR_SUB("after:install_player_damage"); install_player_damage(true); }
+        { HSVR_SUB("after:install_muscle_hooks"); install_muscle_hooks(); }
         { HSVR_SUB("after:stab_no_rubber_band"); stab_no_rubber_band(context); }
         { HSVR_SUB("after:cut_through_tick"); cut_through_tick(context); }
         { HSVR_SUB("after:stab_log_tick"); stab_log_tick(context); }
@@ -19730,6 +19817,7 @@ namespace
         { HSVR_SUB("tick:hide_own_head"); hide_own_head(cfg); }
         { HSVR_SUB("tick:grab_button"); grab_button(cfg, hsvr::controllers_state(), shared.menu_up.load()); }
         { HSVR_SUB("tick:watch_vars_tick"); watch_vars_tick(); }
+        if (g_pose.pawn) { HSVR_SUB("tick:strength_growth_log"); strength_growth_log(g_pose.pawn, cfg); }
         if (g_console_done)
         {
             { HSVR_SUB("tick:apply_picture_settings"); apply_picture_settings(cfg); }

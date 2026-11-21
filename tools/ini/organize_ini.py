@@ -455,6 +455,7 @@ LAYOUT = [
         ("stab_log", ""),
         ("hit_buzz_log", ""),
         ("perf_log_seconds", ""),
+        ("strength_log_seconds", ""),
         ("perf_events", "1 = with each Perf line, time the game's Blueprint calls per class (troubleshooting, ~1 ms a frame)."),
         ("perf_sample", "1 = with each Perf line, sample where the game thread spends its time (troubleshooting)."),
         ("perf_bp_segments", "1 = with each Perf line, time Willie's tick graph by bytecode segment (troubleshooting)."),

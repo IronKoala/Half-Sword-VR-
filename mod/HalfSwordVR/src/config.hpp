@@ -873,6 +873,9 @@ namespace hsvr
         // Every this many seconds a "Perf:" line: frame rate, the mod's own time per frame by part, and
         // how many objects, actors and simulating bodies the game has (0 = off).
         double perf_log_seconds = 10.0;
+        // Every this many seconds a "Strength: training:" line: his strength (Muscle Rate), the growth the
+        // game has banked (Muscle Growth Due) and every input to it (0 = off).
+        double strength_log_seconds = 10.0;
         // Troubleshooting: time every Blueprint call the game makes on its main thread, per class and
         // function ("Perf events" lines with each Perf line). Costs about 1 ms a frame in big fights.
         bool perf_events = false;

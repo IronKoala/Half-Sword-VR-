@@ -723,6 +723,7 @@ namespace hsvr
         num("hit_buzz_impulse_full", c.hit_buzz_impulse_full);
         flag("hit_buzz_log", c.hit_buzz_log);
         num("perf_log_seconds", c.perf_log_seconds);
+        num("strength_log_seconds", c.strength_log_seconds);
         flag("perf_events", c.perf_events);
         flag("perf_sample", c.perf_sample);
         flag("perf_bp_segments", c.perf_bp_segments);
