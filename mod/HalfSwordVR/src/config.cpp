@@ -729,6 +729,10 @@ namespace hsvr
         flag("perf_bp_segments", c.perf_bp_segments);
         num("hit_buzz_min_intensity", c.hit_buzz_min_intensity);
         num("hit_buzz_limb_min_ms", c.hit_buzz_limb_min_ms);
+        flag("whoosh_feed", c.whoosh_feed);
+        num("whoosh_dv_per_speed", c.whoosh_dv_per_speed);
+        flag("whoosh_log", c.whoosh_log);
+        num("whoosh_log_min_speed", c.whoosh_log_min_speed);
         flag("stab_assist", c.stab_assist);
         num("stab_min_speed_cms", c.stab_min_speed_cms);
         num("stab_min_into_cos", c.stab_min_into_cos);
