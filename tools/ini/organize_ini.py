@@ -21,6 +21,7 @@ SRC = Path(__file__).resolve().parents[2] / "mod" / "HalfSwordVR" / "src"
 LAYOUT = [
     ("Quick settings", "The ones you are most likely to change. Each is in only this place.", [
         ("test_room", "1 = boot straight into the test arena (passive foes, two weapon tables); 0 = normal game. Read at launch."),
+        ("test_room_button", "1 = in Free Mode the tavern's Train (the fencer) has a Train button that opens the test room."),
         ("test_room_foes", "Foes in the test room (1-10)."),
         ("render_scale", "Per-eye resolution as a share of what the headset asks for (1.0 = full)."),
         ("screen_percentage", "Share of the eye the engine draws before upscaling (50-100; -1 = game's own)."),
@@ -86,7 +87,7 @@ LAYOUT = [
         ("vr_auto_processes", "Process names that count as SteamVR running."),
         ("require_steamvr_running", "Older name of vr_auto (only read when present; 0 = same as vr_auto=0)."),
     ]),
-    ("Test room", "test_room and test_room_foes are in Quick settings.", [
+    ("Test room", "test_room, test_room_button and test_room_foes are in Quick settings.", [
         ("test_room_map", ""),
         ("test_room_tier", "Foes' tier: -1 random, 0 Beggar .. 8 Lord."),
         ("test_room_weapon_tier", "Table weapons' tier: -1 random 0-7, 0 Beggar .. 8 Lord."),

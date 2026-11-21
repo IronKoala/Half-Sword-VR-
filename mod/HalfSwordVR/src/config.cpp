@@ -382,6 +382,7 @@ namespace hsvr
         num("dev_fake_scale", c.dev_fake_scale);
         text("dev_script", c.dev_script);
         flag("test_room", c.test_room);
+        flag("test_room_button", c.test_room_button);
         text("test_room_map", c.test_room_map);
         integer("test_room_foes", c.test_room_foes);
         integer("test_room_tier", c.test_room_tier);
