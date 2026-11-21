@@ -707,6 +707,12 @@ namespace hsvr
         double pose_elbow_velocity_scale = 0.9375;
         bool pose_fingers_tracked = true;
         double pose_fingers_tau_s = 0.05;
+        // A finger's joints from one curl: the middle joint is fully bent at curl pip_full, the end joint
+        // just behind it, the knuckle starts at curl mcp_lag (a half curl is a hook, not a circle).
+        // 0 = every joint the same fraction (the framework's way).
+        bool pose_finger_schedule = true;
+        double pose_finger_mcp_lag = 0.25;
+        double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
         // loose object with curl until they touch it. Ease in/out time, how often all five are re-solved,
         // finger radius (0 = 9.5% of the hand's length, the framework's), and the open hand as its base.

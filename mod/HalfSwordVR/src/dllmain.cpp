@@ -8715,6 +8715,27 @@ namespace
         return std::atan2(dot(cross(a, b), axis), dot(a, b));
     }
 
+    // Per-joint fractions from one curl c (fingers, not the thumb): the middle joint (PIP) is fully
+    // bent at c = pose_finger_pip_full, the end joint (DIP) follows it a little behind (it is
+    // tendon-coupled to it), and the knuckle (MCP) starts at c = pose_finger_mcp_lag and is fully
+    // bent at 1. At c 1 all are 1 (the table's fist); a lift (c < 0) stays at the knuckle.
+    std::atomic<bool> g_finger_schedule{true};
+    std::atomic<double> g_finger_mcp_lag{0.25}, g_finger_pip_full{0.75};
+    void finger_schedule(double c, double out[3])
+    {
+        double lag = (std::min)(0.9, (std::max)(0.0, g_finger_mcp_lag.load()));
+        double full = (std::min)(1.0, (std::max)(0.1, g_finger_pip_full.load()));
+        auto ramp = [](double x) { x = (std::max)(0.0, (std::min)(1.0, x)); return x * x * (3.0 - 2.0 * x) * 0.5 + x * 0.5; };
+        if (c <= 0.0)
+        {
+            out[1] = out[2] = 0.0;
+            return; // out[0] keeps the lift
+        }
+        out[0] = ramp((c - lag) / (1.0 - lag));
+        out[1] = ramp(c / full);
+        out[2] = ramp((c - 0.05) / (std::max)(0.1, full - 0.05));
+    }
+
     // Writes one hand's fingers into the snapshot (the framework's Finger::bend, avatar/src/rig.rs):
     // each finger's base spreads (splay), then each joint bends about the finger's flex axis to
     // curl x CURL, replacing the bend the pose had (so curl 0 = straight); the thumb's base adds its
@@ -8761,8 +8782,12 @@ namespace
             double c0 = (std::max)(-g_finger_lift[f], (std::min)(1.0, jc ? jc[0] : curl[f]));
             double c12 = (std::max)(0.0, (std::min)(1.0, curl[f]));
             double cj[3] = {c0, jc ? (std::max)(0.0, (std::min)(1.0, jc[1])) : c12, jc ? (std::max)(0.0, (std::min)(1.0, jc[2])) : c12};
+            // One curl for the whole finger (no wrap): not the same fraction at every joint (Matthew
+            // 2026-11-21: "fingers make a circle"). The middle and end joints close first and the
+            // knuckle follows (pose_finger_schedule), so a half-closed finger is a hook, not an arc.
+            if (!jc && !thumb && g_finger_schedule.load()) finger_schedule(curl[f], cj);
             // Splay at the base: the fingers close up as the base curls.
-            double sp = (std::max)(0.0, (std::min)(1.0, splay)) * (1.0 - (std::max)(0.0, (std::min)(1.0, c0)));
+            double sp = (std::max)(0.0, (std::min)(1.0, splay)) * (1.0 - (std::max)(0.0, (std::min)(1.0, cj[0])));
             double spread_now = bend_about(along, seg(0), splay_axis);
             double spread_turn = thumb ? (sp - 0.3) * g_finger_spread[0] : sp * g_finger_spread[f] - spread_now;
             turn_subtree(B, R.subtree[side][f][0], P(b0), quat_axis_angle(splay_axis, spread_turn));
@@ -9017,6 +9042,7 @@ namespace
         for (int f = 0; f < 5; ++f)
         {
             double base[3] = {(std::max)(-g_finger_lift[f], (std::min)(1.0, own[f])), (std::max)(0.0, (std::min)(1.0, own[f])), (std::max)(0.0, (std::min)(1.0, own[f]))};
+            if (f != 0 && g_finger_schedule.load()) finger_schedule(own[f], base);
             double ww = g.solved[f] ? w : 0.0;
             for (int k = 0; k < 3; ++k) joint_out[f][k] = base[k] + (g.curls[f][k] - base[k]) * ww;
         }
@@ -9391,6 +9417,9 @@ namespace
             g_fist_side[side].store(pawn && is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))));
         // Fingers every tick the body is posed, even with the controllers idle (test 10: behind the grab
         // gate below, an unfaked fake headset never reached it).
+        g_finger_schedule.store(cfg.pose_finger_schedule);
+        g_finger_mcp_lag.store(cfg.pose_finger_mcp_lag);
+        g_finger_pip_full.store(cfg.pose_finger_pip_full);
         if (pawn && g_pose_active.load()) wrap_tick(cfg, pawn);
         if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
