@@ -746,6 +746,13 @@ namespace hsvr
         // The body pull's spring is sized for at least this many kg: a throat or chest bone is light
         // (0.9 kg), but pulling it means moving his whole upper body.
         double pose_grab_body_pull_min_kg = 12.0;
+        // His drawn hand rides a held body (his framework): it stays with the palm on the held spot, fully
+        // once the body is ride_full_cm from where your hand wants it (from ride_from_cm), up to ride_max_cm.
+        bool pose_grab_ride = true;
+        bool pose_grab_ride_objects = false;
+        double pose_grab_ride_from_cm = 0.5;
+        double pose_grab_ride_full_cm = 2.0;
+        double pose_grab_ride_max_cm = 40.0;
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;

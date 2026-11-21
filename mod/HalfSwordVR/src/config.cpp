@@ -663,6 +663,11 @@ namespace hsvr
         num("pose_grab_body_pull_n", c.pose_grab_body_pull_n);
         num("pose_grab_body_pull_hz", c.pose_grab_body_pull_hz);
         num("pose_grab_body_pull_min_kg", c.pose_grab_body_pull_min_kg);
+        flag("pose_grab_ride", c.pose_grab_ride);
+        flag("pose_grab_ride_objects", c.pose_grab_ride_objects);
+        num("pose_grab_ride_from_cm", c.pose_grab_ride_from_cm);
+        num("pose_grab_ride_full_cm", c.pose_grab_ride_full_cm);
+        num("pose_grab_ride_max_cm", c.pose_grab_ride_max_cm);
         flag("log_wrap", c.log_wrap);
         flag("log_fingers", c.log_fingers);
         flag("log_body_grab", c.log_body_grab);
