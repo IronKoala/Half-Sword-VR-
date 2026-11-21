@@ -2480,6 +2480,17 @@ namespace
                 double t = now * w + side * 0.3;
                 local = Vec3{45.0, out * 10.0 + 55.0 * std::sin(t), 5.0 - 30.0 * std::fabs(std::sin(t))};
             }
+            else if (mode == 22)
+            {
+                // Grab-slip test: hsvr.arm_move 22 <up cm> <cm/s>: as mode 1, the right hand rising <up> cm
+                // at <cm/s> (default 80) from when the command came.
+                static int epoch_seen = -1;
+                static double since = 0.0;
+                if (epoch_seen != g_fake_arm_epoch.load()) epoch_seen = g_fake_arm_epoch.load(), since = now;
+                double speed = g_fake_thrust_pitch.load() > 0.0 ? g_fake_thrust_pitch.load() : 80.0;
+                double up = side == 1 ? (std::min)(g_fake_two_up.load(), speed * (now - since)) : 0.0;
+                local = Vec3{40.0, out * 15.0, -10.0 + up};
+            }
             else if (mode == 4) local = Vec3{15.0, out * 15.0, 45.0};
             else if (mode == 5) local = Vec3{45.0, out * 15.0, -175.0}; // under the floor: the weapon is stopped by the ground
             else if (mode == 6) local = Vec3{62.0 + 8.0 * std::sin(now * 1.0), out * 10.0, 5.0}; // reaching out past his arm: the shoulder reaches
