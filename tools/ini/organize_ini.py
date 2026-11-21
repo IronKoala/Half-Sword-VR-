@@ -170,6 +170,7 @@ LAYOUT = [
         ("pose_lean_settle_speed_cms", ""),
         ("pose_lean_back_radius_cm", "He leans back at most this far (cm); further back his hips follow."),
         ("pose_lean_walk_catchup_s", "Once your neck passes the step radius he steps: hips back under you over this long (s)."),
+        ("pose_room_neck_base_cm", "Leans and steps are measured this far below your head joint (base of the neck), so nodding or tilting your head doesn't move him (0 = at the head joint)."),
         ("pose_lean_follow_past_radius", "1 = past the step radius his hips follow your neck at once, so it never gets further than the radius; 0 = he steps all the way under you."),
         ("pose_lean_follow_speed_cms", "pose_lean_follow_past_radius: fastest his hips follow (cm/s)."),
         ("pose_lean_cancel_game_bend", ""),

@@ -3604,8 +3604,12 @@ namespace
                 // recentred, so the neck then was eye_forward/eye_up behind and below it.
                 Quat base = quat_from_yaw_deg(base_yaw);
                 Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
-                Vec3 neck_now = head_world - head_rot.rotate(eye_offset);
-                Vec3 neck_then = anchor - base.rotate(eye_offset);
+                // At the base of the neck (pose_room_neck_base_cm below the head joint, turning with the head):
+                // nodding or tilting your head swings the head joint ~10 cm about it, and that is not a lean
+                // or a step (test 2026-11-21: a 60 degree look down stepped him 10 cm).
+                Vec3 neck_base{0.0, 0.0, (std::max)(0.0, cfg.pose_room_neck_base_cm)};
+                Vec3 neck_now = head_world - head_rot.rotate(eye_offset + neck_base);
+                Vec3 neck_then = anchor - base.rotate(eye_offset + neck_base);
                 Vec3 total = base.inverse().rotate(Vec3{neck_now.x - neck_then.x, neck_now.y - neck_then.y, 0.0});
                 total.z = 0.0;
                 Vec3 delta = total - g_pose_room_moved_local;
@@ -3708,7 +3712,8 @@ namespace
             {
                 Quat base = quat_from_yaw_deg(base_yaw);
                 Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
-                Vec3 total = base.inverse().rotate((head_world - head_rot.rotate(eye_offset)) - (anchor - base.rotate(eye_offset)));
+                Vec3 neck_base{0.0, 0.0, (std::max)(0.0, cfg.pose_room_neck_base_cm)};
+                Vec3 total = base.inverse().rotate((head_world - head_rot.rotate(eye_offset + neck_base)) - (anchor - base.rotate(eye_offset + neck_base)));
                 Vec3 d{total.x - g_pose_room_moved_local.x, total.y - g_pose_room_moved_local.y, 0.0};
                 if (length(d) <= 50.0 + 40.0) g_lean.offset = body.inverse().rotate(base.rotate(d));
                 g_lean.offset.z = 0.0;

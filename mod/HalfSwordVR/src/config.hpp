@@ -239,6 +239,9 @@ namespace hsvr
         // pose_lean_walk_catchup_s and stays with you while you walk, until it is under your neck again.
         // 0 = the old way (his hips always under your neck).
         double pose_lean_step_radius_cm = 8.0;
+        // Your lean and room steps are measured this far (cm) below your head joint, turning with your head
+        // (about the base of your neck), so a nod or head tilt is neither a lean nor a step. 0 = at the head joint.
+        double pose_room_neck_base_cm = 12.0;
         double pose_lean_walk_catchup_s = 0.15;
         // 1 = past the radius his hips follow your neck at once (at most pose_lean_follow_speed_cms), so
         // your neck is never more than the radius from over his hips (closed PR #8/#10: 8 cm, 400 cm/s).

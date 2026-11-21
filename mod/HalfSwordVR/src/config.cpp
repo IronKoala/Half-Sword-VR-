@@ -417,6 +417,7 @@ namespace hsvr
         num("pose_lean_smooth_s", c.pose_lean_smooth_s);
         num("pose_lean_slack_cm", c.pose_lean_slack_cm);
         num("pose_lean_step_radius_cm", c.pose_lean_step_radius_cm);
+        num("pose_room_neck_base_cm", c.pose_room_neck_base_cm);
         num("pose_lean_walk_catchup_s", c.pose_lean_walk_catchup_s);
         flag("pose_lean_follow_past_radius", c.pose_lean_follow_past_radius);
         num("pose_lean_follow_speed_cms", c.pose_lean_follow_speed_cms);
