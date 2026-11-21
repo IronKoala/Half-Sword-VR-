@@ -286,6 +286,8 @@ namespace hsvr
         // speed, fat, temperature and armour factors and regenerates as usual.
         double pose_stamina_scale = 1.0;
         double pose_stamina_gate = 10.0;
+        // A fist's burn x this, on top of the game's own fist factor (Hands Rigidity x Fisting Rate).
+        double pose_stamina_fist_scale = 1.0;
         double pose_stamina_force_cap_n = 1000.0;
         double pose_stamina_torque_cap_nm = 100.0;
         // Exact hold (B&S-style): each frame the weapon gets the velocity that puts it exactly where

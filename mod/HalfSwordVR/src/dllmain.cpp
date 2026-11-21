@@ -10143,14 +10143,25 @@ namespace
         double t = (std::min)(1.0, (std::max)(0.0, (v - a) / (b - a)));
         return x + (y - x) * t;
     }
-    void drain_stamina(int side, UObject* pawn, double force_n, double torque_nm, const hsvr::Config& cfg)
+    void drain_stamina(int side, UObject* pawn, UObject* weapon, double force_n, double torque_nm, const hsvr::Config& cfg)
     {
         if (!pawn || cfg.pose_stamina_scale <= 0.0) return;
         bool has_mr = false;
         double mr = number_var(pawn, STR("Muscle Rate"), has_mr);
         double strength = has_mr ? map_range(mr, 0.0, 3.0, 1.0, 0.1) : 1.0;
         double f = (std::min)(force_n, cfg.pose_stamina_force_cap_n), t = (std::min)(torque_nm, cfg.pose_stamina_torque_cap_nm);
-        double raw = (f + 100.0 * t) / 60.0 * strength * cfg.pose_stamina_scale;
+        // A fist (grip 0, nothing grabbed): the game's factor is Hands Rigidity x MRC(R/L Fisting Rate,
+        // 0.1..1 -> 0..1) in place of the weapon's 0.01 (@407212, fists_eating.md 1.5), i.e. 100x it
+        // here; Fisting Rate is the mod's own (fist_flags_after_tick), as the tick zeroes the game's.
+        double kind = 1.0, rigidity = -1.0;
+        bool fist = is_fist(weapon);
+        if (fist)
+        {
+            bool has_rig = false;
+            rigidity = number_var(pawn, STR("Hands Rigidity"), has_rig);
+            kind = 100.0 * (has_rig ? rigidity : 0.0) * map_range(g_fisting_rate[side], 0.1, 1.0, 0.0, 1.0) * cfg.pose_stamina_fist_scale;
+        }
+        double raw = (f + 100.0 * t) / 60.0 * kind * strength * cfg.pose_stamina_scale;
         double burn = raw >= cfg.pose_stamina_gate ? raw : 0.0;
         const TCHAR* name = side == 0 ? STR("L Hand Stamina Burn Rate") : STR("R Hand Stamina Burn Rate");
         bool ok = set_variable(pawn, name, burn, nullptr, nullptr);
@@ -10161,9 +10172,10 @@ namespace
             last_line[side] = now;
             bool has_swing = false;
             double swing = number_var(pawn, side == 0 ? STR("Stamina Burn Swing L") : STR("Stamina Burn Swing R"), has_swing);
-            HSVR_LOG("Stamina: %s hand: bar %.1f, burn %.1f%s (%.1f from %.0f N, %.1f N m; Muscle Rate %s%.2f x%.2f; gate %.0f); game's swing burn last tick %.2f a second, Stamina Burn %.2f, Aim Swing Speed %.0f",
-                     side == 0 ? "left" : "right", read_number_variable(pawn, STR("Stamina")), burn, ok ? "" : " (NOT WRITTEN: variable not found)", raw, force_n,
-                     torque_nm, has_mr ? "" : "(not found) ", mr, strength, cfg.pose_stamina_gate, has_swing ? swing : -1.0,
+            HSVR_LOG("Stamina: %s hand%s: bar %.1f, burn %.1f%s (%.1f from %.0f N, %.1f N m x%.2f; Muscle Rate %s%.2f x%.2f; gate %.0f); game's swing burn last tick %.2f a second, Stamina Burn %.2f, Aim Swing Speed %.0f",
+                     side == 0 ? "left" : "right", fist ? (rigidity < 0.0 ? " (fist; Hands Rigidity NOT FOUND)" : " (fist)") : "", read_number_variable(pawn, STR("Stamina")), burn,
+                     ok ? "" : " (NOT WRITTEN: variable not found)", raw, force_n,
+                     torque_nm, kind, has_mr ? "" : "(not found) ", mr, strength, cfg.pose_stamina_gate, has_swing ? swing : -1.0,
                      read_number_variable(pawn, STR("Stamina Burn")), read_number_variable(pawn, STR("Aim Swing Speed")));
         }
     }
@@ -11105,7 +11117,7 @@ namespace
         }
         h.expected_com = com_next;
         h.have_expected = true;
-        drain_stamina(side, pawn, h.force_n, h.torque_nm, cfg);
+        drain_stamina(side, pawn, weapon, h.force_n, h.torque_nm, cfg);
         // Wake it first: a body the solver has put to sleep (a weapon lying still on the ground) may
         // keep the velocity it is given without moving (run 29: the knife stayed frozen on the floor).
         Call wake(base, STR("WakeRigidBody"));

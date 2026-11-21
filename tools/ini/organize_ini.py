@@ -230,6 +230,7 @@ LAYOUT = [
         ("pose_body_strength_min", ""),
         ("pose_body_size_strength", ""),
         ("pose_stamina_gate", ""),
+        ("pose_stamina_fist_scale", ""),
         ("pose_stamina_force_cap_n", ""),
         ("pose_stamina_torque_cap_nm", ""),
         ("pose_hold_hand_on_weapon", ""),
