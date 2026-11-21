@@ -284,7 +284,7 @@ namespace hsvr
         // (capped) go into the game's per-hand burn (as its hand joint would), x Muscle Rate's factor x
         // this scale, kept from pose_stamina_gate up (the game's 10); the game then applies its swing
         // speed, fat, temperature and armour factors and regenerates as usual.
-        double pose_stamina_scale = 1.0;
+        double pose_stamina_scale = 12.0; // Matthew 2026-11-21: 12x the flat game (1 = the game exactly; its regen ~26/s outruns swinging)
         // The game keeps a hand burn only from 10 up. Its hand joint is spiky (flat runs 2026-11-21: 30%
         // of fast-swing ticks over 10), the mod's spring hold smooth (never over 10 at the same
         // swings), so with the gate VR never paid; with none its mean matches the flat game's.

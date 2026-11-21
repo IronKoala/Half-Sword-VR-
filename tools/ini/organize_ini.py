@@ -47,7 +47,7 @@ LAYOUT = [
         ("pose_hold_wrist_stop_torque", "Wrist end stop: turning limit once the item is bent past the free angle (N m)."),
         ("pose_hold_shoulder_torque", "Shoulder strength against swinging arm + weapon (N m; 0 = off). Lower = heavy weapons trail more."),
         ("pose_two_hand_strength", "Two hands on one weapon hold this many times as strong."),
-        ("pose_stamina_scale", "Stamina cost of holding and swinging (1 = the game's own formula, fed from the hold)."),
+        ("pose_stamina_scale", "Stamina cost of holding and swinging (1 = exactly the flat game, which barely drains; 12 = chosen 2026-11-21)."),
         ("pose_throw_multiplier", "Thrown weapon speed x this (B&S 2)."),
         ("pose_grab_touch_cm", "How far from an item your palm can be and still grab it (cm)."),
         ("hit_buzz", "Hit vibration strength (0 = off, 1 = like Blade & Sorcery)."),
