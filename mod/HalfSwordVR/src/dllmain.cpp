@@ -8150,13 +8150,17 @@ namespace
     // pose_grab_body_no_slip: right before Willie's tick (where the slip rule runs), the held hand's
     // 'Hand Block Drop' is set while his grip strength is above pose_grab_body_slip_below_t.
     bool g_body_blocking[2] = {false, false};
+    // A loose object the mod itself holds (grab_drive: the game's joint is set free): the game's slip
+    // rule reads that free joint and let go 0.5 s in (as soon as its own Hand Block Drop ran out), so
+    // it is held off the same way while the mod carries the thing. Set each tick by grab_drive.
+    double g_drive_held_until[2] = {-1.0, -1.0};
     void body_grab_before_tick(UObject* pawn)
     {
         hsvr::Config cfg = hsvr::config();
         for (int side = 0; side < 2; ++side)
         {
             const BodyGrab& b = g_body_grab[side];
-            bool want = cfg.pose_grab_body_no_slip && b.on && b.grip_t >= cfg.pose_grab_body_slip_below_t;
+            bool want = (cfg.pose_grab_body_no_slip && b.on && b.grip_t >= cfg.pose_grab_body_slip_below_t) || hsvr::now_seconds() < g_drive_held_until[side];
             const TCHAR* flag = side == 0 ? STR("L Hand Block Drop") : STR("R Hand Block Drop");
             if (want) set_bool_property(pawn, flag, true);
             else if (g_body_blocking[side]) set_bool_property(pawn, flag, false);
@@ -9139,6 +9143,10 @@ namespace
         lv.run();
         Vec3 v = lv.vec();
         Vec3 to = tp - p;
+        // (Test log: the held thing's top speed this hold.)
+        static double vmax[2] = {0, 0}, vmax_since[2] = {-1, -1};
+        if (vmax_since[side] != g.since) vmax_since[side] = g.since, vmax[side] = 0.0;
+        vmax[side] = (std::max)(vmax[side], length(v));
         double now = now_seconds();
         const char* hand = L ? "left" : "right";
         if (g.body)
@@ -9160,8 +9168,8 @@ namespace
             if (cfg.log_wrap && now - g.last_drive_log >= 0.5)
             {
                 g.last_drive_log = now;
-                HSVR_LOG("Grab hold: %s hand pulls %ls bone %ls: %.1f cm off the palm spot, %.0f N (cap %.0f, grip T %.0f, bone %.1f kg)", hand, g.comp->GetName().c_str(),
-                         g.bone.ToString().c_str(), length(to), length(f) / 100.0, fmax / 100.0, t_grip, g.mass);
+                HSVR_LOG("Grab hold: %s hand pulls %ls bone %ls: %.1f cm off the palm spot, %.0f N (cap %.0f, grip T %.0f, bone %.1f kg), speed %.0f cm/s (top %.0f)", hand, g.comp->GetName().c_str(),
+                         g.bone.ToString().c_str(), length(to), length(f) / 100.0, fmax / 100.0, t_grip, g.mass, length(v), vmax[side]);
             }
         }
         else
@@ -9202,6 +9210,7 @@ namespace
             if (length(dv) > amax * dt) want = v + clamp_length(dv, amax * dt);
             want = clamp_length(want, 2000.0);
             want.z += 980.0 * dt; // the step's gravity, which the framework turns off while held
+            g_drive_held_until[side] = now + 0.25; // the game's slip rule held off while the mod carries it
             Call wake(g.comp, STR("WakeRigidBody"));
             wake.name(STR("BoneName"), g.bone);
             wake.run();
@@ -9218,8 +9227,8 @@ namespace
             if (cfg.log_wrap && now - g.last_drive_log >= 0.5)
             {
                 g.last_drive_log = now;
-                HSVR_LOG("Grab hold: %s hand carries %ls (%.1f kg): %.1f cm / %.0f deg off its place in the hand, accel cap %.0f m/s^2", hand, g.comp->GetName().c_str(),
-                         g.mass, length(to), angle * 57.2958, amax / 100.0);
+                HSVR_LOG("Grab hold: %s hand carries %ls (%.1f kg): %.1f cm / %.0f deg off its place in the hand, accel cap %.0f m/s^2, speed %.0f cm/s (top %.0f)", hand, g.comp->GetName().c_str(),
+                         g.mass, length(to), angle * 57.2958, amax / 100.0, length(v), vmax[side]);
             }
         }
         g.last_hand = g_pose.target[side];
