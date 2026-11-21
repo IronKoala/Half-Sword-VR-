@@ -276,6 +276,13 @@ class App:
         self.type_var = tk.StringVar(value=TYPES[0][0])
         ttk.Combobox(form, textvariable=self.type_var, values=[t for t, _ in TYPES], state="readonly",
                      width=28).grid(row=2, column=1, columnspan=2, sticky="w", **pad)
+        self.slide_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="Hand slides down the handle in swings", variable=self.slide_var).grid(
+            row=4, column=1, columnspan=2, sticky="w", **pad)
+        ttk.Label(form, text="Grip", foreground="#000").grid(row=4, column=0, sticky="w", **pad)
+        ttk.Label(form, text="only for odd long-handled swords like the Spit: main hand by the guard, off hand at the "
+                             "pommel, main hand slides down when swinging. Leave off for normal swords.",
+                  foreground="#777", wraplength=560).grid(row=5, column=1, columnspan=2, sticky="w", padx=8)
         ttk.Label(form, text="Units").grid(row=3, column=0, sticky="w", **pad)
         unit_name = self.settings.get("units")
         self.units_var = tk.StringVar(value=unit_name if unit_name in UNIT_SYSTEMS else next(iter(UNIT_SYSTEMS)))
@@ -284,7 +291,7 @@ class App:
                      width=28).grid(row=3, column=1, columnspan=2, sticky="w", **pad)
         self.units_var.trace_add("write", lambda *_: self.units_changed())
         self.show_unit_labels()
-        for var in (self.length_var, self.mass_var, self.type_var):
+        for var in (self.length_var, self.mass_var, self.type_var, self.slide_var):
             var.trace_add("write", lambda *_: self.inputs_changed())
 
         ttk.Label(main, text="Mod folder").grid(row=4, column=0, sticky="w", **pad)
@@ -363,7 +370,7 @@ class App:
                 name, n = f"{base}_{n}", n + 1
             names.add(name.lower())
             item = {"path": f, "name": name, "raw": None, "length_cm": None, "mass_kg": None,
-                    "type": TYPES[0][0], "flip": False, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
+                    "type": TYPES[0][0], "flip": False, "slide": False, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
                     "result": None, "result_inputs": None, "views": None, "status": "reading the model...",
                     "iid": f"item{id(f)}_{len(self.items)}"}
             self.items.append(item)
@@ -414,6 +421,7 @@ class App:
             except ValueError:
                 it[key] = None
         it["type"] = self.type_var.get()
+        it["slide"] = self.slide_var.get()
         it.update(flip=self.flip, raw=self.raw_length, result=self.result, result_inputs=self.result_inputs,
                   views=self.result_views)
         self.refresh_row(it)
@@ -434,6 +442,7 @@ class App:
         self.length_var.set("" if it["length_cm"] is None else f"{it['length_cm'] / lk:.2f}".rstrip("0").rstrip("."))
         self.mass_var.set("" if it["mass_kg"] is None else f"{it['mass_kg'] / mk:.3f}".rstrip("0").rstrip("."))
         self.type_var.set(it["type"])
+        self.slide_var.set(it["slide"])
         self.quiet = False
         self.show_model_info()
         if self.result is not None:
@@ -599,7 +608,7 @@ class App:
             if not 0.05 <= kg <= 50:
                 return None, f"The weight should be between {self.fmt_mass(0.05)} and {self.fmt_mass(50)}."
             mass = f"{kg:.4f}"
-        return (length, mass, dict(TYPES)[self.type_var.get()], self.flip), None
+        return (length, mass, dict(TYPES)[self.type_var.get()], self.flip, self.slide_var.get()), None
 
     def same_inputs(self, a, b):
         """Equal apart from unit-conversion rounding (switching units must not ask for a new Convert)."""
@@ -640,7 +649,7 @@ class App:
         self.run(self.convert_worker, self.argv_for(it, values), values, it)
 
     def argv_for(self, it, values):
-        length, mass, kind, flip = values
+        length, mass, kind, flip, slide = values
         argv = [it["path"], it["work"], "--length-cm", f"{length:g}", "--name", it["name"]]
         if mass:
             argv += ["--mass-kg", mass]
@@ -648,6 +657,8 @@ class App:
             argv += ["--type", kind]
         if flip:
             argv.append("--flip")
+        if slide:
+            argv.append("--hand-slide")
         return argv
 
     def item_values(self, it):
@@ -659,7 +670,7 @@ class App:
         mass = "" if it["mass_kg"] is None else f"{it['mass_kg']:.4f}"
         if mass and not 0.05 <= it["mass_kg"] <= 50:
             return None, "weight out of range"
-        return (round(it["length_cm"], 2), mass, dict(TYPES)[it["type"]], it["flip"]), None
+        return (round(it["length_cm"], 2), mass, dict(TYPES)[it["type"]], it["flip"], it["slide"]), None
 
     def convert_all(self):
         if self.busy:
@@ -779,7 +790,8 @@ class App:
             parts = (f"pommel {L(zn['handle_bottom'] - zn['pommel_end'])}, grip {L(-zn['handle_bottom'])}, "
                      f"guard {L(zn['guard_top'], 1)}, blade {L(zn['tip'] - zn['guard_top'])}")
         self.summary.config(text=f"{'Hafted weapon' if hafted else 'Sword'}, {L(zn['tip'] - zn['pommel_end'])}, "
-                                 f"{mass}.\nParts ({how}): {parts}.\n"
+                                 f"{mass}.\nParts ({how}): {parts}."
+                                 + (" Main hand slides down the handle in swings." if zn.get("hand_slide") else "") + "\n"
                                  "The handle is on the left and the " + ("head" if hafted else "blade") +
                                  " on the right. If the picture shows it the other way round, press "
                                  "\"Blade is on the wrong end\".")

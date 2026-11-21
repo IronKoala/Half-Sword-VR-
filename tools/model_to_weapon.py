@@ -346,6 +346,8 @@ def main(argv=None):
     ap.add_argument("--units", choices=sorted(UNITS_CM))
     ap.add_argument("--mass-kg", type=float)
     ap.add_argument("--flip", action="store_true")
+    ap.add_argument("--hand-slide", action="store_true",
+                    help="long handle held by guard + pommel, the guard hand slides down it in swings (e.g. the Spit)")
     ap.add_argument("--type", choices=["sword", "hafted"],
                     help="sword: guard between grip and blade; hafted: head on the end of a haft (axe, mace, "
                          "hammer, spear). Default: detected")
@@ -721,7 +723,8 @@ def main(argv=None):
     top = float(z.max())
     numbers = {"mass_kg": float(mass), "pommel_end": round(end, 2), "handle_bottom": round(float(handle_bottom), 2),
                "handle_top": 0.0, "guard_bottom": round(float(guard_bottom), 2), "guard_top": round(float(guard_top), 2),
-               "tip": round(top, 2), "hafted": 1 if hafted else 0}
+               "tip": round(top, 2), "hafted": 1 if hafted else 0,
+               "hand_slide": 1 if args.hand_slide else 0}
     wp.write_numbers(os.path.join(args.out, name + ".txt"), f"{name}: written by tools/model_to_weapon.py", numbers)
     json.dump({"source": os.path.basename(args.model), "scale": scale_note, "mass_kg": mass, "mass_note": mass_note,
                "zones_cm": numbers, "volumes_cm3": {s: round(v, 1) for s, v in volume.items()},

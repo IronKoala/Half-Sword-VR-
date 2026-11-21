@@ -123,8 +123,6 @@ namespace
         int fit_hands = 1;
         double two_hand_grip_cm = 14.0; // handle at least this long -> two-handed sword grip (game: 12 cm grips
                                         // are one-handed, type 2; 15 and 20 cm grips two-handed, type 11)
-        double long_handle_cm = 30.0;   // sword handle at least this long: hands at the pommel end for reach,
-                                        // half-sword grip = pommel + guard (Matthew 2026-11-21, Spit)
         // Long handles: the main hand rests by the guard and slides down to the off hand during a swing
         // (Matthew 2026-11-21). Swing = weapon turning faster than swing_slide_start_dps.
         int swing_slide = 1;
@@ -175,7 +173,6 @@ namespace
             else if (k == "swing_slide_hold_s") g_settings.swing_slide_hold_s = atof(v.c_str());
             else if (k == "swing_slide_down_s") g_settings.swing_slide_down_s = atof(v.c_str());
             else if (k == "swing_slide_up_s") g_settings.swing_slide_up_s = atof(v.c_str());
-            else if (k == "long_handle_cm") g_settings.long_handle_cm = atof(v.c_str());
             else if (k == "offhand") g_settings.offhand = std::wstring(v.begin(), v.end());
         }
         fclose(f);
@@ -1438,7 +1435,9 @@ namespace
         double hand = 2.0 * half_hand;             // one hand's width
         double tip = numbers["tip"];
         double blade_from = numbers["guard_top"];
-        bool long_handle = !hafted && grip_len >= g_settings.long_handle_cm;
+        // Per weapon (Matthew 2026-11-21): the converter's "hand slides" switch, hand_slide=1 in the model's
+        // .txt, for long-handled odd weapons like the Spit; traditional swords keep the game's grip.
+        bool long_handle = !hafted && numbers.count("hand_slide") && numbers["hand_slide"] > 0.5;
         double r_target = rz, off_target = oz, l_alt_target = 0, r_alt_target = 0;
         if (long_handle)
         {
@@ -1448,8 +1447,8 @@ namespace
             // Half-sword grip on a long handle: main hand at the pommel end, off hand just under the guard.
             r_alt_target = lo;
             l_alt_target = -half_hand;
-            log("  long handle (%.1f cm >= %.1f): main hand by the guard, off hand at the pommel end, main hand slides "
-                "down in swings; half-sword grip pommel + guard", grip_len, g_settings.long_handle_cm);
+            log("  hand slide on for this weapon (handle %.1f cm): main hand by the guard, off hand at the pommel end, "
+                "main hand slides down in swings; half-sword grip pommel + guard", grip_len);
         }
         else
         {
