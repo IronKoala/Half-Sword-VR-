@@ -526,6 +526,8 @@ namespace hsvr
         num("pose_slide_keep_full", c.pose_slide_keep_full);
         num("pose_slide_damper_light", c.pose_slide_damper_light);
         num("pose_slide_damper_full", c.pose_slide_damper_full);
+        flag("pose_slide_bs_damper", c.pose_slide_bs_damper);
+        flag("draw_seat_ref_fix", c.draw_seat_ref_fix);
         num("pose_grab_settle_s", c.pose_grab_settle_s);
         flag("pose_shield_free_grip", c.pose_shield_free_grip);
         flag("pose_weapon_free_grip", c.pose_weapon_free_grip);
@@ -760,8 +762,7 @@ namespace hsvr
         flag("perf_bp_segments", c.perf_bp_segments);
         num("hit_buzz_min_intensity", c.hit_buzz_min_intensity);
         num("hit_buzz_limb_min_ms", c.hit_buzz_limb_min_ms);
-        flag("whoosh_feed", c.whoosh_feed);
-        num("whoosh_dv_per_speed", c.whoosh_dv_per_speed);
+        num("whoosh_vr_threshold_scale", c.whoosh_vr_threshold_scale);
         flag("whoosh_log", c.whoosh_log);
         num("whoosh_log_min_speed", c.whoosh_log_min_speed);
         flag("stab_assist", c.stab_assist);

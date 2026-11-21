@@ -532,6 +532,13 @@ namespace hsvr
         // exp(-c dt / mass) of its motion along it each frame (replaces keep_light/full; 0 = use those).
         double pose_slide_damper_light = 300.0;
         double pose_slide_damper_full = 20.0;
+        // B&S's slide along the handle (Handle.cs UpdateSliding): spring 0, damper 300 -> 20 N s/m over trigger
+        // 0.2 -> 1, so gravity pulls an upright weapon through the hand and a level one is dragged along with it.
+        // 0 = the old free axis (no damper, and the arm also carried its weight along the handle, so it never fell).
+        bool pose_slide_bs_damper = true;
+        // Draw: the scabbard seat's SetConstraintReferencePosition call with parameter names that match the
+        // engine (the old names may write nothing). Off by default: draws feel as they do now.
+        bool draw_seat_ref_fix = false;
         // A grab leaves the item where it was and the hold pulls it into the hand over this long (B&S);
         // also a hand-over. 0 = put it in the hand at once.
         double pose_grab_settle_s = 0.08;
@@ -937,13 +944,12 @@ namespace hsvr
         // An open hand, forearm or arm on a person buzzes only when it strikes this fast (m/s,
         // against him at the contact).
         double hit_buzz_limb_min_ms = 3.0;
-        // Swing whoosh (hs_whoosh_sound.md). The game sounds a weapon's whoosh from its speed and from how
-        // much its velocity changed since the last tick; the VR hold moves it smoothly, so that change
-        // stays small and most swings were silent (Matthew 2026-11-21). 1 = for a weapon in a tracked
-        // hand, the game is told the change is at least whoosh_dv_per_speed x the weapon's speed, so its
-        // own rules (loop volume, pitch, one-shots) follow the real VR swing speed.
-        bool whoosh_feed = true;
-        double whoosh_dv_per_speed = 0.25;
+        // Swing whoosh (hs_whoosh_sound.md). The game whooshes only when the weapon's centre moves faster than
+        // 1.5 x its "Sound Woosh Threshold" (7.5 m/s for most weapons, 5.25 for an arming sword): flat
+        // Willie's mouse swings reach 10-20 m/s, a human VR cut often doesn't (Matthew 2026-11-21: most VR
+        // swings were silent). A weapon in a tracked hand has its threshold x this during its tick
+        // (1 = the game's own; lower = slower swings whoosh; the one-shot is also that much quieter).
+        double whoosh_vr_threshold_scale = 0.6;
         // "Whoosh:" lines every 0.5 s while a held weapon moves faster than whoosh_log_min_speed (cm/s).
         bool whoosh_log = true;
         double whoosh_log_min_speed = 300.0;

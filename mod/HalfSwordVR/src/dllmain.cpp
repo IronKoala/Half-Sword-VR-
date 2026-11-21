@@ -976,6 +976,28 @@ namespace
         {
             if (FProperty* p = param(param_name)) *(buffer.data() + p->GetOffset_Internal()) = value;
         }
+        // The first parameter found among a few spellings (reflection names are case-sensitive, and
+        // engine headers don't always name a parameter as its docs do). Returns the name used, or null.
+        const TCHAR* byte_any(std::initializer_list<const TCHAR*> names, uint8_t value)
+        {
+            for (const TCHAR* n : names)
+                if (FProperty* p = param(n))
+                {
+                    *(buffer.data() + p->GetOffset_Internal()) = value;
+                    return n;
+                }
+            return nullptr;
+        }
+        const TCHAR* three_any(std::initializer_list<const TCHAR*> names, double a, double b, double c)
+        {
+            for (const TCHAR* n : names)
+                if (FProperty* p = param(n))
+                {
+                    write_three(buffer.data() + p->GetOffset_Internal(), p, a, b, c);
+                    return n;
+                }
+            return nullptr;
+        }
         void name(const TCHAR* param_name, FName value)
         {
             if (FProperty* p = param(param_name)) *reinterpret_cast<FName*>(buffer.data() + p->GetOffset_Internal()) = value;
@@ -2711,11 +2733,22 @@ namespace
                 Vec3 want = (body * rot_to_quat(-g_fake_thrust_pitch.load(), 0.0, 0.0)).normalized().rotate({1.0, 0.0, 0.0});
                 UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
                 RawArray* tips = held ? value_ptr<RawArray>(held, STR("Tips")) : nullptr;
-                if (tips && tips->Data && tips->Num > 0 && tips->Data[0])
+                UObject* held_mesh = held ? object_property(held, STR("BaseMesh")) : nullptr;
+                bool have_tip = tips && tips->Data && tips->Num > 0 && tips->Data[0];
+                if (have_tip || held_mesh)
                 {
-                    Call f(static_cast<UObject*>(tips->Data[0]), STR("GetForwardVector"));
-                    f.run();
-                    Vec3 have = f.vec();
+                    // The first "Tip" marker's forward; a weapon without Tips (passport-spawned ones
+                    // have none) uses its blade axis, the BaseMesh's +Z (pommel to tip).
+                    Vec3 have;
+                    if (have_tip)
+                    {
+                        Call f(static_cast<UObject*>(tips->Data[0]), STR("GetForwardVector"));
+                        f.run();
+                        have = f.vec();
+                    }
+                    else have = component_rotation(held_mesh).rotate(Vec3{0, 0, 1});
+                    HSVR_LOG_EVERY(1.0, "Test aim: %s, tip axis (%.2f, %.2f, %.2f), want (%.2f, %.2f, %.2f)", have_tip ? "Tips[0] forward" : "BaseMesh +Z",
+                                   have.x, have.y, have.z, want.x, want.y, want.z);
                     Vec3 axis = cross(have, want);
                     double sn = length(axis), cs = have.x * want.x + have.y * want.y + have.z * want.z;
                     if (sn > 1e-6)
@@ -5129,9 +5162,11 @@ namespace
         hsvr::Vec3 err;    // held point minus its target
         hsvr::Vec3 vt;     // the target's velocity
         double k = 0.0, c = 0.0, fmax = 0.0;
-        bool slide = false; // free along `axis` (the hand sliding on the handle)
+        bool slide = false; // no spring along `axis` (the hand sliding on the handle)
         hsvr::Vec3 axis;
+        double slide_c = 0.0; // B&S's slide damper along `axis` (N s/m, against the hand's motion along it); 0 = free
         hsvr::Vec3 acc;    // accumulated impulse
+        double acc_ax = 0.0; // accumulated impulse along `axis` while sliding
     };
     inline Mat3 skew(const hsvr::Vec3& r)
     {
@@ -5155,7 +5190,20 @@ namespace
             double gamma = 1.0 / (dt * (p.c + dt * p.k) + 1e-12);
             Ksoft[i] = (K + I3 * gamma).inverse();
             p.acc = Vec3{};
+            p.acc_ax = 0.0;
+            if (p.slide) p.axis = normalized(p.axis);
         }
+        // The slide's damper (B&S Handle.UpdateSliding: the Y drive gets spring 0 and damper 300 -> 20): a
+        // soft constraint along the handle with no bias, so only gravity, the swing and contacts move the
+        // weapon through the hand, slowed by the damper against the hand's own motion along it.
+        double kax[4] = {0, 0, 0, 0};
+        for (int i = 0; i < n; ++i)
+            if (pts[i].slide && pts[i].slide_c > 0.0)
+            {
+                Mat3 S = skew(pts[i].r);
+                Mat3 K = I3 * (1.0 / mass) + (S * invI * S) * -1.0;
+                kax[i] = dot(pts[i].axis, K * pts[i].axis);
+            }
         double ga = ka > 0.0 ? 1.0 / (dt * (ca + dt * ka) + 1e-12) : 0.0;
         Mat3 Kang = ka > 0.0 ? (invI + I3 * ga).inverse() : Mat3{};
         ang_acc = Vec3{};
@@ -5174,6 +5222,17 @@ namespace
                 lam = p.acc - old;
                 v = v + lam * (1.0 / mass);
                 w = w + invI * cross(p.r, lam);
+                if (p.slide && p.slide_c > 0.0)
+                {
+                    double gax = 1.0 / (dt * p.slide_c);
+                    double cax = dot(v + cross(w, p.r) - p.vt, p.axis);
+                    double l = -(cax + p.acc_ax * gax) / (kax[i] + gax);
+                    double o = p.acc_ax;
+                    p.acc_ax = (std::min)(p.fmax * dt, (std::max)(-p.fmax * dt, p.acc_ax + l));
+                    Vec3 J = p.axis * (p.acc_ax - o);
+                    v = v + J * (1.0 / mass);
+                    w = w + invI * cross(p.r, J);
+                }
             }
             if (ka > 0.0)
             {
@@ -11931,14 +11990,24 @@ namespace
                 h.free.t = u;
                 h.free.pivot = h.free.ha + ab * u;
                 bool at_end = u <= 0.0 || u >= 1.0;
+                if (at_end && cfg.pose_slide_bs_damper)
+                {
+                    // At an end the hand may still slide off it the way gravity takes the weapon (B&S: tip
+                    // down, a hand at the guard runs down to the pommel): the weapon falls along the handle,
+                    // so the hand's place on it moves by the handle's up-ness (ha -> hb axis, world z).
+                    double up = bq.rotate(normalized(ab)).z;
+                    if ((u >= 1.0 && up < -0.1) || (u <= 0.0 && up > 0.1)) at_end = false;
+                }
                 if (!at_end)
                 {
                     h.handle_slide = true;
                     h.handle_axis = bq.rotate(normalized(ab));
                     double squeeze = (std::min)(1.0, (std::max)(0.0, (trig - 0.15) / 0.85));
                     h.handle_keep = cfg.pose_slide_keep_light + (cfg.pose_slide_keep_full - cfg.pose_slide_keep_light) * squeeze;
-                    // B&S (Handle.cs:1053-1087): the axis drive's damper goes 300 -> 20 N s/m as the trigger goes in.
-                    h.handle_damp = cfg.pose_slide_damper_light + (cfg.pose_slide_damper_full - cfg.pose_slide_damper_light) * squeeze;
+                    // B&S (Handle.cs UpdateSliding): the axis drive's damper goes 300 -> 20 N s/m as the trigger
+                    // goes 0.2 -> 1 (Utils.CalculateRatio, clamped).
+                    double bs_sq = (std::min)(1.0, (std::max)(0.0, (trig - 0.2) / 0.8));
+                    h.handle_damp = cfg.pose_slide_damper_light + (cfg.pose_slide_damper_full - cfg.pose_slide_damper_light) * bs_sq;
                 }
             }
         }
@@ -12557,6 +12626,7 @@ namespace
                     p.fmax = pf * st * body.total * 100.0 * draw_scale;
                     p.slide = h.handle_slide;
                     p.axis = h.handle_axis;
+                    p.slide_c = (h.handle_slide && cfg.pose_slide_bs_damper) ? (std::max)(0.0, h.handle_damp) : 0.0;
                 }
                 if (two)
                 {
@@ -12583,9 +12653,26 @@ namespace
                 {
                     // The arm carries the weapon's weight at the grip (the soft arm spring would let the hand
                     // sag g / omega^2, 7 cm for a polearm); its lever about the grip is still the turn's to hold.
+                    // A hand sliding on the handle (B&S) can't carry the weight along it: that share falls
+                    // through the hand (the slide's damper slows it); the other hand, if any, carries it.
+                    int firm = 0;
+                    for (int i = 0; i < n; ++i) firm += !(pts[i].slide && cfg.pose_slide_bs_damper);
                     for (int i = 0; i < n; ++i)
                     {
                         Vec3 J = g * (-mass * DT / n);
+                        if (pts[i].slide && cfg.pose_slide_bs_damper)
+                        {
+                            Vec3 ax = normalized(pts[i].axis);
+                            Vec3 along = ax * dot(J, ax);
+                            J = J - along;
+                            for (int j = 0; j < n; ++j)
+                                if (j != i && !(pts[j].slide && cfg.pose_slide_bs_damper))
+                                {
+                                    Vec3 Jo = along * (1.0 / firm);
+                                    vb = vb + Jo * (1.0 / mass);
+                                    wb = wb + invI * cross(pts[j].r, Jo);
+                                }
+                        }
                         vb = vb + J * (1.0 / mass);
                         wb = wb + invI * cross(pts[i].r, J);
                     }
@@ -12625,6 +12712,16 @@ namespace
                          (std::max)(1, cfg.pose_bs_iterations), ang);
                 exact_v = clamp_length(vb - g * DT, 2000.0);
                 w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
+                if (pts[0].slide && pts[0].slide_c > 0.0)
+                {
+                    // How it slides: the handle's tilt from level, and the grip's speed along it against the hand's.
+                    Vec3 ax = normalized(pts[0].axis);
+                    double tilt = std::asin((std::min)(1.0, std::fabs(ax.z))) * 57.2958;
+                    double slip = dot(exact_v + g * DT + cross(w_next, pts[0].r) - pts[0].vt, ax);
+                    HSVR_LOG_EVERY(0.25, "Slide: %s hand on %ls: handle %.0f deg from level, slips %.0f cm/s along it (damper %.0f N s/m, %.0f N)%s",
+                                   side == 0 ? "left" : "right", weapon->GetName().c_str(), tilt, slip, pts[0].slide_c,
+                                   std::fabs(pts[0].acc_ax) / DT / 100.0, two ? ", other hand holds" : "");
+                }
                 h.force_n = length(pts[0].acc) / DT / 100.0;
                 h.force_capped = length(pts[0].acc) >= pts[0].fmax * DT * 0.999;
                 h.torque_nm = length(ang) / DT / 1e4;
@@ -13763,41 +13860,41 @@ namespace
 
     // ---- Swing whoosh (HalfSwordDecomp defaults\hs_whoosh_sound.md) ---------------------------------
     // The game plays a weapon's whoosh from its own tick (ModularWeaponBP ReceiveTick) out of two numbers:
-    // the speed of its BaseMesh (GetPhysicsLinearVelocity, |v|) and how much that velocity changed since
-    // its last tick (dv = |v - "Weapon Velocity_Old"|). With T = "Sound Woosh Threshold" (arming sword
-    // 350, most weapons 500): the air loop sounds once |v| x min(dv/100, 1) > 1.5 T (full at 4.875 T), and
-    // the one-shot whoosh fires when dv > 0.5 T and |v| > 0.5 T (at most 5 a second).
-    // Matthew 2026-11-21: most VR swings make no whoosh. The VR hold moves the weapon smoothly (a spring
-    // toward your hand, the arm lag), so dv per tick stays small however fast the swing; the flat game's
-    // arm joint jerks the weapon and dv is large. whoosh_feed: just before the weapon's tick, for a weapon
-    // in a tracked hand, the mod sets "Weapon Velocity_Old" so that the game's own dv is at least
-    // whoosh_dv_per_speed x |v|. The game's own rules then pick loop volume, pitch, one-shot and its
-    // volume from the real VR speed, exactly as in the flat game. "Whoosh:" lines log what it saw.
+    // the speed of its BaseMesh's centre (GetPhysicsLinearVelocity, |v|) and how much that velocity changed
+    // since its last tick (dv). With T = "Sound Woosh Threshold" (arming sword 350, most weapons 500): the air
+    // loop sounds once |v| x min(dv/100, 1) > 1.5 T (full at 4.875 T), and a one-shot whoosh fires when
+    // dv > 0.5 T and |v| > 0.5 T (at most 5 a second; volume |v| x T x 1e-6).
+    // Matthew 2026-11-21: most VR swings make no whoosh. Test 2026-11-21 (whoosh_test_2026-11-21T063543Z.log):
+    // dv is NOT the problem (VR hold and the flat arm both give dv ~ 0.5 |v|); it is speed. The flat game's
+    // mouse swings move the weapon's centre at 10-20 m/s, and anything under 1.5 T (7.5 m/s, arming sword
+    // 5.25) is silent: a VR cut at 6-7 m/s made no sound. whoosh_vr_threshold_scale: while a weapon in a
+    // tracked hand ticks, its threshold is x this (and put back right after its tick), so the game's own
+    // rules sound slower, human-speed swings. "Whoosh:" lines log what each 0.5 s of swinging did.
     struct WhooshSide
     {
         UObject* weapon = nullptr;
         UFunction* tick = nullptr; // that weapon's ReceiveTick
-        double win_start = -1.0, max_v = 0.0, max_dv = 0.0, max_fed = 0.0, max_vol = 0.0, threshold = 0.0;
-        int ticks = 0, sliding = 0, shots = 0, fed = 0;
+        double win_start = -1.0, max_v = 0.0, max_dv = 0.0, max_vol = 0.0, threshold = 0.0, used = 0.0;
+        int ticks = 0, sliding = 0, shots = 0;
         bool tracked = false;
+        bool restore = false; // its threshold is lowered for this tick: put saved back after it
+        double saved = 0.0;
         double gate_until = -1.0;
     };
     WhooshSide g_whoosh[2];
-    bool g_whoosh_feed = true;
     bool g_whoosh_log = true;
-    double g_whoosh_dv_per_speed = 0.25;
+    double g_whoosh_scale = 1.0;
     double g_whoosh_log_min_speed = 300.0;
 
     // From the engine tick: which weapons are in his hands now, and the settings (config() is a copy,
     // too dear for every weapon tick).
     void whoosh_refresh(const hsvr::Config& cfg)
     {
-        g_whoosh_feed = cfg.whoosh_feed;
         g_whoosh_log = cfg.whoosh_log;
-        g_whoosh_dv_per_speed = cfg.whoosh_dv_per_speed;
+        g_whoosh_scale = cfg.whoosh_vr_threshold_scale > 0.0 ? cfg.whoosh_vr_threshold_scale : 1.0;
         g_whoosh_log_min_speed = cfg.whoosh_log_min_speed;
         UObject* pawn = nullptr;
-        if (g_whoosh_feed || g_whoosh_log) pawn = object_property(find_player_controller(), STR("Pawn"));
+        if (g_whoosh_log || g_whoosh_scale != 1.0) pawn = object_property(find_player_controller(), STR("Pawn"));
         UObject* held[2] = {nullptr, nullptr};
         for (int side = 0; side < 2; ++side)
         {
@@ -13818,72 +13915,83 @@ namespace
         }
     }
 
+    int whoosh_side(UObject* context, UFunction* function)
+    {
+        if (!context || !function) return -1;
+        int side = context == g_whoosh[1].weapon ? 1 : context == g_whoosh[0].weapon ? 0 : -1;
+        if (side < 0) return -1;
+        WhooshSide& s = g_whoosh[side];
+        if (s.tick) return function == s.tick ? side : -1;
+        if (function->GetName() != STR("ReceiveTick")) return -1;
+        s.tick = function;
+        return side;
+    }
+
     void whoosh_before_weapon_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
-        if (!context || !function) return;
-        int side = context == g_whoosh[1].weapon ? 1 : context == g_whoosh[0].weapon ? 0 : -1;
+        int side = whoosh_side(context, function);
         if (side < 0) return;
         WhooshSide& s = g_whoosh[side];
-        if (s.tick)
-        {
-            if (function != s.tick) return;
-        }
-        else
-        {
-            if (function->GetName() != STR("ReceiveTick")) return;
-            s.tick = function;
-        }
         using namespace hsvr;
         if (bool_property(context, STR("Sheathed"))) return; // the game zeroes it all while sheathed
+        FProperty* tp = prop_chain(context, STR("Sound Woosh Threshold"));
+        if (!tp) return;
+        double* tv = tp->GetClass().GetName() == STR("DoubleProperty") ? reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(context) + tp->GetOffset_Internal()) : nullptr;
+        if (!tv) return;
+        double T = *tv, used = T;
+        if (s.tracked && g_whoosh_scale != 1.0)
+        {
+            s.saved = T;
+            s.restore = true;
+            used = T * g_whoosh_scale;
+            *tv = used;
+        }
+        if (!g_whoosh_log) return;
         UObject* base = object_property(context, STR("BaseMesh"));
         FProperty* oldp = prop_chain(context, STR("Weapon Velocity_Old"));
-        FProperty* tp = prop_chain(context, STR("Sound Woosh Threshold"));
-        if (!base || !oldp || !tp) return;
+        if (!base || !oldp) return;
         Call gv(base, STR("GetPhysicsLinearVelocity"));
         if (!gv.run()) return;
         Vec3 v = gv.vec();
-        uint8_t* old_at = reinterpret_cast<uint8_t*>(context) + oldp->GetOffset_Internal();
         double o[3];
-        read_three(old_at, oldp, o);
+        read_three(reinterpret_cast<uint8_t*>(context) + oldp->GetOffset_Internal(), oldp, o);
         double speed = length(v);
         double dv = length(v - Vec3{o[0], o[1], o[2]});
-        double T = number_property(context, tp);
-        double fed = dv;
-        if (g_whoosh_feed && s.tracked && speed > 1.0 && g_whoosh_dv_per_speed > 0.0)
-        {
-            double want = speed * g_whoosh_dv_per_speed;
-            if (want > dv)
-            {
-                // The game takes dv = |v - old|: an old velocity along v, short by want, gives exactly want.
-                Vec3 nv = v * (1.0 - want / speed);
-                if (write_three(old_at, oldp, nv.x, nv.y, nv.z)) fed = want, ++s.fed;
-            }
-        }
-        if (!g_whoosh_log) return;
         double now = now_seconds();
         if (s.win_start < 0.0) s.win_start = now;
         ++s.ticks;
         s.threshold = T;
+        s.used = used;
         s.max_v = (std::max)(s.max_v, speed);
         s.max_dv = (std::max)(s.max_dv, dv);
-        s.max_fed = (std::max)(s.max_fed, fed);
         if (bool_property(context, STR("Sliding"))) ++s.sliding;
         if (UObject* slide = object_property(context, STR("Sound Slide")))
             if (float* vol = value_ptr<float>(slide, STR("VolumeMultiplier"))) s.max_vol = (std::max)(s.max_vol, (double)*vol);
-        // The game's one-shot rule with its 0.2 s gate, on the dv it will see.
-        if (fed > 0.5 * T && speed > 0.5 * T && now >= s.gate_until) ++s.shots, s.gate_until = now + 0.2;
+        // The game's one-shot rule with its 0.2 s gate.
+        if (dv > 0.5 * used && speed > 0.5 * used && now >= s.gate_until) ++s.shots, s.gate_until = now + 0.2;
         if (now - s.win_start >= 0.5)
         {
             if (s.max_v >= g_whoosh_log_min_speed)
-                HSVR_LOG("Whoosh: %s %ls (%s, threshold %.0f): speed max %.0f cm/s, game's dv max %.0f cm/s%s, sliding %d/%d ticks, air loop volume max %.2f, "
+                HSVR_LOG("Whoosh: %s %ls (%s, threshold %.0f, used %.0f): speed max %.0f cm/s, game's dv max %.0f cm/s, sliding %d/%d ticks, air loop volume max %.2f, "
                          "one-shots %d",
-                         side == 0 ? "left" : "right", context->GetName().c_str(), s.tracked ? "VR hand" : "game's arm", T, s.max_v, s.max_dv,
-                         s.fed > 0 ? (std::string(" (fed up to ") + std::to_string((int)std::lround(s.max_fed)) + ")").c_str() : "", s.sliding, s.ticks, s.max_vol,
-                         s.shots);
+                         side == 0 ? "left" : "right", context->GetName().c_str(), s.tracked ? "VR hand" : "game's arm", s.threshold, s.used, s.max_v, s.max_dv,
+                         s.sliding, s.ticks, s.max_vol, s.shots);
             s.win_start = now;
-            s.ticks = s.sliding = s.shots = s.fed = 0;
-            s.max_v = s.max_dv = s.max_fed = s.max_vol = 0.0;
+            s.ticks = s.sliding = s.shots = 0;
+            s.max_v = s.max_dv = s.max_vol = 0.0;
         }
+    }
+
+    // Right after the weapon's tick: its own threshold back (nothing else in the game sees the lowered one).
+    void whoosh_after_weapon_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
+    {
+        int side = whoosh_side(context, function);
+        if (side < 0) return;
+        WhooshSide& s = g_whoosh[side];
+        if (!s.restore) return;
+        s.restore = false;
+        if (FProperty* tp = prop_chain(context, STR("Sound Woosh Threshold")))
+            *reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(context) + tp->GetOffset_Internal()) = s.saved;
     }
 
     // Who lets a stuck blade go (stab-test7: the game stuck thrusts, then let them go within 0.15 s).
@@ -14398,8 +14506,30 @@ namespace
         if (UObject* slide = object_property(pawn, sd.constraint))
         {
             Call ref(slide, STR("SetConstraintReferencePosition"));
-            ref.byte(STR("Frame"), 1);
-            ref.three(STR("RefPos"), 0.0, 0.0, blade_length(w));
+            const TCHAR* fname = nullptr;
+            const TCHAR* pname = nullptr;
+            if (cfg.draw_seat_ref_fix)
+            {
+                // The old call named its parameters "Frame"/"RefPos"; if the engine calls them otherwise,
+                // it wrote nothing and set Frame1's reference to (0,0,0). Matthew likes how draws feel with
+                // that, so the corrected call is opt-in (draw_seat_ref_fix=1) until he has tried it.
+                fname = ref.byte_any({STR("Frame"), STR("frame")}, 1);
+                pname = ref.three_any({STR("RefPosition"), STR("RefPos")}, 0.0, 0.0, blade_length(w));
+            }
+            else
+            {
+                ref.byte(STR("Frame"), 1);
+                ref.three(STR("RefPos"), 0.0, 0.0, blade_length(w));
+            }
+            static bool names_logged = false;
+            if (!names_logged && ref.fn)
+            {
+                names_logged = true;
+                std::wstring list;
+                for (FProperty* p : ref.fn->ForEachProperty()) list += p->GetName() + L" ";
+                HSVR_LOG("Draw: SetConstraintReferencePosition parameters: %ls(fix %d: frame %ls, position %ls)", list.c_str(), (int)cfg.draw_seat_ref_fix,
+                         fname ? fname : L"-", pname ? pname : L"-");
+            }
             if (!ref.run()) HSVR_LOG("Draw: SetConstraintReferencePosition not found on %ls", sd.constraint);
         }
         else
@@ -15527,8 +15657,8 @@ namespace
                         if (want && marker)
                             at = component_rotation(base).inverse().rotate(component_location(marker) - component_location(base));
                         Call rp(joint, STR("SetConstraintReferencePosition"));
-                        rp.byte(STR("Frame"), 0); // Frame1, the weapon's side
-                        rp.three(STR("RefPosition"), at.x, at.y, at.z);
+                        rp.byte_any({STR("Frame"), STR("frame")}, 0); // Frame1, the weapon's side
+                        rp.three_any({STR("RefPosition"), STR("RefPos")}, at.x, at.y, at.z);
                         rp.run();
                         HSVR_LOG("Grip: %s weapon anchor at (%.1f, %.1f, %.1f) in the weapon (%s)", side == 0 ? "left" : "right", at.x, at.y, at.z,
                                  want ? (marker ? "its handle marker" : "no handle marker, the game's anchor") : "the game's anchor");
@@ -15561,8 +15691,8 @@ namespace
                         hsvr::Vec3 at{original.x + g_grip_frame_offset[0].load(), original.y + g_grip_frame_offset[1].load(),
                                       original.z + g_grip_frame_offset[2].load()};
                         Call rp(joint, STR("SetConstraintReferencePosition"));
-                        rp.byte(STR("Frame"), 1); // EConstraintFrame::Frame2, the hand's side
-                        rp.three(STR("RefPosition"), at.x, at.y, at.z);
+                        rp.byte_any({STR("Frame"), STR("frame")}, 1); // EConstraintFrame::Frame2, the hand's side
+                        rp.three_any({STR("RefPosition"), STR("RefPos")}, at.x, at.y, at.z);
                         bool ok = rp.run();
                         HSVR_LOG("Grip: hand anchor moved to (%.1f, %.1f, %.1f) (%d)", at.x, at.y, at.z, (int)ok);
                     }
@@ -21817,6 +21947,7 @@ class HalfSwordVR : public CppUserModBase
         }
         Hook::RegisterProcessEventPreCallback(&capsule_before_tick, {false, false, STR("HalfSwordVR"), STR("CapsuleBefore")});
         Hook::RegisterProcessEventPreCallback(&whoosh_before_weapon_tick, {false, false, STR("HalfSwordVR"), STR("WhooshBefore")});
+        Hook::RegisterProcessEventPostCallback(&whoosh_after_weapon_tick, {false, false, STR("HalfSwordVR"), STR("WhooshAfter")});
         // Cost probe: pre after the mod's pre callbacks, post before its post callbacks (perf_events).
         Hook::RegisterProcessEventPreCallback(&ev_pre, {false, false, STR("HalfSwordVR"), STR("CostProbePre")});
         Hook::RegisterProcessEventPostCallback(&ev_post, {false, false, STR("HalfSwordVR"), STR("CostProbePost")});
