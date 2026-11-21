@@ -2443,11 +2443,22 @@ namespace
                 Vec3 want = (body * rot_to_quat(-g_fake_thrust_pitch.load(), 0.0, 0.0)).normalized().rotate({1.0, 0.0, 0.0});
                 UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
                 RawArray* tips = held ? value_ptr<RawArray>(held, STR("Tips")) : nullptr;
-                if (tips && tips->Data && tips->Num > 0 && tips->Data[0])
+                UObject* held_mesh = held ? object_property(held, STR("BaseMesh")) : nullptr;
+                bool have_tip = tips && tips->Data && tips->Num > 0 && tips->Data[0];
+                if (have_tip || held_mesh)
                 {
-                    Call f(static_cast<UObject*>(tips->Data[0]), STR("GetForwardVector"));
-                    f.run();
-                    Vec3 have = f.vec();
+                    // The first "Tip" marker's forward; a weapon without Tips (passport-spawned ones
+                    // have none) uses its blade axis, the BaseMesh's +Z (pommel to tip).
+                    Vec3 have;
+                    if (have_tip)
+                    {
+                        Call f(static_cast<UObject*>(tips->Data[0]), STR("GetForwardVector"));
+                        f.run();
+                        have = f.vec();
+                    }
+                    else have = component_rotation(held_mesh).rotate(Vec3{0, 0, 1});
+                    HSVR_LOG_EVERY(1.0, "Test aim: %s, tip axis (%.2f, %.2f, %.2f), want (%.2f, %.2f, %.2f)", have_tip ? "Tips[0] forward" : "BaseMesh +Z",
+                                   have.x, have.y, have.z, want.x, want.y, want.z);
                     Vec3 axis = cross(have, want);
                     double sn = length(axis), cs = have.x * want.x + have.y * want.y + have.z * want.z;
                     if (sn > 1e-6)
@@ -11633,6 +11644,14 @@ namespace
                 h.free.t = u;
                 h.free.pivot = h.free.ha + ab * u;
                 bool at_end = u <= 0.0 || u >= 1.0;
+                if (at_end && cfg.pose_slide_bs_damper)
+                {
+                    // At an end the hand may still slide off it the way gravity takes the weapon (B&S: tip
+                    // down, a hand at the guard runs down to the pommel): the weapon falls along the handle,
+                    // so the hand's place on it moves by the handle's up-ness (ha -> hb axis, world z).
+                    double up = bq.rotate(normalized(ab)).z;
+                    if ((u >= 1.0 && up < -0.1) || (u <= 0.0 && up > 0.1)) at_end = false;
+                }
                 if (!at_end)
                 {
                     h.handle_slide = true;
