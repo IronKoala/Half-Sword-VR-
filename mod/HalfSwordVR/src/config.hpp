@@ -229,6 +229,12 @@ namespace hsvr
         // 0 = the old way (his hips always under your neck).
         double pose_lean_step_radius_cm = 30.0;
         double pose_lean_walk_catchup_s = 0.15;
+        // A lean you hold still is a new stance: once your neck has moved less than
+        // pose_lean_settle_speed_cms for pose_lean_settle_s, he steps under you (0 = never; stays leaned).
+        double pose_lean_settle_s = 0.8;
+        // Behind his hips he leans back at most this far (cm); further back, his hips follow at once.
+        double pose_lean_back_radius_cm = 6.0;
+        double pose_lean_settle_speed_cms = 10.0;
         // 1 = the game's own forward bend from crouching (Root Height) and reaching for grabs (Lean
         // Forward (Grabbing)) is taken out of his animation, so only your lean bends him.
         bool pose_lean_cancel_game_bend = true;
@@ -437,6 +443,12 @@ namespace hsvr
         double pose_hold_let_go_reach_slack_cm = 15.0; // with the arm-lag hold: how far past his reach the grip may trail
         // No let-go for this long after a weapon comes into the hand (long weapons swing into place).
         double pose_hold_let_go_grace_s = 1.0;
+        // Stuck let-go drops the weapon dead (no velocity) instead of with the hold's last chase
+        // velocity (playtest 2026-11-21: stopped weapons left at 10-20 m/s and flew at him). 0 = old.
+        bool pose_hold_let_go_dead = true;
+        // While a held weapon is stopped, the hold uses its measured motion, not the velocity it last
+        // set (which never drops while it is blocked, so the hold wound up to 20 m/s). 0 = old.
+        bool pose_hold_measured_v = true;
         // Something is in the held weapon's way when it ends a tick this far (cm) short of where the
         // hold sent it; the stuck rule only lets go of a weapon that is in contact like that.
         double pose_hold_contact_cm = 0.5;
@@ -582,6 +594,10 @@ namespace hsvr
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;
+        // Fixed scenery (a fence, a table, a wall: anything that blocks and does not move) can be held:
+        // his drawn hand stays put on it with the fingers wrapped round it until you let go or pull your
+        // hand pose_grab_ride_max_cm away from it.
+        bool pose_grab_world = true;
         // Two hands on one weapon (B&S rules): squeeze the free hand on a weapon the other hand holds,
         // on its grip or anywhere along its blade (half-swording, Matthew 2026-11-18). The weapon then
         // lies along the line between the hands, the first hand sets its roll, and the hold is
@@ -737,6 +753,9 @@ namespace hsvr
         bool pose_finger_schedule = true;
         // With SteamVR's hand skeleton: each finger joint follows your own joint (not one curl per finger).
         bool pose_fingers_per_joint = true;
+        // With per-joint fingers: the end joint bends this much of the middle joint's angle (the tendon
+        // couples them, ~0.67); 0 = as the hand skeleton reports it.
+        double pose_finger_dip_coupling = 0.67;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
@@ -772,8 +791,10 @@ namespace hsvr
         bool pose_grab_ride_objects = false;
         double pose_grab_ride_from_cm = 0.5;
         double pose_grab_ride_full_cm = 2.0;
-        double pose_grab_ride_max_cm = 20.0;
-        double pose_grab_slip_s = 0.3; // held past ride_max_cm this long: the grip slips (let go)
+        // (20 dropped ~25 body grabs in 0.4-1.8 s in a real fight, 2026-11-21 11:28-11:34: fighting Willies
+        // move 35-92 cm away; the 'pushed away' reaching was his hat's collision, not the ride.)
+        double pose_grab_ride_max_cm = 40.0;
+        double pose_grab_slip_s = 0.5; // held past ride_max_cm this long: the grip slips (let go)
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;
@@ -879,6 +900,11 @@ namespace hsvr
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;
         double pose_crouch_dead_zone_cm = 3.0;
+        // How far his legs crouch him (cm, times his size). Deeper than that (your view lower still), he
+        // bends forward until his head is down with your view, so his hands reach as low as yours
+        // (pose_crouch_bend_for_depth; playtest 2026-11-21: he could not reach the ground).
+        double pose_crouch_max_cm = 62.0; // was a fixed 55; playtest 2026-11-21: view 114 cm down, his head bone 35 cm above it
+        bool pose_crouch_bend_for_depth = true;
         // Left stick click toggles a button crouch this deep (cm, eased at _cms); 0 = off.
         double pose_crouch_button_cm = 40.0;
         double pose_crouch_button_cms = 120.0;
@@ -931,6 +957,10 @@ namespace hsvr
         // Feet stay where they were put down and step (lift and place) when the hips have moved or
         // turned away from them: 1 = on, 0 = the game's own feet.
         bool pose_feet = true;
+        // 1 = while the game's kick has a leg (Kicking L/R), the mod stops planting that foot and holding
+        // it flat; it is planted again where the kick put it down (playtest 2026-11-21: foot turned backwards).
+        bool pose_feet_free_on_kick = true;
+        double pose_feet_kick_free_s = 1.0; // and this long after right A / the left-X tap fires a kick (kicks rise 0.2-0.3 s after the press and last ~0.5 s)
         double pose_step_distance_cm = 10.0, pose_step_angle_deg = 30.0; // when a foot steps
         double pose_step_time_s = 0.3;  // how long a step takes standing (shorter when moving)
         double pose_step_lift_cm = 10.0; // how high the foot lifts
@@ -1027,6 +1057,10 @@ namespace hsvr
         // material the game ships). helmet_fade_see_through 0 = solid, 1 = invisible. The material has
         // no colour texture: helmet_fade_tint is the metal colour "r,g,b" (0-1).
         double helmet_fade_see_through = 0.5;
+        // Which head pieces helmet_view 5 fades: those in front of your eyes (built-in list measured
+        // from the meshes: helmet_fade_face.md). Comma lists of mesh names to always / never fade.
+        std::string helmet_fade_always = "";
+        std::string helmet_fade_never = "";
         std::string helmet_fade_tint = "0.55,0.55,0.58";
         double helmet_fade_metallic = 1.0;
         double helmet_fade_roughness = 0.35;

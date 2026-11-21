@@ -415,6 +415,9 @@ namespace hsvr
         num("pose_lean_slack_cm", c.pose_lean_slack_cm);
         num("pose_lean_step_radius_cm", c.pose_lean_step_radius_cm);
         num("pose_lean_walk_catchup_s", c.pose_lean_walk_catchup_s);
+        num("pose_lean_settle_s", c.pose_lean_settle_s);
+        num("pose_lean_back_radius_cm", c.pose_lean_back_radius_cm);
+        num("pose_lean_settle_speed_cms", c.pose_lean_settle_speed_cms);
         flag("pose_lean_cancel_game_bend", c.pose_lean_cancel_game_bend);
         flag("pose_no_uro", c.pose_no_uro);
         flag("pose_helmet_late", c.pose_helmet_late);
@@ -482,6 +485,8 @@ namespace hsvr
         num("pose_hold_let_go_s", c.pose_hold_let_go_s);
         flag("pose_hold_let_go_ignore_self", c.pose_hold_let_go_ignore_self);
         num("pose_hold_let_go_grace_s", c.pose_hold_let_go_grace_s);
+        flag("pose_hold_let_go_dead", c.pose_hold_let_go_dead);
+        flag("pose_hold_measured_v", c.pose_hold_measured_v);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
         flag("pose_hold_ignore_hand", c.pose_hold_ignore_hand);
         flag("pose_hold_block_offhand_search", c.pose_hold_block_offhand_search);
@@ -650,6 +655,7 @@ namespace hsvr
         num("pose_fingers_tau_s", c.pose_fingers_tau_s);
         flag("pose_finger_schedule", c.pose_finger_schedule);
         flag("pose_fingers_per_joint", c.pose_fingers_per_joint);
+        num("pose_finger_dip_coupling", c.pose_finger_dip_coupling);
         num("pose_finger_mcp_lag", c.pose_finger_mcp_lag);
         num("pose_finger_pip_full", c.pose_finger_pip_full);
         flag("pose_wrap", c.pose_wrap);
@@ -700,6 +706,7 @@ namespace hsvr
         num("pose_drink_sip_s", c.pose_drink_sip_s);
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
         flag("pose_grab_objects", c.pose_grab_objects);
+        flag("pose_grab_world", c.pose_grab_world);
         flag("pose_ghost_hand", c.pose_ghost_hand);
         num("pose_ghost_from_cm", c.pose_ghost_from_cm);
         text("pose_ghost_mesh", c.pose_ghost_mesh);
@@ -729,6 +736,8 @@ namespace hsvr
         num("pose_teleport_above_cm", c.pose_teleport_above_cm);
         flag("pose_crouch", c.pose_crouch);
         num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
+        num("pose_crouch_max_cm", c.pose_crouch_max_cm);
+        flag("pose_crouch_bend_for_depth", c.pose_crouch_bend_for_depth);
         num("pose_crouch_button_cm", c.pose_crouch_button_cm);
         num("pose_crouch_button_cms", c.pose_crouch_button_cms);
         flag("kick_on_a", c.kick_on_a);
@@ -751,6 +760,8 @@ namespace hsvr
         num("pose_forearm_twist_share", c.pose_forearm_twist_share);
         num("pose_torso_twist", c.pose_torso_twist);
         flag("pose_feet", c.pose_feet);
+        flag("pose_feet_free_on_kick", c.pose_feet_free_on_kick);
+        num("pose_feet_kick_free_s", c.pose_feet_kick_free_s);
         num("pose_step_distance_cm", c.pose_step_distance_cm);
         num("pose_step_angle_deg", c.pose_step_angle_deg);
         num("pose_step_time_s", c.pose_step_time_s);
@@ -789,6 +800,8 @@ namespace hsvr
         text("helmet_see_through_param", c.helmet_see_through_param);
         integer("helmet_see_through_test", c.helmet_see_through_test);
         num("helmet_fade_see_through", c.helmet_fade_see_through);
+        text("helmet_fade_always", c.helmet_fade_always);
+        text("helmet_fade_never", c.helmet_fade_never);
         text("helmet_fade_tint", c.helmet_fade_tint);
         num("helmet_fade_metallic", c.helmet_fade_metallic);
         num("helmet_fade_roughness", c.helmet_fade_roughness);
