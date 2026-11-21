@@ -3580,10 +3580,27 @@ namespace
                 static double last_t = 0.0;
                 double tn = now_seconds(), dtn = tn - last_t;
                 last_t = tn;
+                // How long your neck has been still: a lean you hold still is a new stance, so he steps under
+                // you after pose_lean_settle_s (playtest 2026-11-21: after shuffling, he stayed leaned 10-20 cm
+                // toward your head for minutes, "never in line with my own spine").
+                static Vec3 last_neck;
+                static double neck_speed = 0.0, still_s = 0.0;
+                if (dtn > 0.0 && dtn < 0.2)
+                {
+                    double v = length(Vec3{neck_now.x - last_neck.x, neck_now.y - last_neck.y, 0.0}) / dtn;
+                    neck_speed += (v - neck_speed) * (1.0 - std::exp(-dtn / 0.15));
+                    still_s = neck_speed < cfg.pose_lean_settle_speed_cms ? still_s + dtn : 0.0;
+                }
+                last_neck = neck_now;
                 if (radius > 0.0)
                 {
                     double d = length(delta);
                     if (d > radius) stepping = true;
+                    if (!stepping && cfg.pose_lean_settle_s > 0.0 && still_s > cfg.pose_lean_settle_s && d > 5.0)
+                    {
+                        stepping = true;
+                        HSVR_LOG_EVERY(1.0, "Lean: your neck held %.0f cm from his hips for %.1f s: he steps under you", d, still_s);
+                    }
                     double keep = 1.0; // share of the offset kept as lean
                     if (stepping)
                     {

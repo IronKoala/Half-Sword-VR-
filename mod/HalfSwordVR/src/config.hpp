@@ -229,6 +229,10 @@ namespace hsvr
         // 0 = the old way (his hips always under your neck).
         double pose_lean_step_radius_cm = 30.0;
         double pose_lean_walk_catchup_s = 0.15;
+        // A lean you hold still is a new stance: once your neck has moved less than
+        // pose_lean_settle_speed_cms for pose_lean_settle_s, he steps under you (0 = never; stays leaned).
+        double pose_lean_settle_s = 0.8;
+        double pose_lean_settle_speed_cms = 10.0;
         // 1 = the game's own forward bend from crouching (Root Height) and reaching for grabs (Lean
         // Forward (Grabbing)) is taken out of his animation, so only your lean bends him.
         bool pose_lean_cancel_game_bend = true;
