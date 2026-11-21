@@ -150,6 +150,8 @@ LAYOUT = [
         ("pose_lean_cancel_game_bend", ""),
         ("pose_torso_twist", "Share of your head's turn the spine and neck take."),
         ("hide_own_gore_from", "Gore skeleton hidden from this bone up (empty = not hidden)."),
+        ("player_takes_damage", "1 = hits on your body hurt you as in the flat game (health, consciousness, bleeding)."),
+        ("player_stump_blood", "1 = blood from your own cut-off limb stays at the stump (not floating where the limb was)."),
         ("pose_arms", ""),
         ("pose_follow_room", ""),
         ("pose_hold_capsule", ""),
