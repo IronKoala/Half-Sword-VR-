@@ -3594,7 +3594,19 @@ namespace
                 last_neck = neck_now;
                 if (radius > 0.0)
                 {
-                    double d = length(delta);
+                    // Backwards he doesn't lean (nobody leans back to sit into a crouch): past
+                    // pose_lean_back_radius_cm behind his hips, the capsule follows at once (playtest
+                    // 2026-11-21: crouching put your neck 25 cm back and he leaned 20 degrees backwards,
+                    // shoulders up and away from the floor).
+                    Vec3 back_follow{0.0, 0.0, 0.0};
+                    {
+                        Vec3 dl = body.inverse().rotate(base.rotate(delta));
+                        double br = (std::max)(0.0, cfg.pose_lean_back_radius_cm);
+                        if (dl.x < -br) back_follow = base.inverse().rotate(body.rotate(Vec3{dl.x + br, 0.0, 0.0}));
+                        back_follow.z = 0.0;
+                    }
+                    Vec3 rest = delta - back_follow;
+                    double d = length(rest);
                     if (d > radius) stepping = true;
                     if (!stepping && cfg.pose_lean_settle_s > 0.0 && still_s > cfg.pose_lean_settle_s && d > 5.0)
                     {
@@ -3613,7 +3625,7 @@ namespace
                         if (d > 1e-6 && d * (1.0 - keep) < 0.6) keep = (std::max)(0.0, 1.0 - 0.6 / d);
                         if (d < 0.6) stepping = false;
                     }
-                    follow = delta * (1.0 - keep);
+                    follow = back_follow + rest * (1.0 - keep);
                 }
                 else
                     stepping = false;

@@ -161,6 +161,7 @@ LAYOUT = [
         ("pose_lean_smooth_s", ""),
         ("pose_lean_slack_cm", ""),
         ("pose_lean_settle_speed_cms", ""),
+        ("pose_lean_back_radius_cm", "He leans back at most this far (cm); further back his hips follow."),
         ("pose_lean_walk_catchup_s", "Once your neck passes the step radius he steps: hips back under you over this long (s)."),
         ("pose_lean_cancel_game_bend", ""),
         ("pose_torso_twist", "Share of your head's turn the spine and neck take."),
