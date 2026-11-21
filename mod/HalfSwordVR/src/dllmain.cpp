@@ -7361,6 +7361,213 @@ namespace
         }
     }
 
+    // Joint breaking by grappling (joint_break). The game's Dislocate Bone is emptied out since the
+    // 11-17 update (extracted-2026-11-19\listing\fn_Willie_BP_Dislocate_Bone.txt: it sets Bone
+    // Dislocation 0 and returns), so for a Willie you hold the mod runs the old game's rules
+    // (decompiled\functions\Willie_BP\Dislocate Bone.txt), with a twist past the free range counted as a
+    // bend (Matthew 2026-11-21 04:23Z). Per part, every tick:
+    //   d = the bone's forward (X) in its parent bone's space . X, or cos(twist excess x gain) if lower
+    //   BD = MapRangeClamped(d, 1, -1, State x 0.125, Strain + 1) x part factor (neck 0.375, arm 0.025,
+    //        back 0.125, leg 0.25) x (Skeletron ? 1.5 : 1) x MapRangeClamped(Strain, 0, 1, 0.5, 5)
+    //   BD >= 0.1: health -= BD x 666 x dt, pain += BD x 1000 x dt, Strain += BD x 100 x dt,
+    //              State += min(BD x 666 x dt, 0.1); State >= 1: the part goes (below)
+    //   else:      Strain += BD x 25 x dt, pain += BD x 10 x dt
+    // The game itself still eases every Strain back to 0 (FInterpTo speed 5, UG 358852) and relocates a
+    // dislocated shoulder or knee by its Restore Bone (swinging the arm, crouching), which sets the
+    // joint's "Motor" profile again.
+    struct JointPart
+    {
+        const char* bone;
+        const char* twist_bones[3]; // their twists about X (each against its parent) add up
+        const TCHAR* strain;
+        const TCHAR* state;
+        const TCHAR* health;
+        const TCHAR* pain;
+        const TCHAR* dislocated; // nullptr: the outcome is a game event
+        const char* joint;       // its constraint, set to "Broken" when it dislocates
+        double factor;
+        int kind; // 0 neck, 1 arm, 2 back, 3 leg
+    };
+    static const JointPart k_joint_parts[] = {
+        {"neck_01", {"neck_01", "neck_02", "head"}, STR("Neck Strain"), STR("Neck Dislocation State"), STR("Neck Health"), STR("Pain Neck"), nullptr, nullptr, 0.375, 0},
+        {"upperarm_r", {"upperarm_r", nullptr, nullptr}, STR("Arm R Strain"), STR("Arm R Dislocation State"), STR("Arm_R Health"), STR("Pain Arm R"), STR("Arm R Dislocated"), "UserConstraint_10", 0.025, 1},
+        {"upperarm_l", {"upperarm_l", nullptr, nullptr}, STR("Arm L Strain"), STR("Arm L Dislocation State"), STR("Arm_L Health"), STR("Pain Arm L"), STR("Arm L Dislocated"), "UserConstraint_14", 0.025, 1},
+        {"spine_03", {"spine_03", "spine_04", "spine_05"}, STR("Back Strain"), STR("Back Dislocation State"), STR("Back Health"), STR("Pain Lower Body"), nullptr, nullptr, 0.125, 2},
+        {"calf_r", {"calf_r", nullptr, nullptr}, STR("Leg R Strain"), STR("Leg R Dislocation State"), STR("Leg_R Health"), STR("Pain Leg R"), STR("Leg R Dislocated"), "UserConstraint_0", 0.25, 3},
+        {"calf_l", {"calf_l", nullptr, nullptr}, STR("Leg L Strain"), STR("Leg L Dislocation State"), STR("Leg_L Health"), STR("Pain Leg L"), STR("Leg L Dislocated"), "UserConstraint_18", 0.25, 3},
+    };
+    constexpr int k_joint_part_count = sizeof(k_joint_parts) / sizeof(k_joint_parts[0]);
+
+    // Each hand's grab: the twists its Willie's parts had when it took hold (the rest the free range
+    // is counted from), keyed by that grab's start time.
+    struct JointRest
+    {
+        double since = -2.0;
+        double twist[k_joint_part_count] = {};
+    };
+    JointRest g_joint_rest[3]; // [2]: the hsvr.joint_torque test's foe
+
+    // A bone's forward . X and its twist about X (degrees), both in its parent bone's space.
+    bool bone_bend_twist(UObject* mesh, const char* bone_text, double& dot_x, double& twist_deg)
+    {
+        using namespace hsvr;
+        FName bone = bone_fname(bone_text);
+        Call pb(mesh, STR("GetParentBone"));
+        pb.name(STR("BoneName"), bone);
+        pb.run();
+        FProperty* rp = pb.param(STR("ReturnValue"));
+        if (!rp) return false;
+        FName parent = *reinterpret_cast<FName*>(pb.buffer.data() + rp->GetOffset_Internal());
+        Quat rel = (socket_rotation(mesh, parent).inverse() * socket_rotation(mesh, bone)).normalized();
+        dot_x = rel.rotate({1.0, 0.0, 0.0}).x;
+        twist_deg = normalize_axis(2.0 * std::atan2(rel.x, rel.w) * 57.29577951308232);
+        return true;
+    }
+
+    double map_range_clamped(double v, double in_a, double in_b, double out_a, double out_b)
+    {
+        double t = (v - in_a) / (in_b - in_a);
+        t = (std::max)(0.0, (std::min)(1.0, t));
+        return out_a + (out_b - out_a) * t;
+    }
+
+    void joint_crack_sound(UObject* mesh, const char* bone, double volume)
+    {
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        static UObject* cue = nullptr;
+        if (!cue) cue = load_asset_object(STR("/Game/Sounds/Gore/Knee/sound_knee_crush_Cue.sound_knee_crush_Cue"));
+        if (!gs || !cue || !mesh) return;
+        Call c(gs, STR("SpawnSoundAttached"));
+        c.object(STR("Sound"), cue);
+        c.object(STR("AttachToComponent"), mesh);
+        c.name(STR("AttachPointName"), bone_fname(bone));
+        c.byte(STR("LocationType"), 0); // KeepRelativeOffset
+        c.flag(STR("bStopWhenAttachedToDestroyed"), false);
+        c.number(STR("VolumeMultiplier"), volume);
+        c.number(STR("PitchMultiplier"), 1.0);
+        c.flag(STR("bAutoDestroy"), true);
+        c.run();
+    }
+
+    void joint_break_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        const Config& cfg = config();
+        if (!cfg.joint_break) return;
+        static double last = -1.0;
+        double now = now_seconds();
+        double dt = last < 0.0 ? 0.0 : (std::min)(0.05, now - last);
+        last = now;
+        if (dt <= 0.0) return;
+        UObject* done = nullptr;
+        static double log_at[3][k_joint_part_count] = {};
+        for (int side = 0; side < 3; ++side)
+        {
+            UObject* w = nullptr;
+            double since = 0.0;
+            if (side < 2)
+            {
+                w = g_body_grab[side].on ? g_body_grab[side].victim : nullptr;
+                since = g_body_grab[side].since;
+            }
+            else if (g_joint_torque.on)
+            {
+                w = joint_torque_foe(pawn);
+                since = g_joint_torque.until;
+            }
+            if (!w || w == done || !object_alive(w) || w == pawn) continue;
+            done = w;
+            UObject* mesh = object_property(w, STR("Mesh"));
+            if (!mesh || bool_property(w, STR("Immortal"))) continue;
+            bool skeletron = bool_property(w, STR("Skeletron"));
+            JointRest& rest = g_joint_rest[side];
+            bool fresh = rest.since != since;
+            for (int i = 0; i < k_joint_part_count; ++i)
+            {
+                const JointPart& p = k_joint_parts[i];
+                if (p.kind == 3 && !cfg.joint_break_legs) continue;
+                // Already gone: the game owns it now (Restore Bone relocates, a snapped neck is dead).
+                if (p.kind == 0 && (bool_property(w, STR("Neck Snapped")) || bool_property(w, STR("Neck Dislocated")))) continue;
+                if (p.kind == 2 && bool_property(w, STR("Back Broken"))) continue;
+                if (p.dislocated && bool_property(w, p.dislocated)) continue;
+                double dot = 1.0, tw = 0.0, twist = 0.0;
+                if (!bone_bend_twist(mesh, p.bone, dot, tw)) continue;
+                for (const char* tb : p.twist_bones)
+                {
+                    double d2 = 1.0, t2 = 0.0;
+                    if (tb && bone_bend_twist(mesh, tb, d2, t2)) twist += t2;
+                }
+                if (fresh) rest.twist[i] = twist;
+                double free = p.kind == 0 ? cfg.joint_break_twist_free_neck_deg : p.kind == 1 ? cfg.joint_break_twist_free_arm_deg
+                            : p.kind == 2 ? cfg.joint_break_twist_free_back_deg : 1e9;
+                double excess = (std::max)(0.0, std::fabs(normalize_axis(twist - rest.twist[i])) - free);
+                double twist_dot = std::cos((std::min)(180.0, excess * cfg.joint_break_twist_gain) * kDegToRad);
+                double d = (std::min)(dot, twist_dot);
+                double strain = read_number_variable(w, p.strain), state = read_number_variable(w, p.state);
+                if (strain < 0.0 || state < 0.0) continue; // no such variable
+                double bd = map_range_clamped(d, 1.0, -1.0, state * 0.125, strain + 1.0) * p.factor * (skeletron ? 1.5 : 1.0) *
+                            map_range_clamped(strain, 0.0, 1.0, 0.5, 5.0) * cfg.joint_break_scale;
+                if (bd <= 0.0) continue;
+                double pain = read_number_variable(w, p.pain);
+                if (bd >= 0.1)
+                {
+                    double health = read_number_variable(w, p.health);
+                    if (health >= 0.0) set_variable(w, p.health, (std::max)(0.0, (std::min)(100.0, health - bd * 666.0 * dt)));
+                    if (pain >= 0.0) set_variable(w, p.pain, pain + bd * 1000.0 * dt);
+                    set_variable(w, p.strain, (std::min)(1.0, strain + bd * 100.0 * dt));
+                    state = (std::min)(1.0, state + (std::min)(0.1, bd * 666.0 * dt));
+                    set_variable(w, p.state, state);
+                    if (state >= 1.0)
+                    {
+                        HSVR_LOG("Joints: %ls's %s goes (bend dot %.2f, twist %.0f deg from rest, strain %.2f)", w->GetName().c_str(), p.bone, dot,
+                                 normalize_axis(twist - rest.twist[i]), strain);
+                        if (p.kind == 0)
+                        {
+                            Call c(w, STR("Snap Neck"));
+                            c.run();
+                        }
+                        else if (p.kind == 2)
+                        {
+                            Call c(w, STR("Break Back"));
+                            c.run();
+                        }
+                        else
+                        {
+                            set_variable(w, p.health, 0.0);
+                            if (pain >= 0.0) set_variable(w, p.pain, read_number_variable(w, p.pain) + 20.0);
+                            set_bool_property(w, p.dislocated, true);
+                            Call prof(mesh, STR("SetConstraintProfile"));
+                            prof.name(STR("JointName"), bone_fname(p.joint));
+                            prof.name(STR("ProfileName"), bone_fname(skeletron ? "Skeletron" : "Broken"));
+                            prof.flag(STR("bDefaultIfNotFound"), false);
+                            prof.run();
+                            joint_crack_sound(mesh, p.bone, 1.0);
+                        }
+                    }
+                }
+                else
+                {
+                    set_variable(w, p.strain, (std::min)(1.0, strain + bd * 25.0 * dt));
+                    if (pain >= 0.0) set_variable(w, p.pain, pain + bd * 10.0 * dt);
+                    // The old game's crack at 0.05 (volume = BD), at most every 0.5 s per part.
+                    static double crack_at[3][k_joint_part_count] = {};
+                    if (bd >= 0.05 && now - crack_at[side][i] > 0.5)
+                    {
+                        crack_at[side][i] = now;
+                        joint_crack_sound(mesh, p.bone, (std::min)(1.0, bd));
+                    }
+                }
+                if (bd >= 0.005 && now - log_at[side][i] > 0.5)
+                {
+                    log_at[side][i] = now;
+                    HSVR_LOG("Joints: %ls %s strains: BD %.3f (bend dot %.2f, twist %.0f deg from rest -> dot %.2f), strain %.2f, state %.2f", w->GetName().c_str(), p.bone, bd,
+                             dot, normalize_axis(twist - rest.twist[i]), twist_dot, strain, state);
+                }
+            }
+            rest.since = since;
+        }
+    }
+
     // Willie's tick re-shapes his hand joints every tick (as for weapons, @454086), so a softened body
     // grab's spring is written again right after it.
     void body_grab_after_tick(UObject* pawn)
@@ -14587,7 +14794,7 @@ namespace
             { HSVR_SUB("after:swing_speed_after_tick"); swing_speed_after_tick(context); }
             { HSVR_SUB("after:fist_flags_after_tick"); fist_flags_after_tick(context); }
             { HSVR_SUB("after:body_grab_after_tick"); body_grab_after_tick(context); }
-            { HSVR_SUB("after:joint_strain_log"); joint_torque_tick(context); joint_strain_log(context); }
+            { HSVR_SUB("after:joint_strain_log"); joint_torque_tick(context); joint_break_tick(context); joint_strain_log(context); }
             { HSVR_SUB("after:body_hit_watch"); body_hit_watch(context); }
             { HSVR_SUB("after:elbow_tick"); elbow_tick(context); }
             { HSVR_SUB("after:stump_blood_tick"); stump_blood_tick(context); }

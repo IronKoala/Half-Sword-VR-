@@ -714,6 +714,22 @@ namespace hsvr
         // While you hold a Willie: his joints as the game's Dislocate Bone reads them (each bone's forward
         // against its parent's, the bend; and its twist), with Strain / Dislocation State / part health.
         bool log_joint_strain = true;
+        // Joint breaking by grappling. The game's own joint strain (Dislocate Bone) was emptied out in
+        // the 11-17 update, so the mod runs the old game's rules for a Willie you hold: his neck_01,
+        // upperarms, spine_03 (and calves with joint_break_legs) bent against their parent bone, or
+        // twisted past joint_break_twist_free_*_deg from how they sat when you took hold, build his
+        // Strain / Dislocation State; at 1 the neck snaps (the game's Snap Neck: he dies), a shoulder
+        // or knee dislocates (the game relocates it by its own rules), or the back breaks (Break Back).
+        // A twist's excess counts as a bend of excess x joint_break_twist_gain degrees.
+        bool joint_break = true;
+        double joint_break_twist_free_neck_deg = 60.0;
+        double joint_break_twist_free_arm_deg = 60.0;
+        double joint_break_twist_free_back_deg = 30.0;
+        double joint_break_twist_gain = 2.0;
+        // Knees too (the old rule read the calf's bend against the thigh).
+        bool joint_break_legs = false;
+        // Every part's strain rate x this (1 = the old game).
+        double joint_break_scale = 1.0;
         // Every other Willie's body hits (impulse, health, consciousness, what hit him), when they change.
         bool log_body_hits = true;
         // 1 = the game's grab joint is made soft (a capped spring, B&S-like) 0.25 s after it latches, so

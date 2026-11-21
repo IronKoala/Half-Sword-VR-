@@ -645,6 +645,13 @@ namespace hsvr
         flag("log_fingers", c.log_fingers);
         flag("log_body_grab", c.log_body_grab);
         flag("log_joint_strain", c.log_joint_strain);
+        flag("joint_break", c.joint_break);
+        num("joint_break_twist_free_neck_deg", c.joint_break_twist_free_neck_deg);
+        num("joint_break_twist_free_arm_deg", c.joint_break_twist_free_arm_deg);
+        num("joint_break_twist_free_back_deg", c.joint_break_twist_free_back_deg);
+        num("joint_break_twist_gain", c.joint_break_twist_gain);
+        flag("joint_break_legs", c.joint_break_legs);
+        num("joint_break_scale", c.joint_break_scale);
         flag("log_body_hits", c.log_body_hits);
         integer("pose_grab_body_hold", c.pose_grab_body_hold);
         num("pose_grab_body_spring", c.pose_grab_body_spring);
