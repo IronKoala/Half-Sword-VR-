@@ -13737,27 +13737,120 @@ namespace
                            m_his, raw, cap, closing, length(v_mine), length(v_his), cp.self_comp < 0 ? " [armour proxy]" : "");
     }
 
+    // ---- Items pinned against your body (player_item_contact_speed) --------------------------------
+    // Matthew 2026-11-21 (yes to the test's finding): a passive Willie's tongs squeezed between him and
+    // your posed body took your consciousness 95 -> 55 in ~2 s with no swing. Every touch of an item on
+    // a Willie runs his 'Deal Complex Damage' (BPI_ComplexCollision; ModularWeaponBP UG @41944 passes
+    // Hit Comp, its own Collision Component, bone, Impact Point, Impact Normal, its velocity and the
+    // contact impulse). The squeezed item is shoved out by the kinematic body every physics step at
+    // whatever speed the push-out gives it, so dozens of 'hits' a second piled Pain up to 2348 (test
+    // h73ilf-bc-speed1b, state.txt) and Pain pulls Consciousness down (Willie UG @314017-@314742).
+    // A simulated body (the flat game) only takes what the item brings in: here, before his Deal
+    // Complex Damage runs on you, the item's Hit Velocity is cut to its closing speed into your body
+    // part (relative velocity against the contact normal, which points out of you toward the item:
+    // an item sliding or being squeezed out brings nothing) and the impulse to reduced mass x that
+    // speed. A real swing or thrust closes at its own speed, so it is unchanged. Never raised.
+    struct ItemDamageParams
+    {
+        FProperty *hit_comp = nullptr, *collided = nullptr, *bone = nullptr, *loc = nullptr, *normal = nullptr, *vel = nullptr, *imp = nullptr;
+        bool ok = false;
+    };
+    void item_contact_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        gc_sync();
+        HSVR_PROF(PerfPunchPre);
+        UObject* pawn = g_hitf.pawn;
+        if (!pawn || context.Context != pawn) return; // only damage to you
+        if (g_elbow_calling.load()) return;
+        UFunction* fn = static_cast<UFunction*>(custom_data);
+        uint8_t* locals = context.TheStack.Locals();
+        if (!fn || !locals) return;
+        static ItemDamageParams P;
+        if (!P.ok)
+        {
+            for (FProperty* p : fn->ForEachProperty())
+            {
+                std::wstring n = p->GetName();
+                if (n == STR("Hit Component")) P.hit_comp = p;
+                else if (n == STR("Collided Component")) P.collided = p;
+                else if (n == STR("Hit Bone")) P.bone = p;
+                else if (n == STR("Location")) P.loc = p;
+                else if (n == STR("Normal")) P.normal = p;
+                else if (n == STR("Hit Velocity")) P.vel = p;
+                else if (n == STR("Hit Impulse")) P.imp = p;
+            }
+            P.ok = true;
+            HSVR_LOG("Pinned item: Deal Complex Damage parameters found: hit comp %d, collided %d, bone %d, location %d, normal %d, velocity %d, impulse %d", P.hit_comp != nullptr,
+                     P.collided != nullptr, P.bone != nullptr, P.loc != nullptr, P.normal != nullptr, P.vel != nullptr, P.imp != nullptr);
+        }
+        if (!P.collided || !P.vel || !P.imp || !P.normal) return;
+        hsvr::Config cfg = hsvr::config();
+        if (!cfg.player_item_contact_speed) return;
+        UObject* item_comp = *reinterpret_cast<UObject**>(locals + P.collided->GetOffset_Internal());
+        UObject* my_comp = P.hit_comp ? *reinterpret_cast<UObject**>(locals + P.hit_comp->GetOffset_Internal()) : nullptr;
+        if (!item_comp) return;
+        Call oc(item_comp, STR("GetOwner"));
+        oc.run();
+        UObject* item = oc.object_result();
+        // Your own things, and other people's bodies (capped at their own hit, body_contact_hook).
+        if (!item || item == pawn || is_a(item, STR("Willie_BP_C"))) return;
+        if (hit_is_his_item(item)) return;
+        using namespace hsvr;
+        Vec3 v_item = read_param_vec(locals, P.vel), imp = read_param_vec(locals, P.imp), nrm = read_param_vec(locals, P.normal);
+        double speed = length(v_item), impulse = length(imp);
+        if (speed < 1.0 && impulse < 1.0) return;
+        Vec3 n_out = length(nrm) > 1e-6 ? nrm * (1.0 / length(nrm)) : impulse > 1e-6 ? imp * (1.0 / impulse) : Vec3{};
+        if (length(n_out) < 0.5) return;
+        FName bone = P.bone ? *reinterpret_cast<FName*>(locals + P.bone->GetOffset_Internal()) : FName();
+        Vec3 at = P.loc ? read_param_vec(locals, P.loc) : Vec3{};
+        if (!my_comp) my_comp = object_property(pawn, STR("Mesh"));
+        Vec3 v_mine = hit_body_velocity(my_comp, bone, at);
+        double closing = (std::max)(0.0, -dot(v_item - v_mine, n_out));
+        double new_speed = (std::min)(speed, closing);
+        // Reduced mass of the item (its root body carries the welded parts) and your body part.
+        double m_item = 0.0;
+        {
+            Call root(item, STR("K2_GetRootComponent"));
+            root.run();
+            UObject* rc = root.object_result();
+            m_item = body_part_mass(rc ? rc : item_comp, FName());
+            if (!(m_item > 0.0)) m_item = body_part_mass(item_comp, FName());
+        }
+        double m_mine = body_part_mass(my_comp, bone) * (std::max)(0.0, cfg.player_body_contact_mass_scale);
+        double new_impulse = impulse;
+        if (m_item > 0.0 && m_mine > 0.0) new_impulse = (std::min)(impulse, m_item * m_mine / (m_item + m_mine) * closing);
+        else if (speed > 1.0) new_impulse = impulse * new_speed / speed;
+        if (new_speed >= speed - 1.0 && new_impulse >= impulse - 1.0) return; // a real blow: untouched
+        double kv = speed > 1e-6 ? new_speed / speed : 0.0, ki = impulse > 1e-6 ? new_impulse / impulse : 0.0;
+        write_three(locals + P.vel->GetOffset_Internal(), P.vel, v_item.x * kv, v_item.y * kv, v_item.z * kv);
+        write_three(locals + P.imp->GetOffset_Internal(), P.imp, imp.x * ki, imp.y * ki, imp.z * ki);
+        if (cfg.player_body_contact_log && (speed >= 200.0 || impulse >= 300.0))
+            HSVR_LOG_EVERY(0.2, "Pinned item: %ls on your %ls: velocity %.0f -> %.0f cm/s, impulse %.0f -> %.0f (closing %.0f cm/s, your part %.0f cm/s, item %.1f kg, part %.1f kg)",
+                           item->GetName().c_str(), bone.ToString().c_str(), speed, new_speed, impulse, new_impulse, closing, length(v_mine), m_item, m_mine);
+    }
+
     void install_body_contact()
     {
-        static bool installed[2] = {false, false};
+        static bool installed[3] = {false, false, false};
         static double last_try = -10.0;
-        if (installed[0] && installed[1]) return;
+        if (installed[0] && installed[1] && installed[2]) return;
         double now = hsvr::now_seconds();
         if (now - last_try < 2.0) return;
         last_try = now;
-        const TCHAR* paths[2] = {
+        const TCHAR* paths[3] = {
             STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:BndEvt__BP_ThirdPersonCharacter_Mesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"),
-            STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:NewFunction")};
-        for (int i = 0; i < 2; ++i)
+            STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:NewFunction"), STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:Deal Complex Damage")};
+        for (int i = 0; i < 3; ++i)
         {
             if (installed[i]) continue;
             UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, paths[i]);
             if (!fn) continue;
             installed[i] = true;
-            UObjectGlobals::RegisterHook(fn, &body_contact_hook, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+            UObjectGlobals::RegisterHook(fn, i == 2 ? &item_contact_hook : &body_contact_hook, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
             std::wstring params;
             for (FProperty* p : fn->ForEachProperty()) params += p->GetName() + STR(", ");
-            HSVR_LOG("Body contact: watching %ls (parameters %ls)", i == 0 ? STR("Willie's mesh hits") : STR("his armour proxies' hits (NewFunction)"), params.c_str());
+            HSVR_LOG("Body contact: watching %ls (parameters %ls)",
+                     i == 0 ? STR("Willie's mesh hits") : i == 1 ? STR("his armour proxies' hits (NewFunction)") : STR("items hitting you (Deal Complex Damage)"), params.c_str());
         }
     }
 
