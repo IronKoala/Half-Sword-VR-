@@ -499,6 +499,7 @@ namespace hsvr
         flag("pose_hold_arm_lag", c.pose_hold_arm_lag);
         num("pose_hold_arm_lag_s", c.pose_hold_arm_lag_s);
         num("pose_hold_arm_lag_max_s", c.pose_hold_arm_lag_max_s);
+        num("pose_hold_heft_lag_s", c.pose_hold_heft_lag_s);
         num("pose_hold_arm_reach_cm", c.pose_hold_arm_reach_cm);
         num("pose_hold_shoulder_torque", c.pose_hold_shoulder_torque);
         num("pose_hold_shoulder_fade_from_cm", c.pose_hold_shoulder_fade_from_cm);
@@ -746,6 +747,11 @@ namespace hsvr
         integer("helmet_see_through_mode", c.helmet_see_through_mode);
         text("helmet_see_through_param", c.helmet_see_through_param);
         integer("helmet_see_through_test", c.helmet_see_through_test);
+        num("helmet_fade_see_through", c.helmet_fade_see_through);
+        text("helmet_fade_tint", c.helmet_fade_tint);
+        num("helmet_fade_metallic", c.helmet_fade_metallic);
+        num("helmet_fade_roughness", c.helmet_fade_roughness);
+        text("helmet_fade_material", c.helmet_fade_material);
         text("hide_own_gore_from", c.hide_own_gore_from);
         flag("player_takes_damage", c.player_takes_damage);
         flag("player_stump_blood", c.player_stump_blood);
