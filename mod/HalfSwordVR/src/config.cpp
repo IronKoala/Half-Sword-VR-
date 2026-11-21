@@ -340,6 +340,7 @@ namespace hsvr
         num("eye_up_cm", c.eye_up_cm);
         num("anchor_smoothing", c.anchor_smoothing);
         flag("tracking_current_anchor", c.tracking_current_anchor);
+        flag("anchor_room_unsmoothed", c.anchor_room_unsmoothed);
         num("near_clip_cm", c.near_clip_cm);
         integer("gamma_mode", c.gamma_mode);
         flag("ui_panel", c.ui_panel);

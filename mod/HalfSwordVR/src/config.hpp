@@ -35,6 +35,10 @@ namespace hsvr
         // Controllers and headset placed in the world from the view anchor as it will be this frame
         // (where he is now), not as it was set up for the frame before (hands shook while walking).
         bool tracking_current_anchor = true;
+        // 1 = the room walking handed to his capsule is taken into the view at once, not smoothed with
+        // anchor_smoothing: the capsule moves by it the same frame, so smoothing it swung the world by
+        // each step (and hands placed earlier in the frame were off by the smoothing's step).
+        bool anchor_room_unsmoothed = true;
         // Near clip plane of the eyes, cm. Helmet walls sit 2.3-4.6 cm from your eyes (measured on every
         // helmet mesh, helmet_see_through.md), and off to the side their depth along the view is even
         // less: at 4 cm the sides of closed helmets were cut away and you saw the world through them.

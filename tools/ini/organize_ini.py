@@ -109,6 +109,7 @@ LAYOUT = [
         ("eye_up_cm", "...and up (cm)."),
         ("anchor_smoothing", "Smoothing on the head anchor (s; takes physics jitter out)."),
         ("tracking_current_anchor", ""),
+        ("anchor_room_unsmoothed", "1 = your room steps move the view at once (not smoothed), so the world and your hands don't swing when his feet follow you."),
         ("near_clip_cm", "Near clip of the eyes, cm. Keep it at 1: at 4 the sides of closed helmets were cut away (see-through)."),
         ("gamma_mode", "0 auto, 1 always decode sRGB, 2 never."),
         ("separate_render_target", "1 = full headset resolution with menus on a panel; 0 = fallback through the game window."),

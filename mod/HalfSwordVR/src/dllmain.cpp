@@ -543,8 +543,10 @@ namespace
         // Turning both with the view's frame put the eyes in front of or behind his neck once the body
         // faced elsewhere (180 degrees round: looking down at his own shoulders from behind).
         if (g_pose_anchor_fixed)
-            out.head_position = out.actor_position + hsvr::quat_from_yaw_deg(body_yaw).rotate(g_pose_anchor_local) -
-                                hsvr::quat_from_yaw_deg(out.has_heading ? out.heading_yaw : 0.0).rotate(g_pose_room_moved_local);
+        {
+            out.exact_offset = hsvr::quat_from_yaw_deg(out.has_heading ? out.heading_yaw : 0.0).rotate(g_pose_room_moved_local) * -1.0;
+            out.head_position = out.actor_position + hsvr::quat_from_yaw_deg(body_yaw).rotate(g_pose_anchor_local) + out.exact_offset;
+        }
         out.head_position.z -= g_button_crouch; // the button crouch takes the view down with him
         return true;
     }
