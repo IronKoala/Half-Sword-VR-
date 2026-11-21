@@ -20549,6 +20549,49 @@ namespace
                 }
                 continue;
             }
+            if (entry.command.rfind("hsvr.hand_to_scenery ", 0) == 0)
+            {
+                // Scenery-grab tests: "hsvr.hand_to_scenery <side> <cm> <actor name>": the player moved
+                // (sideways only) so that hand's grab point is <cm> from the nearest point of that
+                // actor's collision (e.g. StaticMeshActor_1049, a Yard fence).
+                using hsvr::Vec3;
+                int side = 1;
+                double cm = 0.0;
+                char nm[128] = {0};
+                if (sscanf(entry.command.c_str() + 21, "%d %lf %127s", &side, &cm, nm) < 3) continue;
+                side = side != 0 ? 1 : 0;
+                UObject* player = nullptr;
+                UObject* pm = find_pawn_mesh(&player);
+                if (!player || !pm) continue;
+                std::vector<UObject*> actors;
+                UObjectGlobals::FindAllOf(STR("StaticMeshActor"), actors);
+                std::wstring want(nm, nm + strlen(nm));
+                UObject* comp = nullptr;
+                for (UObject* a : actors)
+                    if (a && a->GetName() == want) { comp = object_property(a, STR("StaticMeshComponent")); break; }
+                if (!comp) { HSVR_LOG("Script: hsvr.hand_to_scenery: no StaticMeshActor %s", nm); continue; }
+                Vec3 hand = hand_grab_point(pm, side);
+                Call cp(comp, STR("GetClosestPointOnCollision"));
+                cp.three(STR("Point"), hand.x, hand.y, hand.z);
+                cp.run();
+                double d = cp.number();
+                Vec3 on = cp.vec(STR("OutPointOnBody"));
+                Vec3 n = hand - on;
+                n.z = 0.0;
+                double nl = hsvr::length(n);
+                n = nl > 1e-3 ? n * (1.0 / nl) : Vec3{1, 0, 0};
+                Vec3 want_hand = on + n * cm;
+                Vec3 delta = want_hand - hand;
+                delta.z = 0.0;
+                Vec3 at = actor_location(player) + delta;
+                Call mv(player, STR("K2_SetActorLocation"));
+                mv.three(STR("NewLocation"), at.x, at.y, at.z);
+                mv.flag(STR("bTeleport"), true);
+                mv.run();
+                HSVR_LOG("Script: hsvr.hand_to_scenery %d %.0f %s: was %.1f cm from it (point %.0f %.0f %.0f, hand %.0f %.0f %.0f), player moved by (%.0f, %.0f)",
+                         side, cm, nm, d, on.x, on.y, on.z, hand.x, hand.y, hand.z, delta.x, delta.y);
+                continue;
+            }
             if (entry.command.rfind("hsvr.foe_bone_at_hand ", 0) == 0)
             {
                 // Wrap tests: "hsvr.foe_bone_at_hand <side> <cm> <bone> [<bone2>]": every foe moved (not
@@ -21050,6 +21093,10 @@ namespace
                 // "hsvr.bring_object left" = to the left hand.
                 int bring_side = entry.command.find("left", 17) != std::string::npos ? 0 : 1;
                 bool want_food = entry.command.find("food", 17) != std::string::npos; // "hsvr.bring_object [left] food": food only
+                // "hsvr.bring_object [left] clutter [heavy]": a BP_Physical_Clutter_Spawner object (cups, kettles),
+                // the heaviest with "heavy"; it is put with its bounds' middle (not its pivot) at the hand.
+                bool want_clutter = entry.command.find("clutter", 17) != std::string::npos;
+                bool want_heavy = entry.command.find("heavy", 17) != std::string::npos;
                 // "hsvr.bring_object [left] shield [rim]": the nearest loose shield, its middle at the
                 // hand, or with "rim" the edge of it (found from its collision) at the hand.
                 bool want_shield = entry.command.find("shield", 17) != std::string::npos;
@@ -21089,12 +21136,19 @@ namespace
                     else if (is_a(owner, STR("ModularWeaponBP_C")))
                         continue;
                     if (want_food && !is_a(owner, STR("BP_Food_Master_C"))) continue;
+                    if (want_clutter && !is_a(owner, STR("BP_Physical_Clutter_Spawner_C"))) continue;
                     Call sim(c, STR("IsSimulatingPhysics"));
                     sim.run();
                     FProperty* sp = sim.param(STR("ReturnValue"));
                     if (!want_held_kind && (!sp || !*(sim.buffer.data() + sp->GetOffset_Internal()))) continue; // a weapon just spawned may not simulate yet
                     ++loose;
                     double d = hsvr::length(component_location(c) - hand);
+                    if (want_heavy)
+                    {
+                        Call m(c, STR("GetMass"));
+                        m.run();
+                        d = 1000.0 - m.number(); // heaviest first
+                    }
                     if (d < best_d)
                     {
                         best_d = d;
@@ -21106,8 +21160,23 @@ namespace
                     Call g(best, STR("SetEnableGravity"));
                     g.first_flag(false);
                     g.run();
+                    hsvr::Vec3 put{hand.x, hand.y, hand.z + 4.0};
+                    if (want_clutter)
+                    {
+                        // Its bounds' middle at the hand: a clutter mesh's pivot can be 30 cm off its body.
+                        static UObject* ksl_b = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+                        Call bnd(ksl_b, STR("GetComponentBounds"));
+                        bnd.object(STR("Component"), best);
+                        bnd.run();
+                        hsvr::Vec3 mid = bnd.vec(STR("Origin"));
+                        hsvr::Vec3 at = component_location(best);
+                        put = hand + (at - mid);
+                        Call mm(best, STR("GetMass"));
+                        mm.run();
+                        HSVR_LOG("Script: hsvr.bring_object clutter: %ls, %.1f kg, pivot %.1f cm from its bounds' middle", best->GetName().c_str(), mm.number(), hsvr::length(at - mid));
+                    }
                     Call move(best, STR("K2_SetWorldLocation"));
-                    move.three(STR("NewLocation"), hand.x, hand.y, hand.z + 4.0);
+                    move.three(STR("NewLocation"), put.x, put.y, put.z);
                     move.flag(STR("bTeleport"), true);
                     move.run();
                     Call stop(best, STR("SetPhysicsLinearVelocity"));
@@ -21118,6 +21187,15 @@ namespace
                     g_bring_weapon = want_held_kind;
                     g_bring_at_point = have_at;
                     g_bring_point = at_point;
+                    if (want_clutter)
+                    {
+                        static UObject* ksl_c = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+                        Call bnd2(ksl_c, STR("GetComponentBounds"));
+                        bnd2.object(STR("Component"), best);
+                        bnd2.run();
+                        g_bring_point = component_rotation(best).inverse().rotate(bnd2.vec(STR("Origin")) - component_location(best));
+                        g_bring_at_point = true;
+                    }
                     if (want_shield && want_rim && !have_at)
                     {
                         // Its thin axis: the local axis with the least collision across it (asked
