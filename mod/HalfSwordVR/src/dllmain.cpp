@@ -2114,16 +2114,21 @@ namespace
     // - Limb health 0..100 per arm and leg. Get Damage only tries to break a bone once that limb's
     //   health is <= 25 (Leg L @63550: LessEqual(Leg_L Health, 25)), and a break sets <Limb> Broken,
     //   the joint profile "Broken" and the health to 0 (UG @237298..238581).
-    // - Dislocate Bone runs every tick on his posed mesh (UG @346785 -> @263949, bones neck_01,
-    //   upperarm_r/l, spine_03, calf_r/l) from each bone's component-space direction: an arm pushed
-    //   too far dislocates (<Arm> Dislocated), and a dislocated arm moved through that range again is
-    //   put back by Restore Bone (Dislocate Bone @5712 -> Restore Bone(part, BD x 33 x dt); at state 0
-    //   it clears Dislocated AND Broken, sets profile "Motor" and the health to 25).
+    // - A break also sets that part's Dislocation State to 1 (Break Arm R UG @729062). His tick puts
+    //   a broken arm back while it swings fast: R/L Hand Active AND Aim Swing Speed > 60 ->
+    //   Restore Bone(2 R / 3 L, MRC(Aim Swing Speed, 60..90 -> 0..50) x dt) (UG @358184..358825, the
+    //   same in the pre-update game @391401..392042). Restore Bone lowers the state by heal x 0.05
+    //   (heal = amount x MRC(state, 1..0 -> 1..0.1)) and at state <= 0 clears Broken and Dislocated,
+    //   sets joint "Motor", Pain +15 and health 25 (Restore_Bone @9087..9557). Hand Active is the
+    //   mouse button (0 in VR), so the mod makes that call itself (injury_relocate_tick).
+    // - Dislocate Bone (the per-tick pose check) is an empty function now; in the pre-update game its
+    //   arm constant 0.025 with the tick's strain decay (FInterpTo 0 at 5/s, old UG @392218) kept an
+    //   arm's value under 0.04, never its 0.1 threshold, so arms only "dislocated" by breaking.
     // - The tick holds a limb's health at 0 while it is broken, dislocated or cut off (Dismembered
     //   Parts Map / Hand Torn Off; UG @273479 for Arm R), so health covers all three.
     // - A broken or dislocated leg, or a broken back, drops that leg's tonus to 0 (UG @367031/@367531),
     //   and walk speed has x MapRange(Leg R Tonus + Leg L Tonus, 0..2 -> Crawl Rate + 1..2) (UG @567651).
-    // So: a limb is badly hurt at health <= injury_limb_health (25), broken, dislocated or cut off.
+    // So: a limb is badly hurt at health < injury_limb_health (25), broken, dislocated or cut off.
     struct InjuryState
     {
         UObject* pawn = nullptr; // compared only, never read through
@@ -2135,8 +2140,13 @@ namespace
         bool p_valid[2] = {false, false};
         double t[2] = {0.0, 0.0};
         double last_log = -10.0;
+        // Your controller's wrist point (world) each frame, for swinging a broken arm back in.
+        hsvr::Vec3 ctrl[2], ctrl_rel[2];
+        bool ctrl_valid[2] = {false, false}, rel_valid[2] = {false, false};
+        double ctrl_v[2] = {0.0, 0.0}, relocate_t = -1.0, relocate_log[2] = {-10.0, -10.0};
     };
     InjuryState g_inj;
+    double g_inj_fake_swing_v[2] = {0.0, 0.0}, g_inj_fake_swing_until[2] = {-1.0, -1.0}; // test (hsvr.injury_fake_swing)
 
     // A Double property of his, read without the per-call class-name check (per-frame path).
     double pawn_double(UObject* pawn, const TCHAR* name)
@@ -2190,9 +2200,8 @@ namespace
                 hp[i] = pawn_double(pawn, health[i]);
                 brk[i] = bool_property(pawn, broken[i]);
                 dis[i] = bool_property(pawn, disloc[i]);
-                bool was_bad = i < 2 ? arm_was[i] != 0 : leg_was[i - 2];
-                // 2 points of hysteresis, so a limb healing through the threshold doesn't flicker.
-                bool bad = brk[i] || dis[i] || (hp[i] >= 0.0 && (was_bad ? hp[i] <= thr + 2.0 : hp[i] <= thr));
+                // Below the threshold (a bone put back is set to exactly 25, and that arm works again).
+                bool bad = brk[i] || dis[i] || (hp[i] >= 0.0 && hp[i] < thr);
                 if (i < 2) g_inj.arm[i] = !bad ? 0 : (dis[i] && !brk[i] ? 1 : 2);
                 else g_inj.leg_out[i - 2] = bad;
             }
@@ -2223,13 +2232,76 @@ namespace
         if (changed || (any && now - g_inj.last_log >= 2.0))
         {
             g_inj.last_log = now;
-            static const char* arm_text[3] = {"ok", "DISLOCATED (flops, swing to put back)", "USELESS (hangs)"};
+            static const char* arm_text[3] = {"ok", "DISLOCATED (flops)", "USELESS (hangs; a broken one swings back in)"};
             HSVR_LOG("Injury%s: left arm %s (health %.0f, broken %d, dislocated %d, disloc state %.2f), right arm %s (health %.0f, broken %d, dislocated %d, disloc state %.2f); "
                      "left leg %s (health %.0f, broken %d, dislocated %d), right leg %s (health %.0f, broken %d, dislocated %d); back broken %d; walk speed x%.2f; %s",
                      changed ? " changed" : "", arm_text[g_inj.arm[0]], hp[0], (int)brk[0], (int)dis[0], pawn_double(pawn, STR("Arm L Dislocation State")),
                      arm_text[g_inj.arm[1]], hp[1], (int)brk[1], (int)dis[1], pawn_double(pawn, STR("Arm R Dislocation State")),
                      g_inj.leg_out[0] ? "OUT" : "ok", hp[2], (int)brk[2], (int)dis[2], g_inj.leg_out[1] ? "OUT" : "ok", hp[3], (int)brk[3], (int)dis[3],
                      (int)g_inj.back_broken, g_inj.leg_speed, g_inj.dead ? "DEAD (ragdoll)" : (g_inj.down ? "DOWN (both legs: fallen)" : "standing"));
+        }
+    }
+
+    // Swinging a broken arm back in: his tick's own call (see above), which needs "R/L Hand Active"
+    // (0 in VR), made by the mod with that hand's own swing speed: your controller's wrist speed
+    // relative to his body, mapped pose_swing_speed_lo..hi m/s -> Aim Swing Speed 0..75 as the swing
+    // feed does (the hurt hand holds nothing, so the feed itself leaves it out).
+    void injury_relocate_tick(const hsvr::Config& cfg, UObject* pawn)
+    {
+        using namespace hsvr;
+        double now = now_seconds(), dt = g_inj.relocate_t > 0.0 ? now - g_inj.relocate_t : 0.0;
+        g_inj.relocate_t = now;
+        if (!pawn || g_inj.dead) return;
+        Vec3 body = actor_location(pawn);
+        double lo = cfg.pose_swing_speed_lo, hi = (std::max)(lo + 0.1, cfg.pose_swing_speed_hi);
+        static const TCHAR* state_name[2] = {STR("Arm L Dislocation State"), STR("Arm R Dislocation State")};
+        static const TCHAR* broken_name[2] = {STR("Arm L Broken"), STR("Arm R Broken")};
+        for (int side = 0; side < 2; ++side)
+        {
+            Vec3 rel = g_inj.ctrl[side] - body;
+            if (g_inj.ctrl_valid[side] && g_inj.rel_valid[side] && dt > 1e-4 && dt < 0.1)
+            {
+                double v = length(rel - g_inj.ctrl_rel[side]) / dt / 100.0; // m/s
+                g_inj.ctrl_v[side] += (v - g_inj.ctrl_v[side]) * (1.0 - std::exp(-dt / 0.03)); // ~30 ms, like the feed
+            }
+            else
+                g_inj.ctrl_v[side] = 0.0;
+            g_inj.ctrl_rel[side] = rel;
+            g_inj.rel_valid[side] = g_inj.ctrl_valid[side];
+            if (!cfg.injury_limbs || !cfg.injury_swing_relocate || dt <= 0.0 || dt >= 0.1) continue;
+            // Only an arm the game counts as out of place (broken, or a Dislocation State left from a
+            // break; Restore Bone also clears Broken once the state has decayed to 0); a healthy or
+            // cut-off arm's swing is left to the game's own rules.
+            double state = pawn_double(pawn, state_name[side]);
+            bool out_of_place = state > 0.0 || bool_property(pawn, broken_name[side]);
+            if (!out_of_place || g_inj.arm[side] == 0) continue;
+            double v = g_inj.ctrl_v[side];
+            if (now < g_inj_fake_swing_until[side]) v = g_inj_fake_swing_v[side];
+            double ass = v <= lo ? 0.0 : (std::min)(75.0, (v - lo) / (hi - lo) * 75.0);
+            double rate = ass <= 60.0 ? 0.0 : (std::min)(1.0, (ass - 60.0) / 30.0) * 50.0; // MRC(ASS, 60..90 -> 0..50)
+            if (rate <= 0.0) continue;
+            Call c(pawn, STR("Restore Bone"));
+            if (!c.fn)
+            {
+                if (now - g_inj.relocate_log[side] > 30.0)
+                {
+                    g_inj.relocate_log[side] = now;
+                    HSVR_LOG("Injury: no Restore Bone on his Willie: a broken arm can't be swung back in");
+                }
+                continue;
+            }
+            c.byte(STR("Body Part"), side == 0 ? 3 : 2);
+            c.number(STR("Amount"), rate * dt);
+            c.flag(STR("Regeneration"), false);
+            c.run();
+            double after = pawn_double(pawn, state_name[side]);
+            bool brk = bool_property(pawn, broken_name[side]);
+            if (now - g_inj.relocate_log[side] >= 0.5 || !brk)
+            {
+                g_inj.relocate_log[side] = now;
+                HSVR_LOG("Injury: %s arm swung at %.1f m/s (swing speed %.0f): Restore Bone(%.2f), dislocation state %.3f -> %.3f, broken %d%s", side == 0 ? "left" : "right", v,
+                         ass, rate * dt, state, after, (int)brk, brk ? "" : ": PUT BACK");
+            }
         }
     }
 
@@ -2240,6 +2312,7 @@ namespace
     bool injury_down_tick(const hsvr::Config& cfg, UObject* pawn, UObject* mesh)
     {
         injury_update(cfg, pawn);
+        injury_relocate_tick(cfg, pawn);
         if (g_inj.down)
         {
             if (!g_inj.down_now)
@@ -2653,6 +2726,8 @@ namespace
         }
         // A badly hurt arm: the controller no longer places it (it hangs, or flops when dislocated).
         bool limp = false;
+        g_inj.ctrl[side] = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
+        g_inj.ctrl_valid[side] = tracked;
         if (g_inj.arm[side] != 0 && g_inj.pawn == g_pose.pawn)
         {
             Vec3 wrist_off{cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm};
@@ -17657,6 +17732,33 @@ namespace
                 double value = atof(rest.c_str() + sp + 1);
                 bool ok = set_variable(pawn, name.c_str(), value, nullptr, nullptr);
                 HSVR_LOG("Script: hsvr.pawn_set %ls = %g (%s)", name.c_str(), value, ok ? "set" : "NOT FOUND");
+                continue;
+            }
+            if (entry.command.rfind("hsvr.player_event ", 0) == 0)
+            {
+                // Test: calls one of his own no-argument events/functions, e.g. "hsvr.player_event Break Arm L".
+                std::string rest = entry.command.substr(18);
+                std::wstring name(rest.begin(), rest.end());
+                UObject* pawn = nullptr;
+                find_pawn_mesh(&pawn);
+                if (!pawn) continue;
+                Call c(pawn, name.c_str());
+                bool ok = c.run();
+                HSVR_LOG("Script: hsvr.player_event %ls %s", name.c_str(), ok ? "called" : "NOT FOUND");
+                continue;
+            }
+            if (entry.command.rfind("hsvr.injury_fake_swing ", 0) == 0)
+            {
+                // Test: "hsvr.injury_fake_swing <0 left|1 right> <m/s> <seconds>": that controller counts
+                // as swinging this fast (for putting a broken arm back without a headset).
+                int side = 1;
+                double v = 0.0, secs = 0.0;
+                if (sscanf(entry.command.c_str() + 23, "%d %lf %lf", &side, &v, &secs) >= 2 && (side == 0 || side == 1))
+                {
+                    g_inj_fake_swing_v[side] = v;
+                    g_inj_fake_swing_until[side] = hsvr::now_seconds() + (secs > 0.0 ? secs : 3.0);
+                    HSVR_LOG("Script: hsvr.injury_fake_swing: %s controller at %.1f m/s for %.1f s", side == 0 ? "left" : "right", v, secs > 0.0 ? secs : 3.0);
+                }
                 continue;
             }
             if (entry.command == "hsvr.player_kill")

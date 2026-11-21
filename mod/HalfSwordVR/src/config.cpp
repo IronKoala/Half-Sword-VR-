@@ -757,6 +757,7 @@ namespace hsvr
         flag("injury_back_broken_falls", c.injury_back_broken_falls);
         num("injury_dislocated_follow_s", c.injury_dislocated_follow_s);
         num("injury_dislocated_sag_cm", c.injury_dislocated_sag_cm);
+        flag("injury_swing_relocate", c.injury_swing_relocate);
         flag("death_ragdoll", c.death_ragdoll);
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;

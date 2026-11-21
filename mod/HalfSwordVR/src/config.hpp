@@ -939,9 +939,9 @@ namespace hsvr
         // bone (hand to controller, head to headset), so the blood floated in mid-air.
         bool player_stump_blood = true;
         // Your own injuries, with the game's own limb values (Willie_BP; injuries.md). A limb counts as
-        // badly hurt when its health is at or below injury_limb_health (the game's own bone-break
-        // threshold, Get Damage: bones only break at limb health <= 25), or it is broken, dislocated
-        // or cut off (the game holds that limb's health at 0 then). 0 = off.
+        // badly hurt when its health is below injury_limb_health (the game's own bone-break
+        // threshold, Get Damage: bones only break at limb health <= 25; a bone put back is set to 25),
+        // or it is broken, dislocated or cut off (the game holds that limb's health at 0 then). 0 = off.
         bool injury_limbs = true;
         double injury_limb_health = 25.0;
         // One leg badly hurt: you walk at this share of your normal speed (stick walking).
@@ -951,11 +951,16 @@ namespace hsvr
         bool injury_two_legs_fall = true;
         bool injury_back_broken_falls = true;
         // A broken, cut-off or badly hurt arm: the controller no longer moves it; it hangs and swings
-        // from the shoulder and its hand lets go. A dislocated arm (not broken) flops after your
-        // controller instead (this lag, s, and this much sag, cm), so swinging your arm around can put
-        // it back in, the game's own way (Dislocate Bone reads the posed arm every tick).
+        // from the shoulder and its hand lets go. (Dislocated without broken: it flops after your
+        // controller, this lag, s, and this much sag, cm; normal Willies never get that flag.)
         double injury_dislocated_follow_s = 0.15;
         double injury_dislocated_sag_cm = 12.0;
+        // Swing a broken arm back in, the game's own rule (his tick, UG @358184..358825): while that
+        // hand swings at Aim Swing Speed > 60 it calls Restore Bone(arm, MRC(speed, 60..90 -> 0..50)
+        // x dt); at Dislocation State 0 the game clears Broken, sets health 25 and the joint "Motor".
+        // The game gates it on "R/L Hand Active" (mouse buttons, always 0 in VR), so the mod makes the
+        // call with your controller's speed (pose_swing_speed_lo..hi m/s -> 0..75, as the swing feed).
+        bool injury_swing_relocate = true;
         // You die: the mod stops posing you, physics goes on and he falls as a ragdoll; the view stays
         // on his head (no fade).
         bool death_ragdoll = true;
