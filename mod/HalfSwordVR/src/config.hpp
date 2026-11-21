@@ -503,7 +503,7 @@ namespace hsvr
         // Two fixed grip zones, under the guard and above the pommel, no slide (Matthew 2026-11-21):
         // 0 = off (grip slides), 1 = hand-and-a-half (bastard sword, Grip_15) only, 2 = every two-handed
         // sword (also longswords and greatswords).
-        int pose_grip_two_zones_2h_sword = 2;
+        int pose_grip_two_zones_2h_sword = 1; // Matthew 2026-11-21: bastard swords only
         // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
         bool pose_grip_dagger_fixed = true;
         double pose_slide_rate_min = 3.0;
