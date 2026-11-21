@@ -14466,6 +14466,19 @@ namespace
         if (!item || item == pawn || is_a(item, STR("Willie_BP_C"))) return;
         if (hit_is_his_item(item)) return;
         using namespace hsvr;
+        // Something either hand is gripping (a fence, a Willie's held item, a table edge): holding it is
+        // not being hit by it. Matthew 2026-11-21 13:58 log: grabbing the yard fence ran Deal Complex
+        // Damage on him every step (1114 cm/s from the push-out), with punch sounds and pain grunts.
+        for (int side = 0; side < 2; ++side)
+            if (item_comp == object_property(pawn, side == 0 ? STR("Grab Component L") : STR("Grab Component R")) || item_comp == g_object_grab[side].component ||
+                (g_wrap[side].on && item_comp == g_wrap[side].comp))
+            {
+                write_three(locals + P.vel->GetOffset_Internal(), P.vel, 0.0, 0.0, 0.0);
+                write_three(locals + P.imp->GetOffset_Internal(), P.imp, 0.0, 0.0, 0.0);
+                if (cfg.player_body_contact_log)
+                    HSVR_LOG_EVERY(1.0, "Pinned item: %ls is in your %s hand's grip: no hit", item->GetName().c_str(), side == 0 ? "left" : "right");
+                return;
+            }
         Vec3 v_item = read_param_vec(locals, P.vel), imp = read_param_vec(locals, P.imp), nrm = read_param_vec(locals, P.normal);
         double speed = length(v_item), impulse = length(imp);
         if (speed < 1.0 && impulse < 1.0) return;
