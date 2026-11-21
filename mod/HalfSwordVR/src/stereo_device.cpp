@@ -253,6 +253,17 @@ namespace hsvr
                 Quat base = quat_from_yaw_deg(g_view.base_yaw);
                 Vec3 location = g_view.anchor + base.rotate(relative);
                 Rot rotation = quat_to_rot((base * relative_rotation).normalized());
+                if (shared().photo_on.load())
+                {
+                    // Test pictures: a fixed camera (hsvr.photo_cam), the eyes 3.2 cm either side of it.
+                    double yaw = shared().photo_yaw.load(), pitch = shared().photo_pitch.load();
+                    Quat q = quat_from_yaw_deg(yaw);
+                    double side = ViewIndex == 0 ? -3.2 : (ViewIndex > 0 ? 3.2 : 0.0);
+                    location = Vec3{shared().photo_x.load(), shared().photo_y.load(), shared().photo_z.load()} + q.rotate({0.0, side, 0.0});
+                    rotation.pitch = pitch;
+                    rotation.yaw = yaw;
+                    rotation.roll = 0.0;
+                }
                 ViewLocation.X = location.x;
                 ViewLocation.Y = location.y;
                 ViewLocation.Z = location.z;
