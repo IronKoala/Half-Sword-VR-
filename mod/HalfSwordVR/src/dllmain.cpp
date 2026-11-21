@@ -8865,6 +8865,8 @@ namespace
         bool seated = false;
         int seat_tries = 0;
         double last_log = -10.0;
+        double seated_at = -1.0;
+        int checks = 0;
     };
     WrapGrab g_wrap[2];
     const double kWrapSamples[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
@@ -9055,8 +9057,13 @@ namespace
                 if (cfg.log_wrap && (first || now - g.last_log >= 1.0))
                 {
                     g.last_log = now;
-                    HSVR_LOG("Wrap: %s %s on %ls bone %ls: curls %.2f/%.2f/%.2f (%d queries, finger radius %.2f cm)", side == 0 ? "left" : "right", kFingerNames[f],
-                             g.comp->GetName().c_str(), g.bone.ToString().c_str(), out[0], out[1], out[2], ws.queries, ws.radius * ws.cs);
+                    // (Where the snapshot's hand is against the drawn hand, and how far its palm is from the thing.)
+                    Vec3 hand_w = ws.cp + ws.cq.rotate(hand * ws.cs);
+                    Vec3 drawn = g_pose.mesh ? socket_location(g_pose.mesh, bone_fname(side == 0 ? "hand_l" : "hand_r")) : hand_w;
+                    double palm_d = ws.distance(hand + (mid - hand) * 0.5) * ws.cs;
+                    HSVR_LOG("Wrap: %s %s on %ls bone %ls: curls %.2f/%.2f/%.2f (%d queries, finger radius %.2f cm; palm %.1f cm from it, snapshot hand %.1f cm from the drawn hand)",
+                             side == 0 ? "left" : "right", kFingerNames[f], g.comp->GetName().c_str(), g.bone.ToString().c_str(), out[0], out[1], out[2], ws.queries,
+                             ws.radius * ws.cs, palm_d, length(hand_w - drawn));
                 }
             }
         }
@@ -9104,6 +9111,61 @@ namespace
             {
                 ++g.seat_tries;
                 g.seated = seat_on_palm(side, pawn, g, cfg);
+                if (g.seated) g.seated_at = now;
+            }
+            else if (comp && g.on && g.seated && cfg.log_wrap && g.checks < 3 && now - g.seated_at >= 0.1 + 0.4 * g.checks)
+            {
+                // Is the joint still as seated (frames, limit), and how far is the thing from the palm now?
+                ++g.checks;
+                UObject* joint = object_property(pawn, L ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand"));
+                if (joint && g_pose.mesh)
+                {
+                    auto jn = [&](const TCHAR* a, const TCHAR* b) { return nested_number(joint, {STR("ConstraintInstance"), a, b}); };
+                    double lim = nested_number(joint, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("Limit")});
+                    std::string sx = L ? "_l" : "_r";
+                    hsvr::Vec3 hp = socket_location(g_pose.mesh, bone_fname("hand" + sx));
+                    hsvr::Quat hq = socket_rotation(g_pose.mesh, bone_fname("hand" + sx));
+                    hsvr::Vec3 kn = socket_location(g_pose.mesh, bone_fname("middle_01" + sx));
+                    hsvr::Vec3 palm = hp + (kn - hp) * cfg.pose_grab_palm_along + hsvr::normalized(hq.rotate(hsvr::Vec3{0, 0, -1})) * cfg.pose_grab_palm_cm;
+                    Call cp(g.comp, STR("GetClosestPointOnCollision"));
+                    cp.three(STR("Point"), palm.x, palm.y, palm.z);
+                    cp.name(STR("BoneName"), g.bone);
+                    cp.run();
+                    HSVR_LOG("Wrap: %s hand %.1f s after seating: the thing %.1f cm from the palm; joint %ls Pos1 (%.1f %.1f %.1f) Pos2 (%.1f %.1f %.1f) limit %.1f, bones %s / %s",
+                             L ? "left" : "right", now - g.seated_at, cp.number(), joint->GetName().c_str(), jn(STR("Pos1"), STR("X")), jn(STR("Pos1"), STR("Y")),
+                             jn(STR("Pos1"), STR("Z")), jn(STR("Pos2"), STR("X")), jn(STR("Pos2"), STR("Y")), jn(STR("Pos2"), STR("Z")), lim,
+                             nested_name(joint, {STR("ConstraintInstance"), STR("ConstraintBone1")}).c_str(), nested_name(joint, {STR("ConstraintInstance"), STR("ConstraintBone2")}).c_str());
+                    // The joint's two anchors in the world (they meet when it holds), and how it is set.
+                    static const FName none_b = FName(STR("None"), FNAME_Add);
+                    bool boned = !(g.bone == none_b) && func_chain(g.comp, STR("FindClosestBone_K2")) != nullptr;
+                    hsvr::Vec3 bp = boned ? socket_location(g.comp, g.bone) : component_location(g.comp);
+                    hsvr::Quat bq = boned ? socket_rotation(g.comp, g.bone) : component_rotation(g.comp);
+                    hsvr::Vec3 a1 = hp + hq.rotate(hsvr::Vec3{jn(STR("Pos1"), STR("X")), jn(STR("Pos1"), STR("Y")), jn(STR("Pos1"), STR("Z"))});
+                    hsvr::Vec3 a2 = bp + bq.rotate(hsvr::Vec3{jn(STR("Pos2"), STR("X")), jn(STR("Pos2"), STR("Y")), jn(STR("Pos2"), STR("Z"))});
+                    auto lm = [&](const TCHAR* m) { return nested_number(joint, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), m}); };
+                    Call broken(joint, STR("IsBroken"));
+                    broken.run();
+                    FProperty* brp = broken.param(STR("ReturnValue"));
+                    HSVR_LOG("Wrap: %s joint anchors %.1f cm apart; linear motion %.0f/%.0f/%.0f; broken %d; %s; held thing simulating %d", L ? "left" : "right",
+                             hsvr::length(a1 - a2), lm(STR("XMotion")), lm(STR("YMotion")), lm(STR("ZMotion")), brp ? (int)*(broken.buffer.data() + brp->GetOffset_Internal()) : -1,
+                             joint_settings(joint).c_str(), (int)[&] { Call s(g.comp, STR("IsSimulatingPhysics")); s.name(STR("BoneName"), g.bone); s.run(); FProperty* r = s.param(STR("ReturnValue")); return r && *(s.buffer.data() + r->GetOffset_Internal()); }());
+                    Call mass(g.comp, STR("GetMass"));
+                    mass.run();
+                    // Is his hand's physics body where the drawn hand bone is? (0 = the bone is inside it)
+                    Call hb(g_pose.mesh, STR("GetClosestPointOnCollision"));
+                    hb.three(STR("Point"), hp.x, hp.y, hp.z);
+                    hb.name(STR("BoneName"), bone_fname("hand" + sx));
+                    hb.run();
+                    Call hsim(g_pose.mesh, STR("IsSimulatingPhysics"));
+                    hsim.name(STR("BoneName"), bone_fname("hand" + sx));
+                    hsim.run();
+                    FProperty* hsr = hsim.param(STR("ReturnValue"));
+                    HSVR_LOG("Wrap: %s drawn hand bone is %.1f cm from his hand's physics body (simulating %d)", L ? "left" : "right", hb.number(),
+                             hsr ? (int)*(hsim.buffer.data() + hsr->GetOffset_Internal()) : -1);
+                    HSVR_LOG("Wrap: %s joint linear limit soft %.0f stiffness %.0f damping %.0f restitution %.2f; projection %.0f; held thing mass %.1f kg",
+                             L ? "left" : "right", lm(STR("bSoftConstraint")), lm(STR("Stiffness")), lm(STR("Damping")), lm(STR("Restitution")),
+                             nested_number(joint, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("bEnableProjection")}), mass.number());
+                }
             }
             else if (!comp && g.on)
             {
@@ -9154,12 +9216,32 @@ namespace
         Call a(joint, STR("SetConstraintReferencePosition"));
         Call b(joint, STR("SetConstraintReferencePosition"));
         if (!a.fn) return false;
-        a.byte(STR("Frame"), 0);
+        static bool listed = false;
+        if (!listed && cfg.log_wrap)
+        {
+            listed = true;
+            std::wstring params;
+            for (FProperty* p : a.fn->ForEachProperty())
+                params += p->GetName() + STR(" (") + p->GetClass().GetName() + STR(" @") + std::to_wstring(p->GetOffset_Internal()) + STR(" size ") +
+                          std::to_wstring(p->GetSize()) + STR(") ");
+            HSVR_LOG("Wrap: SetConstraintReferencePosition params: %ls", params.c_str());
+        }
+        auto pos = [&](const TCHAR* which) {
+            return Vec3{nested_number(joint, {STR("ConstraintInstance"), which, STR("X")}), nested_number(joint, {STR("ConstraintInstance"), which, STR("Y")}),
+                        nested_number(joint, {STR("ConstraintInstance"), which, STR("Z")})};
+        };
+        Vec3 p1_0 = pos(STR("Pos1")), p2_0 = pos(STR("Pos2"));
+        a.byte(STR("frame"), 0); // (the engine names it "frame"; the lookup is case-sensitive)
         a.three(STR("RefPosition"), f1.x, f1.y, f1.z);
         a.run();
-        b.byte(STR("Frame"), 1);
+        Vec3 p1_a = pos(STR("Pos1")), p2_a = pos(STR("Pos2"));
+        b.byte(STR("frame"), 1);
         b.three(STR("RefPosition"), f2.x, f2.y, f2.z);
         b.run();
+        Vec3 p1_b = pos(STR("Pos1")), p2_b = pos(STR("Pos2"));
+        if (cfg.log_wrap)
+            HSVR_LOG("Wrap: %s joint frames: before Pos1 (%.1f %.1f %.1f) Pos2 (%.1f %.1f %.1f); after Frame 0 call Pos1 (%.1f %.1f %.1f) Pos2 (%.1f %.1f %.1f); after Frame 1 call Pos1 (%.1f %.1f %.1f) Pos2 (%.1f %.1f %.1f)",
+                     hand, p1_0.x, p1_0.y, p1_0.z, p2_0.x, p2_0.y, p2_0.z, p1_a.x, p1_a.y, p1_a.z, p2_a.x, p2_a.y, p2_a.z, p1_b.x, p1_b.y, p1_b.z, p2_b.x, p2_b.y, p2_b.z);
         if (cfg.log_wrap)
             HSVR_LOG("Wrap: %s hand seats %ls bone %ls on the palm: spot %.1f cm from the palm (hand end %.1f %.1f %.1f, held end %.1f %.1f %.1f)", hand,
                      g.comp->GetName().c_str(), g.bone.ToString().c_str(), d, f1.x, f1.y, f1.z, f2.x, f2.y, f2.z);
