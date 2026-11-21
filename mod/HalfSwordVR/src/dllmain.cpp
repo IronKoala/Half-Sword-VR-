@@ -11569,6 +11569,39 @@ namespace
         return HitTarget::World;
     }
 
+    // True when the other side of a weapon's hit belongs to that same weapon: the same actor, a
+    // component it owns, or an actor attached to it or owned by it (either way round). Only called
+    // for hits that already involve an item he holds (stab_hit_hook filters first).
+    bool hit_is_own_part(UObject* weapon, UObject* other, UObject* other_comp)
+    {
+        if (!weapon) return false;
+        if (other == weapon) return true;
+        auto owner_of = [](UObject* x) -> UObject* {
+            if (!x) return nullptr;
+            Call oc(x, STR("GetOwner"));
+            oc.run();
+            return oc.object_result();
+        };
+        auto parent_of = [](UObject* x) -> UObject* {
+            if (!x) return nullptr;
+            Call pc(x, STR("GetAttachParentActor"));
+            pc.run();
+            return pc.object_result();
+        };
+        // A resting flail head reports a hit every physics step: the answer per pair is kept 1 s.
+        struct Seen { UObject* weapon; UObject* other; UObject* comp; double at; bool own; };
+        static Seen seen[8] = {};
+        static int next = 0;
+        double now = hsvr::now_seconds();
+        for (const Seen& e : seen)
+            if (e.weapon == weapon && e.other == other && e.comp == other_comp && now - e.at < 1.0) return e.own;
+        bool own = (other_comp && owner_of(other_comp) == weapon) ||
+                   (other && (owner_of(other) == weapon || owner_of(weapon) == other || parent_of(other) == weapon || parent_of(weapon) == other));
+        seen[next] = {weapon, other, other_comp, now, own};
+        next = (next + 1) % 8;
+        return own;
+    }
+
     // ModularWeaponBP "Collision Hit" (before it runs): a weapon hits something. Ours hitting
     // anything, or anyone's hitting an item we hold.
     void hit_haptics_weapon(Unreal::UnrealScriptFunctionCallableContext& context, UFunction* fn)
@@ -11594,6 +11627,9 @@ namespace
             else if (n == STR("Hit")) hit_prop = p;
         }
         if (other == pawn) return; // his own body (the game ignores it too)
+        // A weapon's own parts touching each other (a flail's swinging head on its haft, a chain
+        // link on the grip) is no hit: Matthew 2026-11-21, the flail head flopping onto its pole buzzed.
+        if (cfg.hit_buzz_ignore_self && hit_is_own_part(weapon, other, other_comp)) return;
         int mine = hit_holders(pawn, weapon);
         int theirs = other ? hit_holders(pawn, other) : 0;
         int mask = mine | theirs;

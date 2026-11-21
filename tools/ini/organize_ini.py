@@ -50,6 +50,7 @@ LAYOUT = [
         ("hit_buzz", "Hit vibration strength (0 = off, 1 = like Blade & Sorcery)."),
         ("hit_buzz_scrape", "Scrape ticks while a blade slides along something (0 = off)."),
         ("hit_buzz_blade_on_plate", "1 = blade on plate armour buzzes too (B&S is silent there)."),
+        ("hit_buzz_ignore_self", "1 = a weapon's own parts hitting each other (flail head on its haft) never buzz."),
         ("hit_buzz_min_intensity", "Below this (0-1) a contact is a touch, not a hit: no buzz."),
         ("pose_lean", "1 = your torso leans when you look down/sideways, so armour stays out of view."),
         ("pose_lean_pitch_gain", "How much of your head's downward pitch the torso takes."),
