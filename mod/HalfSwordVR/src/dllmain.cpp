@@ -18935,15 +18935,47 @@ namespace
         set.run();
     }
 
+    // A widget by its object name under `from` (panels' children and buttons' content, depth first).
+    UObject* widget_in_tree(UObject* from, const TCHAR* name, int depth = 0)
+    {
+        if (!from || depth > 12) return nullptr;
+        if (from->GetName() == name) return from;
+        Call cnt(from, STR("GetChildrenCount"));
+        if (cnt.fn)
+        {
+            cnt.run();
+            int32_t n = 0;
+            if (FProperty* r = cnt.param(STR("ReturnValue"))) n = *reinterpret_cast<int32_t*>(cnt.buffer.data() + r->GetOffset_Internal());
+            for (int32_t i = 0; i < n; ++i)
+            {
+                Call at(from, STR("GetChildAt"));
+                if (FProperty* ip = at.param(STR("Index"))) *reinterpret_cast<int32_t*>(at.buffer.data() + ip->GetOffset_Internal()) = i;
+                at.run();
+                if (UObject* found = widget_in_tree(at.object_result(), name, depth + 1)) return found;
+            }
+            return nullptr;
+        }
+        Call content(from, STR("GetContent"));
+        if (content.fn)
+        {
+            content.run();
+            return widget_in_tree(content.object_result(), name, depth + 1);
+        }
+        return nullptr;
+    }
+
     // Puts the Train button into the Free Mode fencer dialog, above Leave and drawn like it.
     bool train_button_build(UObject* dialog)
     {
-        UObject* leave = object_property(dialog, STR("Button_1"));
-        UObject* leave_text = object_property(dialog, STR("TextBlock_1"));
+        // Its buttons are not Blueprint variables: Leave is found in the dialog's widget tree by name.
         UObject* tree = object_property(dialog, STR("WidgetTree"));
+        UObject* leave = widget_in_tree(object_property(tree, STR("RootWidget")), STR("Button_1"));
+        UObject* leave_text = widget_in_tree(leave, STR("TextBlock_1"));
+        g_train.dialog = dialog; // tried once per dialog
         if (!leave || !leave_text || !tree)
         {
-            HSVR_LOG("TestRoom: Train button: the Free Mode fencer dialog has no Leave button to copy");
+            HSVR_LOG("TestRoom: Train button: no Leave button found in %ls (tree %d, Leave %d, its text %d)", dialog->GetName().c_str(), tree != nullptr, leave != nullptr,
+                     leave_text != nullptr);
             return false;
         }
         Call gp(leave, STR("GetParent"));
@@ -18968,25 +19000,44 @@ namespace
                 call_with_property(slot, STR("SetHorizontalAlignment"), STR("InHorizontalAlignment"), leave_slot, STR("HorizontalAlignment"));
                 call_with_property(slot, STR("SetVerticalAlignment"), STR("InVerticalAlignment"), leave_slot, STR("VerticalAlignment"));
             }
-        // The button above Leave, laid out like it.
-        Call ix(box, STR("GetChildIndex"));
-        ix.object(STR("Content"), leave);
-        ix.run();
-        int32_t at = 0;
-        if (FProperty* r = ix.param(STR("ReturnValue"))) at = *reinterpret_cast<int32_t*>(ix.buffer.data() + r->GetOffset_Internal());
-        Call ins(box, STR("InsertChildAt"));
-        if (FProperty* ip = ins.param(STR("Index"))) *reinterpret_cast<int32_t*>(ins.buffer.data() + ip->GetOffset_Internal()) = (std::max)(0, at);
-        ins.object(STR("Content"), button);
-        ins.run();
-        UObject* slot = ins.object_result();
-        UObject* leave_slot = object_property(leave, STR("Slot"));
-        if (slot && leave_slot)
+        // The button above Leave, laid out like it. InsertChildAt does nothing in the game (editor
+        // only; test 2026-11-21 09:24): the button is added at the end, and Leave is taken out and
+        // added again after it, keeping its layout.
+        auto child_count = [](UObject* panel) {
+            Call cnt(panel, STR("GetChildrenCount"));
+            cnt.run();
+            FProperty* r = cnt.param(STR("ReturnValue"));
+            return r ? *reinterpret_cast<int32_t*>(cnt.buffer.data() + r->GetOffset_Internal()) : -1;
+        };
+        auto same_layout = [](UObject* slot, UObject* like) {
+            if (!slot || !like) return;
+            call_with_property(slot, STR("SetPadding"), STR("InPadding"), like, STR("Padding"));
+            call_with_property(slot, STR("SetHorizontalAlignment"), STR("InHorizontalAlignment"), like, STR("HorizontalAlignment"));
+            call_with_property(slot, STR("SetVerticalAlignment"), STR("InVerticalAlignment"), like, STR("VerticalAlignment"));
+            call_with_property(slot, STR("SetSize"), STR("InSize"), like, STR("Size"));
+        };
+        auto add_to_box = [&](UObject* widget) {
+            Call add_box(box, STR("AddChildToVerticalBox"));
+            if (!add_box.fn) return (UObject*)nullptr;
+            add_box.object(STR("Content"), widget);
+            add_box.run();
+            return add_box.object_result();
+        };
+        int before_count = child_count(box);
+        UObject* slot = add_to_box(button);
+        same_layout(slot, object_property(leave, STR("Slot")));
+        int at = before_count;
+        if (slot)
         {
-            call_with_property(slot, STR("SetPadding"), STR("InPadding"), leave_slot, STR("Padding"));
-            call_with_property(slot, STR("SetHorizontalAlignment"), STR("InHorizontalAlignment"), leave_slot, STR("HorizontalAlignment"));
-            call_with_property(slot, STR("SetVerticalAlignment"), STR("InVerticalAlignment"), leave_slot, STR("VerticalAlignment"));
-            call_with_property(slot, STR("SetSize"), STR("InSize"), leave_slot, STR("Size"));
+            Call rm(box, STR("RemoveChild"));
+            rm.object(STR("Content"), leave);
+            rm.run();
+            UObject* leave_slot = add_to_box(leave);
+            same_layout(leave_slot, slot);
+            at = before_count - 1;
         }
+        HSVR_LOG("TestRoom: Train button: %ls had %d children, now %d; button slot %ls, Leave %ls", box->GetName().c_str(), before_count, child_count(box),
+                 slot ? slot->GetName().c_str() : STR("none"), object_property(leave, STR("Slot")) ? STR("back in the box") : STR("NOT in the box"));
         g_train.dialog = dialog;
         g_train.button = button;
         g_train.text = text;
@@ -19118,11 +19169,25 @@ namespace
         bool hovered = widget_bool(g_train.button, STR("IsHovered"));
         if (!g_train.logged_spot)
         {
-            double x, y, w, h;
+            double x = 0, y = 0, w = 0, h = 0;
             if (widget_desktop_centre(g_train.button, x, y, w, h))
             {
                 HSVR_LOG("TestRoom: Train button at desktop (%.0f, %.0f), %.0f x %.0f", x, y, w, h);
                 g_train.logged_spot = true;
+            }
+            else
+            {
+                static double first_try = 0.0;
+                if (first_try == 0.0) first_try = now;
+                if (now - first_try > 3.0)
+                {
+                    first_try = 1e18; // once
+                    double lx = 0, ly = 0, lw = 0, lh = 0;
+                    UObject* tree = object_property(g_train.dialog, STR("WidgetTree"));
+                    bool leave_ok = widget_desktop_centre(widget_in_tree(object_property(tree, STR("RootWidget")), STR("Button_1")), lx, ly, lw, lh);
+                    HSVR_LOG("TestRoom: Train button has no layout after 3 s (size %.0f x %.0f, visible %d); Leave %s at (%.0f, %.0f) %.0f x %.0f", w, h,
+                             (int)widget_bool(g_train.button, STR("IsVisible")), leave_ok ? "is" : "is not laid out either", lx, ly, lw, lh);
+                }
             }
         }
         bool clicked = g_train.was_pressed && !pressed && hovered;
