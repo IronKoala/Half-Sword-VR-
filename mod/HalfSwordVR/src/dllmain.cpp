@@ -16455,18 +16455,49 @@ namespace
             double floor_z = 0.0;
             double half = 90.0 * component_scale_z(g_pose.mesh);
             bool floor = ground_below(context, keep.x, keep.y, (std::max)(g_hold_location.z, keep.z) + 40.0, floor_z);
-            // The trace under his middle can miss among loose weapons and shields (it looks through
-            // only 5 of them): then the higher of the feet's floors (found within 0.25 s) is the floor.
-            // Only with neither is there no floor (a pit, a ledge) and he falls.
-            if (!floor)
-                for (int side = 0; side < 2; ++side)
+            // The feet's floors (found within 0.25 s): the higher of the two.
+            double feet_z = 0.0;
+            bool feet = false;
+            for (int side = 0; side < 2; ++side)
+            {
+                const FootState& f = g_feet[side];
+                if (!f.have_ground || t_now - f.ground_t > 0.25) continue;
+                double fz = f.ground_z - g_pose.ankle_height[side];
+                if (!feet || fz > feet_z) feet_z = fz;
+                feet = true;
+            }
+            // The trace under his middle counts only up to a step (40 cm) above where his feet stand,
+            // or above the last floor he stood on: walking into a 110 cm weapon table, it hit the table
+            // top and lifted him onto it (jump test 2026-11-21 05:29Z, centre 182, "lifted 126 cm a tick").
+            // It can also miss among loose weapons and shields (it looks through only 5 of them).
+            // Either way the feet's floor is used; with neither there is no floor and he falls.
+            static double last_floor_z = 0.0, last_floor_t = -100.0;
+            const double step_up = 40.0;
+            if (floor)
+            {
+                double ref = feet ? feet_z : last_floor_z;
+                bool have_ref = feet || t_now - last_floor_t < 1.0;
+                if (have_ref && floor_z > ref + step_up)
                 {
-                    const FootState& f = g_feet[side];
-                    if (!f.have_ground || t_now - f.ground_t > 0.25) continue;
-                    double fz = f.ground_z - g_pose.ankle_height[side];
-                    if (!floor || fz > floor_z) floor_z = fz;
-                    floor = true;
+                    static double said_top = 0.0;
+                    if (t_now - said_top >= 1.0)
+                    {
+                        said_top = t_now;
+                        HSVR_LOG("Capsule: something %.0f cm above his floor under his middle (a table, a body?): not stood on, floor %.1f kept", floor_z - ref, ref);
+                    }
+                    floor_z = ref;
                 }
+            }
+            else if (feet)
+            {
+                floor_z = feet_z;
+                floor = true;
+            }
+            if (floor)
+            {
+                last_floor_z = floor_z;
+                last_floor_t = t_now;
+            }
             double standing = floor ? floor_z + half : -1e9;
             if (floor && keep.z < standing - 15.0)
             {
