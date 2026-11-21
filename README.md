@@ -35,6 +35,8 @@ cmake --build build-mod --config Game__Shipping__Win64 --target HalfSwordVR
 
 Install by copying `main.dll` to `HalfswordUE5\Binaries\Win64\ue4ss\Mods\HalfSwordVR\dlls\main.dll` and creating an empty `enabled.txt` in `Mods\HalfSwordVR`. Remove that folder to uninstall.
 
+**VR or flat is chosen at launch** (`vr_auto=1`, the default): start SteamVR first and the game starts in VR (and, with `test_room=1`, in the test room). Start the game without SteamVR and it plays flat with the mod switched off for that session: no OpenXR, so SteamVR is not opened, and no hooks. `vr_auto=0` always starts VR (OpenXR opens SteamVR if it is closed). `vr_auto_processes` lists the process names that count as "SteamVR is running" (default `vrserver.exe,vrmonitor.exe`).
+
 ## Running the headset test
 
 1. Start SteamVR and put on the headset.
