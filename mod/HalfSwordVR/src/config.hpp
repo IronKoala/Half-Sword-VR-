@@ -1033,6 +1033,18 @@ namespace hsvr
         // physics (Root Mesh, Get Damage @540-@584); the posed body does not, so without this the
         // player only lost limb health and could die only by losing his head.
         bool player_takes_damage = true;
+        // 1 = your posed body bumping into a person counts by how fast it moves into him, as a
+        // simulated body would. The posed body is kinematic: when it sinks into a Willie the physics
+        // pushes him out with an impulse set by how deep it went, not how fast (the game caps it at
+        // 1500 standing), and his body-hit block (Willie_BP UG @741800-@746500) passes any contact of
+        // your arm, hand, calf or foot ('Beig Hit By Limbs') to Deal Complex Damage with that impulse:
+        // walking slowly into him knocked his consciousness down (Matthew 2026-11-21). With this the
+        // contact's impulse is at most reduced mass x closing speed (each side's body mass, your
+        // contact body's x player_body_contact_mass_scale), the impulse a free body of that mass
+        // would give; it is never raised. Both ways: him hitting your body too.
+        bool player_body_contact_speed = true;
+        double player_body_contact_mass_scale = 1.0;
+        bool player_body_contact_log = true;
         // 1 = blood from your own cut-off limb stays at the stump. The game sticks the fountain to a
         // bone of the cut-off limb, which it only hides; the posed body keeps moving that hidden
         // bone (hand to controller, head to headset), so the blood floated in mid-air.

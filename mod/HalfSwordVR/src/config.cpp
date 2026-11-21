@@ -792,6 +792,9 @@ namespace hsvr
         text("helmet_fade_material", c.helmet_fade_material);
         text("hide_own_gore_from", c.hide_own_gore_from);
         flag("player_takes_damage", c.player_takes_damage);
+        flag("player_body_contact_speed", c.player_body_contact_speed);
+        num("player_body_contact_mass_scale", c.player_body_contact_mass_scale);
+        flag("player_body_contact_log", c.player_body_contact_log);
         flag("player_stump_blood", c.player_stump_blood);
         flag("injury_limbs", c.injury_limbs);
         num("injury_limb_health", c.injury_limb_health);

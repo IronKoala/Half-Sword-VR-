@@ -13489,6 +13489,135 @@ namespace
                      hit.comp ? hit.comp->GetName().c_str() : STR("?"), hit.bone.ToString().c_str(), speed, intensity, vol);
     }
 
+    // ---- Body contact by speed, not depth (player_body_contact_speed) -----------------------------
+    // Matthew 2026-11-21: walking into a Willie, however slowly, hurt him. Every hit on a Willie
+    // (his mesh's OnComponentHit, UG @757869, and his armour proxies' through NewFunction) stores
+    // the contact's NormalImpulse, capped at 1500 standing, as 'Body Hit Normal Impulse'; his
+    // body-hit block (UG @741800-@746500) then passes any contact of the other's arm, hand, calf or
+    // foot ('Beig Hit By Limbs', @738294) to the hitter's Deal Complex Damage with that impulse as
+    // both velocity and impulse. Your posed body is kinematic: when it sinks into him the solver
+    // pushes him out with an impulse set by how deep it went, so a slow step gave 988-1500 (the
+    // session's log: consciousness 92 -> 55 from one bump). A simulated body (the flat game's)
+    // gives at most reduced mass x closing speed. So, for contacts between your Willie and another
+    // one, before the event runs: impulse = min(game's, mu x |closing speed along the normal|),
+    // mu = m_yours m_his / (m_yours + m_his), each the body's own mass (yours x
+    // player_body_contact_mass_scale). Never raised; hits by weapons (other actors) untouched.
+    struct ContactParams
+    {
+        int self_comp = -1, other_actor = -1, other_comp = -1, impulse = -1;
+        FProperty *impulse_p = nullptr, *hit_p = nullptr;
+    };
+    double body_part_mass(UObject* comp, FName bone)
+    {
+        if (!comp) return 0.0;
+        if (bone != FName() && func_chain(comp, STR("GetBoneMass")))
+        {
+            Call m(comp, STR("GetBoneMass"));
+            m.name(STR("BoneName"), bone);
+            m.flag(STR("bScaleMass"), true);
+            m.run();
+            return m.number();
+        }
+        Call m(comp, STR("GetMass"));
+        m.run();
+        return m.number();
+    }
+    void body_contact_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        gc_sync();
+        HSVR_PROF(PerfHitBody);
+        UObject* pawn = g_hitf.pawn;
+        if (!pawn) return;
+        UFunction* fn = static_cast<UFunction*>(custom_data);
+        uint8_t* locals = context.TheStack.Locals();
+        if (!fn || !locals) return;
+        static std::unordered_map<UFunction*, ContactParams> cache;
+        auto it = cache.find(fn);
+        if (it == cache.end())
+        {
+            ContactParams c;
+            for (FProperty* p : fn->ForEachProperty())
+            {
+                std::wstring n = p->GetName();
+                if (n == STR("HitComponent")) c.self_comp = p->GetOffset_Internal();
+                else if (n == STR("OtherActor") || n == STR("Other Actor")) c.other_actor = p->GetOffset_Internal();
+                else if (n == STR("OtherComp") || n == STR("Other Comp")) c.other_comp = p->GetOffset_Internal();
+                else if (n == STR("NormalImpulse") || n == STR("A")) c.impulse = p->GetOffset_Internal(), c.impulse_p = p;
+                else if (n == STR("Hit") || n == STR("Body Hit")) c.hit_p = p;
+            }
+            it = cache.emplace(fn, c).first;
+        }
+        const ContactParams& cp = it->second;
+        if (cp.other_actor < 0 || cp.impulse < 0) return;
+        UObject* self = context.Context;
+        UObject* other = *reinterpret_cast<UObject**>(locals + cp.other_actor);
+        // Only your Willie against another Willie (pointer compares first: this runs for every hit).
+        if (self != pawn && other != pawn) return;
+        if (!self || !other || self == other) return;
+        hsvr::Config cfg = hsvr::config();
+        if (!cfg.player_body_contact_speed) return;
+        if (!is_a(self == pawn ? other : self, STR("Willie_BP_C"))) return;
+        uint8_t* imp_at = locals + cp.impulse;
+        double ni[3];
+        read_three(imp_at, cp.impulse_p, ni);
+        using namespace hsvr;
+        Vec3 n{ni[0], ni[1], ni[2]};
+        double raw = length(n);
+        if (raw < 1.0) return;
+        HitInfo hit = break_hit(context, cp.hit_p);
+        UObject* self_comp = cp.self_comp >= 0 ? *reinterpret_cast<UObject**>(locals + cp.self_comp) : nullptr;
+        if (!self_comp) self_comp = object_property(self, STR("Mesh")); // an armour proxy (NewFunction): his body
+        UObject* other_comp = cp.other_comp >= 0 ? *reinterpret_cast<UObject**>(locals + cp.other_comp) : hit.comp;
+        bool mine_self = self == pawn;
+        UObject* my_comp = mine_self ? self_comp : other_comp;
+        FName my_bone = mine_self ? hit.my_bone : hit.bone;
+        UObject* his_comp = mine_self ? other_comp : self_comp;
+        FName his_bone = mine_self ? hit.bone : hit.my_bone;
+        double m_mine = body_part_mass(my_comp, my_bone);
+        double m_his = body_part_mass(his_comp, his_bone);
+        // A posed (kinematic) body part may report no mass: his matching part's (same skeleton).
+        if (!(m_mine > 0.0)) m_mine = m_his;
+        if (!(m_mine > 0.0) || !(m_his > 0.0)) return;
+        m_mine *= (std::max)(0.0, cfg.player_body_contact_mass_scale);
+        double mu = m_mine * m_his / (m_mine + m_his);
+        Vec3 dir = n * (1.0 / raw);
+        Vec3 v_mine = hit_body_velocity(my_comp, my_bone, hit.point);
+        Vec3 v_his = hit_body_velocity(his_comp, his_bone, hit.point);
+        double closing = std::fabs(dot(v_mine - v_his, dir)); // cm/s along the contact normal
+        double cap = mu * closing;
+        if (cap >= raw) return;
+        double k = cap / raw;
+        write_three(imp_at, cp.impulse_p, ni[0] * k, ni[1] * k, ni[2] * k);
+        if (cfg.player_body_contact_log && raw >= 300.0)
+            HSVR_LOG_EVERY(0.2, "Body contact: your %ls (%.1f kg) %s %ls's %ls (%.1f kg): impulse %.0f -> %.0f (closing %.0f cm/s, your part %.0f cm/s, his %.0f cm/s)%s",
+                           my_bone.ToString().c_str(), m_mine, mine_self ? "hit by" : "into", (mine_self ? other : self)->GetName().c_str(), his_bone.ToString().c_str(),
+                           m_his, raw, cap, closing, length(v_mine), length(v_his), cp.self_comp < 0 ? " [armour proxy]" : "");
+    }
+
+    void install_body_contact()
+    {
+        static bool installed[2] = {false, false};
+        static double last_try = -10.0;
+        if (installed[0] && installed[1]) return;
+        double now = hsvr::now_seconds();
+        if (now - last_try < 2.0) return;
+        last_try = now;
+        const TCHAR* paths[2] = {
+            STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:BndEvt__BP_ThirdPersonCharacter_Mesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"),
+            STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:NewFunction")};
+        for (int i = 0; i < 2; ++i)
+        {
+            if (installed[i]) continue;
+            UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, paths[i]);
+            if (!fn) continue;
+            installed[i] = true;
+            UObjectGlobals::RegisterHook(fn, &body_contact_hook, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, fn);
+            std::wstring params;
+            for (FProperty* p : fn->ForEachProperty()) params += p->GetName() + STR(", ");
+            HSVR_LOG("Body contact: watching %ls (parameters %ls)", i == 0 ? STR("Willie's mesh hits") : STR("his armour proxies' hits (NewFunction)"), params.c_str());
+        }
+    }
+
     // ---- Stab log (read only) ------------------------------------------------------------------
     // Why VR stabs bounce (defaults\stabbing_and_ss_reference.md in the decompile folder): the game
     // sticks a blade only when CuttingRate * |NormalImpulse| >= 10000 (ModularWeaponBP @44253-@44512)
@@ -16437,6 +16566,7 @@ namespace
         { HSVR_SUB("after:cut_through_tick"); cut_through_tick(context); }
         { HSVR_SUB("after:stab_log_tick"); stab_log_tick(context); }
         { HSVR_SUB("after:install_hit_haptics"); install_hit_haptics(); }
+        { HSVR_SUB("after:install_body_contact"); install_body_contact(); }
         { HSVR_SUB("after:grip_flip_tick"); grip_flip_tick(context); }
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
