@@ -10023,6 +10023,7 @@ namespace
     }
 
     bool seat_on_palm(int side, UObject* pawn, WrapGrab& g, const hsvr::Config& cfg);
+    bool seat_on_scenery(int side, WrapGrab& g, const hsvr::Config& cfg);
     // The first enum (byte) parameter of a call, whatever the engine named it.
     void first_byte(Call& c, uint8_t v)
     {
@@ -10402,7 +10403,7 @@ namespace
                 lv.run();
                 hsvr::Vec3 v = lv.vec();
                 double cap = (std::max)(150.0, 1.5 * hsvr::length(g.hand_v));
-                hsvr::Vec3 vc = hsvr::clamp_length(v, cap);
+                hsvr::Vec3 vc = clamp_length(v, cap);
                 Call slv(g.comp, STR("SetPhysicsLinearVelocity"));
                 slv.three(STR("NewVel"), vc.x, vc.y, vc.z);
                 slv.flag(STR("bAddToCurrent"), false);
@@ -10411,7 +10412,7 @@ namespace
                 Call av(g.comp, STR("GetPhysicsAngularVelocityInRadians"));
                 av.name(STR("BoneName"), g.bone);
                 av.run();
-                hsvr::Vec3 w = hsvr::clamp_length(av.vec(), 15.0);
+                hsvr::Vec3 w = clamp_length(av.vec(), 15.0);
                 Call sav(g.comp, STR("SetPhysicsAngularVelocityInRadians"));
                 sav.three(STR("NewAngVel"), w.x, w.y, w.z);
                 sav.flag(STR("bAddToCurrent"), false);
