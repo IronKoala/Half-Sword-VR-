@@ -283,6 +283,8 @@ LAYOUT = [
         ("pose_hold_let_go", "Stuck rule: drop a weapon stuck out of reach."),
         ("pose_hold_let_go_s", ""),
         ("pose_hold_let_go_grace_s", ""),
+        ("pose_hold_let_go_dead", "1 = a stuck weapon is let go with no speed (never flies off)."),
+        ("pose_hold_measured_v", "1 = a stopped weapon is driven from how it really moves (no wind-up)."),
         ("pose_hold_let_go_ignore_self", ""),
         ("pose_hold_contact_cm", ""),
         ("pose_hold_ignore_hand", ""),

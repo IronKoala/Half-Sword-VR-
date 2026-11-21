@@ -434,6 +434,12 @@ namespace hsvr
         double pose_hold_let_go_reach_slack_cm = 15.0; // with the arm-lag hold: how far past his reach the grip may trail
         // No let-go for this long after a weapon comes into the hand (long weapons swing into place).
         double pose_hold_let_go_grace_s = 1.0;
+        // Stuck let-go drops the weapon dead (no velocity) instead of with the hold's last chase
+        // velocity (playtest 2026-11-21: stopped weapons left at 10-20 m/s and flew at him). 0 = old.
+        bool pose_hold_let_go_dead = true;
+        // While a held weapon is stopped, the hold uses its measured motion, not the velocity it last
+        // set (which never drops while it is blocked, so the hold wound up to 20 m/s). 0 = old.
+        bool pose_hold_measured_v = true;
         // Something is in the held weapon's way when it ends a tick this far (cm) short of where the
         // hold sent it; the stuck rule only lets go of a weapon that is in contact like that.
         double pose_hold_contact_cm = 0.5;
