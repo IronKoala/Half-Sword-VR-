@@ -469,6 +469,10 @@ namespace hsvr
         bool pose_hold_arm_lag = true;
         double pose_hold_arm_lag_s = 0.05;
         double pose_hold_arm_lag_max_s = 0.25;
+        // A heavy weapon's own heft, whoever holds it (Matthew 2026-11-21: a max-strength "GigaChad" Willie swung a
+        // greatsword like a dagger): the lag is never below this x sqrt(weapon inertia about the shoulder per arm,
+        // in kg m^2). 0.11: greatsword ~0.10 s two-handed / 0.14 one-handed, arming sword ~0.08, dagger ~0.05. 0 = off.
+        double pose_hold_heft_lag_s = 0.11;
         double pose_hold_arm_reach_cm = 55.0;
         // His shoulder's strength (N m, for a default fresh body; x his strength, injury and stamina; both arms
         // add): the arm-lag hold can't speed arm + weapon about the shoulder faster than this allows, so the

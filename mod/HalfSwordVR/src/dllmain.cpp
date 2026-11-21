@@ -10902,6 +10902,8 @@ namespace
                     if (two) fit = 0.5 * (fit + (std::min)(s2b.injury, s2b.stamina));
                     fit = (std::max)(0.05, fit);
                     double lag = cfg.pose_hold_arm_lag_s * std::sqrt((A + W) / (std::max)(0.01, A)) / std::sqrt(fit);
+                    double heft = cfg.pose_hold_heft_lag_s > 0.0 ? cfg.pose_hold_heft_lag_s * std::sqrt((std::max)(0.0, W) / (two ? 2.0 : 1.0)) : 0.0;
+                    lag = (std::max)(lag, heft);
                     lag = (std::min)((std::max)(cfg.pose_hold_arm_lag_s, cfg.pose_hold_arm_lag_max_s), lag);
                     double om = 2.0 / lag;
                     double z = cfg.pose_hold_damping_ratio > 0.0 ? cfg.pose_hold_damping_ratio : 1.0;
