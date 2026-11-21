@@ -280,15 +280,14 @@ namespace hsvr
         bool pose_body_strength = true;
         double pose_body_stamina_floor = 0.5;
         double pose_body_strength_min = 0.1;
-        // Holding and swinging cost stamina by the game's own formula, run on the hold's force and
-        // torque (capped) and the controller's speed at the grip, smoothed (lo..hi cm/s -> x10..x85),
-        // times this scale (3-5 if continuous swinging should empty the bar in 10-20 s).
+        // Holding and swinging cost stamina through the game's own rules: the hold's force and torque
+        // (capped) go into the game's per-hand burn (as its hand joint would), x Muscle Rate's factor x
+        // this scale, kept from pose_stamina_gate up (the game's 10); the game then applies its swing
+        // speed, fat, temperature and armour factors and regenerates as usual.
         double pose_stamina_scale = 1.0;
-        double pose_stamina_swing_lo_cm_s = 200.0;
-        double pose_stamina_swing_hi_cm_s = 700.0;
-        double pose_stamina_speed_smooth_s = 0.7;
-        double pose_stamina_force_cap_n = 150.0;
-        double pose_stamina_torque_cap_nm = 15.0;
+        double pose_stamina_gate = 10.0;
+        double pose_stamina_force_cap_n = 1000.0;
+        double pose_stamina_torque_cap_nm = 100.0;
         // Exact hold (B&S-style): each frame the weapon gets the velocity that puts it exactly where
         // the hand is drawn at the end of this frame's physics, limited only by the hand's strength
         // (pose_hold_max_force / max_torque). 0 = the spring below.
