@@ -12365,6 +12365,252 @@ namespace
     double g_young_since[2] = {-1.0, -1.0};
     int g_young_trace_ok[2] = {0, 0}; // ticks in a row the normal 3 cm keep trace found the stuck bone
 
+    // ---- the joint hold (pose_hold_joint, experimental) --------------------------------------------
+    // B&S holds an item with a ConfigurableJoint per hand (Handle.cs SetJointConfig / RefreshJointDrive)
+    // and Matthew's framework with rapier joints (melee.rs melee_joint): the physics engine solves the
+    // hold inside its step, together with the collisions. Here each hand gets an invisible kinematic
+    // sphere that the mod moves to where the controller wants the weapon, and a PhysicsConstraintComponent
+    // with spring drives ties it to the weapon's BaseMesh.
+    // Made with the sphere exactly on the weapon (frames copied at SetConstrainedComponents), so the
+    // drive's rest pose is "weapon where the sphere is": the main hand's sphere is moved to the weapon's
+    // target pose each tick; the second hand's sits on its palm point and only pulls (no turn), as B&S.
+    // Chaos runs drives in acceleration mode (chaos_joint_drive.md): stiffness 1/s^2, damping 1/s and
+    // MaxForce a max acceleration (cm/s^2, rad/s^2), so B&S's N/m values are divided by the mass (and
+    // N m by the inertia about the grip). Angular stiffness/damping get the CVar's x1.5, taken off here.
+    struct JointHand
+    {
+        UObject* sphere = nullptr;
+        UObject* con = nullptr;
+        UObject* weapon = nullptr;
+        hsvr::Vec3 made_at{0, 0, 0}; // the point it was made at, in the weapon's frame
+        bool turns = false;
+        bool touched = false;
+    };
+    JointHand g_jh[2][2]; // [side][0 = the hand's own joint, 1 = its joint as the second hand on the other's weapon]
+
+    void jh_destroy(JointHand& j)
+    {
+        for (UObject* o : {j.con, j.sphere})
+            if (o && !gone(o) && object_alive(o))
+            {
+                Call d(o, STR("K2_DestroyComponent"));
+                d.object(STR("Object"), o);
+                d.run();
+            }
+        j = JointHand{};
+    }
+
+    UObject* jh_add(UObject* pawn, const TCHAR* cls_path)
+    {
+        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, cls_path);
+        if (!cls) return nullptr;
+        Call add(pawn, STR("AddComponentByClass"));
+        add.object(STR("Class"), cls);
+        add.flag(STR("bManualAttachment"), false);
+        if (FProperty* t = add.param(STR("RelativeTransform")))
+        {
+            uint8_t* at = add.buffer.data() + t->GetOffset_Internal();
+            UScriptStruct* type = struct_type(t);
+            if (FProperty* r = struct_member(type, STR("Rotation")))
+                if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                {
+                    uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                    if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                    else *reinterpret_cast<float*>(wat) = 1.0f;
+                }
+            if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+        }
+        add.flag(STR("bDeferredFinish"), false);
+        if (!add.run()) return nullptr;
+        return add.object_result();
+    }
+
+    // Makes the joint with the sphere on the weapon at `at_world` (the point held), turned as the weapon.
+    bool jh_make(JointHand& j, UObject* pawn, UObject* base, UObject* weapon, const hsvr::Vec3& at_world, const hsvr::Vec3& at_local,
+                 const hsvr::Vec3& sphere_pos, const hsvr::Quat& sphere_rot, bool turns, int side)
+    {
+        jh_destroy(j);
+        UObject* s = jh_add(pawn, STR("/Script/Engine.SphereComponent"));
+        if (!s) return false;
+        {
+            Call ab(s, STR("SetAbsolute"));
+            ab.flag(STR("bNewAbsoluteLocation"), true);
+            ab.flag(STR("bNewAbsoluteRotation"), true);
+            ab.flag(STR("bNewAbsoluteScale"), true);
+            ab.run();
+            Call r(s, STR("SetSphereRadius"));
+            r.number(STR("InSphereRadius"), 1.0);
+            r.flag(STR("bUpdateOverlaps"), false);
+            r.run();
+            Call hid(s, STR("SetHiddenInGame"));
+            hid.first_flag(true);
+            hid.run();
+            Call ov(s, STR("SetGenerateOverlapEvents"));
+            ov.first_flag(false);
+            ov.run();
+            Call all(s, STR("SetCollisionResponseToAllChannels"));
+            all.byte(STR("NewResponse"), 0); // ignore everything: it touches nothing, it only anchors the joint
+            all.run();
+            Call sim(s, STR("SetSimulatePhysics"));
+            sim.first_flag(false);
+            sim.run();
+            if (FProperty* step = prop_chain(s, STR("CanCharacterStepUpOn"))) *(reinterpret_cast<uint8_t*>(s) + step->GetOffset_Internal()) = 0;
+            set_component_transform(s, sphere_pos, sphere_rot, true);
+            // A body exists only with physics collision on (a kinematic body); done once, before any joint.
+            Call ce(s, STR("SetCollisionEnabled"));
+            ce.byte(STR("NewType"), 2); // PhysicsOnly
+            ce.run();
+        }
+        UObject* c = jh_add(pawn, STR("/Script/Engine.PhysicsConstraintComponent"));
+        if (!c)
+        {
+            Call d(s, STR("K2_DestroyComponent"));
+            d.object(STR("Object"), s);
+            d.run();
+            return false;
+        }
+        {
+            Call ab(c, STR("SetAbsolute"));
+            ab.flag(STR("bNewAbsoluteLocation"), true);
+            ab.flag(STR("bNewAbsoluteRotation"), true);
+            ab.flag(STR("bNewAbsoluteScale"), true);
+            ab.run();
+            set_component_transform(c, at_world, sphere_rot, true);
+            for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
+            {
+                Call c1(c, fn);
+                c1.byte(STR("ConstraintType"), 0); // free: a drive on a locked axis is ignored
+                c1.number(STR("LimitSize"), 0.0);
+                c1.run();
+            }
+            for (const TCHAR* fn : {STR("SetAngularSwing1Limit"), STR("SetAngularSwing2Limit"), STR("SetAngularTwistLimit")})
+            {
+                Call c1(c, fn);
+                c1.byte(STR("MotionType"), 0); // free
+                c1.run();
+            }
+            Call dc(c, STR("SetDisableCollision"));
+            dc.first_flag(true);
+            dc.run();
+            Call join(c, STR("SetConstrainedComponents"));
+            join.object(STR("Component1"), s);
+            join.name(STR("BoneName1"), FName());
+            join.object(STR("Component2"), base);
+            join.name(STR("BoneName2"), FName());
+            join.run();
+            Call pos(c, STR("SetLinearPositionDrive"));
+            pos.flag(STR("bEnableDriveX"), true);
+            pos.flag(STR("bEnableDriveY"), true);
+            pos.flag(STR("bEnableDriveZ"), true);
+            pos.run();
+            Call vel(c, STR("SetLinearVelocityDrive"));
+            vel.flag(STR("bEnableDriveX"), true);
+            vel.flag(STR("bEnableDriveY"), true);
+            vel.flag(STR("bEnableDriveZ"), true);
+            vel.run();
+            Call mode(c, STR("SetAngularDriveMode"));
+            mode.byte(STR("DriveMode"), 0); // SLERP
+            mode.run();
+            Call slerp(c, STR("SetOrientationDriveSLERP"));
+            slerp.first_flag(turns);
+            slerp.run();
+            Call aslerp(c, STR("SetAngularVelocityDriveSLERP"));
+            aslerp.first_flag(turns);
+            aslerp.run();
+        }
+        j.sphere = s;
+        j.con = c;
+        j.weapon = weapon;
+        j.made_at = at_local;
+        j.turns = turns;
+        HSVR_LOG("Joint hold: %s hand %s joint made on %ls at (%.1f, %.1f, %.1f) on it", side == 0 ? "left" : "right", turns ? "turning" : "pull-only",
+                 weapon->GetName().c_str(), at_local.x, at_local.y, at_local.z);
+        return true;
+    }
+
+    void jh_drive(JointHand& j, double k, double c, double fmax, double ka, double ca, double tmax)
+    {
+        Call lin(j.con, STR("SetLinearDriveParams"));
+        lin.number(STR("PositionStrength"), k);
+        lin.number(STR("VelocityStrength"), c);
+        lin.number(STR("InForceLimit"), fmax);
+        lin.run();
+        if (!j.turns) return;
+        Call ang(j.con, STR("SetAngularDriveParams"));
+        ang.number(STR("PositionStrength"), ka);
+        ang.number(STR("VelocityStrength"), ca);
+        ang.number(STR("InForceLimit"), tmax);
+        ang.run();
+    }
+
+    // Once per tick, after the holds: a joint no hold touched this tick goes (let go, dropped, swapped).
+    void jh_sweep()
+    {
+        for (int s = 0; s < 2; ++s)
+            for (int i = 0; i < 2; ++i)
+            {
+                JointHand& j = g_jh[s][i];
+                if ((j.sphere || j.con) && (!j.touched || gone(j.weapon) || gone(j.sphere) || gone(j.con)))
+                {
+                    if (j.weapon && !gone(j.weapon)) HSVR_LOG("Joint hold: %s hand's joint on %ls removed", s == 0 ? "left" : "right", j.weapon->GetName().c_str());
+                    if (gone(j.sphere)) j.sphere = nullptr;
+                    if (gone(j.con)) j.con = nullptr;
+                    jh_destroy(j);
+                }
+                j.touched = false;
+            }
+    }
+
+    // The joint hold for this tick. Returns false if it doesn't apply (the old hold then runs).
+    bool joint_hold(int side, UObject* pawn, UObject* base, UObject* weapon, double mass, double ig_kgm2, const hsvr::Vec3& pivot,
+                    const hsvr::Vec3& target_pos, const hsvr::Quat& target_rot, const hsvr::Vec3& pos, const hsvr::Quat& rot, const BodyStrength& body,
+                    const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        bool two = g_two.active && g_two.main == side && g_two.weapon == weapon && g_two.bs_valid && g_pose.hand_valid[g_two.second];
+        JointHand& m = g_jh[side][0];
+        Vec3 pivot_world = pos + rot.rotate(pivot);
+        if (!m.con || m.weapon != weapon || length(m.made_at - pivot) > 10.0)
+            if (!jh_make(m, pawn, base, weapon, pivot_world, pivot, pos, rot, true, side)) return false;
+        m.touched = true;
+        BodyStrength s2b = two ? body_strength(pawn, g_two.second, cfg) : BodyStrength{};
+        double pk = two ? cfg.pose_bs_two_pos_k : cfg.pose_hold_spring, pc = two ? cfg.pose_bs_two_pos_c : cfg.pose_hold_damper,
+               pf = two ? cfg.pose_bs_two_pos_max : cfg.pose_hold_max_force;
+        double rk = two ? cfg.pose_bs_two_rot_k : cfg.pose_hold_turn_spring, rc = two ? cfg.pose_bs_two_rot_c : cfg.pose_hold_turn_damper,
+               rf = two ? cfg.pose_bs_two_rot_max : cfg.pose_hold_max_torque;
+        double st = (std::max)(0.0, cfg.pose_hold_strength) * (std::max)(0.0, cfg.pose_hold_joint_stiffness);
+        double dst = (std::max)(0.0, cfg.pose_hold_strength) * (std::max)(0.0, cfg.pose_hold_joint_damping);
+        double mx = (std::max)(0.0, cfg.pose_hold_joint_max);
+        double mm = (std::max)(0.05, two ? mass * 0.5 : mass); // each of two hands moves half of it
+        double I = (std::max)(1e-4, ig_kgm2);
+        double ang_scale = 1.5; // p.Chaos.JointConstraint.AngularDriveStiffnessScale / DampingScale default
+        double k = pk * st / mm, c = pc * dst / mm, fcap = pf * mx * (std::max)(0.0, body.total) / mm * 100.0;
+        double ka = rk * st / I / ang_scale, ca = rc * dst / I / ang_scale, tcap = rf * mx * (std::max)(0.0, two ? 0.5 * (body.total + s2b.total) : body.total) / I;
+        set_component_transform(m.sphere, target_pos, target_rot, false);
+        jh_drive(m, k, c, fcap, ka, ca, tcap);
+        if (two)
+        {
+            JointHand& o = g_jh[g_two.second][1];
+            Vec3 at_world = pos + rot.rotate(g_two.bs_local);
+            if (!o.con || o.weapon != weapon || length(o.made_at - g_two.bs_local) > 10.0)
+                jh_make(o, pawn, base, weapon, at_world, g_two.bs_local, at_world, rot, false, g_two.second);
+            if (o.con)
+            {
+                o.touched = true;
+                // Its sphere carries the made-at point: keep that point where the palm wants the spot held now.
+                Vec3 want = g_two.bs_p2 + rot.rotate(o.made_at - g_two.bs_local);
+                set_component_transform(o.sphere, want, rot, false);
+                double fcap2 = pf * mx * (std::max)(0.0, s2b.total) / mm * 100.0;
+                jh_drive(o, k, c, fcap2, 0.0, 0.0, 0.0);
+            }
+        }
+        HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls%s: grip %.1f cm / %.0f deg off; drive k %.0f c %.1f max %.0f cm/s^2, turn k %.0f c %.1f max %.0f rad/s^2 (%.2f kg, %.3f kg m^2)",
+                       side == 0 ? "left" : "right", weapon->GetName().c_str(), two ? " (two hands)" : "",
+                       length(pivot_world - (target_pos + target_rot.rotate(pivot))), length(scaled_axis((rot * target_rot.inverse()).normalized())) * 57.2958,
+                       k, c, fcap, ka, ca, tcap, mass, I);
+        return true;
+    }
+
     void hold_weapon(int side, UObject* pawn, UObject* joint, UObject* base, UObject* weapon, double mass, const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -13357,17 +13603,32 @@ namespace
         // keep the velocity it is given without moving (run 29: the knife stayed frozen on the floor).
         Call wake(base, STR("WakeRigidBody"));
         wake.run();
-        Call slv(base, STR("SetPhysicsLinearVelocity"));
         Vec3 set_v = exact_set ? exact_v : (com_next - com) * (1.0 / dt);
-        slv.three(STR("NewVel"), set_v.x, set_v.y, set_v.z);
-        slv.flag(STR("bAddToCurrent"), false);
-        slv.run();
+        // The joint hold (experimental): the engine's joint holds it instead of the velocity set here.
+        // Not while drawing or sheathing, sliding on a handle, or in a wound: those still run the old hold.
+        bool by_joint = false;
+        if (cfg.pose_hold_joint && g_pose.hand_valid[side] && !h.handle_slide && !(g_draw[side].active && g_draw[side].weapon == weapon) &&
+            !(cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon)))
+        {
+            Vec3 rp = pivot_now - com;
+            double ig = ((std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp)) / 1e4; // kg m^2 about the grip
+            by_joint = joint_hold(side, pawn, base, weapon, mass, ig, pivot, target_pos, target_rot, pos, rot, body, cfg);
+        }
+        if (!by_joint)
+        {
+            for (JointHand& j : g_jh[side])
+                if (j.con && j.weapon == weapon) jh_destroy(j);
+            Call slv(base, STR("SetPhysicsLinearVelocity"));
+            slv.three(STR("NewVel"), set_v.x, set_v.y, set_v.z);
+            slv.flag(STR("bAddToCurrent"), false);
+            slv.run();
+            Call sav(base, STR("SetPhysicsAngularVelocityInRadians"));
+            sav.three(STR("NewAngVel"), w_next.x, w_next.y, w_next.z);
+            sav.flag(STR("bAddToCurrent"), false);
+            sav.run();
+        }
         h.last_set_v = set_v;
         h.last_set_w = w_next;
-        Call sav(base, STR("SetPhysicsAngularVelocityInRadians"));
-        sav.three(STR("NewAngVel"), w_next.x, w_next.y, w_next.z);
-        sav.flag(STR("bAddToCurrent"), false);
-        sav.run();
         h.lag = length(to);
         if (h.lag > g_worst_lag[side].load()) g_worst_lag[side].store(h.lag);
         // Far behind for a while: why it isn't coming (asleep, not simulating, what it does with the
@@ -16788,6 +17049,7 @@ namespace
                              g_grip_log[side].weapon_com_local.z);
                 }
         }
+        jh_sweep();
     }
 
     // ---- Deep recording (log_frames; Matthew 2026-11-19: "make it as deep as you can") ------------------
