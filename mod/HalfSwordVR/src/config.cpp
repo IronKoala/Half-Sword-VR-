@@ -625,6 +625,8 @@ namespace hsvr
             num("pose_two_hand_mirror", m);
             c.pose_two_hand_mirror = (int)m;
         }
+        flag("pose_two_hand_twist_only", c.pose_two_hand_twist_only);
+        num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
         flag("pose_fists", c.pose_fists);
         text("pose_fist_class", c.pose_fist_class);
         flag("pose_fist_mark_spawned", c.pose_fist_mark_spawned);
@@ -784,6 +786,7 @@ namespace hsvr
         num("hit_buzz_min_intensity", c.hit_buzz_min_intensity);
         num("hit_buzz_limb_min_ms", c.hit_buzz_limb_min_ms);
         num("whoosh_vr_threshold_scale", c.whoosh_vr_threshold_scale);
+        num("whoosh_walk_speed_scale", c.whoosh_walk_speed_scale);
         flag("whoosh_log", c.whoosh_log);
         num("whoosh_log_min_speed", c.whoosh_log_min_speed);
         flag("stab_assist", c.stab_assist);

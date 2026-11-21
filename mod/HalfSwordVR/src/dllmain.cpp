@@ -5283,7 +5283,7 @@ namespace
     // v, w: the item's centre-of-mass velocity and spin, changed in place. Angular drive (the main
     // hand's turn) when ka > 0: err_rot = the turn from target to current (scaled axis), wt its target spin.
     void bs_solve(double mass, const Mat3& invI, hsvr::Vec3& v, hsvr::Vec3& w, SoftPoint* pts, int n, const hsvr::Vec3& err_rot, const hsvr::Vec3& wt, double ka,
-                  double ca, double tmax, double dt, int iters, hsvr::Vec3& ang_acc)
+                  double ca, double tmax, double dt, int iters, hsvr::Vec3& ang_acc, const hsvr::Vec3* twist_axis = nullptr, double swing_share = 1.0)
     {
         using namespace hsvr;
         Mat3 I3 = Mat3::diag(1, 1, 1);
@@ -5344,6 +5344,13 @@ namespace
             {
                 Vec3 bias = err_rot * (ka / (ca + dt * ka + 1e-12));
                 Vec3 lam = (Kang * ((w - wt) + bias + ang_acc * ga)) * -1.0;
+                if (twist_axis)
+                {
+                    // Two hands: the turning hand only twists it about the line between the hands (and a
+                    // swing_share of the rest); where it points is the two hands' positions.
+                    Vec3 tw = *twist_axis * dot(lam, *twist_axis);
+                    lam = tw + (lam - tw) * swing_share;
+                }
                 Vec3 old = ang_acc;
                 ang_acc = clamp_length(ang_acc + lam, tmax * dt);
                 w = w + invI * (ang_acc - old);
@@ -13299,8 +13306,22 @@ namespace
                                        tcap / 1e4);
                     }
                 }
+                // Two hands (playtest 2026-11-21 13:47, war staff): the right wrist's full turn (up to 680 N m)
+                // beat the two hands' capped pulls (37-70 N), so the staff went where the right wrist
+                // pointed (20-50 deg off the line between the hands), flailed on a wrist roll, and the left
+                // hand could not push or pull it. A real stick (and B&S, where each hand's pull is ~12x its
+                // turn per metre) points where the two hands put it; the wrist only rolls it.
+                Vec3 twist_ax;
+                bool twist_only = two && cfg.pose_two_hand_twist_only && n == 2;
+                if (twist_only)
+                {
+                    twist_ax = (pos + rot.rotate(g_two.bs_local)) - pivot_now;
+                    if (length(twist_ax) > 5.0) twist_ax = twist_ax * (1.0 / length(twist_ax));
+                    else twist_only = false;
+                }
                 bs_solve(mass, invI, vb, wb, pts, n, err_rot, target_ang, rk * st * 1e4, rc * dst * 1e4, tcap, DT,
-                         (std::max)(1, cfg.pose_bs_iterations), ang);
+                         (std::max)(1, cfg.pose_bs_iterations), ang, twist_only ? &twist_ax : nullptr,
+                         (std::min)(1.0, (std::max)(0.0, cfg.pose_two_hand_swing_share)));
                 exact_v = clamp_length(vb - g * DT, 2000.0);
                 w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
                 if (pts[0].slide && pts[0].slide_c > 0.0)
@@ -14698,6 +14719,7 @@ namespace
     bool g_whoosh_log = true;
     double g_whoosh_scale = 1.0;
     double g_whoosh_log_min_speed = 300.0;
+    double g_whoosh_walk = 0.0; // cm/s added to a tracked weapon's whoosh threshold: his walking speed x whoosh_walk_speed_scale
 
     // From the engine tick: which weapons are in his hands now, and the settings (config() is a copy,
     // too dear for every weapon tick).
@@ -14707,7 +14729,20 @@ namespace
         g_whoosh_scale = cfg.whoosh_vr_threshold_scale > 0.0 ? cfg.whoosh_vr_threshold_scale : 1.0;
         g_whoosh_log_min_speed = cfg.whoosh_log_min_speed;
         UObject* pawn = nullptr;
-        if (g_whoosh_log || g_whoosh_scale != 1.0) pawn = object_property(find_player_controller(), STR("Pawn"));
+        if (g_whoosh_log || g_whoosh_scale != 1.0 || cfg.whoosh_walk_speed_scale > 0.0) pawn = object_property(find_player_controller(), STR("Pawn"));
+        g_whoosh_walk = 0.0;
+        if (pawn && cfg.whoosh_walk_speed_scale > 0.0)
+        {
+            // The game whooshes on the weapon's speed through the world (> its threshold); walking at 3-4 m/s
+            // with a weapon nearly did that alone (playtest 2026-11-21 13:47). Raised by the walk, so a
+            // swing is judged on about its speed against his body.
+            Call gv(pawn, STR("GetVelocity"));
+            if (gv.run())
+            {
+                hsvr::Vec3 v = gv.vec();
+                g_whoosh_walk = std::sqrt(v.x * v.x + v.y * v.y) * cfg.whoosh_walk_speed_scale;
+            }
+        }
         UObject* held[2] = {nullptr, nullptr};
         for (int side = 0; side < 2; ++side)
         {
@@ -14752,11 +14787,11 @@ namespace
         double* tv = tp->GetClass().GetName() == STR("DoubleProperty") ? reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(context) + tp->GetOffset_Internal()) : nullptr;
         if (!tv) return;
         double T = *tv, used = T;
-        if (s.tracked && g_whoosh_scale != 1.0)
+        if (s.tracked && (g_whoosh_scale != 1.0 || g_whoosh_walk > 0.0))
         {
             s.saved = T;
             s.restore = true;
-            used = T * g_whoosh_scale;
+            used = T * g_whoosh_scale + g_whoosh_walk;
             *tv = used;
         }
         if (!g_whoosh_log) return;

@@ -449,6 +449,14 @@ namespace hsvr
         // While a held weapon is stopped, the hold uses its measured motion, not the velocity it last
         // set (which never drops while it is blocked, so the hold wound up to 20 m/s). 0 = old.
         bool pose_hold_measured_v = true;
+        // Two hands: the turning hand only twists the weapon about the line between the hands; where it
+        // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
+        // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
+        bool pose_two_hand_twist_only = true;
+        double pose_two_hand_swing_share = 0.1;
+        // Whoosh judged on the weapon's speed against your body: the game's whoosh threshold for a weapon in
+        // a tracked hand is raised by your walking speed x this (0 = off).
+        double whoosh_walk_speed_scale = 1.0;
         // Something is in the held weapon's way when it ends a tick this far (cm) short of where the
         // hold sent it; the stuck rule only lets go of a weapon that is in contact like that.
         double pose_hold_contact_cm = 0.5;
