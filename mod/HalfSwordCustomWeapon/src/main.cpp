@@ -1369,6 +1369,28 @@ namespace
                 ok ? "" : " (call FAILED)");
     }
 
+    // A held main hand keeps the constraint frame it was made with. Breaking it alone does not make the
+    // game re-grip (needs R Offhand Searching Grip), so the joint's weapon-side point is moved instead
+    // (SetConstraintReferencePosition Frame1 = BaseMesh space, where the markers live; the game's own
+    // polearm slide does the same, custom_weapon_hand_spots.md 4b). Skipped while the game holds the hand
+    // in another grip; the new marker is used at the next grip change anyway.
+    void regrip_main(UObject* pawn, UObject* mark)
+    {
+        UObject* rc = object_property(pawn, STR("PhysicsConstraint R Hand"));
+        FProperty* rel = mark ? mark->GetPropertyByNameInChain(STR("RelativeLocation")) : nullptr;
+        if (!rc || !rel) return;
+        for (const TCHAR* f : {STR("R Alt Grip"), STR("Mordhau Grip"), STR("2H Switched Hands (Temp)"), STR("R Offhand Searching Grip")})
+            if (pawn_flag(pawn, pawn->GetPropertyByNameInChain(f)))
+            {
+                log("  main hand: in another grip now (%s); the new spot is used at the next grip change", narrow(f).c_str());
+                return;
+            }
+        V3 r = read_three(reinterpret_cast<uint8_t*>(mark) + rel->GetOffset_Internal(), rel);
+        Call c(rc, STR("SetConstraintReferencePosition"));
+        c.byte(STR("Frame"), 0).three(STR("RefPosition"), r.x, r.y, r.z);
+        log("  main hand moved to its new spot now (joint point %.1f %.1f %.1f: %s)", r.x, r.y, r.z, c.run() && c.ok ? "ok" : "FAILED");
+    }
+
     void fit_hands(UObject* pawn, UObject* weapon, const Xf& head_xf, V3 hs, double shift, std::map<std::string, double>& numbers)
     {
         if (!g_settings.fit_hands) return;
@@ -1412,25 +1434,41 @@ namespace
             // haft is pulled onto it, half a hand from either end.
             double lo = handle_bottom + half_hand, hi = numbers["guard_bottom"] - half_hand;
             bool moved_l = false;
+            // Spots placed by hand in the converter win (spot_* in the .txt, model cm). Spears and other
+            // weapons whose "Grip L Hand Default" is 3 hold the main hand at "Grip L Hand Default Pos".
+            uint8_t l_default = 0;
+            byte_property(weapon, STR("Grip L Hand Default"), false, l_default);
+            auto spot_for = [&](const std::string& n) -> const char* {
+                if (n == "Grip R Hand Default Pos" || (n == "Grip L Hand Default Pos" && l_default == 3)) return "spot_main";
+                if (n == "Grip L Hand Off Hand") return "spot_off";
+                if (n == "Grip L Hand Alt Pos") return "spot_half_off";
+                if (n == "Grip R Hand Alt Pos") return "spot_half_main";
+                if (n == "Grip R Hand Default Pos Reverse") return "spot_reverse";
+                return nullptr;
+            };
             for (const TCHAR* n : {STR("Grip R Hand Default Pos"), STR("Grip L Hand Default Pos"), STR("Grip L Hand Off Hand"),
-                                   STR("Grip L Hand Alt Pos"), STR("Grip R Hand Alt Pos")})
+                                   STR("Grip L Hand Alt Pos"), STR("Grip R Hand Alt Pos"), STR("Grip R Hand Default Pos Reverse")})
             {
                 UObject* mark = object_property(weapon, n);
                 if (!mark) continue;
                 V3 hl{};
                 double z = model_z(mark, hl);
-                double want = (std::min)((std::max)(z, lo), hi);
-                if (hi < lo) want = 0.5 * (lo + hi);
+                const char* key = spot_for(narrow(n));
+                bool chosen = key && numbers.count(key);
+                if (!chosen && narrow(n) == "Grip R Hand Default Pos Reverse") continue; // the game's own place
+                double want = chosen ? numbers[key] : (std::min)((std::max)(z, lo), hi);
+                if (hi < lo && !chosen) want = 0.5 * (lo + hi);
                 if (std::fabs(want - z) < 0.5)
                 {
-                    log("  %s at %.1f cm: on the haft", narrow(n).c_str(), z);
+                    log("  %s at %.1f cm: %s", narrow(n).c_str(), z, chosen ? "already where it was placed" : "on the haft");
                     continue;
                 }
                 V3 w = transform_point(head_xf, V3{hl.x, hl.y, (want + shift) / hs.z}, false);
                 Call move(mark, STR("K2_SetWorldLocation"));
                 move.three(STR("NewLocation"), w.x, w.y, w.z).flag(STR("bTeleport"), true);
                 move.run();
-                log("  %s %.1f -> %.1f cm (was off the model's haft %.1f..%.1f)", narrow(n).c_str(), z, want, lo, hi);
+                log("  %s %.1f -> %.1f cm (%s)", narrow(n).c_str(), z, want, chosen ? "placed in the converter" : "was off the model's haft");
+                if (key && std::string(key) == "spot_main") regrip_main(pawn, mark);
                 moved_l = moved_l || narrow(n) == "Grip L Hand Off Hand";
             }
             if (moved_l && off_mark)
@@ -1502,6 +1540,26 @@ namespace
             l_alt_target = (std::min)((std::max)(blade_from + 0.5 * blade, blade_from + hand), tip - hand);
             r_alt_target = r_target;
         }
+        // Reverse (Mordhau) grip: the game puts it halfway between the half-sword spot and the tip
+        // (MW @7331-7833, at BeginPlay, from the GAME blade), so it is redone for the model's blade.
+        double rev_target = 0.5 * (l_alt_target + tip);
+        // Spots placed by hand in the converter win (spot_* in the .txt, model cm along the weapon).
+        auto chosen = [&](const char* key, double& v, const char* what) {
+            if (!numbers.count(key)) return false;
+            log("  %s: placed in the converter at %.1f cm (instead of %.1f)", what, numbers[key], v);
+            v = numbers[key];
+            return true;
+        };
+        bool main_chosen = chosen("spot_main", r_target, "main hand");
+        chosen("spot_off", off_target, "off hand");
+        chosen("spot_half_main", r_alt_target, "half-sword main hand");
+        chosen("spot_half_off", l_alt_target, "half-sword off hand");
+        chosen("spot_reverse", rev_target, "reverse grip main hand");
+        if (main_chosen)
+        {
+            place(r_mark, "main hand", r_target);
+            regrip_main(pawn, r_mark);
+        }
         g_slide = SwingSlide{};
         if (long_handle && g_settings.swing_slide)
         {
@@ -1538,6 +1596,7 @@ namespace
         {
             place(l_alt, "half-sword off hand", l_alt_target);
             place(r_alt, "half-sword main hand", r_alt_target);
+            place(object_property(weapon, STR("Grip R Hand Default Pos Reverse")), "reverse grip main hand", rev_target);
         }
         // A hand already holding keeps its old spot until it grips again: let go the way the game itself
         // does when it switches grips (Break R/L Constraint); each hand re-attaches at its new marker.

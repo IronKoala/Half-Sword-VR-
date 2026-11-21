@@ -38,6 +38,12 @@ UNITS = [("metres", 100.0), ("centimetres", 1.0), ("millimetres", 0.1), ("inches
 MODEL_TYPES = "*.glb *.gltf *.obj *.nif *.stl *.ply *.dae *.off"
 MODEL_EXTS = tuple(e[1:] for e in MODEL_TYPES.split())
 TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or spear", "hafted")]
+# Hand spots the user can place on the picture (written as spot_<key>= in the model's .txt, cm along the
+# weapon; the mod uses them instead of its own placement). The mod's names for the game's markers:
+# main = Grip R Hand Default Pos, off = Grip L Hand Off Hand, half_main/half_off = Grip R/L Hand Alt Pos
+# (half-swording), reverse = Grip R Hand Default Pos Reverse (reverse/Mordhau grip).
+SPOTS = [("main", "Main hand", "#e74c3c"), ("off", "Off hand", "#3498db"), ("half_main", "Half-sword main", "#e67e22"),
+         ("half_off", "Half-sword off", "#1abc9c"), ("reverse", "Reverse grip", "#9b59b6")]
 ZONE_COLOURS = {"Pommel": "#b07a3c", "Grip": "#7a4a2a", "Guard": "#c9a227", "Head": "#8fa3b8"}
 # Display units. Everything inside stays centimetres and kilograms; only what is shown and typed changes.
 UNIT_SYSTEMS = {"Metric (cm, kg)": ("cm", 1.0, "kg", 1.0), "Imperial (inches, pounds)": ("in", 2.54, "lb", 0.45359237)}
@@ -283,6 +289,21 @@ class App:
         ttk.Label(form, text="only for odd long-handled swords like the Spit: main hand by the guard, off hand at the "
                              "pommel, main hand slides down when swinging. Leave off for normal swords.",
                   foreground="#777", wraplength=560).grid(row=5, column=1, columnspan=2, sticky="w", padx=8)
+        ttk.Label(form, text="Hand spots").grid(row=6, column=0, sticky="w", **pad)
+        spots = ttk.Frame(form)
+        spots.grid(row=6, column=1, columnspan=2, sticky="w", **pad)
+        self.spot_buttons = {}
+        form.columnconfigure(2, weight=1)
+        for i, (key, label, _) in enumerate(SPOTS):
+            b = ttk.Button(spots, text=f"{label}: auto", command=lambda k=key: self.start_placing(k), state="disabled")
+            b.grid(row=i // 3, column=i % 3, sticky="ew", padx=(0, 4), pady=1)
+            b.bind("<Button-3>", lambda e, k=key: self.clear_spot(k))
+            self.spot_buttons[key] = b
+        ttk.Label(form, text="optional: press one, then click on the picture where that hand should hold "
+                             "(measured up from the pommel end). Right-click a button to go back to auto.",
+                  foreground="#777", wraplength=640).grid(
+            row=7, column=1, columnspan=2, sticky="w", padx=8)
+        self.placing = None
         ttk.Label(form, text="Units").grid(row=3, column=0, sticky="w", **pad)
         unit_name = self.settings.get("units")
         self.units_var = tk.StringVar(value=unit_name if unit_name in UNIT_SYSTEMS else next(iter(UNIT_SYSTEMS)))
@@ -306,6 +327,7 @@ class App:
         self.convert_btn.grid(row=6, column=0, columnspan=3, pady=8)
 
         self.preview = ttk.Label(main, anchor="center")
+        self.preview.bind("<Button-1>", self.preview_clicked)
         self.preview.grid(row=7, column=0, columnspan=3, sticky="nsew")
         main.rowconfigure(7, weight=1)
         self.summary = ttk.Label(main, text="", justify="left", wraplength=880)
@@ -370,7 +392,7 @@ class App:
                 name, n = f"{base}_{n}", n + 1
             names.add(name.lower())
             item = {"path": f, "name": name, "raw": None, "length_cm": None, "mass_kg": None,
-                    "type": TYPES[0][0], "flip": False, "slide": False, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
+                    "type": TYPES[0][0], "flip": False, "slide": False, "spots": {}, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
                     "result": None, "result_inputs": None, "views": None, "status": "reading the model...",
                     "iid": f"item{id(f)}_{len(self.items)}"}
             self.items.append(item)
@@ -458,6 +480,8 @@ class App:
             self.flip_btn.config(state="disabled")
             self.install_btn.config(state="disabled")
             self.status.config(text="" if it["raw"] is None else "Check the length, then Convert.")
+            self.placing = None
+            self.refresh_spot_buttons()
 
     def refresh_row(self, it):
         if not self.tree.exists(it["iid"]):
@@ -744,6 +768,7 @@ class App:
     def converted(self, payload, values):
         it, name, info, views = payload
         it.update(result=(name, info), result_inputs=values, views=views)
+        self.write_spots(it)
         it["status"] = "converted"
         self.refresh_row(it)
         if it is not self.cur:
@@ -754,6 +779,79 @@ class App:
         self.flip_btn.config(state="normal")
         self.install_btn.config(state="normal")
         self.status.config(text="Check the picture, then Install.")
+
+    # ---- hand spots ---------------------------------------------------------------------------------
+    # Kept as a share of the weapon's length (0 = pommel end, 1 = tip) so a new length keeps them in place.
+    def spot_z(self, it, key):
+        if it is None or it["result"] is None or key not in it["spots"]:
+            return None
+        zn = it["result"][1]["zones_cm"]
+        return zn["pommel_end"] + it["spots"][key] * (zn["tip"] - zn["pommel_end"])
+
+    def write_spots(self, it):
+        if it["result"] is None:
+            return
+        name = it["result"][0]
+        path = os.path.join(it["work"], name + ".txt")
+        try:
+            lines = [l for l in open(path, encoding="utf-8").read().splitlines() if not l.startswith("spot_")]
+        except OSError:
+            return
+        for key, _, _ in SPOTS:
+            z = self.spot_z(it, key)
+            if z is not None:
+                lines.append(f"spot_{key}={z:.2f}")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def refresh_spot_buttons(self):
+        it = self.cur
+        for key, label, _ in SPOTS:
+            b = self.spot_buttons[key]
+            z = self.spot_z(it, key)
+            if it is None or it["result"] is None:
+                b.config(text=f"{label}: auto", state="disabled")
+                continue
+            zn = it["result"][1]["zones_cm"]
+            txt = "auto" if z is None else f"{self.fmt_len(z - zn['pommel_end'], 1)} up"
+            b.config(text=("> " if self.placing == key else "") + f"{label}: {txt}", state="normal")
+
+    def start_placing(self, key):
+        if self.result is None:
+            return
+        self.placing = None if self.placing == key else key
+        label = dict((k, l) for k, l, _ in SPOTS)[key]
+        self.status.config(text=f"Click on the picture where the {label.lower()} should hold." if self.placing else "")
+        self.refresh_spot_buttons()
+
+    def clear_spot(self, key):
+        it = self.cur
+        if it is None or key not in it["spots"]:
+            return
+        del it["spots"][key]
+        self.write_spots(it)
+        self.redraw_result()
+        self.status.config(text="Back to auto. Press Install to use it in the game.")
+
+    def preview_clicked(self, event):
+        it = self.cur
+        if not self.placing or it is None or it["result"] is None or not self.result_views:
+            return
+        flat, edge, zones, zmin, s, width = self.result_views
+        pw, ph = getattr(self, "pic_size", (width, 0))
+        x = event.x - (self.preview.winfo_width() - pw) / 2
+        z = zmin + (x - 10) / s
+        zn = it["result"][1]["zones_cm"]
+        if not zn["pommel_end"] - 1 <= z <= zn["tip"] + 1:
+            self.status.config(text="That is off the weapon: click on it.")
+            return
+        z = min(max(z, zn["pommel_end"]), zn["tip"])
+        it["spots"][self.placing] = (z - zn["pommel_end"]) / (zn["tip"] - zn["pommel_end"])
+        label = dict((k, l) for k, l, _ in SPOTS)[self.placing]
+        self.placing = None
+        self.write_spots(it)
+        self.redraw_result()
+        self.status.config(text=f"{label} placed. Press Install to use it in the game.")
 
     def short_summary(self, info):
         zn = info["zones_cm"]
@@ -771,6 +869,18 @@ class App:
         pic.paste(flat, (0, 0))
         pic.paste(edge, (0, flat.height))
         pic.paste(bar, (0, flat.height + edge.height))
+        self.pic_size = pic.size
+        zn = info["zones_cm"]
+        from PIL import ImageDraw
+        d = ImageDraw.Draw(pic)
+        for key, label, colour in SPOTS:
+            z = self.spot_z(self.cur, key)
+            if z is None:
+                continue
+            x = 10 + (z - zmin) * s
+            d.line([(x, 4), (x, flat.height + edge.height - 2)], fill=colour, width=3)
+            d.text((x + 4, 4 + 12 * [k for k, _, _ in SPOTS].index(key)), label, fill=colour)
+        self.refresh_spot_buttons()
         photo = ImageTk.PhotoImage(pic)
         self.photos = [photo]
         self.preview.config(image=photo)
@@ -819,6 +929,9 @@ class App:
         self.summary.config(text="")
         self.flip_btn.config(state="disabled")
         self.install_btn.config(state="disabled")
+        self.placing = None
+        if hasattr(self, "spot_buttons"):
+            self.refresh_spot_buttons()
 
     # ---- installing ------------------------------------------------------------------------------------
     def install(self):
