@@ -6494,6 +6494,27 @@ namespace
         owner_call.run();
         UObject* owner = owner_call.object_result();
         bool character = is_a(owner, STR("Willie_BP_C"));
+        if (character && !func_chain(best, STR("FindClosestBone_K2")))
+        {
+            // Armour welded to him (14:04: a plate, NODE_AddStaticMeshComponent): the grab goes to his
+            // body under it, the nearest bone, as the game's own grab would take him.
+            UObject* body = object_property(owner, STR("Mesh"));
+            if (body && func_chain(body, STR("FindClosestBone_K2")))
+            {
+                Call fb(body, STR("FindClosestBone_K2"));
+                fb.three(STR("TestLocation"), at.x, at.y, at.z);
+                fb.flag(STR("bRequirePhysicsAsset"), true);
+                fb.run();
+                FName nb = best_bone;
+                if (FProperty* rp = fb.param(STR("ReturnValue"))) nb = *reinterpret_cast<FName*>(fb.buffer.data() + rp->GetOffset_Internal());
+                Vec3 np;
+                double nd = closest_point_any(body, nb, at, 30.0, &np);
+                HSVR_LOG("Grab: %s grip touched %ls on %ls: takes his bone %ls under it (%.1f cm)", hand, best->GetName().c_str(), owner->GetName().c_str(), nb.ToString().c_str(), nd);
+                best = body;
+                best_bone = nb;
+                if (nd >= 0.0) best_point = np, best_d = nd;
+            }
+        }
         bool L = side == 0;
         std::wstring missing;
         auto need = [&](bool ok, const TCHAR* n) { if (!ok) missing += std::wstring(n) + STR(", "); };
@@ -10299,7 +10320,9 @@ namespace
             double w = 2.0 * 3.14159265 * (std::max)(0.5, cfg.pose_grab_body_pull_hz);
             Vec3 hv = (g_pose.target[side] - g.last_hand) * (1.0 / dt);
             if (!g.have_last_hand) hv = Vec3{0, 0, 0};
-            Vec3 acc = to * (w * w) + (hv - v) * (2.0 * w);
+            double tl = length(to), slack = (std::max)(0.0, cfg.pose_grab_body_pull_slack_cm);
+            Vec3 to_pull = tl > slack ? to * ((tl - slack) / tl) : Vec3{0, 0, 0};
+            Vec3 acc = to_pull * (w * w) + (hv - v) * (2.0 * w);
             // (Sized for the weight that really has to move: a 0.9 kg neck bone drags his whole upper body,
             // and at its own mass the spring gave 40-120 N, leaving the throat 6-8 cm off the palm.)
             double pull_kg = (std::max)(g.mass, cfg.pose_grab_body_pull_min_kg);
@@ -10681,6 +10704,11 @@ namespace
                 }
             }
         }
+        if (cfg.pose_grab_scenery_gap_cm > 0.0 && length(palm - spot) > 0.01)
+        {
+            // Off the surface toward where the palm came from (the face's side).
+            spot = spot + normalized(palm - spot) * cfg.pose_grab_scenery_gap_cm;
+        }
         Vec3 bp = component_location(g.comp);
         Quat bq = component_rotation(g.comp);
         g.boned = false;
@@ -10720,6 +10748,16 @@ namespace
         Vec3 bp = boned ? socket_location(g.comp, g.bone) : component_location(g.comp);
         Quat bq = boned ? socket_rotation(g.comp, g.bone) : component_rotation(g.comp);
         Vec3 f1 = hq.inverse().rotate(palm - hp), f2 = bq.inverse().rotate(spot - bp);
+        if (length(f2) > 60.0 || length(spot - palm) > 40.0)
+        {
+            // (14:04: a grab on an armour plate welded to him used the neck_02 frame 284 cm away; the
+            // game's joint yanked him across the room.) Leave the game's joint as it built it.
+            if (cfg.log_wrap)
+                HSVR_LOG("Wrap: %s hand: %ls bone %ls is not where it should be (held end %.0f cm from its frame, spot %.0f cm from the palm): not seated", hand,
+                         g.comp->GetName().c_str(), g.bone.ToString().c_str(), length(f2), length(spot - palm));
+            g.seat_tries = 99;
+            return false;
+        }
         // The mod's hold keeps the bone where it is now, moved so the spot is on the palm, relative
         // to the hand (his framework's take(): rel = inverse(hand) o object; palm_on shift).
         g.boned = boned;

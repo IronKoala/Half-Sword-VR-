@@ -665,6 +665,7 @@ namespace hsvr
         flag("pose_wrap_open_base", c.pose_wrap_open_base);
         flag("pose_grab_seat_palm", c.pose_grab_seat_palm);
         num("pose_grab_palm_cm", c.pose_grab_palm_cm);
+        num("pose_grab_scenery_gap_cm", c.pose_grab_scenery_gap_cm);
         num("pose_grab_palm_along", c.pose_grab_palm_along);
         flag("pose_grab_drive", c.pose_grab_drive);
         num("pose_grab_drive_heft", c.pose_grab_drive_heft);
@@ -672,6 +673,7 @@ namespace hsvr
         num("pose_grab_drive_ang_accel", c.pose_grab_drive_ang_accel);
         num("pose_grab_body_pull_n", c.pose_grab_body_pull_n);
         num("pose_grab_body_pull_hz", c.pose_grab_body_pull_hz);
+        num("pose_grab_body_pull_slack_cm", c.pose_grab_body_pull_slack_cm);
         num("pose_grab_body_pull_min_kg", c.pose_grab_body_pull_min_kg);
         flag("pose_grab_ride", c.pose_grab_ride);
         flag("pose_grab_ride_objects", c.pose_grab_ride_objects);
