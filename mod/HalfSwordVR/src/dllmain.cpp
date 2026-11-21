@@ -10812,6 +10812,15 @@ namespace
                     for (int k = 0; k < 3; ++k)
                     {
                         double tj = h.joint_frac[f][k];
+                        // The end joint follows the middle one (the tendon couples them, DIP ~ 2/3 PIP):
+                        // SteamVR's controller-made skeleton bent it MORE than either other joint
+                        // (index 0.45/0.46/0.67 of full at curl 0.3-0.7, 11:21 session), rolling each
+                        // finger into an arc (Matthew: "fingers make circles").
+                        if (k == 2 && cfg.pose_finger_dip_coupling > 0.0)
+                        {
+                            static const double full_deg[5][3] = {{25.8, 34.4, 45.8}, {69.9, 95.1, 60.2}, {77.9, 100.3, 64.7}, {81.9, 100.3, 61.9}, {88.2, 95.1, 60.2}};
+                            tj = (std::min)(1.0, cfg.pose_finger_dip_coupling * h.joint_frac[f][1] * full_deg[f][1] / full_deg[f][2]);
+                        }
                         w.joint[f][k] = (w.on && w.have_joint) ? w.joint[f][k] + (tj - w.joint[f][k]) * k_tau : tj;
                     }
                 for (int k = 0; k < 3; ++k) w.joint[0][k] = 0.0;

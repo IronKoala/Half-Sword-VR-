@@ -744,6 +744,9 @@ namespace hsvr
         bool pose_finger_schedule = true;
         // With SteamVR's hand skeleton: each finger joint follows your own joint (not one curl per finger).
         bool pose_fingers_per_joint = true;
+        // With per-joint fingers: the end joint bends this much of the middle joint's angle (the tendon
+        // couples them, ~0.67); 0 = as the hand skeleton reports it.
+        double pose_finger_dip_coupling = 0.67;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
