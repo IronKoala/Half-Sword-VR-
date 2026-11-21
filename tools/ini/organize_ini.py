@@ -451,6 +451,7 @@ LAYOUT = [
         ("log_body", ""),
         ("log_fingers", ""),
         ("log_body_grab", ""),
+        ("log_joint_strain", "Log a held Willie's joint bends, twists and dislocation state."),
         ("log_body_hits", ""),
         ("stab_log", ""),
         ("hit_buzz_log", ""),

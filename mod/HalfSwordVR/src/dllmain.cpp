@@ -7252,6 +7252,70 @@ namespace
         lin.run();
     }
 
+    // What the game's Dislocate Bone (run in every Willie's tick over neck_01, upperarm_r/l, spine_03,
+    // calf_r/l) reads: the bone's forward (X) in its parent bone's space, dotted with X. Only a bend
+    // moves it; a twist about the bone's own X does not. Logged for the Willies you hold, with the
+    // twist about X (swing-twist split) and his Strain / Dislocation State / part health.
+    void joint_strain_log(UObject* pawn)
+    {
+        using namespace hsvr;
+        if (!config().log_joint_strain) return;
+        static double last = -10.0;
+        double now = now_seconds();
+        if (now - last < 0.2) return;
+        last = now;
+        UObject* done = nullptr;
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* w = g_body_grab[side].on ? g_body_grab[side].victim : nullptr;
+            if (!w || w == done || !object_alive(w)) continue;
+            done = w;
+            UObject* mesh = object_property(w, STR("Mesh"));
+            if (!mesh) continue;
+            struct Part { const char* bone; const TCHAR* strain; const TCHAR* state; const TCHAR* health; };
+            static const Part parts[] = {
+                {"neck_01", STR("Neck Strain"), STR("Neck Dislocation State"), STR("Neck Health")},
+                {"neck_02", nullptr, nullptr, nullptr},
+                {"Head", nullptr, nullptr, nullptr},
+                {"upperarm_r", STR("Arm R Strain"), STR("Arm R Dislocation State"), STR("Arm_R Health")},
+                {"upperarm_l", STR("Arm L Strain"), STR("Arm L Dislocation State"), STR("Arm_L Health")},
+                {"spine_03", STR("Back Strain"), STR("Back Dislocation State"), STR("Back Health")},
+            };
+            std::string line;
+            for (const Part& p : parts)
+            {
+                FName bone = bone_fname(p.bone);
+                Call pb(mesh, STR("GetParentBone"));
+                pb.name(STR("BoneName"), bone);
+                pb.run();
+                FProperty* rp = pb.param(STR("ReturnValue"));
+                if (!rp) continue;
+                FName parent = *reinterpret_cast<FName*>(pb.buffer.data() + rp->GetOffset_Internal());
+                Quat qb = socket_rotation(mesh, bone), qp = socket_rotation(mesh, parent);
+                Quat rel = (qp.inverse() * qb).normalized();
+                Vec3 f = rel.rotate({1.0, 0.0, 0.0});
+                // Twist about X: the X part of the relative rotation.
+                double tw = 2.0 * std::atan2(rel.x, rel.w) * 57.2958;
+                if (tw > 180.0) tw -= 360.0;
+                if (tw < -180.0) tw += 360.0;
+                char buf[256];
+                std::snprintf(buf, sizeof(buf), " %s(of %ls): bend %.0f deg (dot %.2f) twist %.0f", p.bone, parent.ToString().c_str(),
+                              std::acos((std::max)(-1.0, (std::min)(1.0, f.x))) * 57.2958, f.x, tw);
+                line += buf;
+                if (p.strain)
+                {
+                    std::snprintf(buf, sizeof(buf), " [strain %.2f state %.2f health %.0f]", read_number_variable(w, p.strain), read_number_variable(w, p.state),
+                                  read_number_variable(w, p.health));
+                    line += buf;
+                }
+            }
+            HSVR_LOG("Joints: %ls (neck dislocated %d, snapped %d, arm R/L dislocated %d/%d, invulnerable %d, dislocation blocked %d):%s", w->GetName().c_str(),
+                     (int)bool_property(w, STR("Neck Dislocated")), (int)bool_property(w, STR("Neck Snapped")), (int)bool_property(w, STR("Arm R Dislocated")),
+                     (int)bool_property(w, STR("Arm L Dislocated")), (int)bool_property(w, STR("Invulnerable")), (int)bool_property(w, STR("Dislocation Blocked")),
+                     line.c_str());
+        }
+    }
+
     // Willie's tick re-shapes his hand joints every tick (as for weapons, @454086), so a softened body
     // grab's spring is written again right after it.
     void body_grab_after_tick(UObject* pawn)
@@ -14478,6 +14542,7 @@ namespace
             { HSVR_SUB("after:swing_speed_after_tick"); swing_speed_after_tick(context); }
             { HSVR_SUB("after:fist_flags_after_tick"); fist_flags_after_tick(context); }
             { HSVR_SUB("after:body_grab_after_tick"); body_grab_after_tick(context); }
+            { HSVR_SUB("after:joint_strain_log"); joint_strain_log(context); }
             { HSVR_SUB("after:body_hit_watch"); body_hit_watch(context); }
             { HSVR_SUB("after:elbow_tick"); elbow_tick(context); }
             { HSVR_SUB("after:stump_blood_tick"); stump_blood_tick(context); }

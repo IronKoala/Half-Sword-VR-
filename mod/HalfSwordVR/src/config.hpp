@@ -711,6 +711,9 @@ namespace hsvr
         bool log_fingers = true;
         // Body grabs (a Willie's throat, arm...): what the game's grab joint feels, logged every 0.1 s.
         bool log_body_grab = true;
+        // While you hold a Willie: his joints as the game's Dislocate Bone reads them (each bone's forward
+        // against its parent's, the bend; and its twist), with Strain / Dislocation State / part health.
+        bool log_joint_strain = true;
         // Every other Willie's body hits (impulse, health, consciousness, what hit him), when they change.
         bool log_body_hits = true;
         // 1 = the game's grab joint is made soft (a capped spring, B&S-like) 0.25 s after it latches, so

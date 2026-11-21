@@ -644,6 +644,7 @@ namespace hsvr
         num("pose_fingers_tau_s", c.pose_fingers_tau_s);
         flag("log_fingers", c.log_fingers);
         flag("log_body_grab", c.log_body_grab);
+        flag("log_joint_strain", c.log_joint_strain);
         flag("log_body_hits", c.log_body_hits);
         integer("pose_grab_body_hold", c.pose_grab_body_hold);
         num("pose_grab_body_spring", c.pose_grab_body_spring);
