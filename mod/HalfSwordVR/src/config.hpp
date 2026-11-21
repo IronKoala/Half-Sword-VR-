@@ -765,8 +765,8 @@ namespace hsvr
         bool pose_grab_ride_objects = false;
         double pose_grab_ride_from_cm = 0.5;
         double pose_grab_ride_full_cm = 2.0;
-        double pose_grab_ride_max_cm = 40.0;
-        double pose_grab_slip_s = 0.15; // held past ride_max_cm this long: the grip slips (let go)
+        double pose_grab_ride_max_cm = 20.0;
+        double pose_grab_slip_s = 0.3; // held past ride_max_cm this long: the grip slips (let go)
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;
