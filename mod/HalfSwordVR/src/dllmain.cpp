@@ -2014,6 +2014,8 @@ namespace
     // hsvr.arm_move 10 <speed cm/s> <pitch deg> <height cm>: the right hand thrusts (stab tests).
     std::atomic<double> g_fake_thrust_pitch{60.0};
     std::atomic<double> g_fake_thrust_up{-5.0};
+    std::atomic<double> g_fake_roll_deg[2]{0.0, 0.0}; // test aid hsvr.hand_roll: the fake hand turned about the forward axis
+    std::atomic<double> g_carry_log_until{0.0};       // test aid hsvr.carry_log <s>: every-tick carry lines until then
     double blade_length(UObject* w);
     bool mouth_point(UObject* pawn, hsvr::Vec3& out); // hsvr.arm_move 7 <cm>: the left hand this far above the right
     std::atomic<bool> g_contact_log{true};
@@ -2810,6 +2812,8 @@ namespace
                 grip_rot = (aim * body * rot_to_quat(60.0, 0.0, 0.0)).normalized();
             }
             if (mode == 9) grip_rot = (body * quat_axis_angle(Vec3{0, 1, 0}, std::fmod(now, 6.0) / 6.0 * 2.0 * 3.14159265358979) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
+            if (double roll = g_fake_roll_deg[side].load(); roll != 0.0)
+                grip_rot = (body * quat_axis_angle(Vec3{1, 0, 0}, roll / 57.29578) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
         }
         if (cfg.dev_pose_fake_tracking && g_fake_jitter_cm.load() > 0.0)
         {
@@ -10397,6 +10401,9 @@ namespace
             sav.flag(STR("bAddToCurrent"), false);
             sav.name(STR("BoneName"), g.bone);
             sav.run();
+            if (cfg.log_wrap && now < g_carry_log_until.load())
+                HSVR_LOG("Grab hold tick: %s %.3f: off (%.1f, %.1f, %.1f) cm %.1f deg, ang vel (%.1f, %.1f, %.1f) rad/s, speed %.0f cm/s", hand, now, to.x, to.y, to.z,
+                         angle * 57.2958, ang.x, ang.y, ang.z, length(v));
             if (cfg.log_wrap && now - g.last_drive_log >= 0.5)
             {
                 g.last_drive_log = now;
@@ -21386,6 +21393,84 @@ namespace
                 UObject* pawn = nullptr;
                 find_pawn_mesh(&pawn);
                 if (pawn) weapon_dump(entry.command.size() > 17 && entry.command[17] == '0' ? 0 : 1, pawn);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.hand_roll ", 0) == 0)
+            {
+                int sd = 1;
+                double deg = 0.0;
+                sscanf(entry.command.c_str() + 15, "%d %lf", &sd, &deg);
+                if (sd == 0 || sd == 1) g_fake_roll_deg[sd].store(deg);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.carry_log ", 0) == 0)
+            {
+                g_carry_log_until.store(hsvr::now_seconds() + atof(entry.command.c_str() + 15));
+                continue;
+            }
+            if (entry.command == "hsvr.glove_bones")
+            {
+                // Glove test: for his body and every skeletal piece on it that has right-hand finger bones,
+                // each finger bone's parent, its bend from the parent (deg) and the piece's finger-bone list.
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                if (!mesh) { HSVR_LOG("Script: hsvr.glove_bones: no character"); continue; }
+                std::vector<UObject*> parts{mesh};
+                Call kids(mesh, STR("GetChildrenComponents"));
+                kids.flag(STR("bIncludeAllDescendants"), true);
+                if (kids.run())
+                    if (FProperty* cp = kids.param(STR("Children")))
+                    {
+                        struct RawArray { UObject** data; int32_t num, max; };
+                        RawArray* arr = reinterpret_cast<RawArray*>(kids.buffer.data() + cp->GetOffset_Internal());
+                        for (int32_t i = 0; arr->data && i < arr->num && i < 512; ++i)
+                            if (UObject* c = arr->data[i])
+                                if (c->GetClassPrivate()->GetName().find(STR("SkeletalMeshComponent")) != std::wstring::npos) parts.push_back(c);
+                    }
+                auto bone_index = [](UObject* c, FName b) { Call bi(c, STR("GetBoneIndex")); bi.name(STR("BoneName"), b); bi.run(); return bi.integer(); };
+                auto name_ret = [](Call& c) { FProperty* rp = c.param(STR("ReturnValue")); return rp ? *reinterpret_cast<FName*>(c.buffer.data() + rp->GetOffset_Internal()) : FName(); };
+                for (UObject* c : parts)
+                {
+                    if (bone_index(c, bone_fname("index_02_r")) < 0) continue;
+                    UObject* sk = object_property(c, STR("SkeletalMeshAsset"));
+                    if (!sk) sk = object_property(c, STR("SkeletalMesh"));
+                    Call nb(c, STR("GetNumBones"));
+                    nb.run();
+                    int32_t n = nb.integer();
+                    std::wstring fingers;
+                    for (int32_t i = 0; i < n && i < 400; ++i)
+                    {
+                        Call bn(c, STR("GetBoneName"));
+                        if (FProperty* ip = bn.param(STR("BoneIndex"))) *reinterpret_cast<int32_t*>(bn.buffer.data() + ip->GetOffset_Internal()) = i;
+                        bn.run();
+                        std::wstring nm = name_ret(bn).ToString();
+                        if (nm.size() > 2 && nm.substr(nm.size() - 2) == STR("_r") &&
+                            (nm.find(STR("index")) != std::wstring::npos || nm.find(STR("middle")) != std::wstring::npos || nm.find(STR("ring")) != std::wstring::npos ||
+                             nm.find(STR("pinky")) != std::wstring::npos || nm.find(STR("thumb")) != std::wstring::npos || nm.find(STR("finger")) != std::wstring::npos))
+                            fingers += nm + STR(" ");
+                    }
+                    HSVR_LOG("Glove bones: %ls (mesh %ls, %d bones); right finger bones: %ls", c->GetName().c_str(), sk ? sk->GetName().c_str() : STR("-"), n, fingers.c_str());
+                    std::string row;
+                    for (const char* f : {"thumb", "index", "middle", "ring", "pinky"})
+                        for (int k = 1; k <= 3; ++k)
+                        {
+                            FName b = bone_fname(std::string(f) + "_0" + std::to_string(k) + "_r");
+                            if (bone_index(c, b) < 0) { row += std::string(f) + std::to_string(k) + " - "; continue; }
+                            Call pb(c, STR("GetParentBone"));
+                            pb.name(STR("BoneName"), b);
+                            pb.run();
+                            FName par = name_ret(pb);
+                            hsvr::Quat q = socket_rotation(c, b), qp = socket_rotation(c, par);
+                            hsvr::Quat rel = (qp.inverse() * q).normalized();
+                            double ang = 2.0 * std::acos((std::min)(1.0, std::fabs(rel.w))) * 57.29578;
+                            char buf[96];
+                            std::wstring pw = par.ToString();
+                            std::string ps(pw.begin(), pw.end());
+                            snprintf(buf, sizeof buf, "%s%d<%s %.0f; ", f, k, ps.c_str(), ang);
+                            row += buf;
+                        }
+                    HSVR_LOG("Glove bones: %ls: %s", c->GetName().c_str(), row.c_str());
+                }
                 continue;
             }
             if (entry.command.rfind("hsvr.wear ", 0) == 0)
