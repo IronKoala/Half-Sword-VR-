@@ -543,8 +543,10 @@ namespace
         // Turning both with the view's frame put the eyes in front of or behind his neck once the body
         // faced elsewhere (180 degrees round: looking down at his own shoulders from behind).
         if (g_pose_anchor_fixed)
-            out.head_position = out.actor_position + hsvr::quat_from_yaw_deg(body_yaw).rotate(g_pose_anchor_local) -
-                                hsvr::quat_from_yaw_deg(out.has_heading ? out.heading_yaw : 0.0).rotate(g_pose_room_moved_local);
+        {
+            out.exact_offset = hsvr::quat_from_yaw_deg(out.has_heading ? out.heading_yaw : 0.0).rotate(g_pose_room_moved_local) * -1.0;
+            out.head_position = out.actor_position + hsvr::quat_from_yaw_deg(body_yaw).rotate(g_pose_anchor_local) + out.exact_offset;
+        }
         out.head_position.z -= g_button_crouch; // the button crouch takes the view down with him
         return true;
     }
@@ -1241,6 +1243,8 @@ namespace
         double held = 1.0;       // share of the wanted bend allowed by the head height
         double reach_fwd = 0.0;  // forward bend forced by a crouch deeper than his legs go (pose_crouch_bend_for_depth)
         hsvr::Vec3 offset;       // your neck away from where his hips stand (body frame, cm; pose_lean_step_radius_cm)
+        hsvr::Vec3 aim;          // where his head is leaned to: offset, less the chest-back of looking down
+        double look_back = 0.0;  // that chest-back now (cm; pose_lean_look_down_back_cm)
         double off_fwd = 0.0, off_side = 0.0; // the bend that offset asks for (degrees)
     };
     LeanState g_lean;
@@ -3393,7 +3397,7 @@ namespace
             Vec3 f = head_rot.rotate({1, 0, 0}), rt = head_rot.rotate({0, 1, 0});
             g_lean.pitch = std::asin((std::max)(-1.0, (std::min)(1.0, -f.z))) * kRadToDeg;
             g_lean.roll = std::asin((std::max)(-1.0, (std::min)(1.0, -rt.z))) * kRadToDeg;
-            if (cfg.pose_lean && g_lean.calibrated)
+            if (cfg.pose_lean && g_lean.calibrated && cfg.pose_lean_head_angle)
             {
                 want_f = (std::min)(cfg.pose_lean_max_deg, (std::max)(0.0, g_lean.pitch - cfg.pose_lean_pitch_dead_deg) * cfg.pose_lean_pitch_gain);
                 double r = std::fabs(g_lean.roll) - cfg.pose_lean_roll_dead_deg;
@@ -3407,6 +3411,25 @@ namespace
                 twist = (std::max)(-90.0, (std::min)(90.0, rel)) * (std::min)(1.0, cfg.pose_torso_twist);
             }
         }
+        // Looking down, his chest leans back out of the view (the way closed PR #8/#10 did it, which
+        // Matthew found right, 2026-11-21): the head is aimed this far behind your neck, up to
+        // pose_lean_look_down_back_cm at 60 degrees down, from 5. "Back" is away from where the head
+        // faces (its forward and its top both tip that way when it looks down).
+        g_lean.aim = g_lean.offset;
+        g_lean.look_back = 0.0;
+        if (have_head && cfg.pose_lean && g_lean.calibrated && cfg.pose_lean_look_down_back_cm > 0.0)
+        {
+            Vec3 look = head_rot.rotate({1, 0, 0}), top = head_rot.rotate({0, 0, 1});
+            double sgn = look.z < 0.0 ? 1.0 : -1.0;
+            Vec3 ahead{look.x + top.x * sgn, look.y + top.y * sgn, 0.0};
+            double down = std::asin((std::max)(-1.0, (std::min)(1.0, -look.z))) * kRadToDeg;
+            if (down > 5.0 && length(ahead) > 0.05)
+            {
+                g_lean.look_back = cfg.pose_lean_look_down_back_cm * (std::min)(1.0, (down - 5.0) / 55.0);
+                Vec3 a = quat_from_yaw_deg(heading).inverse().rotate(normalized(ahead));
+                g_lean.aim = g_lean.offset - Vec3{a.x, a.y, 0.0} * g_lean.look_back;
+            }
+        }
         // Lean first, step after: the bend that puts his head over your neck's offset from his hips
         // (about the spine_02 joint, head height h above it).
         g_lean.off_fwd = g_lean.off_side = 0.0;
@@ -3414,7 +3437,8 @@ namespace
         {
             double h = (std::max)(20.0, g_lean.pts[6].z - g_lean.pts[0].z);
             auto as = [](double v, double lo, double hi) { return std::asin((std::max)(lo, (std::min)(hi, v))) * kRadToDeg; };
-            double of = as(g_lean.offset.x / h, -0.34, 0.95), os = as(g_lean.offset.y / h, -0.7, 0.7); // back at most 20 degrees
+            const Vec3& aim = g_lean.aim;
+            double of = as(aim.x / h, -0.34, 0.95), os = as(aim.y / h, -0.7, 0.7); // back at most 20 degrees
             // The neck bends back against the spine, so the head goes less far than h sin(bend): scale the
             // bends until the head is carried by your offset, or his hips end off the capsule (test: 11 deg
             // carried the head 7 cm of an 11 cm offset).
@@ -3422,8 +3446,8 @@ namespace
             {
                 Quat tq[6];
                 Vec3 mm = lean_fk(of, os, 0.0, tq);
-                if (std::fabs(mm.x) > 0.5 && std::fabs(g_lean.offset.x) > 0.5) of *= g_lean.offset.x / mm.x;
-                if (std::fabs(mm.y) > 0.5 && std::fabs(g_lean.offset.y) > 0.5) os *= g_lean.offset.y / mm.y;
+                if (std::fabs(mm.x) > 0.5 && std::fabs(aim.x) > 0.5) of *= aim.x / mm.x;
+                if (std::fabs(mm.y) > 0.5 && std::fabs(aim.y) > 0.5) os *= aim.y / mm.y;
                 of = (std::max)(-20.0, (std::min)(72.0, of));
                 os = (std::max)(-44.0, (std::min)(44.0, os));
             }
@@ -3584,8 +3608,12 @@ namespace
                 // recentred, so the neck then was eye_forward/eye_up behind and below it.
                 Quat base = quat_from_yaw_deg(base_yaw);
                 Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
-                Vec3 neck_now = head_world - head_rot.rotate(eye_offset);
-                Vec3 neck_then = anchor - base.rotate(eye_offset);
+                // At the base of the neck (pose_room_neck_base_cm below the head joint, turning with the head):
+                // nodding or tilting your head swings the head joint ~10 cm about it, and that is not a lean
+                // or a step (test 2026-11-21: a 60 degree look down stepped him 10 cm).
+                Vec3 neck_base{0.0, 0.0, (std::max)(0.0, cfg.pose_room_neck_base_cm)};
+                Vec3 neck_now = head_world - head_rot.rotate(eye_offset + neck_base);
+                Vec3 neck_then = anchor - base.rotate(eye_offset + neck_base);
                 Vec3 total = base.inverse().rotate(Vec3{neck_now.x - neck_then.x, neck_now.y - neck_then.y, 0.0});
                 total.z = 0.0;
                 Vec3 delta = total - g_pose_room_moved_local;
@@ -3628,14 +3656,21 @@ namespace
                     }
                     Vec3 rest = delta - back_follow;
                     double d = length(rest);
-                    if (d > radius) stepping = true;
+                    bool past = cfg.pose_lean_follow_past_radius; // closed PR #8/#10: beyond the radius the hips follow at once
+                    if (d > radius && !past) stepping = true;
                     if (!stepping && cfg.pose_lean_settle_s > 0.0 && still_s > cfg.pose_lean_settle_s && d > 5.0)
                     {
                         stepping = true;
                         HSVR_LOG_EVERY(1.0, "Lean: your neck held %.0f cm from his hips for %.1f s: he steps under you", d, still_s);
                     }
                     double keep = 1.0; // share of the offset kept as lean
-                    if (stepping)
+                    if (past && !stepping && d > radius)
+                    {
+                        double over = d - radius;
+                        double most = (dtn > 0.0 && dtn < 0.2) ? (std::max)(1.0, cfg.pose_lean_follow_speed_cms) * dtn : over;
+                        keep = (d - (std::min)(over, most)) / d;
+                    }
+                    else if (stepping)
                     {
                         double tau = cfg.pose_lean_walk_catchup_s;
                         keep = (tau > 1e-3 && dtn > 0.0 && dtn < 0.2) ? std::exp(-dtn / tau) : 0.0;
@@ -3681,7 +3716,8 @@ namespace
             {
                 Quat base = quat_from_yaw_deg(base_yaw);
                 Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
-                Vec3 total = base.inverse().rotate((head_world - head_rot.rotate(eye_offset)) - (anchor - base.rotate(eye_offset)));
+                Vec3 neck_base{0.0, 0.0, (std::max)(0.0, cfg.pose_room_neck_base_cm)};
+                Vec3 total = base.inverse().rotate((head_world - head_rot.rotate(eye_offset + neck_base)) - (anchor - base.rotate(eye_offset + neck_base)));
                 Vec3 d{total.x - g_pose_room_moved_local.x, total.y - g_pose_room_moved_local.y, 0.0};
                 if (length(d) <= 50.0 + 40.0) g_lean.offset = body.inverse().rotate(base.rotate(d));
                 g_lean.offset.z = 0.0;
@@ -3768,7 +3804,7 @@ namespace
             lean_update(cfg, have_head, hr, heading, crouch_want, (std::max)(0.0, crouch_want - crouch_cap));
             Vec3 m = g_lean.head_moved;
             // His head goes over your neck: hips at the capsule, less the bend's carry, plus your offset.
-            place = place - body.rotate(Vec3{m.x - g_lean.offset.x, m.y - g_lean.offset.y, 0.0});
+            place = place - body.rotate(Vec3{m.x - g_lean.aim.x, m.y - g_lean.aim.y, 0.0});
             g_crouch_drop = (std::min)(crouch_cap, (std::max)(0.0, crouch_want + m.z));
         }
         if (g_crouch_drop > 10.0) crouch_push_log(pawn, mesh);
@@ -3941,10 +3977,10 @@ namespace
                     Vec3 cr = body.inverse().rotate(socket_location(mesh, bone_fname("clavicle_r")) - hw);
                     HSVR_LOG("Lean: your head pitch %.0f roll %.0f; wanted forward %.0f side %.0f, bent forward %.0f side %.0f (%.0f%% allowed by head height); "
                              "head carried (%.1f, %.1f, %.1f) cm, crouch %.0f cm; chest (spine_05) %.1f cm in front of your eyes, %.1f below; clavicles %.1f / %.1f in front; "
-                             "your neck (%.1f, %.1f) cm from his hips -> lean forward %.0f side %.0f; capsule (%.0f, %.0f); bend for a crouch past his legs %.0f",
+                             "your neck (%.1f, %.1f) cm from his hips -> lean forward %.0f side %.0f; capsule (%.0f, %.0f); bend for a crouch past his legs %.0f; looking down: chest back %.1f cm",
                              g_lean.pitch, g_lean.roll, g_lean.want_fwd, g_lean.want_side, g_lean.fwd, g_lean.side, g_lean.held * 100.0, g_lean.head_moved.x,
                              g_lean.head_moved.y, g_lean.head_moved.z, g_crouch_drop, c.x, -c.z, cl.x, cr.x, g_lean.offset.x, g_lean.offset.y, g_lean.off_fwd,
-                             g_lean.off_side, actor.x, actor.y, g_lean.reach_fwd);
+                             g_lean.off_side, actor.x, actor.y, g_lean.reach_fwd, g_lean.look_back);
                 }
             }
             HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d, torso twist %.0f deg asked; on screen: head %.0f, chest %.0f, hips %.0f (chest %+.0f from hips)",
@@ -4118,11 +4154,27 @@ namespace
             g_turn_valid = true;
             HSVR_LOG("Turn: your body now faces where you face (start %.0f)", g_turn_yaw);
         }
+        ControllerState state = controllers_state();
+        // Playing with controllers, the mouse does nothing: no turn, no look up or down (Matthew
+        // 2026-11-21: moving the mouse over the window bent him to look down while he stood straight;
+        // the game's spine bend reads the control pitch). pose_mouse_off_with_controllers.
+        bool controllers_in_use = state.active && (state.hand[0].grip_valid || state.hand[1].grip_valid);
+        bool mouse_off = config().pose_mouse_off_with_controllers && controllers_in_use;
         // Whatever turned the control yaw since we last wrote it (mouse, stick) is your turn.
-        g_turn_yaw = wrap(g_turn_yaw + wrap(rotation->Yaw - g_last_written_yaw));
+        if (!mouse_off) g_turn_yaw = wrap(g_turn_yaw + wrap(rotation->Yaw - g_last_written_yaw));
+        else
+        {
+            static bool said = false;
+            if (!said && (std::fabs(wrap(rotation->Yaw - g_last_written_yaw)) > 0.5 || std::fabs(rotation->Pitch) > 0.5))
+            {
+                said = true;
+                HSVR_LOG("Turn: mouse turn/look ignored while controllers are in use (yaw %+.1f, pitch %.1f; pose_mouse_off_with_controllers)",
+                         wrap(rotation->Yaw - g_last_written_yaw), (double)rotation->Pitch);
+            }
+            rotation->Pitch = 0.0;
+        }
         double dt = (std::min)(0.1, (std::max)(0.0, now - g_turn_time));
         g_turn_time = now;
-        ControllerState state = controllers_state();
         // The right stick turns you (view and body together), smoothly or in snaps.
         {
             Config cfg = config();

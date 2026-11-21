@@ -340,6 +340,7 @@ namespace hsvr
         num("eye_up_cm", c.eye_up_cm);
         num("anchor_smoothing", c.anchor_smoothing);
         flag("tracking_current_anchor", c.tracking_current_anchor);
+        flag("anchor_room_unsmoothed", c.anchor_room_unsmoothed);
         num("near_clip_cm", c.near_clip_cm);
         integer("gamma_mode", c.gamma_mode);
         flag("ui_panel", c.ui_panel);
@@ -405,6 +406,8 @@ namespace hsvr
         flag("pose_head_lock", c.pose_head_lock);
         num("pose_head_lock_max_cm", c.pose_head_lock_max_cm);
         flag("pose_lean", c.pose_lean);
+        flag("pose_lean_head_angle", c.pose_lean_head_angle);
+        num("pose_lean_look_down_back_cm", c.pose_lean_look_down_back_cm);
         num("pose_lean_pitch_dead_deg", c.pose_lean_pitch_dead_deg);
         num("pose_lean_pitch_gain", c.pose_lean_pitch_gain);
         num("pose_lean_max_deg", c.pose_lean_max_deg);
@@ -414,7 +417,10 @@ namespace hsvr
         num("pose_lean_smooth_s", c.pose_lean_smooth_s);
         num("pose_lean_slack_cm", c.pose_lean_slack_cm);
         num("pose_lean_step_radius_cm", c.pose_lean_step_radius_cm);
+        num("pose_room_neck_base_cm", c.pose_room_neck_base_cm);
         num("pose_lean_walk_catchup_s", c.pose_lean_walk_catchup_s);
+        flag("pose_lean_follow_past_radius", c.pose_lean_follow_past_radius);
+        num("pose_lean_follow_speed_cms", c.pose_lean_follow_speed_cms);
         num("pose_lean_settle_s", c.pose_lean_settle_s);
         num("pose_lean_back_radius_cm", c.pose_lean_back_radius_cm);
         num("pose_lean_settle_speed_cms", c.pose_lean_settle_speed_cms);
@@ -426,6 +432,7 @@ namespace hsvr
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);
         flag("pose_body_turn", c.pose_body_turn);
+        flag("pose_mouse_off_with_controllers", c.pose_mouse_off_with_controllers);
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);

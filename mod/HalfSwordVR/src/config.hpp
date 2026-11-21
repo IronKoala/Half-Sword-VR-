@@ -35,6 +35,10 @@ namespace hsvr
         // Controllers and headset placed in the world from the view anchor as it will be this frame
         // (where he is now), not as it was set up for the frame before (hands shook while walking).
         bool tracking_current_anchor = true;
+        // 1 = the room walking handed to his capsule is taken into the view at once, not smoothed with
+        // anchor_smoothing: the capsule moves by it the same frame, so smoothing it swung the world by
+        // each step (and hands placed earlier in the frame were off by the smoothing's step).
+        bool anchor_room_unsmoothed = true;
         // Near clip plane of the eyes, cm. Helmet walls sit 2.3-4.6 cm from your eyes (measured on every
         // helmet mesh, helmet_see_through.md), and off to the side their depth along the view is even
         // less: at 4 cm the sides of closed helmets were cut away and you saw the world through them.
@@ -212,6 +216,13 @@ namespace hsvr
         // Forward bend = (head pitch below the horizon - pose_lean_pitch_dead_deg) x pose_lean_pitch_gain,
         // at most pose_lean_max_deg (the game's own lean reaches 60). Sideways = head roll likewise.
         bool pose_lean = true;
+        // 1 = also bend him from your head's pitch and roll (the bend above); 0 = his torso only leans to
+        // where your neck actually is, as closed PR #8/#10 did (Matthew 2026-11-21: that leaning was
+        // "basically perfect"; with the head-angle bend his spine was never in line with his own).
+        bool pose_lean_head_angle = false;
+        // Looking down, his chest leans back out of the view by up to this many cm (reached at 60 degrees
+        // down, from 5), from closed PR #8/#10. 0 = off.
+        double pose_lean_look_down_back_cm = 16.0;
         double pose_lean_pitch_dead_deg = 10.0;
         double pose_lean_pitch_gain = 0.7;
         double pose_lean_max_deg = 60.0;
@@ -227,8 +238,16 @@ namespace hsvr
         // away does he step: his capsule (and so his feet) comes back under your neck over
         // pose_lean_walk_catchup_s and stays with you while you walk, until it is under your neck again.
         // 0 = the old way (his hips always under your neck).
-        double pose_lean_step_radius_cm = 30.0;
+        double pose_lean_step_radius_cm = 8.0;
+        // Your lean and room steps are measured this far (cm) below your head joint, turning with your head
+        // (about the base of your neck), so a nod or head tilt is neither a lean nor a step. 0 = at the head joint.
+        double pose_room_neck_base_cm = 12.0;
         double pose_lean_walk_catchup_s = 0.15;
+        // 1 = past the radius his hips follow your neck at once (at most pose_lean_follow_speed_cms), so
+        // your neck is never more than the radius from over his hips (closed PR #8/#10: 8 cm, 400 cm/s).
+        // 0 = past the radius he steps all the way under you (pose_lean_walk_catchup_s).
+        bool pose_lean_follow_past_radius = true;
+        double pose_lean_follow_speed_cms = 400.0;
         // A lean you hold still is a new stance: once your neck has moved less than
         // pose_lean_settle_speed_cms for pose_lean_settle_s, he steps under you (0 = never; stays leaned).
         double pose_lean_settle_s = 0.8;
@@ -256,6 +275,9 @@ namespace hsvr
         // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
         // turns you as well.
         bool pose_body_turn = true;
+        // 1 = while the controllers are tracked, the mouse neither turns him nor tilts his look (the
+        // control pitch is held at 0); with mouse and keyboard play the mouse works as before.
+        bool pose_mouse_off_with_controllers = true;
         double pose_turn_dead_zone_deg = 60.0;
         double pose_turn_speed_dps = 150.0;
         // The most your head can be turned from his hips (a neck's reach): past it the hips come
