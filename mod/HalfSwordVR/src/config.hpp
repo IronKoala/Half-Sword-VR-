@@ -703,6 +703,15 @@ namespace hsvr
         double pose_elbow_velocity_scale = 0.9375;
         bool pose_fingers_tracked = true;
         double pose_fingers_tau_s = 0.05;
+        // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
+        // loose object with curl until they touch it. Ease in/out time, how often all five are re-solved,
+        // finger radius (0 = 9.5% of the hand's length, the framework's), and the open hand as its base.
+        bool pose_wrap = true;
+        double pose_wrap_ease_s = 0.12;
+        double pose_wrap_refresh_s = 0.5;
+        double pose_wrap_finger_radius_cm = 0.0;
+        bool pose_wrap_open_base = true;
+        bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;
         // Body grabs (a Willie's throat, arm...): what the game's grab joint feels, logged every 0.1 s.

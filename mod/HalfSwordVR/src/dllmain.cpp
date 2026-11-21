@@ -1728,6 +1728,7 @@ namespace
     bool set_variable(UObject* owner, const TCHAR* name, double number, UObject* object, const FName* fname);
     double read_number_variable(UObject* owner, const TCHAR* name);
     bool fingers_tracked_on(int side); // the hand's fingers follow yours (then the fist needs no shape)
+    bool wrap_active(int side);        // the hand's fingers wrap what the game's grab holds
     int fist_shape(const hsvr::Config& cfg)
     {
         int t = g_fist_shape_test.load();
@@ -1745,6 +1746,10 @@ namespace
             if (function->GetName() != STR("BlueprintUpdateAnimation")) return;
             g_anim_update = function;
         }
+        // A wrapping hand starts from the open hand (the game's own grab shape would be under the wrap).
+        if (hsvr::config().pose_wrap_open_base)
+            for (int side = 0; side < 2; ++side)
+                if (wrap_active(side)) set_bool_property(context, side == 0 ? STR("Grabbed L") : STR("Grabbed R"), false);
         if (!hsvr::config().pose_fingers_anim_only) return;
         static FProperty* prop[2] = {nullptr, nullptr};
         static bool looked = false;
@@ -8716,7 +8721,7 @@ namespace
     // bend to the pose's own (the game's open hand, the framework's rest pose). Axes from the hand
     // bone (hand_bones.md: fingers +X on hand_l / -X on hand_r, thumb +Y, palm -Z), checked against
     // the knuckles' own geometry in the log.
-    bool pose_hand_fingers(XForm96* B, int side, const double curl[5], double splay, bool log)
+    bool pose_hand_fingers(XForm96* B, int side, const double curl[5], double splay, bool log, const double (*joint_curl)[3] = nullptr, int only = -1)
     {
         using namespace hsvr;
         FingerRig& R = g_frig;
@@ -8740,6 +8745,7 @@ namespace
         Vec3 splay_axis = normalized(cross(along, thumbward)); // + turns a finger toward the thumb
         for (int f = 0; f < 5; ++f)
         {
+            if (only >= 0 && f != only) continue;
             bool thumb = f == 0;
             int b0 = ch[f][0], b1 = ch[f][1], b2 = ch[f][2];
             Vec3 seg1 = P(b2) - P(b1);
@@ -8750,8 +8756,11 @@ namespace
                 return normalized(j < 2 ? P(ch[f][j + 1]) - P(ch[f][j]) : xf_rot(B[ch[f][j]]).rotate(u));
             };
             Vec3 tip_before = P(b2) + xf_rot(B[b2]).rotate(u) * 2.5;
-            double c0 = (std::max)(-g_finger_lift[f], (std::min)(1.0, curl[f]));
+            // Per-joint curls (the wrap's, joint_curl) or one curl for the whole finger.
+            const double* jc = joint_curl ? joint_curl[f] : nullptr;
+            double c0 = (std::max)(-g_finger_lift[f], (std::min)(1.0, jc ? jc[0] : curl[f]));
             double c12 = (std::max)(0.0, (std::min)(1.0, curl[f]));
+            double cj[3] = {c0, jc ? (std::max)(0.0, (std::min)(1.0, jc[1])) : c12, jc ? (std::max)(0.0, (std::min)(1.0, jc[2])) : c12};
             // Splay at the base: the fingers close up as the base curls.
             double sp = (std::max)(0.0, (std::min)(1.0, splay)) * (1.0 - (std::max)(0.0, (std::min)(1.0, c0)));
             double spread_now = bend_about(along, seg(0), splay_axis);
@@ -8767,7 +8776,7 @@ namespace
             {
                 Vec3 prev = j == 0 ? along : seg(j - 1);
                 double bend = bend_about(prev, seg(j), axis);
-                double c = j == 0 ? c0 : c12;
+                double c = cj[j];
                 double turn = (j == 0 && thumb) ? c * g_finger_full[0][0] : c * g_finger_full[f][j] - bend;
                 before[j] = bend;
                 turn_subtree(B, R.subtree[side][f][j], P(ch[f][j]), quat_axis_angle(axis, turn));
@@ -8784,6 +8793,277 @@ namespace
         }
         if (log) HSVR_LOG("Fingers %s (splay %.2f):%s", side == 0 ? "left" : "right", splay, line);
         return true;
+    }
+
+    // ---- Procedural finger wrap (Matthew 2026-11-21: "your fingers aren't wrapping around it") ----
+    // A port of his VR framework's grasp (avatar/src/grasp.rs wrap, rig.rs PosedChain): each finger
+    // curls in from straight, all its free joints together; when a segment touches the held thing,
+    // the joints up to it stop and the ones past it keep curling (so fingers fold round an arm or over
+    // an edge); a finger that meets nothing closes to a fist; a finger already sunk into it first
+    // bends back at its base. The framework measures against a signed distance of its own solids; here
+    // the engine's own collision is asked (GetClosestPointOnCollision on the held body: 0 inside, -1
+    // when it has none). That costs a call per sample, so the wrap is solved one finger per frame
+    // (the held thing keeps its place in the hand, the game's joint holds it) and refreshed every
+    // pose_wrap_refresh_s; the framework's 6 samples / 20 steps / 6 halvings are cut to 5 / 10 / 4.
+    struct WrapGrab
+    {
+        bool on = false;
+        UObject* comp = nullptr;
+        FName bone;
+        double since = -1.0, off_at = -1.0, next_at = 0.0;
+        double curls[5][3] = {};
+        bool solved[5] = {false, false, false, false, false};
+        int next = 0;
+        int queries = 0, solves = 0;
+        double w_off = 0.0, ease = 0.12;
+        double last_log = -10.0;
+    };
+    WrapGrab g_wrap[2];
+    const double kWrapSamples[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
+    const double kWrapCrease = 0.5, kWrapSplay = 0.1, kWrapSunk = 0.5;
+    const int kWrapSteps = 10, kWrapHalvings = 4, kWrapLiftSteps = 6;
+    const double kFingerTip = 2.5; // cm past the last finger bone (as pose_hand_fingers)
+
+    double wrap_smooth(double x)
+    {
+        x = (std::max)(0.0, (std::min)(1.0, x));
+        return x * x * (3.0 - 2.0 * x);
+    }
+
+    // A finger's three segments (component space of the snapshot): knuckle to middle, middle to last,
+    // last to the tip.
+    void finger_segments(const XForm96* B, int side, int f, hsvr::Vec3 seg[3][2])
+    {
+        using namespace hsvr;
+        const int(*ch)[3] = g_frig.chain[side];
+        Vec3 p0 = xf_pos(B[ch[f][0]]), p1 = xf_pos(B[ch[f][1]]), p2 = xf_pos(B[ch[f][2]]);
+        Vec3 u0 = p2 - p1;
+        Vec3 u = length(u0) > 0.05 ? xf_rot(B[ch[f][1]]).inverse().rotate(normalized(u0)) : Vec3{1, 0, 0};
+        Vec3 tip = p2 + xf_rot(B[ch[f][2]]).rotate(u) * kFingerTip;
+        seg[0][0] = p0, seg[0][1] = p1;
+        seg[1][0] = p1, seg[1][1] = p2;
+        seg[2][0] = p2, seg[2][1] = tip;
+    }
+
+    struct WrapSolve
+    {
+        const XForm96* B0 = nullptr;
+        std::vector<XForm96> tmp;
+        int side = 0, f = 0;
+        hsvr::Vec3 cp;
+        hsvr::Quat cq;
+        double cs = 1.0, radius = 0.9;
+        WrapGrab* g = nullptr;
+        Call* query = nullptr;
+        FProperty* q_point = nullptr;
+        FProperty* q_bone = nullptr;
+        FProperty* q_ret = nullptr;
+        int queries = 0;
+
+        double distance(const hsvr::Vec3& p_cs)
+        {
+            hsvr::Vec3 p = cp + cq.rotate(p_cs * cs);
+            write_three(query->buffer.data() + q_point->GetOffset_Internal(), q_point, p.x, p.y, p.z);
+            *reinterpret_cast<FName*>(query->buffer.data() + q_bone->GetOffset_Internal()) = g->bone;
+            query->run();
+            ++queries;
+            double d = query->number();
+            return d < 0.0 ? 1e9 : d / cs; // in snapshot centimetres
+        }
+        void place(const double c[3], hsvr::Vec3 seg[3][2])
+        {
+            std::memcpy(tmp.data(), B0, sizeof(XForm96) * tmp.size());
+            double curl5[5] = {0, 0, 0, 0, 0};
+            double jc[5][3] = {};
+            for (int k = 0; k < 3; ++k) jc[f][k] = c[k];
+            pose_hand_fingers(tmp.data(), side, curl5, kWrapSplay, false, jc, f);
+            finger_segments(tmp.data(), side, f, seg);
+        }
+        bool touches(const double c[3], int k)
+        {
+            hsvr::Vec3 seg[3][2];
+            place(c, seg);
+            for (double t : kWrapSamples)
+                if (distance(seg[k][0] + (seg[k][1] - seg[k][0]) * t) < radius * (std::min)(1.0, t / kWrapCrease)) return true;
+            return false;
+        }
+        // How far the finger is sunk in (radius - nearest), the engine reporting 0 inside.
+        double sunk(const double c[3])
+        {
+            hsvr::Vec3 seg[3][2];
+            place(c, seg);
+            double worst = -1e9;
+            for (int k = 0; k < 3; ++k)
+                for (double t : kWrapSamples) worst = (std::max)(worst, radius - distance(seg[k][0] + (seg[k][1] - seg[k][0]) * t));
+            return worst;
+        }
+        void solve(double out[3])
+        {
+            const int n = 3;
+            double start[3] = {0, 0, 0};
+            if (sunk(start) > kWrapSunk * radius)
+            {
+                double best_d = sunk(start), best_b = 0.0;
+                for (int step = 1; step <= kWrapLiftSteps; ++step)
+                {
+                    double c[3] = {-g_finger_lift[f] * step / kWrapLiftSteps, 0, 0};
+                    double d = sunk(c);
+                    if (d < best_d) best_d = d, best_b = c[0];
+                    if (d <= kWrapSunk * radius) break;
+                }
+                start[0] = best_b;
+            }
+            double curls[3] = {start[0], start[1], start[2]};
+            int held = 0;
+            while (held < n && touches(curls, held)) ++held;
+            auto at = [&](const double base[3], int h, double t, double c[3]) {
+                for (int k = 0; k < 3; ++k) c[k] = k >= h ? start[k] + (1.0 - start[k]) * t : base[k];
+            };
+            double t = 0.0;
+            for (int step = 1; step <= kWrapSteps && held < n; ++step)
+            {
+                double next = (double)step / kWrapSteps, tried[3];
+                at(curls, held, next, tried);
+                int hit = -1;
+                for (int k = held; k < n && hit < 0; ++k)
+                    if (touches(tried, k)) hit = k;
+                if (hit < 0)
+                {
+                    std::memcpy(curls, tried, sizeof(curls));
+                    t = next;
+                    continue;
+                }
+                double lo = t, hi = next;
+                for (int h = 0; h < kWrapHalvings; ++h)
+                {
+                    double mid = 0.5 * (lo + hi), m[3];
+                    at(curls, held, mid, m);
+                    bool any = false;
+                    for (int j = held; j < n && !any; ++j) any = touches(m, j);
+                    (any ? hi : lo) = mid;
+                }
+                double c[3];
+                at(curls, held, lo, c);
+                std::memcpy(curls, c, sizeof(curls));
+                t = lo;
+                held = hit + 1;
+                while (held < n && touches(curls, held)) ++held;
+            }
+            if (held < n)
+            {
+                double c[3];
+                at(curls, held, 1.0, c);
+                std::memcpy(curls, c, sizeof(curls));
+            }
+            for (int k = 0; k < 3; ++k) out[k] = (std::min)(1.0, curls[k]);
+        }
+    };
+
+    // In the copy node's update: solve the next finger due, and give the curls to pose with.
+    // Returns the wrap's weight (0 = the hand's own curls).
+    double wrap_fingers(const XForm96* B, int side, double joint_out[5][3], const double own[5], double& splay)
+    {
+        using namespace hsvr;
+        WrapGrab& g = g_wrap[side];
+        double now = now_seconds();
+        double ease = g.ease;
+        double w = g.on ? wrap_smooth((now - g.since) / ease) : g.w_off * (1.0 - wrap_smooth((now - g.off_at) / ease));
+        if (w <= 0.0 || !g_frig.ok) return 0.0;
+        if (g.on && g.comp && now >= g.next_at && g_frig.driver)
+        {
+            hsvr::Config cfg = hsvr::config();
+            WrapSolve ws;
+            ws.B0 = B;
+            ws.tmp.assign(B, B + g_frig.bone_count);
+            ws.side = side;
+            ws.g = &g;
+            Call q(g.comp, STR("GetClosestPointOnCollision"));
+            ws.query = &q;
+            ws.q_point = q.param(STR("Point"));
+            ws.q_bone = q.param(STR("BoneName"));
+            if (q.fn && ws.q_point && ws.q_bone)
+            {
+                ws.cp = component_location(g_frig.driver);
+                ws.cq = component_rotation(g_frig.driver);
+                ws.cs = component_scale_z(g_frig.driver);
+                Vec3 hand = xf_pos(B[g_frig.hand[side]]), mid = xf_pos(B[g_frig.chain[side][2][0]]);
+                ws.radius = cfg.pose_wrap_finger_radius_cm > 0.0 ? cfg.pose_wrap_finger_radius_cm / ws.cs : 0.095 * length(mid - hand);
+                // Unsolved fingers first, then round and round.
+                int f = g.next % 5;
+                for (int k = 0; k < 5; ++k)
+                    if (!g.solved[(g.next + k) % 5]) { f = (g.next + k) % 5; break; }
+                ws.f = f;
+                double out[3];
+                ws.solve(out);
+                for (int k = 0; k < 3; ++k) g.curls[f][k] = out[k];
+                bool first = !g.solved[f];
+                g.solved[f] = true;
+                g.next = f + 1;
+                g.queries = ws.queries;
+                ++g.solves;
+                bool all = true;
+                for (bool b : g.solved) all = all && b;
+                g.next_at = all ? now + cfg.pose_wrap_refresh_s / 5.0 : now;
+                if (cfg.log_wrap && (first || now - g.last_log >= 1.0))
+                {
+                    g.last_log = now;
+                    HSVR_LOG("Wrap: %s %s on %ls bone %ls: curls %.2f/%.2f/%.2f (%d queries, finger radius %.2f cm)", side == 0 ? "left" : "right", kFingerNames[f],
+                             g.comp->GetName().c_str(), g.bone.ToString().c_str(), out[0], out[1], out[2], ws.queries, ws.radius * ws.cs);
+                }
+            }
+        }
+        for (int f = 0; f < 5; ++f)
+        {
+            double base[3] = {(std::max)(-g_finger_lift[f], (std::min)(1.0, own[f])), (std::max)(0.0, (std::min)(1.0, own[f])), (std::max)(0.0, (std::min)(1.0, own[f]))};
+            double ww = g.solved[f] ? w : 0.0;
+            for (int k = 0; k < 3; ++k) joint_out[f][k] = base[k] + (g.curls[f][k] - base[k]) * ww;
+        }
+        splay += (kWrapSplay - splay) * w;
+        return w;
+    }
+
+    // Game tick: a hand the game's grab holds something with (a body, a loose object) wraps it.
+    void wrap_tick(const hsvr::Config& cfg, UObject* pawn)
+    {
+        double now = hsvr::now_seconds();
+        for (int side = 0; side < 2; ++side)
+        {
+            WrapGrab& g = g_wrap[side];
+            g.ease = (std::max)(0.01, cfg.pose_wrap_ease_s);
+            bool L = side == 0;
+            UObject* comp = nullptr;
+            FName bone;
+            if (cfg.pose_wrap && bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R")))
+            {
+                comp = object_property(pawn, L ? STR("Grab Component L") : STR("Grab Component R"));
+                if (FName* b = value_ptr<FName>(pawn, L ? STR("Grab Bone L") : STR("Grab Bone R"))) bone = *b;
+                if (comp && !object_alive(comp)) comp = nullptr;
+            }
+            if (comp && (!g.on || g.comp != comp || !(g.bone == bone)))
+            {
+                g = WrapGrab{};
+                g.on = true;
+                g.comp = comp;
+                g.bone = bone;
+                g.since = now;
+                g.ease = (std::max)(0.01, cfg.pose_wrap_ease_s);
+                if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str());
+            }
+            else if (!comp && g.on)
+            {
+                double ease = (std::max)(0.01, cfg.pose_wrap_ease_s);
+                g.w_off = wrap_smooth((now - g.since) / ease);
+                g.on = false;
+                g.off_at = now;
+                g.comp = nullptr;
+                if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand opens (%d solves)", L ? "left" : "right", g.solves);
+            }
+        }
+    }
+    bool wrap_active(int side)
+    {
+        const WrapGrab& g = g_wrap[side];
+        return g.on || (g.off_at >= 0.0 && hsvr::now_seconds() - g.off_at < g.ease);
     }
 
     UFunction* g_copy_update_fn = nullptr;
@@ -8827,7 +9107,9 @@ namespace
         {
             const FingerWant& w = g_fwant[side];
             if (!w.on || now - w.at > 0.2) continue;
-            pose_hand_fingers(a->data, side, w.curl, w.splay, log);
+            double joint[5][3], splay = w.splay;
+            if (wrap_fingers(a->data, side, joint, w.curl, splay) > 0.0) pose_hand_fingers(a->data, side, w.curl, splay, log, joint);
+            else pose_hand_fingers(a->data, side, w.curl, w.splay, log);
         }
     }
 
@@ -8849,6 +9131,8 @@ namespace
             UObject* mine = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             bool free = cfg.pose_fingers_tracked && (!mine || is_fist(mine)) &&
                         !bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")) && !scabbard_held(side) && !(g_two.active && side == g_two.second);
+            // A hand wrapping what the game's grab holds is posed by the wrap (from your curls).
+            if (wrap_active(side) && g_frig.ok) free = true;
             const hsvr::HandState& h = state.hand[side];
             double target[5];
             double touch_override = -1.0;
@@ -9048,6 +9332,7 @@ namespace
             g_fist_side[side].store(pawn && is_fist(object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"))));
         // Fingers every tick the body is posed, even with the controllers idle (test 10: behind the grab
         // gate below, an unfaked fake headset never reached it).
+        if (pawn && g_pose_active.load()) wrap_tick(cfg, pawn);
         if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
         {

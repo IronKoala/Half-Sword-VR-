@@ -641,6 +641,12 @@ namespace hsvr
         num("pose_elbow_impulse_per_v", c.pose_elbow_impulse_per_v);
         num("pose_elbow_velocity_scale", c.pose_elbow_velocity_scale);
         num("pose_fingers_tau_s", c.pose_fingers_tau_s);
+        flag("pose_wrap", c.pose_wrap);
+        num("pose_wrap_ease_s", c.pose_wrap_ease_s);
+        num("pose_wrap_refresh_s", c.pose_wrap_refresh_s);
+        num("pose_wrap_finger_radius_cm", c.pose_wrap_finger_radius_cm);
+        flag("pose_wrap_open_base", c.pose_wrap_open_base);
+        flag("log_wrap", c.log_wrap);
         flag("log_fingers", c.log_fingers);
         flag("log_body_grab", c.log_body_grab);
         flag("log_body_hits", c.log_body_hits);
