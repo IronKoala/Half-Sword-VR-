@@ -481,6 +481,8 @@ namespace hsvr
         num("pose_hold_let_go_s", c.pose_hold_let_go_s);
         flag("pose_hold_let_go_ignore_self", c.pose_hold_let_go_ignore_self);
         num("pose_hold_let_go_grace_s", c.pose_hold_let_go_grace_s);
+        flag("pose_hold_let_go_dead", c.pose_hold_let_go_dead);
+        flag("pose_hold_measured_v", c.pose_hold_measured_v);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
         flag("pose_hold_ignore_hand", c.pose_hold_ignore_hand);
         flag("pose_hold_block_offhand_search", c.pose_hold_block_offhand_search);
@@ -649,6 +651,7 @@ namespace hsvr
         num("pose_fingers_tau_s", c.pose_fingers_tau_s);
         flag("pose_finger_schedule", c.pose_finger_schedule);
         flag("pose_fingers_per_joint", c.pose_fingers_per_joint);
+        num("pose_finger_dip_coupling", c.pose_finger_dip_coupling);
         num("pose_finger_mcp_lag", c.pose_finger_mcp_lag);
         num("pose_finger_pip_full", c.pose_finger_pip_full);
         flag("pose_wrap", c.pose_wrap);
@@ -699,6 +702,7 @@ namespace hsvr
         num("pose_drink_sip_s", c.pose_drink_sip_s);
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
         flag("pose_grab_objects", c.pose_grab_objects);
+        flag("pose_grab_world", c.pose_grab_world);
         flag("pose_ghost_hand", c.pose_ghost_hand);
         num("pose_ghost_from_cm", c.pose_ghost_from_cm);
         text("pose_ghost_mesh", c.pose_ghost_mesh);

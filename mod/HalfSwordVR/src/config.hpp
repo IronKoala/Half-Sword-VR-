@@ -434,6 +434,12 @@ namespace hsvr
         double pose_hold_let_go_reach_slack_cm = 15.0; // with the arm-lag hold: how far past his reach the grip may trail
         // No let-go for this long after a weapon comes into the hand (long weapons swing into place).
         double pose_hold_let_go_grace_s = 1.0;
+        // Stuck let-go drops the weapon dead (no velocity) instead of with the hold's last chase
+        // velocity (playtest 2026-11-21: stopped weapons left at 10-20 m/s and flew at him). 0 = old.
+        bool pose_hold_let_go_dead = true;
+        // While a held weapon is stopped, the hold uses its measured motion, not the velocity it last
+        // set (which never drops while it is blocked, so the hold wound up to 20 m/s). 0 = old.
+        bool pose_hold_measured_v = true;
         // Something is in the held weapon's way when it ends a tick this far (cm) short of where the
         // hold sent it; the stuck rule only lets go of a weapon that is in contact like that.
         double pose_hold_contact_cm = 0.5;
@@ -579,6 +585,10 @@ namespace hsvr
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;
+        // Fixed scenery (a fence, a table, a wall: anything that blocks and does not move) can be held:
+        // his drawn hand stays put on it with the fingers wrapped round it until you let go or pull your
+        // hand pose_grab_ride_max_cm away from it.
+        bool pose_grab_world = true;
         // Two hands on one weapon (B&S rules): squeeze the free hand on a weapon the other hand holds,
         // on its grip or anywhere along its blade (half-swording, Matthew 2026-11-18). The weapon then
         // lies along the line between the hands, the first hand sets its roll, and the hold is
@@ -734,6 +744,9 @@ namespace hsvr
         bool pose_finger_schedule = true;
         // With SteamVR's hand skeleton: each finger joint follows your own joint (not one curl per finger).
         bool pose_fingers_per_joint = true;
+        // With per-joint fingers: the end joint bends this much of the middle joint's angle (the tendon
+        // couples them, ~0.67); 0 = as the hand skeleton reports it.
+        double pose_finger_dip_coupling = 0.67;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
@@ -769,8 +782,10 @@ namespace hsvr
         bool pose_grab_ride_objects = false;
         double pose_grab_ride_from_cm = 0.5;
         double pose_grab_ride_full_cm = 2.0;
-        double pose_grab_ride_max_cm = 20.0;
-        double pose_grab_slip_s = 0.3; // held past ride_max_cm this long: the grip slips (let go)
+        // (20 dropped ~25 body grabs in 0.4-1.8 s in a real fight, 2026-11-21 11:28-11:34: fighting Willies
+        // move 35-92 cm away; the 'pushed away' reaching was his hat's collision, not the ride.)
+        double pose_grab_ride_max_cm = 40.0;
+        double pose_grab_slip_s = 0.5; // held past ride_max_cm this long: the grip slips (let go)
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;
