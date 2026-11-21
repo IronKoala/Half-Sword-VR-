@@ -6199,6 +6199,27 @@ namespace
         const std::vector<Handle>& hs = item_handles(weapon, base);
         double t = 0.0, hd = 1e9;
         int hi = nearest_handle(hs, local, t, hd);
+        if (hi >= 0 && hs[hi].fixed && h.free.set &&
+            length(hs[hi].a + (hs[hi].b - hs[hi].a) * hs[hi].fixed_t - h.free.pivot) < 2.0 * cfg.pose_slide_hand_half_cm)
+        {
+            // The first hand holds that fixed zone: the nearest other zone (a hand-and-a-half sword's other grip zone).
+            std::vector<Handle> others;
+            std::vector<int> idx;
+            for (int i = 0; i < (int)hs.size(); ++i)
+                if (i != hi && !(hs[i].fixed && length(hs[i].a + (hs[i].b - hs[i].a) * hs[i].fixed_t - h.free.pivot) < 2.0 * cfg.pose_slide_hand_half_cm))
+                {
+                    others.push_back(hs[i]);
+                    idx.push_back(i);
+                }
+            double t2 = 0.0, d2 = 1e9;
+            int j = nearest_handle(others, local, t2, d2);
+            if (j >= 0 && d2 <= cfg.pose_grab_handle_cm)
+            {
+                hi = idx[j];
+                t = t2;
+                hd = d2;
+            }
+        }
         bool on_handle = hi >= 0 && hd <= cfg.pose_grab_handle_cm;
         if (!on_handle && cfg.pose_grab_weapon_handles_only && grab_needs_handle(weapon))
         {
@@ -9677,11 +9698,25 @@ namespace
                 bool sword = !hafted && wide_hi && weapon_has_guard(item);
                 if (sword)
                     HSVR_LOG("Handles: %ls: sword, game grip type %.0f (%s), grip %.1f..%.1f cm", item->GetName().c_str(), grip_type,
-                             grip_type < 0.0 ? "not found" : two_hand_type ? "two-handed: grip slides" : "one-handed", g0, g1);
+                             grip_type < 0.0 ? "not found" : two_hand_type ? "two-handed: guard and pommel zones" : "one-handed", g0, g1);
                 if (sword && cfg.pose_slide_fixed_1h_sword && grip_type >= 0.0 && !two_hand_type && g1 - g0 > 1e-3)
                 {
                     hs.back().fixed = true;
                     hs.back().fixed_t = (std::min)(1.0, (std::max)(0.0, (0.0 - g0) / (g1 - g0))); // the game's grip point
+                }
+                else if (sword && cfg.pose_grip_two_zones_2h_sword && two_hand_type && g1 - g0 >= 2.0 * half)
+                {
+                    // Hand-and-a-half and two-handed swords (Matthew 2026-11-21): two fixed zones, no slide:
+                    // one under the guard (the grip's top, where the game's grip point is) and one above the
+                    // pommel (the grip's bottom). A touch on the upper half of the grip takes the upper zone,
+                    // on the lower half the lower one.
+                    double mid = 0.5 * (g0 + g1);
+                    hs.back() = Handle{Vec3{0, 0, mid}, Vec3{0, 0, g1}, "grip", -1, 2};
+                    hs.back().fixed = true;
+                    hs.back().fixed_t = 1.0;
+                    hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, mid}, "grip", -1, 2});
+                    hs.back().fixed = true;
+                    hs.back().fixed_t = 0.0;
                 }
                 if (hafted)
                 {

@@ -495,6 +495,9 @@ namespace hsvr
         // no trigger slide along the grip (Matthew 2026-11-20). Hand-and-a-half and two-handed swords, and
         // every non-sword, keep the slide. The blade (half-swording) is unchanged.
         bool pose_slide_fixed_1h_sword = true;
+        // Hand-and-a-half and two-handed swords (game grip type 10-16): two fixed grip zones, under the guard
+        // and above the pommel, no slide (Matthew 2026-11-21).
+        bool pose_grip_two_zones_2h_sword = true;
         double pose_slide_rate_min = 3.0;
         double pose_slide_rate_max = 40.0;
         double pose_slide_max_cm_s = 250.0; // fastest the hand runs along a weapon

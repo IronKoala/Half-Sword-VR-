@@ -512,6 +512,7 @@ namespace hsvr
         flag("pose_slide_rondel_stops", c.pose_slide_rondel_stops);
         flag("pose_slide_butt_is_haft", c.pose_slide_butt_is_haft);
         flag("pose_slide_fixed_1h_sword", c.pose_slide_fixed_1h_sword);
+        flag("pose_grip_two_zones_2h_sword", c.pose_grip_two_zones_2h_sword);
         num("pose_slide_rate_min", c.pose_slide_rate_min);
         num("pose_slide_rate_max", c.pose_slide_rate_max);
         num("pose_slide_max_cm_s", c.pose_slide_max_cm_s);
