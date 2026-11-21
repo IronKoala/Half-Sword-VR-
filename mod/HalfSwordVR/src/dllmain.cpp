@@ -1683,7 +1683,10 @@ namespace
                 }
                 if (!g_pose.ankle_measured[side]) continue; // the game's own foot until then
             }
-            if (ground_below(pawn, f.at.x, f.at.y, actor.z, floor_z))
+            // From a step (50 cm) above where he stands, not from his middle: from the middle a foot
+            // under a 105 cm weapon table found its top and he was stood on it (table test U2).
+            double foot_from = g_pose.mesh ? (std::min)(actor.z, actor.z - 90.0 * component_scale_z(g_pose.mesh) + 50.0) : actor.z;
+            if (ground_below(pawn, f.at.x, f.at.y, foot_from, floor_z))
             {
                 f.ground_z = floor_z + g_pose.ankle_height[side];
                 f.have_ground = true;
@@ -16415,7 +16418,8 @@ namespace
         // game drops the capsule ~77 cm (Willie @594860, crouch_ik.md). The capsule's centre is kept
         // at least its standing height above the floor under it, less 15 cm (the game's own step
         // offset is within +-10).
-        if (hsvr::config().pose_capsule_floor_clamp && g_pose.mesh)
+        // (Superseded by pose_capsule_keep_on_floor, which holds him up without lifting him onto tables.)
+        if (hsvr::config().pose_capsule_floor_clamp && !hsvr::config().pose_capsule_keep_on_floor && g_pose.mesh)
         {
             double floor_z = 0.0;
             // Only when the game dropped it this tick (its miss drop is ~77 cm): the trace can land on a
