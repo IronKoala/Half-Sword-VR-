@@ -7422,11 +7422,22 @@ namespace
     // his own Get Damage runs, IsSimulatingPhysics on his mesh answers yes: the flat game's answer.
     UFunction* g_get_damage_fn = nullptr;
     std::atomic<uint64_t> g_player_damage_overrides{0};
+    int g_in_player_get_damage = 0; // game thread only: depth of his Get Damage calls
+    // Counters for the "Player damage: checks" line (which test fails when no hit is counted).
+    std::atomic<uint64_t> g_pd_sim_calls{0}, g_pd_sim_in_gd{0}, g_pd_sim_on_mesh{0}, g_pd_gd_calls{0}, g_pd_gd_player{0};
+    std::wstring g_pd_first_in_gd;
     void player_sim_check_post(Unreal::UnrealScriptFunctionCallableContext& context, void*)
     {
-        // Pointer compares first: IsSimulatingPhysics is called a lot.
-        if (!g_get_damage_fn || context.TheStack.Node() != g_get_damage_fn) return;
+        g_pd_sim_calls.fetch_add(1);
+        // Only while his own Get Damage runs (set by its pre hook, cleared by its post hook). The
+        // native hook's TheStack.Node() is not the calling Blueprint function (test dmg-dbg1: 0 of
+        // 44792 calls), so the caller can't be read from the stack.
+        if (!g_get_damage_fn || g_in_player_get_damage <= 0) return;
+        g_pd_sim_in_gd.fetch_add(1);
+        if (g_pd_first_in_gd.empty() && context.Context)
+            g_pd_first_in_gd = context.Context->GetFullName() + (context.RESULT_DECL ? STR(" (result slot)") : STR(" (NO result slot)"));
         if (!context.Context || context.Context != g_pose.mesh || !g_pose_active.load() || !context.RESULT_DECL) return;
+        g_pd_sim_on_mesh.fetch_add(1);
         if (!hsvr::config().player_takes_damage) return;
         *static_cast<bool*>(context.RESULT_DECL) = true;
         g_player_damage_overrides.fetch_add(1);
@@ -7435,33 +7446,90 @@ namespace
     // Logs what each Get Damage on him did to his Health and Consciousness (once per hit).
     UObject* g_player_hit_pawn = nullptr;
     double g_player_hit_h0 = 0.0, g_player_hit_c0 = 0.0;
+    std::wstring g_player_hit_what;
     void player_get_damage_pre(Unreal::UnrealScriptFunctionCallableContext& context, void*)
     {
         gc_sync();
+        g_pd_gd_calls.fetch_add(1);
         g_player_hit_pawn = nullptr;
         UObject* pawn = context.Context;
         if (!pawn || !g_pose_active.load() || pawn != g_pose.pawn) return;
+        g_pd_gd_player.fetch_add(1);
+        ++g_in_player_get_damage;
         g_player_hit_pawn = pawn;
+        // What hit him, for the "Player hit:" line.
+        g_player_hit_what.clear();
+        if (uint8_t* locals = context.TheStack.Locals(); locals && g_get_damage_fn)
+        {
+            double raw = -1.0, cut = -1.0;
+            std::wstring bone = STR("?"), by = STR("?"), mesh = STR("?");
+            for (FProperty* p : g_get_damage_fn->ForEachProperty())
+            {
+                std::wstring n = p->GetName();
+                uint8_t* at = locals + p->GetOffset_Internal();
+                bool dbl = p->GetClass().GetName() == STR("DoubleProperty");
+                if (n == STR("Raw Damage") && dbl) raw = *reinterpret_cast<double*>(at);
+                else if (n == STR("Cutting Power") && dbl) cut = *reinterpret_cast<double*>(at);
+                else if (n == STR("Bone") && p->GetClass().GetName() == STR("NameProperty")) bone = reinterpret_cast<FName*>(at)->ToString();
+                else if (n == STR("Hit By Component") || n == STR("Damaged Mesh"))
+                {
+                    UObject* o = *reinterpret_cast<UObject**>(at);
+                    std::wstring s = STR("none");
+                    if (o)
+                    {
+                        UObject* owner = nullptr;
+                        Call oc(o, STR("GetOwner"));
+                        if (oc.run()) owner = oc.object_result();
+                        s = (owner ? owner->GetName() + STR(".") : std::wstring()) + o->GetName();
+                    }
+                    (n == STR("Damaged Mesh") ? mesh : by) = s;
+                }
+            }
+            wchar_t buf[512];
+            swprintf(buf, 512, L"bone %ls, raw %.0f, cut %.1f, by %ls, on %ls", bone.c_str(), raw, cut, by.c_str(), mesh.c_str());
+            g_player_hit_what = buf;
+        }
         g_player_hit_h0 = read_number_variable(pawn, STR("Health"));
         g_player_hit_c0 = read_number_variable(pawn, STR("Consciousness"));
     }
     void player_get_damage_post(Unreal::UnrealScriptFunctionCallableContext& context, void*)
     {
+        if (g_in_player_get_damage > 0 && context.Context && context.Context == g_pose.pawn) --g_in_player_get_damage;
         UObject* pawn = g_player_hit_pawn;
         g_player_hit_pawn = nullptr;
         if (!pawn || context.Context != pawn) return;
         double h = read_number_variable(pawn, STR("Health")), c = read_number_variable(pawn, STR("Consciousness"));
         if (h == g_player_hit_h0 && c == g_player_hit_c0) return;
-        HSVR_LOG("Player hit: health %.2f -> %.2f, consciousness %.2f -> %.2f, blood %.2f (counted as the flat game: %d)", g_player_hit_h0, h, g_player_hit_c0, c,
-                 read_number_variable(pawn, STR("Blood")), (int)hsvr::config().player_takes_damage);
+        HSVR_LOG("Player hit: health %.2f -> %.2f, consciousness %.2f -> %.2f (counted as the flat game: %d); %ls", g_player_hit_h0, h, g_player_hit_c0, c,
+                 (int)hsvr::config().player_takes_damage, g_player_hit_what.c_str());
     }
 
     void install_player_damage()
     {
         static bool installed = false;
         static double last_try = -10.0;
-        if (installed) return;
         double now = hsvr::now_seconds();
+        // Runs after his tick, outside any Get Damage: the flag can never stay on.
+        if (g_in_player_get_damage != 0)
+        {
+            HSVR_LOG_EVERY(10.0, "Player damage: Get Damage flag was left at %d after his tick; cleared", g_in_player_get_damage);
+            g_in_player_get_damage = 0;
+        }
+        if (installed)
+        {
+            // Every 10 s while anything changed: how far the checks get.
+            static double next = 0.0;
+            static uint64_t last_gd = 0;
+            if (now < next || g_pd_gd_calls.load() == last_gd) return;
+            next = now + 10.0;
+            last_gd = g_pd_gd_calls.load();
+            HSVR_LOG("Player damage: checks: Get Damage %llu calls (%llu on him); IsSimulatingPhysics %llu calls, %llu from Get Damage, %llu on his posed mesh, %llu "
+                     "answered yes; first from Get Damage: %ls",
+                     (unsigned long long)g_pd_gd_calls.load(), (unsigned long long)g_pd_gd_player.load(), (unsigned long long)g_pd_sim_calls.load(),
+                     (unsigned long long)g_pd_sim_in_gd.load(), (unsigned long long)g_pd_sim_on_mesh.load(), (unsigned long long)g_player_damage_overrides.load(),
+                     g_pd_first_in_gd.empty() ? STR("none") : g_pd_first_in_gd.c_str());
+            return;
+        }
         if (now - last_try < 2.0) return;
         last_try = now;
         UFunction* gd = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Game/Character/Blueprints/Willie_BP.Willie_BP_C:Get Damage"));
@@ -7492,16 +7560,22 @@ namespace
     void stump_blood_tick(UObject* pawn)
     {
         using namespace hsvr;
-        static std::unordered_set<UObject*> done;
+        static std::unordered_set<UObject*> done, logged;
+        static std::unordered_map<UObject*, double> first_seen;
         static UObject* last_pawn = nullptr;
         static bool tracked = on_freed([] {
-            for (auto it = done.begin(); it != done.end();)
-                it = gone(*it) ? done.erase(it) : std::next(it);
+            for (auto* set : {&done, &logged})
+                for (auto it = set->begin(); it != set->end();)
+                    it = gone(*it) ? set->erase(it) : std::next(it);
+            for (auto it = first_seen.begin(); it != first_seen.end();)
+                it = gone(it->first) ? first_seen.erase(it) : std::next(it);
             if (gone(last_pawn)) last_pawn = nullptr;
         });
         (void)tracked;
         if (pawn != last_pawn)
         {
+            logged.clear();
+            first_seen.clear();
             last_pawn = pawn;
             done.clear();
         }
@@ -7558,7 +7632,15 @@ namespace
             {
                 UObject* item = arr->data[i];
                 if (!item || done.count(item)) continue;
-                done.insert(item);
+                // Checked every tick for 3 s after it first shows up (the cut may hide its bone a
+                // little after the blood spawns), then left alone.
+                double& first = first_seen[item];
+                if (first <= 0.0) first = now_s;
+                if (now_s - first > 3.0)
+                {
+                    done.insert(item);
+                    continue;
+                }
                 UObject* comp = item;
                 if (is_a(item, STR("Actor")))
                 {
@@ -7566,15 +7648,18 @@ namespace
                     root.run();
                     comp = root.object_result();
                 }
-                if (!comp || !is_a(comp, STR("SceneComponent"))) continue;
+                if (!comp || !is_a(comp, STR("SceneComponent")))
+                {
+                    done.insert(item);
+                    continue;
+                }
                 Call ap(comp, STR("GetAttachParent"));
                 ap.run();
-                if (ap.object_result() != mesh) continue;
+                UObject* parent = ap.object_result();
                 Call sn(comp, STR("GetAttachSocketName"));
-                if (!sn.run()) continue;
+                sn.run();
                 FProperty* rp = sn.param(STR("ReturnValue"));
-                if (!rp) continue;
-                FName bone = *reinterpret_cast<FName*>(sn.buffer.data() + rp->GetOffset_Internal());
+                FName bone = rp ? *reinterpret_cast<FName*>(sn.buffer.data() + rp->GetOffset_Internal()) : FName(STR("None"), FNAME_Add);
                 auto hidden = [&](FName b) {
                     Call h(mesh, STR("IsBoneHiddenByName"));
                     h.name(STR("BoneName"), b);
@@ -7582,7 +7667,20 @@ namespace
                     FProperty* r = h.param(STR("ReturnValue"));
                     return r && read_param_bool(h.buffer.data(), r);
                 };
-                if (!hidden(bone)) continue;
+                bool on_mesh = parent == mesh;
+                bool is_hidden = on_mesh && hidden(bone);
+                if (!logged.count(item))
+                {
+                    logged.insert(item);
+                    HSVR_LOG("Stump blood: %ls (%ls) is on %ls:%ls, bone hidden %d", item->GetName().c_str(), list, parent ? parent->GetName().c_str() : STR("nothing"),
+                             bone.ToString().c_str(), (int)is_hidden);
+                }
+                if (!on_mesh)
+                {
+                    done.insert(item); // on the cut-off piece or something else: not his stump
+                    continue;
+                }
+                if (!is_hidden) continue;
                 // Up the chain to the first visible bone; the last hidden one is the stump's joint.
                 FName top = bone, at = parent_bone(mesh, bone);
                 int guard = 0;
@@ -7611,6 +7709,7 @@ namespace
                 HSVR_LOG("Stump blood: %ls on cut-off bone %ls moved %.0f cm to the stump at %ls (attached to %ls, %.0f cm from its origin)", item->GetName().c_str(),
                          bone.ToString().c_str(), length(stump - was), top.ToString().c_str(), at.ToString().c_str(), length(stump - socket_location(mesh, at)));
                 follows.push_back({comp, top, now_s + 5.0, now_s + 0.5});
+                done.insert(item);
             }
         }
     }
@@ -7687,17 +7786,18 @@ namespace
             return;
         }
         const TCHAR* prefix = nullptr;
-        int count = 0;
+        int first = 1, count = 0;
         if (arg == "lowerarm_l")
         {
             t.part = 7; // Spawn Bone lowerarm_l (Dismember Function Delayed @1472)
-            prefix = STR("DM Sphere Loweararm_L "); // sic: the game's spelling
+            prefix = STR("DM Sphere Loweararm_L "); // sic: the game's spelling; numbered 13-25
+            first = 13;
             count = 13;
         }
         else if (arg == "calf_r")
         {
             t.part = 10; // Spawn Bone calf_r
-            prefix = STR("DM Sphere Calf_R ");
+            prefix = STR("DM Sphere Calf_R "); // 1-20
             count = 20;
         }
         else
@@ -7706,7 +7806,7 @@ namespace
             return;
         }
         auto marker = [&](int i) { return object_property(pawn, (std::wstring(prefix) + std::to_wstring(i)).c_str()); };
-        int mid = count / 2;
+        int mid = first + count / 2;
         t.markers.clear();
         for (int i : {mid, mid + 1})
             if (UObject* m = marker(i)) t.markers.push_back(m);
