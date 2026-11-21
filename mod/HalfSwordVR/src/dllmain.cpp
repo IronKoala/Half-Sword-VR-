@@ -9052,7 +9052,8 @@ namespace
                 g.ease = (std::max)(0.01, cfg.pose_wrap_ease_s);
                 if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str());
             }
-            if (g.on && !g.seated && g.seat_tries < 5 && cfg.pose_grab_seat_palm)
+            // (Let go first: a hand that drops its hold before it was seated must not seat a stale thing.)
+            if (comp && g.on && !g.seated && g.seat_tries < 5 && cfg.pose_grab_seat_palm)
             {
                 ++g.seat_tries;
                 g.seated = seat_on_palm(side, pawn, g, cfg);
