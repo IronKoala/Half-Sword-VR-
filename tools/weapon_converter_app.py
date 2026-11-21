@@ -205,7 +205,8 @@ class App:
     def __init__(self, root, first_model=None):
         self.root = root
         self.settings = load_settings()
-        self.work = tempfile.mkdtemp(prefix="hs_weapon_")
+        self.work_root = tempfile.mkdtemp(prefix="hs_weapon_")
+        self.work = self.work_root
         self.events = queue.Queue()
         self.busy = False
         self.flip = False
@@ -213,20 +214,47 @@ class App:
         self.result_inputs = None
         self.raw_length = None
         self.photos = []
+        self.result_views = None
+        # Several models at once: each one is an item (its own inputs, work folder and result). The editor
+        # below always shows the selected item; self.work/flip/raw_length/result* belong to it.
+        self.items = []
+        self.cur = None
+        self.quiet = False  # True while the editor is being filled in by code
+        self.batch_running = False
 
         root.title("Half Sword Weapon Converter")
         root.minsize(760, 560)
         root.protocol("WM_DELETE_WINDOW", self.close)
         pad = {"padx": 8, "pady": 4}
+        self.batch = ttk.Frame(root, padding=(10, 10, 10, 0))
+        ttk.Label(self.batch, text="Weapons (pick one to check or change it)").pack(anchor="w")
+        cols = ("length", "weight", "status")
+        self.tree = ttk.Treeview(self.batch, columns=cols, height=6, selectmode="browse")
+        self.tree.heading("#0", text="Model")
+        self.tree.column("#0", width=330)
+        for c, w in zip(cols, (90, 90, 330)):
+            self.tree.heading(c, text=c.capitalize())
+            self.tree.column(c, width=w, anchor="w")
+        self.tree.pack(fill="x")
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.tree_selected())
+        bb = ttk.Frame(self.batch)
+        bb.pack(fill="x", pady=(4, 0))
+        ttk.Button(bb, text="Add models...", command=self.browse).pack(side="left")
+        ttk.Button(bb, text="Remove", command=self.remove_item).pack(side="left", padx=6)
+        self.install_all_btn = ttk.Button(bb, text="Install all converted", command=self.install_all)
+        self.install_all_btn.pack(side="right")
+        self.convert_all_btn = ttk.Button(bb, text="Convert all", command=self.convert_all)
+        self.convert_all_btn.pack(side="right", padx=6)
         main = ttk.Frame(root, padding=10)
         main.pack(fill="both", expand=True)
         main.columnconfigure(1, weight=1)
+        self.main = main
 
         ttk.Label(main, text="Model").grid(row=0, column=0, sticky="w", **pad)
         self.model_var = tk.StringVar()
         ttk.Entry(main, textvariable=self.model_var, state="readonly").grid(row=0, column=1, sticky="ew", **pad)
         ttk.Button(main, text="Browse...", command=self.browse).grid(row=0, column=2, **pad)
-        self.model_info = ttk.Label(main, text="Pick a weapon model" + (", or drop one on this window." if TkinterDnD else "."))
+        self.model_info = ttk.Label(main, text="Pick weapon models" + (", or drop them on this window (one or many)." if TkinterDnD else "."))
         self.model_info.grid(row=1, column=1, columnspan=2, sticky="w", padx=8)
         self.unit_buttons = ttk.Frame(main)
         self.unit_buttons.grid(row=2, column=1, columnspan=2, sticky="w", padx=8)
@@ -293,66 +321,150 @@ class App:
 
         if TkinterDnD is not None:
             root.drop_target_register(DND_FILES)
-            root.dnd_bind("<<Drop>>", lambda e: self.set_model(root.tk.splitlist(e.data)[0]))
+            root.dnd_bind("<<Drop>>", lambda e: self.add_models(root.tk.splitlist(e.data)))
         root.after(100, self.poll)
         if first_model:
-            root.after(200, lambda: self.set_model(first_model))
+            models = first_model if isinstance(first_model, (list, tuple)) else [first_model]
+            root.after(200, lambda: self.add_models(models))
 
     # ---- inputs ----------------------------------------------------------------------------------------
     def browse(self):
-        path = filedialog.askopenfilename(title="Pick a weapon model", initialdir=self.settings.get("model_dir"),
-                                          filetypes=[("3D models", MODEL_TYPES), ("All files", "*.*")])
-        if path:
-            self.set_model(path)
+        paths = filedialog.askopenfilenames(title="Pick weapon models (one or many)", initialdir=self.settings.get("model_dir"),
+                                            filetypes=[("3D models", MODEL_TYPES), ("All files", "*.*")])
+        if paths:
+            self.add_models(paths)
 
-    def set_model(self, path):
-        if self.busy:
+    def set_model(self, path):  # one model (kept for callers and tests)
+        self.add_models([path])
+
+    def add_models(self, paths):
+        """Adds every model file given; a folder adds every model file inside it."""
+        found = []
+        for path in paths:
+            if os.path.isdir(path):  # e.g. a downloaded mod folder
+                found += sorted(os.path.join(r, f) for r, _, fs in os.walk(path) for f in fs
+                                if f.lower().endswith(MODEL_EXTS))
+            elif os.path.isfile(path) and path.lower().endswith(MODEL_EXTS):
+                found.append(path)
+        known = {os.path.normcase(os.path.abspath(it["path"])) for it in self.items}
+        new = [f for f in found if os.path.normcase(os.path.abspath(f)) not in known]
+        if not new:
+            self.status.config(text=("Those are already in the list." if found else
+                                     f"No model files ({', '.join(MODEL_EXTS)}) there."))
             return
-        if os.path.isdir(path):  # a downloaded mod folder: the model files in it
-            found = sorted(os.path.join(r, f) for r, _, fs in os.walk(path) for f in fs
-                           if f.lower().endswith(MODEL_EXTS))
-            if not found:
-                self.model_info.config(text=f"No model files ({', '.join(MODEL_EXTS)}) in that folder.")
-                return
-            if len(found) > 1:
-                self.choose_model(path, found)
-                return
-            path = found[0]
-        if not os.path.isfile(path):
-            return
-        self.settings["model_dir"] = os.path.dirname(path)
+        self.settings["model_dir"] = os.path.dirname(new[0])
         save_settings(self.settings)
-        self.model_var.set(path)
-        self.flip = False
-        self.raw_length = None
-        self.length_var.set("")
-        self.clear_result()
-        for w in self.unit_buttons.winfo_children():
-            w.destroy()
-        self.model_info.config(text="Reading the model...")
-        self.run(self.measure, path)
+        names = {it["name"].lower() for it in self.items}
+        first = len(self.items)
+        for f in new:
+            base = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.splitext(os.path.basename(f))[0]) or "weapon"
+            name, n = base, 2
+            while name.lower() in names:  # two files called sword.glb in different folders
+                name, n = f"{base}_{n}", n + 1
+            names.add(name.lower())
+            item = {"path": f, "name": name, "raw": None, "length_cm": None, "mass_kg": None,
+                    "type": TYPES[0][0], "flip": False, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
+                    "result": None, "result_inputs": None, "views": None, "status": "reading the model...",
+                    "iid": f"item{id(f)}_{len(self.items)}"}
+            self.items.append(item)
+            self.tree.insert("", "end", iid=item["iid"], text=os.path.basename(f), values=("", "", item["status"]))
+        if len(self.items) > 1 and not self.batch.winfo_ismapped():
+            self.batch.pack(fill="x", before=self.main)
+        self.select(self.items[first])
+        self.run(self.measure_all, [it["path"] for it in self.items[first:]])
 
-    def choose_model(self, folder, files):
-        win = tk.Toplevel(self.root)
-        win.title("Which model?")
-        win.transient(self.root)
-        ttk.Label(win, text="That folder has several models. Pick one:", padding=8).pack(anchor="w")
-        lb = tk.Listbox(win, width=70, height=min(12, len(files)))
-        for f in files:
-            lb.insert("end", os.path.relpath(f, folder))
-        lb.selection_set(0)
-        lb.pack(fill="both", expand=True, padx=8)
+    def item_of(self, path):
+        return next((it for it in self.items if it["path"] == path), None)
 
-        def ok(*_):
-            sel = lb.curselection()
-            win.destroy()
-            if sel:
-                self.set_model(files[sel[0]])
-        lb.bind("<Double-Button-1>", ok)
-        ttk.Button(win, text="Use this one", command=ok).pack(pady=8)
-        win.grab_set()
+    def remove_item(self):
+        it = self.cur
+        if it is None or self.busy:
+            return
+        i = self.items.index(it)
+        self.items.remove(it)
+        self.tree.delete(it["iid"])
+        shutil.rmtree(it["work"], ignore_errors=True)
+        self.cur = None
+        if self.items:
+            self.select(self.items[min(i, len(self.items) - 1)])
+        else:
+            self.quiet = True
+            self.model_var.set("")
+            self.length_var.set("")
+            self.mass_var.set("")
+            self.quiet = False
+            self.clear_result()
+            self.model_info.config(text="Pick weapon models.")
 
-    # ---- units -----------------------------------------------------------------------------------------
+    # ---- the editor shows one item ------------------------------------------------------------------
+    def tree_selected(self):
+        sel = self.tree.selection()
+        it = next((x for x in self.items if x["iid"] in sel), None)
+        if it is not None and it is not self.cur:
+            self.select(it)
+
+    def save_editor(self):
+        it = self.cur
+        if it is None:
+            return
+        _, lk, _, mk = self.units()
+        for key, var, k in (("length_cm", self.length_var, lk), ("mass_kg", self.mass_var, mk)):
+            try:
+                it[key] = float(var.get().replace(",", ".")) * k
+            except ValueError:
+                it[key] = None
+        it["type"] = self.type_var.get()
+        it.update(flip=self.flip, raw=self.raw_length, result=self.result, result_inputs=self.result_inputs,
+                  views=self.result_views)
+        self.refresh_row(it)
+
+    def select(self, it):
+        if self.cur is not None and self.cur is not it:
+            self.save_editor()
+        self.cur = it
+        if self.tree.selection() != (it["iid"],):
+            self.tree.selection_set(it["iid"])
+            self.tree.see(it["iid"])
+        self.work = it["work"]
+        self.flip, self.raw_length = it["flip"], it["raw"]
+        self.result, self.result_inputs, self.result_views = it["result"], it["result_inputs"], it["views"]
+        _, lk, _, mk = self.units()
+        self.quiet = True
+        self.model_var.set(it["path"])
+        self.length_var.set("" if it["length_cm"] is None else f"{it['length_cm'] / lk:.2f}".rstrip("0").rstrip("."))
+        self.mass_var.set("" if it["mass_kg"] is None else f"{it['mass_kg'] / mk:.3f}".rstrip("0").rstrip("."))
+        self.type_var.set(it["type"])
+        self.quiet = False
+        self.show_model_info()
+        if self.result is not None:
+            self.redraw_result()
+            self.flip_btn.config(state="normal")
+            self.install_btn.config(state="normal")
+            self.status.config(text="Check the picture, then Install.")
+            self.inputs_changed()
+        else:
+            self.photos = []
+            self.preview.config(image="")
+            self.summary.config(text="")
+            self.flip_btn.config(state="disabled")
+            self.install_btn.config(state="disabled")
+            self.status.config(text="" if it["raw"] is None else "Check the length, then Convert.")
+
+    def refresh_row(self, it):
+        if not self.tree.exists(it["iid"]):
+            return
+        self.tree.item(it["iid"], values=("" if it["length_cm"] is None else self.fmt_len(it["length_cm"], 1),
+                                          "estimate" if it["mass_kg"] is None else self.fmt_mass(it["mass_kg"]),
+                                          self.status_text(it)))
+
+    def status_text(self, it):
+        if it["status"] in ("converted", "installed") and it["result"] is not None:
+            return f"{it['status']}: {self.short_summary(it['result'][1])}"
+        if it["status"] == "length out of range" and it["length_cm"] is not None:
+            return f"the file says {self.fmt_len(it['length_cm'])}: type its real length"
+        return it["status"]
+
+        # ---- units -----------------------------------------------------------------------------------------
     def units(self):
         return UNIT_SYSTEMS[self.units_var.get()]
 
@@ -389,32 +501,60 @@ class App:
                 pass
         self.converting_units = False
         self.show_unit_labels()
-        if self.raw_length is not None and self.model_var.get():
-            for w in self.unit_buttons.winfo_children():
-                w.destroy()
-            self.measured(self.model_var.get(), self.raw_length, keep_length=True)
+        self.show_model_info()
         if self.result is not None:
             self.redraw_result()
         self.inputs_changed()
+        for it in self.items:
+            self.refresh_row(it)
 
-    def measure(self, path):
-        raw = model_to_weapon.model_length(path)
-        self.events.put(("measured", path, raw))
+    def measure_all(self, paths):
+        for path in paths:
+            try:
+                raw = model_to_weapon.model_length(path)
+            except Exception as e:  # one broken file must not stop the rest
+                self.events.put(("measure_failed", path, str(e)))
+                continue
+            self.events.put(("measured", path, raw))
 
-    def measured(self, path, raw, keep_length=False):
-        if path != self.model_var.get():
+    def has_units(self, path):
+        return os.path.splitext(path)[1].lower() in (".glb", ".gltf")
+
+    def measured(self, path, raw):
+        it = self.item_of(path)
+        if it is None:
             return
-        self.raw_length = raw
+        it["raw"] = raw
+        if self.has_units(path) and it["length_cm"] is None:
+            it["length_cm"] = round(raw * 100, 1)
+        it["status"] = "ready to convert" if it["length_cm"] is not None else "needs its real length"
+        if it is self.cur:
+            self.raw_length = raw
+            if it["length_cm"] is not None and not self.length_var.get():
+                self.quiet = True
+                self.length_var.set(f"{it['length_cm'] / self.units()[1]:.1f}")
+                self.quiet = False
+            self.show_model_info()
+            self.status.config(text="Check the length, then Convert.")
+        self.refresh_row(it)
+
+    def show_model_info(self):
+        for w in self.unit_buttons.winfo_children():
+            w.destroy()
+        it, raw = self.cur, self.raw_length
+        if it is None:
+            return
+        if raw is None:
+            self.model_info.config(text="Reading the model...")
+            return
         k = self.units()[1]
-        if os.path.splitext(path)[1].lower() in (".glb", ".gltf"):
+        if self.has_units(it["path"]):
             self.model_info.config(text=f"The file makes this weapon {self.fmt_len(raw * 100, 1)} long. "
                                         "Downloaded models are often scaled wrong: check the length below.")
-            if not keep_length:
-                self.length_var.set(f"{raw * 100 / k:.1f}")
         else:
             self.model_info.config(text="This file does not say what unit it uses. Pick the one that gives a "
                                         "sensible length, or type the real length below:")
-            units = UNITS + ([("Skyrim units", 1.42875)] if path.lower().endswith(".nif") else [])
+            units = UNITS + ([("Skyrim units", 1.42875)] if it["path"].lower().endswith(".nif") else [])
             for word, cm in units:
                 ttk.Button(self.unit_buttons, text=f"{word}: {self.fmt_len(raw * cm, 1)}",
                            command=lambda v=raw * cm / k: self.length_var.set(f"{v:.1f}")).pack(side="left", padx=(0, 6))
@@ -472,8 +612,10 @@ class App:
         return not a[1] or abs(float(a[1]) - float(b[1])) <= 0.005
 
     def inputs_changed(self):
-        if getattr(self, "converting_units", False):
+        if getattr(self, "converting_units", False) or self.quiet:
             return
+        if self.cur is not None:
+            self.save_editor()
         if self.result is not None and not self.same_inputs(self.inputs()[0], self.result_inputs):
             self.install_btn.config(state="disabled")
             self.status.config(text="Changed: press Convert again before installing.")
@@ -489,22 +631,72 @@ class App:
         if problem:
             self.status.config(text=problem)
             return
+        self.clear_result()
+        self.log.delete("1.0", "end")
+        self.status.config(text="Converting... (big models take a little while)")
+        it = self.cur
+        it["status"] = "converting..."
+        self.refresh_row(it)
+        self.run(self.convert_worker, self.argv_for(it, values), values, it)
+
+    def argv_for(self, it, values):
         length, mass, kind, flip = values
-        argv = [self.model_var.get(), self.work, "--length-cm", f"{length:g}"]
+        argv = [it["path"], it["work"], "--length-cm", f"{length:g}", "--name", it["name"]]
         if mass:
             argv += ["--mass-kg", mass]
         if kind:
             argv += ["--type", kind]
         if flip:
             argv.append("--flip")
-        self.clear_result()
-        self.log.delete("1.0", "end")
-        self.status.config(text="Converting... (big models take a little while)")
-        self.run(self.convert_worker, argv, values)
+        return argv
 
-    def convert_worker(self, argv, values):
-        for f in os.listdir(self.work):
-            os.remove(os.path.join(self.work, f))
+    def item_values(self, it):
+        """The conversion inputs of an item that is not in the editor, or (None, problem)."""
+        if it["length_cm"] is None:
+            return None, "needs its real length"
+        if not 10 <= it["length_cm"] <= 400:
+            return None, "length out of range"
+        mass = "" if it["mass_kg"] is None else f"{it['mass_kg']:.4f}"
+        if mass and not 0.05 <= it["mass_kg"] <= 50:
+            return None, "weight out of range"
+        return (round(it["length_cm"], 2), mass, dict(TYPES)[it["type"]], it["flip"]), None
+
+    def convert_all(self):
+        if self.busy:
+            return
+        self.save_editor()
+        todo, skipped = [], 0
+        for it in self.items:
+            if it["result"] is not None and self.same_inputs(self.item_values(it)[0], it["result_inputs"]):
+                continue  # already converted with these settings
+            values, problem = self.item_values(it)
+            if problem:
+                it["status"] = problem
+                skipped += 1
+            else:
+                todo.append((it, values))
+                it["status"] = "waiting..."
+            self.refresh_row(it)
+        if not todo:
+            self.status.config(text="Nothing to convert." + (f" {skipped} need a length first." if skipped else ""))
+            return
+        self.log.delete("1.0", "end")
+        self.status.config(text=f"Converting {len(todo)} weapons..." + (f" ({skipped} skipped: no length)" if skipped else ""))
+        self.batch_running = True
+        self.run(self.convert_all_worker, todo)
+
+    def convert_all_worker(self, todo):
+        for n, (it, values) in enumerate(todo, 1):
+            self.events.put(("progress", it, f"converting ({n} of {len(todo)})..."))
+            try:
+                self.convert_worker(self.argv_for(it, values), values, it)
+            except Exception as e:
+                self.events.put(("item_failed", it, f"{e}"))
+                self.events.put(("log", traceback.format_exc(), None))
+
+    def convert_worker(self, argv, values, it):
+        for f in os.listdir(it["work"]):
+            os.remove(os.path.join(it["work"], f))
 
         class Out(io.TextIOBase):
             def write(s, text):
@@ -519,14 +711,14 @@ class App:
             raise RuntimeError(str(e))
         finally:
             sys.stdout = old
-        name = os.path.splitext(os.path.basename(argv[0]))[0]
-        info = json.load(open(os.path.join(self.work, name + ".json"), encoding="utf-8"))
-        pos, nrm, uv, tris = read_obj(os.path.join(self.work, name + ".obj"))
+        name, work = it["name"], it["work"]
+        info = json.load(open(os.path.join(work, name + ".json"), encoding="utf-8"))
+        pos, nrm, uv, tris = read_obj(os.path.join(work, name + ".obj"))
         zn = info["zones_cm"]
         zones = [("Pommel", zn["pommel_end"], zn["handle_bottom"]), ("Grip", zn["handle_bottom"], zn["guard_bottom"]),
                  ("Guard", zn["guard_bottom"], zn["guard_top"]), ("Head", zn["guard_top"], zn["tip"])]
         colour = None
-        tex = os.path.join(self.work, name + "_BaseColor.png")
+        tex = os.path.join(work, name + "_BaseColor.png")
         if os.path.isfile(tex):
             from PIL import Image
             colour = Image.open(tex)
@@ -536,16 +728,26 @@ class App:
         flat = render_view(pos, nrm, uv, tris, colour, zones, "flat", width, 200, s)
         edge = render_view(pos, nrm, uv, tris, colour, zones, "edge", width, 70, s)
         views = (flat, edge, zones, float(pos[:, 2].min()), s, width)
-        self.events.put(("converted", (name, info, views), values))
+        self.events.put(("converted", (it, name, info, views), values))
 
     def converted(self, payload, values):
-        name, info, views = payload
+        it, name, info, views = payload
+        it.update(result=(name, info), result_inputs=values, views=views)
+        it["status"] = "converted"
+        self.refresh_row(it)
+        if it is not self.cur:
+            return
         self.result, self.result_inputs = (name, info), values
         self.result_views = views
         self.redraw_result()
         self.flip_btn.config(state="normal")
         self.install_btn.config(state="normal")
         self.status.config(text="Check the picture, then Install.")
+
+    def short_summary(self, info):
+        zn = info["zones_cm"]
+        return (f"{'hafted' if info['type'] == 'hafted' else 'sword'}, {self.fmt_len(zn['tip'] - zn['pommel_end'])}, "
+                f"{self.fmt_mass(info['mass_kg'])}{' (estimated)' if info['mass_note'] != 'given' else ''}")
 
     def redraw_result(self):
         """Picture bar and summary text in the units shown (the conversion itself is unit-free)."""
@@ -597,6 +799,9 @@ class App:
     def clear_result(self):
         self.result = None
         self.result_inputs = None
+        self.result_views = None
+        if self.cur is not None:
+            self.cur.update(result=None, result_inputs=None, views=None)
         self.photos = []
         self.preview.config(image="")
         self.summary.config(text="")
@@ -607,26 +812,54 @@ class App:
     def install(self):
         if self.result is None or self.busy:
             return
+        if self.copy_items([self.cur], self.cur):
+            name = self.cur["name"]
+            self.status.config(text=f"Installed: CustomWeapon.ini now uses {name}.obj.")
+            messagebox.showinfo("Weapon Converter", f"{name} is installed.\n\nIn Half Sword, hold a sword in your "
+                                                    "right hand and press F9 to swap it for this weapon.")
+
+    def install_all(self):
+        if self.busy:
+            return
+        self.save_editor()
+        done = [it for it in self.items if it["result"] is not None]
+        if not done:
+            self.status.config(text="Convert the weapons first (Convert all).")
+            return
+        use = self.cur if self.cur in done else done[0]
+        if self.copy_items(done, use):
+            left = len(self.items) - len(done)
+            self.status.config(text=f"Installed {len(done)} weapons; CustomWeapon.ini uses {use['name']}.obj."
+                                    + (f" {left} not converted yet." if left else ""))
+            messagebox.showinfo("Weapon Converter",
+                                f"{len(done)} weapons are installed.\n\nThe game uses the one picked in the list "
+                                f"({use['name']}). To try another: pick it in the list and press \"Install into Half "
+                                "Sword\" (this works while the game runs), then hold a weapon in the right hand in "
+                                "Half Sword and press F9.")
+
+    def copy_items(self, items, use):
         mod_dir = self.mod_var.get()
         if not mod_dir or not os.path.isdir(mod_dir):
             messagebox.showerror("Weapon Converter", "Pick the HalfSwordCustomWeapon mod folder first.")
-            return
-        name = self.result[0]
+            return False
         try:
-            for f in os.listdir(self.work):
-                shutil.copy2(os.path.join(self.work, f), os.path.join(mod_dir, f))
-            set_model_in_ini(mod_dir, name + ".obj")
+            for it in items:
+                for f in os.listdir(it["work"]):
+                    shutil.copy2(os.path.join(it["work"], f), os.path.join(mod_dir, f))
+                it["status"] = "installed"
+                self.refresh_row(it)
+            set_model_in_ini(mod_dir, use["name"] + ".obj")
         except OSError as e:
             messagebox.showerror("Weapon Converter", f"Could not write to the mod folder:\n{e}")
-            return
-        self.status.config(text=f"Installed: CustomWeapon.ini now uses {name}.obj.")
-        messagebox.showinfo("Weapon Converter", f"{name} is installed.\n\nIn Half Sword, hold a sword in your "
-                                                "right hand and press F9 to swap it for this weapon.")
+            return False
+        return True
 
     # ---- plumbing --------------------------------------------------------------------------------------
     def run(self, fn, *args):
         self.busy = True
         self.convert_btn.config(state="disabled")
+        self.convert_all_btn.config(state="disabled")
+        self.install_all_btn.config(state="disabled")
         self.root.config(cursor="watch")
 
         def worker():
@@ -657,6 +890,20 @@ class App:
             self.log.see("end")
         elif kind == "measured":
             self.measured(a, b)
+        elif kind == "measure_failed":
+            it = self.item_of(a)
+            if it is not None:
+                it["status"] = f"cannot read it: {b}"
+                self.refresh_row(it)
+                if it is self.cur:
+                    self.model_info.config(text=f"That model could not be read: {b}")
+        elif kind == "progress":
+            a["status"] = b
+            self.refresh_row(a)
+            self.status.config(text=f"{a['name']}: {b}")
+        elif kind == "item_failed":
+            a["status"] = f"failed: {b}"
+            self.refresh_row(a)
         elif kind == "converted":
             self.converted(a, b)
         elif kind == "failed":
@@ -667,10 +914,17 @@ class App:
         elif kind == "done":
             self.busy = False
             self.convert_btn.config(state="normal")
+            self.convert_all_btn.config(state="normal")
+            self.install_all_btn.config(state="normal")
+            if self.batch_running:
+                self.batch_running = False
+                ok = sum(1 for it in self.items if it["result"] is not None)
+                self.status.config(text=f"{ok} of {len(self.items)} weapons converted. Pick one in the list to check "
+                                        "its picture, then \"Install all converted\".")
             self.root.config(cursor="")
 
     def close(self):
-        shutil.rmtree(self.work, ignore_errors=True)
+        shutil.rmtree(self.work_root, ignore_errors=True)
         self.root.destroy()
 
 
@@ -680,7 +934,7 @@ def main():
         ttk.Style(root).theme_use("vista")
     except tk.TclError:
         pass
-    App(root, sys.argv[1] if len(sys.argv) > 1 else None)
+    App(root, sys.argv[1:] or None)  # several files dropped on the exe arrive as several arguments
     root.mainloop()
 
 
