@@ -15630,6 +15630,39 @@ namespace
     // within 0.4 s (the item still in its Weapon Slot while this hand holds it), the mod frees it as that
     // break does (hs_draw_sheathe_calls.md, Drawn / break): BreakConstraint + destroy, Weapon Slot = None,
     // Sheath Slot = 3, Concrete = 11, flags off, Unsheathed Mode on the weapon.
+    // Off the back slot the game leaves a shield's BaseMesh kinematic (test 2026-11-21 21:55Z: "simulating 0"
+    // after Sheathe on Spawn Back and after every take; the hand's joint had nothing to pull and the slot
+    // joint's break left it hanging in the air). A belt mace stays simulating. Taken into a hand, the item
+    // is let off any parent it hangs from (keeping where it is) and made to simulate, as a loose one does.
+    void make_loose_simulating(UObject* w, const char* why)
+    {
+        UObject* base = w ? object_property(w, STR("BaseMesh")) : nullptr;
+        if (!base) return;
+        Call sim(base, STR("IsSimulatingPhysics"));
+        sim.run();
+        FProperty* sp = sim.param(STR("ReturnValue"));
+        if (sp && *(sim.buffer.data() + sp->GetOffset_Internal())) return;
+        Call ap(base, STR("GetAttachParent"));
+        ap.run();
+        UObject* parent = ap.object_result();
+        if (parent)
+        {
+            Call det(base, STR("K2_DetachFromComponent"));
+            det.byte(STR("LocationRule"), 1); // KeepWorld
+            det.byte(STR("RotationRule"), 1);
+            det.byte(STR("ScaleRule"), 1);
+            det.run();
+        }
+        Call on(base, STR("SetSimulatePhysics"));
+        on.first_flag(true);
+        on.run();
+        Call again(base, STR("IsSimulatingPhysics"));
+        again.run();
+        FProperty* ap2 = again.param(STR("ReturnValue"));
+        HSVR_LOG("Draw: %ls was not simulating (%s): %s, physics on (now simulating %d)", w->GetName().c_str(), why,
+                 parent ? "let off what it hung from" : "hung from nothing", ap2 ? (int)*(again.buffer.data() + ap2->GetOffset_Internal()) : -1);
+    }
+
     void slot_take_tick(UObject* pawn)
     {
         using namespace hsvr;
@@ -15666,6 +15699,7 @@ namespace
             set_bool_property(pawn, (std::wstring(L"Block ") + S + L" Weapon From Sheathing").c_str(), false);
             set_bool_property(pawn, STR("Cross Unsheath"), false);
             bool um = Call(st.weapon, STR("Unsheathed Mode")).run();
+            make_loose_simulating(st.weapon, "after the mod's slot break");
             HSVR_LOG("Draw: the game had not freed %ls from %ls after %.2f s: the mod broke %ls (joint %s, Unsheathed Mode %s)", st.weapon->GetName().c_str(), sd.var,
                      now_seconds() - st.t0, sd.constraint, joint ? "broken" : "missing", um ? "run" : "missing");
             st = SlotTake{};
@@ -15780,6 +15814,7 @@ namespace
             UObject* base0 = object_property(w, STR("BaseMesh"));
             Vec3 p0 = component_location(base0);
             Quat q0 = component_rotation(base0);
+            make_loose_simulating(w, sd.var == k_slots[4].var ? "on his back" : "on his belt");
             bool ok0 = give_hand_weapon(side, pawn, w);
             if (!ok0 || object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != w)
             {
