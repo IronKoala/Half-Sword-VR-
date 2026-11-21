@@ -340,6 +340,7 @@ namespace hsvr
         num("eye_up_cm", c.eye_up_cm);
         num("anchor_smoothing", c.anchor_smoothing);
         flag("tracking_current_anchor", c.tracking_current_anchor);
+        flag("anchor_room_unsmoothed", c.anchor_room_unsmoothed);
         num("near_clip_cm", c.near_clip_cm);
         integer("gamma_mode", c.gamma_mode);
         flag("ui_panel", c.ui_panel);
@@ -405,6 +406,8 @@ namespace hsvr
         flag("pose_head_lock", c.pose_head_lock);
         num("pose_head_lock_max_cm", c.pose_head_lock_max_cm);
         flag("pose_lean", c.pose_lean);
+        flag("pose_lean_head_angle", c.pose_lean_head_angle);
+        num("pose_lean_look_down_back_cm", c.pose_lean_look_down_back_cm);
         num("pose_lean_pitch_dead_deg", c.pose_lean_pitch_dead_deg);
         num("pose_lean_pitch_gain", c.pose_lean_pitch_gain);
         num("pose_lean_max_deg", c.pose_lean_max_deg);
@@ -414,7 +417,10 @@ namespace hsvr
         num("pose_lean_smooth_s", c.pose_lean_smooth_s);
         num("pose_lean_slack_cm", c.pose_lean_slack_cm);
         num("pose_lean_step_radius_cm", c.pose_lean_step_radius_cm);
+        num("pose_room_neck_base_cm", c.pose_room_neck_base_cm);
         num("pose_lean_walk_catchup_s", c.pose_lean_walk_catchup_s);
+        flag("pose_lean_follow_past_radius", c.pose_lean_follow_past_radius);
+        num("pose_lean_follow_speed_cms", c.pose_lean_follow_speed_cms);
         num("pose_lean_settle_s", c.pose_lean_settle_s);
         num("pose_lean_back_radius_cm", c.pose_lean_back_radius_cm);
         num("pose_lean_settle_speed_cms", c.pose_lean_settle_speed_cms);
@@ -426,6 +432,7 @@ namespace hsvr
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);
         flag("pose_body_turn", c.pose_body_turn);
+        flag("pose_mouse_off_with_controllers", c.pose_mouse_off_with_controllers);
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);
@@ -487,6 +494,10 @@ namespace hsvr
         num("pose_hold_let_go_grace_s", c.pose_hold_let_go_grace_s);
         flag("pose_hold_let_go_dead", c.pose_hold_let_go_dead);
         flag("pose_hold_measured_v", c.pose_hold_measured_v);
+        flag("pose_hold_joint", c.pose_hold_joint);
+        num("pose_hold_joint_stiffness", c.pose_hold_joint_stiffness);
+        num("pose_hold_joint_damping", c.pose_hold_joint_damping);
+        num("pose_hold_joint_max", c.pose_hold_joint_max);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
         flag("pose_hold_ignore_hand", c.pose_hold_ignore_hand);
         flag("pose_hold_block_offhand_search", c.pose_hold_block_offhand_search);
@@ -626,6 +637,8 @@ namespace hsvr
             num("pose_two_hand_mirror", m);
             c.pose_two_hand_mirror = (int)m;
         }
+        flag("pose_two_hand_twist_only", c.pose_two_hand_twist_only);
+        num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
         flag("pose_fists", c.pose_fists);
         text("pose_fist_class", c.pose_fist_class);
         flag("pose_fist_mark_spawned", c.pose_fist_mark_spawned);
@@ -785,6 +798,7 @@ namespace hsvr
         num("hit_buzz_min_intensity", c.hit_buzz_min_intensity);
         num("hit_buzz_limb_min_ms", c.hit_buzz_limb_min_ms);
         num("whoosh_vr_threshold_scale", c.whoosh_vr_threshold_scale);
+        num("whoosh_walk_speed_scale", c.whoosh_walk_speed_scale);
         flag("whoosh_log", c.whoosh_log);
         num("whoosh_log_min_speed", c.whoosh_log_min_speed);
         flag("stab_assist", c.stab_assist);
