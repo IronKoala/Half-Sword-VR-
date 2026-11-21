@@ -1961,6 +1961,8 @@ namespace
     std::atomic<bool> g_contact_log{true};
 
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
+    bool hand_on_grab(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
+    bool hand_rides_grab(int side);
     bool stuck_is_thrust(UObject* weapon);
     bool two_hand_pose(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool hand_on_scabbard(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
@@ -2478,6 +2480,7 @@ namespace
         g_solved_on[side] = on_weapon ? 1 : 0;
         if (two_hand_pose(side, target, Wh)) on_weapon = true, g_solved_on[side] |= 2;
         if (!on_weapon && hand_on_scabbard(side, target, Wh)) on_weapon = true, g_solved_on[side] |= 4;
+        if (!on_weapon && hand_on_grab(side, cfg, target, Wh)) on_weapon = true, g_solved_on[side] |= 8;
         // Where your real hand is, while his stays on a stopped weapon.
         ghost_hand(side, cfg, on_weapon && hand_on_weapon_amount(side) > 0.5 && length(controller_wrist - target) > cfg.pose_ghost_from_cm, controller_wrist,
                    controller_rot);
@@ -8194,6 +8197,8 @@ namespace
                 continue;
             }
             Vec3 hb = mesh ? socket_location(mesh, bone_fname(L ? "hand_l" : "hand_r")) : Vec3{};
+            // A hand riding the held body (hand_on_grab) is on it: the stretch is your hand's.
+            if (hand_rides_grab(side) && g_pose.hand_valid[side]) hb = g_pose.target[side];
             if (!b.on)
             {
                 b.on = true;
@@ -8878,6 +8883,7 @@ namespace
         double mass = 1.0, last_drive_log = -10.0;
         hsvr::Vec3 last_hand;
         bool have_last_hand = false;
+        double ride = 0.0, ride_off = 0.0; // how much his drawn hand rides the held thing, and how far it is
     };
     WrapGrab g_wrap[2];
     const double kWrapSamples[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
@@ -9233,6 +9239,54 @@ namespace
         }
         g.last_hand = g_pose.target[side];
         g.have_last_hand = true;
+    }
+
+    // His drawn hand rides what it holds (his framework, creature_holds: hand = part frame o stored
+    // hand, so a heavy body shows as the hand being held back): the hand goes where it would put the
+    // palm on the held spot, eased in over pose_wrap_ease_s after seating and by how far the held
+    // thing is from where your hand wants it (from pose_grab_ride_from_cm, full at
+    // pose_grab_ride_full_cm). The mod's pull and the slip check use your controller, not this hand.
+    // Bodies always; loose objects only with pose_grab_ride_objects (the hold keeps them ~1 cm).
+    hsvr::Quat slerp_q(const hsvr::Quat& a, const hsvr::Quat& b, double u)
+    {
+        using namespace hsvr;
+        Quat d = (b * a.inverse()).normalized();
+        if (d.w < 0.0) d = Quat{-d.x, -d.y, -d.z, -d.w};
+        Vec3 sa = scaled_axis(d);
+        double ang = length(sa);
+        if (ang < 1e-9) return a;
+        return (quat_axis_angle(sa * (1.0 / ang), ang * u) * a).normalized();
+    }
+    bool hand_rides_grab(int side)
+    {
+        const WrapGrab& g = g_wrap[side];
+        return g.on && g.seated && g.comp && g.ride > 0.0;
+    }
+    bool hand_on_grab(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot)
+    {
+        using namespace hsvr;
+        WrapGrab& g = g_wrap[side];
+        g.ride = 0.0;
+        if (!cfg.pose_grab_ride || !g.on || !g.seated || !g.comp || !g_pose.pawn) return false;
+        if (!g.body && !cfg.pose_grab_ride_objects) return false;
+        if (!bool_property(g_pose.pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R"))) return false;
+        Vec3 bp = g.boned ? socket_location(g.comp, g.bone) : component_location(g.comp);
+        Quat bq = g.boned ? socket_rotation(g.comp, g.bone) : component_rotation(g.comp);
+        Quat rq = (bq * g.rel_rot.inverse()).normalized();
+        Vec3 rp = bp - rq.rotate(g.rel_pos);
+        double off = length(rp - target);
+        double from = cfg.pose_grab_ride_from_cm, full = (std::max)(from + 0.1, cfg.pose_grab_ride_full_cm);
+        double by_gap = (std::max)(0.0, (std::min)(1.0, (off - from) / (full - from)));
+        double by_time = wrap_smooth((now_seconds() - g.seated_at) / (std::max)(0.01, cfg.pose_wrap_ease_s));
+        double u = by_gap * by_time;
+        // Too far (past your reach of it): left to the slip rule, the hand stays yours.
+        if (off > cfg.pose_grab_ride_max_cm) u = 0.0;
+        g.ride = u;
+        g.ride_off = off;
+        if (u <= 0.0) return false;
+        target = target + (rp - target) * u;
+        hand_rot = slerp_q(hand_rot, rq, u);
+        return true;
     }
     // Game tick: a hand the game's grab holds something with (a body, a loose object) wraps it.
     void wrap_tick(const hsvr::Config& cfg, UObject* pawn)

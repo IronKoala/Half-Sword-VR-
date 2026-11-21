@@ -743,6 +743,13 @@ namespace hsvr
         double pose_grab_drive_ang_accel = 1200.0;
         double pose_grab_body_pull_n = 600.0;
         double pose_grab_body_pull_hz = 4.0;
+        // His drawn hand rides a held body (his framework): it stays with the palm on the held spot, fully
+        // once the body is ride_full_cm from where your hand wants it (from ride_from_cm), up to ride_max_cm.
+        bool pose_grab_ride = true;
+        bool pose_grab_ride_objects = false;
+        double pose_grab_ride_from_cm = 0.5;
+        double pose_grab_ride_full_cm = 2.0;
+        double pose_grab_ride_max_cm = 40.0;
         bool log_wrap = true;
         // Once a second while fingers are posed: each finger's bends before/after and where its tip went.
         bool log_fingers = true;

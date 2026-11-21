@@ -209,6 +209,11 @@ LAYOUT = [
         ("pose_grab_drive_ang_accel", ""),
         ("pose_grab_body_pull_n", ""),
         ("pose_grab_body_pull_hz", ""),
+        ("pose_grab_ride", "1 = your hand stays on a grabbed NPC (neck, arm) instead of floating off it."),
+        ("pose_grab_ride_objects", ""),
+        ("pose_grab_ride_from_cm", ""),
+        ("pose_grab_ride_full_cm", ""),
+        ("pose_grab_ride_max_cm", ""),
         ("pose_fingers_anim_only", ""),
     ]),
     ("Holding: weight, strength, stamina", "The main feel values are in Quick settings.", [
