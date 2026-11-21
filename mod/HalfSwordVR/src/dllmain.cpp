@@ -1683,9 +1683,9 @@ namespace
                 }
                 if (!g_pose.ankle_measured[side]) continue; // the game's own foot until then
             }
-            // From a step (50 cm) above where he stands, not from his middle: from the middle a foot
+            // From a step (30 cm) above where he stands, not from his middle: from the middle a foot
             // under a 105 cm weapon table found its top and he was stood on it (table test U2).
-            double foot_from = g_pose.mesh ? (std::min)(actor.z, actor.z - 90.0 * component_scale_z(g_pose.mesh) + 50.0) : actor.z;
+            double foot_from = g_pose.mesh ? (std::min)(actor.z, actor.z - 90.0 * component_scale_z(g_pose.mesh) + 30.0) : actor.z;
             if (ground_below(pawn, f.at.x, f.at.y, foot_from, floor_z))
             {
                 f.ground_z = floor_z + g_pose.ankle_height[side];
@@ -16476,7 +16476,7 @@ namespace
             // It can also miss among loose weapons and shields (it looks through only 5 of them).
             // Either way the feet's floor is used; with neither there is no floor and he falls.
             static double last_floor_z = 0.0, last_floor_t = -100.0;
-            const double step_up = 40.0;
+            const double step_up = 30.0;
             if (floor)
             {
                 double ref = feet ? feet_z : last_floor_z;
