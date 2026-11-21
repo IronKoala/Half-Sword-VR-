@@ -12390,6 +12390,7 @@ namespace
         hsvr::Vec3 made_at{0, 0, 0}; // the point it was made at, in the weapon's frame
         bool turns = false;
         bool touched = false;
+        int drives = -1; // which angular drives are on: bit 0 twist, bit 1 swing (-1 = not set yet)
     };
     JointHand g_jh[2][2]; // [side][0 = the hand's own joint, 1 = its joint as the second hand on the other's weapon]
 
@@ -12480,7 +12481,9 @@ namespace
             ab.flag(STR("bNewAbsoluteRotation"), true);
             ab.flag(STR("bNewAbsoluteScale"), true);
             ab.run();
-            set_component_transform(c, at_world, sphere_rot, true);
+            // The joint's X axis (its twist axis) along the weapon's length (+Z), so two hands can
+            // drive only the twist (the roll) and leave the direction to the two hands' pulls.
+            set_component_transform(c, at_world, hsvr::quat_from_two(sphere_rot.rotate(hsvr::Vec3{0, 0, 1}), sphere_rot.rotate(hsvr::Vec3{1, 0, 0})), true);
             for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
             {
                 Call c1(c, fn);
@@ -12514,14 +12517,8 @@ namespace
             vel.flag(STR("bEnableDriveZ"), true);
             vel.run();
             Call mode(c, STR("SetAngularDriveMode"));
-            mode.byte(STR("DriveMode"), 0); // SLERP
+            mode.byte(STR("DriveMode"), 1); // TwistAndSwing (set per tick in jh_drive)
             mode.run();
-            Call slerp(c, STR("SetOrientationDriveSLERP"));
-            slerp.first_flag(turns);
-            slerp.run();
-            Call aslerp(c, STR("SetAngularVelocityDriveSLERP"));
-            aslerp.first_flag(turns);
-            aslerp.run();
         }
         j.sphere = s;
         j.con = c;
@@ -12533,8 +12530,20 @@ namespace
         return true;
     }
 
-    void jh_drive(JointHand& j, double k, double c, double fmax, double ka, double ca, double tmax)
+    void jh_drive(JointHand& j, double k, double c, double fmax, double ka, double ca, double tmax, bool swing = true)
     {
+        int want = j.turns ? (1 | (swing ? 2 : 0)) : 0;
+        if (want != j.drives)
+        {
+            j.drives = want;
+            for (const TCHAR* fn : {STR("SetOrientationDriveTwistAndSwing"), STR("SetAngularVelocityDriveTwistAndSwing")})
+            {
+                Call d(j.con, fn);
+                d.flag(STR("bEnableTwistDrive"), (want & 1) != 0);
+                d.flag(STR("bEnableSwingDrive"), (want & 2) != 0);
+                d.run();
+            }
+        }
         Call lin(j.con, STR("SetLinearDriveParams"));
         lin.number(STR("PositionStrength"), k);
         lin.number(STR("VelocityStrength"), c);
@@ -12592,7 +12601,10 @@ namespace
         double k = pk * st / mm, c = pc * dst / mm, fcap = pf * mx * (std::max)(0.0, body.total) / mm * 100.0;
         double ka = rk * st / I / ang_scale, ca = rc * dst / I / ang_scale, tcap = rf * mx * (std::max)(0.0, two ? 0.5 * (body.total + s2b.total) : body.total) / I;
         set_component_transform(m.sphere, target_pos, target_rot, false);
-        jh_drive(m, k, c, fcap, ka, ca, tcap);
+        // Two hands: the main hand only rolls it (pose_two_hand_twist_only, as the old hold); where it
+        // points is the two hands' pulls. One hand: twist and swing, a full turn.
+        bool swing = !(two && cfg.pose_two_hand_twist_only);
+        jh_drive(m, k, c, fcap, ka, ca, tcap, swing);
         if (two)
         {
             JointHand& o = g_jh[g_two.second][1];
