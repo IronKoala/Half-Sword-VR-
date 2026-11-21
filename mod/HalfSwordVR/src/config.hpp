@@ -915,6 +915,14 @@ namespace hsvr
         int helmet_see_through_mode = 0;
         std::string helmet_see_through_param = "RT_Damage";
         int helmet_see_through_test = 0;
+        // helmet_view 5: your helmet faded in your view (an only-you-see copy drawn with a translucent
+        // material the game ships). helmet_fade_see_through 0 = solid, 1 = invisible. The material has
+        // no colour texture: helmet_fade_tint is the metal colour "r,g,b" (0-1).
+        double helmet_fade_see_through = 0.5;
+        std::string helmet_fade_tint = "0.55,0.55,0.58";
+        double helmet_fade_metallic = 1.0;
+        double helmet_fade_roughness = 0.35;
+        std::string helmet_fade_material = "/DatasmithContent/Materials/StdTranslucent/M_StdTranslucent.M_StdTranslucent";
         // The gore skeleton under his skin (skull, jaw, teeth, throat) would show from inside the
         // hidden head: it is hidden from this bone up. Empty = not hidden. Wounds elsewhere still
         // show their bones.

@@ -14685,9 +14685,9 @@ namespace
         bool any_worn = false;
         for (const HeadWear& w : g_head_wear)
             if (w.comp && !gone(w.comp)) any_worn = true;
-        if (first_person && (cfg.helmet_view == 1 || cfg.helmet_view == 2))
+        if (first_person && (cfg.helmet_view == 1 || cfg.helmet_view == 2 || cfg.helmet_view == 5))
             for (const HeadWear& w : g_head_wear)
-                if (w.comp && !gone(w.comp) && (w.slot == 2 || cfg.helmet_view == 2)) want.push_back(w.comp);
+                if (w.comp && !gone(w.comp) && (w.slot == 2 || cfg.helmet_view != 1)) want.push_back(w.comp);
         // 3: a clear window. The eyes' near clip moves out to helmet_window_cm while something is
         // worn on the head, so the walls right around your eyes (visor, cheek plates: 2-6 cm away)
         // aren't drawn while the brim and shell further out still are. Anything else that close to
@@ -14911,6 +14911,219 @@ namespace
         was = want;
     }
 
+    // ---- helmet_view 5: your helmet faded (see-through) in your own view -------------------------
+    // The real head pieces are hidden from you (OwnerNoSee + CastHiddenShadow: others see them, the
+    // shadow stays). Each gets an only-you-see copy: a SkeletalMeshComponent with the same mesh,
+    // attached to the real piece and leader-posed by it (so it follows the helmet late move), no
+    // collision, no shadow, drawn with a translucent material the game already ships (Datasmith's
+    // lit M_StdTranslucent, which has skinned-mesh shaders). That material has no colour texture:
+    // the copy is one metal tint with the helmet's own normal map. Only the player's own helmet,
+    // only in his view; nobody else's helmet is touched.
+    struct FadeCopy
+    {
+        UObject* real;
+        UObject* copy;
+    };
+    std::vector<FadeCopy> g_fade;
+    UObject* g_fade_pawn = nullptr;
+    std::string g_fade_key; // the scalars last written
+
+    void fade_clear(const char* why)
+    {
+        for (const FadeCopy& f : g_fade)
+            if (f.copy && !gone(f.copy) && object_alive(f.copy))
+            {
+                Call d(f.copy, STR("K2_DestroyComponent"));
+                d.object(STR("Object"), f.copy);
+                d.run();
+            }
+        if (!g_fade.empty()) HSVR_LOG("Helmet fade: %zu see-through cop%s removed (%s)", g_fade.size(), g_fade.size() == 1 ? "y" : "ies", why);
+        g_fade.clear();
+        g_fade_key.clear();
+    }
+
+    void fade_set_params(const hsvr::Config& cfg, bool force)
+    {
+        char key[160];
+        std::snprintf(key, sizeof key, "%.3f/%s/%.3f/%.3f", cfg.helmet_fade_see_through, cfg.helmet_fade_tint.c_str(), cfg.helmet_fade_metallic, cfg.helmet_fade_roughness);
+        if (!force && g_fade_key == key) return;
+        g_fade_key = key;
+        double tint[3] = {0.55, 0.55, 0.58};
+        std::sscanf(cfg.helmet_fade_tint.c_str(), "%lf,%lf,%lf", &tint[0], &tint[1], &tint[2]);
+        float opacity = (float)(1.0 - (std::clamp)(cfg.helmet_fade_see_through, 0.0, 1.0));
+        for (const FadeCopy& f : g_fade)
+        {
+            if (!f.copy || gone(f.copy)) continue;
+            Call nm(f.copy, STR("GetNumMaterials"));
+            nm.run();
+            int n = nm.integer();
+            for (int i = 0; i < n && i < 16; ++i)
+            {
+                Call gm(f.copy, STR("GetMaterial"));
+                put_int(gm, STR("ElementIndex"), i);
+                gm.run();
+                UObject* mid = gm.object_result();
+                if (!mid || mid->GetClassPrivate()->GetName().find(STR("MaterialInstanceDynamic")) == std::wstring::npos) continue;
+                auto vec = [&](const TCHAR* name, float r, float g, float b, float a) {
+                    Call v(mid, STR("SetVectorParameterValue"));
+                    v.name(STR("ParameterName"), FName(name, FNAME_Add));
+                    float c[4] = {r, g, b, a};
+                    put_raw(v, STR("Value"), c, sizeof c);
+                    v.run();
+                };
+                auto scalar = [&](const TCHAR* name, double value) {
+                    Call s(mid, STR("SetScalarParameterValue"));
+                    s.name(STR("ParameterName"), FName(name, FNAME_Add));
+                    s.number(STR("Value"), value);
+                    s.run();
+                };
+                vec(STR("TintColor"), (float)tint[0], (float)tint[1], (float)tint[2], 1.0f);
+                // Opacity in the first channel, refraction (index 1 = none) in the second.
+                vec(STR("OpacityAndRefraction"), opacity, 1.0f, 0.0f, 0.0f);
+                scalar(STR("OpacityAndRefraction"), opacity);
+                scalar(STR("MetallicAmount"), cfg.helmet_fade_metallic);
+                scalar(STR("RoughnessAmount"), cfg.helmet_fade_roughness);
+            }
+        }
+        if (!g_fade.empty())
+            HSVR_LOG("Helmet fade: see-through %.2f (opacity %.2f), tint %.2f %.2f %.2f, metallic %.2f, roughness %.2f", cfg.helmet_fade_see_through, opacity, tint[0], tint[1], tint[2],
+                     cfg.helmet_fade_metallic, cfg.helmet_fade_roughness);
+    }
+
+    // Returns false when the fade can't be made (material missing): the caller then just hides the helmet.
+    bool helmet_fade_update(const hsvr::Config& cfg, bool first_person, UObject* pawn)
+    {
+        static bool failed = false;
+        static std::string failed_path;
+        bool want = first_person && cfg.helmet_view == 5 && pawn;
+        std::vector<UObject*> pieces;
+        if (want)
+            for (const HeadWear& w : g_head_wear)
+                if (w.comp && !gone(w.comp)) pieces.push_back(w.comp);
+        bool same = want && pawn == g_fade_pawn && pieces.size() == g_fade.size();
+        if (same)
+            for (const FadeCopy& f : g_fade)
+                if (gone(f.real) || gone(f.copy) || std::find(pieces.begin(), pieces.end(), f.real) == pieces.end()) same = false;
+        if (!same) fade_clear(!want ? "helmet_view not 5" : pawn != g_fade_pawn ? "new character" : "head pieces changed");
+        if (!want || pieces.empty()) return true;
+        if (same)
+        {
+            fade_set_params(cfg, false);
+            return true;
+        }
+        if (failed && failed_path == cfg.helmet_fade_material) return false;
+        std::wstring mpath(cfg.helmet_fade_material.begin(), cfg.helmet_fade_material.end());
+        UObject* base = load_asset_object(mpath);
+        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.SkeletalMeshComponent"));
+        if (!base || !cls)
+        {
+            failed = true;
+            failed_path = cfg.helmet_fade_material;
+            HSVR_LOG("Helmet fade: %ls %ls; your helmet is just hidden from you instead (like helmet_view 1)", base ? STR("SkeletalMeshComponent class") : STR("material"),
+                     base ? STR("not found") : (mpath + STR(" could not be loaded")).c_str());
+            return false;
+        }
+        g_fade_pawn = pawn;
+        for (UObject* real : pieces)
+        {
+            UObject* mesh = object_property(real, STR("SkeletalMesh"));
+            if (!mesh) mesh = object_property(real, STR("SkeletalMeshAsset"));
+            if (!mesh) continue;
+            Call add(pawn, STR("AddComponentByClass"));
+            add.object(STR("Class"), cls);
+            add.flag(STR("bManualAttachment"), true);
+            if (FProperty* t = add.param(STR("RelativeTransform")))
+            {
+                uint8_t* at = add.buffer.data() + t->GetOffset_Internal();
+                UScriptStruct* type = struct_type(t);
+                if (FProperty* r = struct_member(type, STR("Rotation")))
+                    if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                    {
+                        uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                        if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                        else *reinterpret_cast<float*>(wat) = 1.0f;
+                    }
+                if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+            }
+            add.flag(STR("bDeferredFinish"), false);
+            if (!add.run() || !add.object_result())
+            {
+                HSVR_LOG("Helmet fade: could not add a copy for %ls", real->GetName().c_str());
+                continue;
+            }
+            UObject* c = add.object_result();
+            bool set = false;
+            for (const TCHAR* fn : {STR("SetSkeletalMeshAsset"), STR("SetSkinnedAssetAndUpdate"), STR("SetSkeletalMesh")})
+            {
+                Call sm(c, fn);
+                if (!sm.fn) continue;
+                for (const TCHAR* pn : {STR("NewMesh"), STR("NewAsset"), STR("InSkeletalMesh")}) sm.object(pn, mesh);
+                sm.run();
+                set = true;
+                break;
+            }
+            Call at_call(c, STR("K2_AttachToComponent"));
+            at_call.object(STR("Parent"), real);
+            at_call.name(STR("SocketName"), FName(STR("None"), FNAME_Add));
+            at_call.byte(STR("LocationRule"), 2); // SnapToTarget
+            at_call.byte(STR("RotationRule"), 2);
+            at_call.byte(STR("ScaleRule"), 2);
+            at_call.flag(STR("bWeldSimulatedBodies"), false);
+            at_call.run();
+            Call lp(c, STR("SetLeaderPoseComponent"));
+            lp.object(STR("NewLeaderBoneComponent"), real);
+            lp.flag(STR("bForceUpdate"), true);
+            lp.flag(STR("bFollowerShouldTickPose"), false);
+            lp.run();
+            Call ce(c, STR("SetCollisionEnabled"));
+            ce.byte(STR("NewType"), 0);
+            ce.run();
+            Call cs(c, STR("SetCastShadow"));
+            cs.first_flag(false);
+            cs.run();
+            Call only(c, STR("SetOnlyOwnerSee"));
+            only.first_flag(true);
+            only.run();
+            Call nm(c, STR("GetNumMaterials"));
+            nm.run();
+            int n = (std::max)(1, nm.integer());
+            // The helmet's own normal map (the master's global "N"), when its material has one.
+            UObject* normal = nullptr;
+            {
+                Call gm(real, STR("GetMaterial"));
+                put_int(gm, STR("ElementIndex"), 0);
+                gm.run();
+                if (UObject* rm = gm.object_result())
+                {
+                    Call get(rm, STR("K2_GetTextureParameterValue"));
+                    get.name(STR("ParameterName"), FName(STR("N"), FNAME_Add));
+                    get.run();
+                    normal = get.object_result();
+                }
+            }
+            for (int i = 0; i < n && i < 16; ++i)
+            {
+                Call cd(c, STR("CreateDynamicMaterialInstance"));
+                put_int(cd, STR("ElementIndex"), i);
+                cd.object(STR("SourceMaterial"), base);
+                cd.run();
+                UObject* mid = cd.object_result();
+                if (mid && normal && i == 0)
+                {
+                    Call st(mid, STR("SetTextureParameterValue"));
+                    st.name(STR("ParameterName"), FName(STR("NormalMap"), FNAME_Add));
+                    st.object(STR("Value"), normal);
+                    st.run();
+                }
+            }
+            g_fade.push_back({real, c});
+            HSVR_LOG("Helmet fade: see-through copy of %ls (%ls, %d material slot%s, mesh %s, normal map %ls) made, only you see it", real->GetName().c_str(), mesh->GetName().c_str(), n,
+                     n == 1 ? "" : "s", set ? "set" : "NOT set", normal ? normal->GetName().c_str() : STR("none"));
+        }
+        fade_set_params(cfg, true);
+        return true;
+    }
+
     void hide_own_head(const hsvr::Config& cfg)
     {
         constexpr int N = 2;
@@ -14929,6 +15142,7 @@ namespace
         see_fp = willie && pawn == g_helmet_pawn && cfg.anchor == "head" && !hsvr::shared().third_person.load() && hsvr::shared().stereo_installed.load();
         helmet_view_update(cfg, see_fp);
         helmet_see_through_update(cfg, see_fp, pawn);
+        helmet_fade_update(cfg, see_fp, pawn);
         UObject* parts[N] = {nullptr, nullptr};
         if (willie)
         {
