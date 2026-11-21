@@ -15662,6 +15662,21 @@ namespace
                       sp ? (int)*(sim.buffer.data() + sp->GetOffset_Internal()) : -1, mp ? (double)*reinterpret_cast<float*>(m.buffer.data() + mp->GetOffset_Internal()) : -1.0);
         return buf;
     }
+    bool is_simulating(UObject* base);
+    // A live body the hand can move: simulating, with collision, and its welded parts' mass (off the
+    // back it read simulating 1 at the take yet collision 0 / mass 0.05 a tick later: 23:35Z test).
+    bool body_live(UObject* base)
+    {
+        Call ce(base, STR("GetCollisionEnabled"));
+        ce.run();
+        FProperty* cp = ce.param(STR("ReturnValue"));
+        Call m(base, STR("GetMass"));
+        m.run();
+        FProperty* mp = m.param(STR("ReturnValue"));
+        bool coll = !cp || *(ce.buffer.data() + cp->GetOffset_Internal()) != 0;
+        bool mass = !mp || *reinterpret_cast<float*>(m.buffer.data() + mp->GetOffset_Internal()) > 0.1f;
+        return coll && mass && is_simulating(base);
+    }
     bool is_simulating(UObject* base)
     {
         Call sim(base, STR("IsSimulatingPhysics"));
@@ -15762,6 +15777,14 @@ namespace
             if (now_seconds() - st.t0 < 0.4) continue;
             free_slot(pawn, st.slot, st.weapon, "the game had not after 0.4 s");
             make_loose_simulating(st.weapon, "after the mod's slot break");
+            // The rebuilt body is a new physics body: the hold's no-collide joints against his own bodies
+            // (made at the take) no longer apply, and it was pinned on his own upper arm and pelvis (23:35Z
+            // test: 1100-1400 N, 80 cm behind). Made again for the new body.
+            if (UObject* b = object_property(st.weapon, STR("BaseMesh")))
+            {
+                clear_arm_ignore(side);
+                ignore_arm_collision(pawn, object_property(pawn, STR("Mesh")), st.weapon, b, side);
+            }
             st = SlotTake{};
         }
     }
@@ -15875,7 +15898,7 @@ namespace
             Vec3 p0 = component_location(base0);
             Quat q0 = component_rotation(base0);
             bool freed = false;
-            if (!is_simulating(base0))
+            if (!body_live(base0))
             {
                 freed = true;
                 // Off the back (or any slot that left it without a live body): freed and rebuilt first,
