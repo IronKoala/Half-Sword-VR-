@@ -1548,18 +1548,23 @@ namespace
     // was). A sphere swept from his shoulder to his palm on the Visibility channel, complex collision
     // (the Yard fence is triangles only); creatures and weapons are looked through. `stop`: where the
     // sphere's centre stops. False when nothing is in the way.
-    bool hand_world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, hsvr::Vec3& stop)
+    // One sweep on the Visibility channel, simple collision unless `complex`: a sphere (half 0) or an
+    // upright capsule. Looks through him, creatures, weapons and anything simulating physics (loose
+    // items get pushed, not walked into). `stop`: the shape's centre where it stops, `normal`: the
+    // surface's. False when nothing is in the way, or the shape starts inside something.
+    bool world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, double half, bool complex, hsvr::Vec3& stop, hsvr::Vec3* normal = nullptr)
     {
         static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
         static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
         if (!cdo || !gs || !g_pose.pawn) return false;
-        Call trace(cdo, STR("SphereTraceSingle"));
+        Call trace(cdo, half > 0.0 ? STR("CapsuleTraceSingle") : STR("SphereTraceSingle"));
         if (!trace.fn) return false;
         trace.object(STR("WorldContextObject"), g_pose.pawn);
         trace.three(STR("Start"), from.x, from.y, from.z);
         trace.three(STR("End"), to.x, to.y, to.z);
         trace.number(STR("Radius"), radius);
-        trace.flag(STR("bTraceComplex"), true);
+        if (half > 0.0) trace.number(STR("HalfHeight"), half);
+        trace.flag(STR("bTraceComplex"), complex);
         trace.flag(STR("bIgnoreSelf"), true);
         if (!trace.run()) return false;
         FProperty* ret = trace.param(STR("ReturnValue"));
@@ -1574,9 +1579,76 @@ namespace
         UObject* actor = b.object_result(STR("HitActor"));
         if (actor && (actor == g_pose.pawn || is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")))) return false;
         FProperty* ip = b.param(STR("bInitialOverlap"));
-        if (ip && *(b.buffer.data() + ip->GetOffset_Internal()) != 0) return false; // his shoulder already in it: leave the hand be
+        if (ip && *(b.buffer.data() + ip->GetOffset_Internal()) != 0) return false; // already in it: leave it be
+        if (UObject* comp = b.object_result(STR("HitComponent")))
+        {
+            Call sim(comp, STR("IsSimulatingPhysics"));
+            if (sim.fn)
+            {
+                static const FName none_name = FName(STR("None"), FNAME_Add);
+                sim.name(STR("BoneName"), none_name);
+                if (sim.run())
+                    if (FProperty* r = sim.param(STR("ReturnValue")); r && *(sim.buffer.data() + r->GetOffset_Internal()) != 0) return false;
+            }
+        }
         stop = b.vec(STR("Location"));
+        if (normal) *normal = b.vec(STR("Normal"));
         return true;
+    }
+
+    // A free hand stops at the world (Matthew 2026-11-22 03:56: "my hand defies the laws of physics…
+    // I can just put my hand inside of the post"; nothing stopped it, it went wherever the controller
+    // was). A sphere swept from his shoulder to his palm, complex collision (the Yard fence is
+    // triangles only).
+    bool hand_world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, hsvr::Vec3& stop)
+    {
+        return world_sweep(from, to, radius, 0.0, true, stop);
+    }
+
+    hsvr::Vec3 g_wall_ok;          // where his capsule last stood legally (pose_body_wall_stop)
+    bool g_wall_ok_have = false;
+    // He stops at walls (pose_body_wall_stop). Matthew 2026-11-22 04:00: "I can just walk through the
+    // post as if it's not even there. Can I walk through walls?" Yes: Willie's CollisionCylinder ignores
+    // WorldStatic (the game's ragdoll body pushed him back off walls; the posed body doesn't). His
+    // capsule's move from `from` to `to` (sideways only) is swept as a capsule from a step above his
+    // feet to his head, and stops at the first wall, sliding along it. Returns where he may stand.
+    hsvr::Vec3 body_wall_sweep(UObject* pawn, const hsvr::Vec3& from, const hsvr::Vec3& to, bool& blocked)
+    {
+        using namespace hsvr;
+        blocked = false;
+        const Config cfg = config();
+        Vec3 move{to.x - from.x, to.y - from.y, 0.0};
+        double len = length(move);
+        if (!cfg.pose_body_wall_stop || len < 0.05 || len > 100.0) return to; // over 1 m in a tick: a teleport
+        UObject* cyl = object_property(pawn, STR("CapsuleComponent"));
+        if (!cyl) return to;
+        double r = 34.0, h = 90.0;
+        { Call c(cyl, STR("GetScaledCapsuleRadius")); if (c.run()) r = c.number(); }
+        { Call c(cyl, STR("GetScaledCapsuleHalfHeight")); if (c.run()) h = c.number(); }
+        r = (std::max)(5.0, r * cfg.pose_body_wall_radius_share);
+        double lift = (std::min)(cfg.pose_body_wall_step_cm, h); // the bottom: this far above his feet
+        double half = (std::max)(r, h - lift * 0.5);
+        double dz = lift * 0.5;
+        Vec3 a{from.x, from.y, to.z + dz}, b{to.x, to.y, to.z + dz};
+        Vec3 at, n;
+        if (!world_sweep(a, b, r, half, false, at, &n)) return to;
+        blocked = true;
+        n.z = 0.0;
+        if (length(n) < 1e-3) n = normalized(a - b);
+        n = normalized(n);
+        Vec3 stop = at + n * 0.1;
+        // Slide along it with what is left.
+        Vec3 rest = b - stop;
+        rest = rest - n * dot(rest, n);
+        rest.z = 0.0;
+        if (length(rest) > 0.05)
+        {
+            Vec3 at2, n2;
+            Vec3 end = stop + rest;
+            stop = world_sweep(stop, end, r, half, false, at2, &n2) ? at2 + normalized(Vec3{n2.x, n2.y, 0.0}) * 0.1 : end;
+        }
+        HSVR_LOG_EVERY(1.0, "Wall: he stopped at a wall %.1f cm short of where he was going (radius %.0f, capsule %.0f)", length(b - stop), r, h);
+        return {stop.x, stop.y, to.z};
     }
 
     struct FootState
@@ -3827,6 +3899,9 @@ namespace
                 else if (length(follow) > 0.3)
                 {
                     Vec3 want = actor + base.rotate(follow);
+                    // Not into a wall (his capsule doesn't block on scenery; the sweep below doesn't stop it).
+                    bool walled = false;
+                    want = body_wall_sweep(pawn, actor, want, walled);
                     Call move(pawn, STR("K2_SetActorLocation"));
                     move.three(STR("NewLocation"), want.x, want.y, want.z);
                     move.flag(STR("bSweep"), true);
@@ -3838,6 +3913,7 @@ namespace
                     g_pose_room_moved_local.z = 0.0;
                     actor = actor + moved;
                     room = moved;
+                    g_wall_ok = actor_location(pawn), g_wall_ok_have = true;
                 }
             }
         }
@@ -4690,6 +4766,37 @@ namespace
         }
         if (!is_receive_tick(context, function)) return;
         g_hold_location = actor_location(context);
+        // The character movement (your stick) has moved him since the last tick: not into a wall.
+        if (g_pose_active.load() && g_wall_ok_have)
+        {
+            bool blocked = false;
+            hsvr::Vec3 ok = body_wall_sweep(context, g_wall_ok, g_hold_location, blocked);
+            if (blocked)
+            {
+                Call put(context, STR("K2_SetActorLocation"));
+                put.three(STR("NewLocation"), ok.x, ok.y, ok.z);
+                put.flag(STR("bSweep"), false);
+                put.flag(STR("bTeleport"), true);
+                put.run();
+                // Its speed into the wall goes too, so it doesn't push on next tick.
+                if (UObject* movement = object_property(context, STR("CharacterMovement")))
+                    if (FProperty* vp = prop_chain(movement, STR("Velocity")))
+                    {
+                        double v[3] = {0, 0, 0};
+                        read_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v);
+                        hsvr::Vec3 want{g_hold_location.x - g_wall_ok.x, g_hold_location.y - g_wall_ok.y, 0.0}, got{ok.x - g_wall_ok.x, ok.y - g_wall_ok.y, 0.0};
+                        hsvr::Vec3 into = want - got;
+                        if (hsvr::length(into) > 1e-3)
+                        {
+                            hsvr::Vec3 d = hsvr::normalized(into);
+                            double k = v[0] * d.x + v[1] * d.y;
+                            if (k > 0.0) v[0] -= d.x * k, v[1] -= d.y * k;
+                            write_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v[0], v[1], v[2]);
+                        }
+                    }
+                g_hold_location = ok;
+            }
+        }
         g_hold_have = true;
         {
             FProperty* p = prop_chain(context, STR("Step Height 2"));
@@ -18708,7 +18815,11 @@ namespace
         { HSVR_SUB("after:install_hit_haptics"); install_hit_haptics(); }
         { HSVR_SUB("after:install_body_contact"); install_body_contact(); }
         { HSVR_SUB("after:grip_flip_tick"); grip_flip_tick(context); }
-        if (!g_hold_have || !g_hold_capsule.load()) return;
+        if (!g_hold_have || !g_hold_capsule.load())
+        {
+            if (g_pose_active.load()) g_wall_ok = actor_location(context), g_wall_ok_have = true;
+            return;
+        }
         g_hold_have = false;
         HSVR_SUB("after:capsule_hold");
         using namespace hsvr;
@@ -18901,6 +19012,7 @@ namespace
             put.flag(STR("bTeleport"), true);
             put.run();
         }
+        g_wall_ok = keep, g_wall_ok_have = true;
         for (const TCHAR* name : {STR("Pain Stumble Immediate"), STR("Pain Stumble Delayed"), STR("Stumble Direction"), STR("Dodge Vector")})
         {
             FProperty* p = prop_chain(context, name);
@@ -22802,6 +22914,7 @@ namespace
                 mv.three(STR("NewLocation"), at.x, at.y, at.z);
                 mv.flag(STR("bTeleport"), true);
                 mv.run();
+                g_wall_ok = actor_location(player), g_wall_ok_have = true; // a test's placement, not a walk
                 HSVR_LOG("Script: hsvr.hand_to_scenery %d %.0f %s: was %.1f cm from it (point %.0f %.0f %.0f, hand %.0f %.0f %.0f), player moved by (%.0f, %.0f)",
                          side, cm, nm, d, on.x, on.y, on.z, hand.x, hand.y, hand.z, delta.x, delta.y);
                 continue;

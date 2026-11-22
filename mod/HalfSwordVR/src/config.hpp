@@ -829,6 +829,11 @@ namespace hsvr
         // 1 = an empty hand's arm is corrected after his body is evaluated, from this frame's shoulder
         // (the solve only has last frame's, so the hand bobbed with each step while walking).
         bool pose_arm_fresh_shoulder = true;
+        // He stops at walls and scenery when walking (stick or room): his capsule, from this far above his
+        // feet (so steps and the floor don't stop him) to his head, radius = his capsule's x share.
+        bool pose_body_wall_stop = true;
+        double pose_body_wall_step_cm = 35.0;
+        double pose_body_wall_radius_share = 1.0;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
