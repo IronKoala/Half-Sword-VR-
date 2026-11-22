@@ -503,6 +503,12 @@ namespace hsvr
         flag("pose_hold_joint_shoulder", c.pose_hold_joint_shoulder);
         flag("pose_hold_joint_carry_weight", c.pose_hold_joint_carry_weight);
         num("pose_hold_joint_fade_min_speed", c.pose_hold_joint_fade_min_speed);
+        num("pose_hold_joint_fade_keep_s", c.pose_hold_joint_fade_keep_s);
+        num("pose_hold_joint_fade_after_s", c.pose_hold_joint_fade_after_s);
+        flag("pose_hold_joint_slerp", c.pose_hold_joint_slerp);
+        flag("pose_hold_joint_mod_turn", c.pose_hold_joint_mod_turn);
+        flag("pose_hold_joint_turn_by_grip", c.pose_hold_joint_turn_by_grip);
+        flag("pose_hold_joint_speed_limit", c.pose_hold_joint_speed_limit);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
         flag("pose_hold_ignore_hand", c.pose_hold_ignore_hand);
         flag("pose_hold_block_offhand_search", c.pose_hold_block_offhand_search);
