@@ -10124,6 +10124,36 @@ namespace
     // Scales on the four fingers' full bend at the knuckle / middle / end joint (pose_finger_scale_*):
     // the gauntlet's skin rolls a PIP-heavy finger into a tube (Matthew's 14:10 screenshots).
     std::atomic<double> g_finger_joint_scale[3] = {1.0, 1.0, 1.0};
+    // Where each finger joint really turns, in its bone's own frame (cm): Willie's finger bones sit on
+    // or outside the palm-side skin, not through the finger's middle (willie-skeleton finger-analysis:
+    // pivots at 59/23/-40% of the index's depth from the palm skin, middle 54/-25/-80%), so bending
+    // about the bone dragged the skin round a loop: a fist made the middle finger 29% longer, the
+    // "circles" Matthew saw (2026-11-21 20:12Z). About these points it is 2%, and the knuckles crease.
+    // After the joints have turned, each finger bone is moved so its pivot (v, in its own frame)
+    // sits where it belongs on its parent (c, in the parent's frame), both from the reference pose
+    // (SK_Body_Man LOD0: midpoint of back- and palm-most skin at each joint, carried back through the
+    // skin weights; PIP/DIP cross-checked within 0.02-0.13 cm). At rest nothing moves. Index..pinky
+    // (the thumb's pivots are in the palm's flesh, unmeasured; thumb_03 is already within 0.17 cm).
+    // [side][index..pinky][_01.._03], snapshot cm.
+    const hsvr::Vec3 kPivotV[2][4][3] = {
+        {{{0.076, -0.231, -0.005}, {-0.153, 0.695, 0.023}, {-0.278, 1.389, 0.047}},
+         {{0.027, -0.052, 0.007}, {-0.234, 1.378, -0.174}, {-0.178, 1.860, -0.235}},
+         {{-0.031, 0.071, -0.016}, {-0.199, 1.422, -0.325}, {-0.158, 1.714, -0.393}},
+         {{-0.312, 0.662, -0.228}, {-0.227, 1.520, -0.589}, {-0.097, 1.658, -0.645}}},
+        {{{-0.087, 0.257, 0.005}, {0.113, -0.522, -0.018}, {0.248, -1.253, -0.042}},
+         {{-0.049, 0.103, -0.014}, {0.232, -1.356, 0.171}, {0.172, -1.763, 0.223}},
+         {{0.031, -0.071, 0.016}, {0.220, -1.442, 0.330}, {0.162, -1.732, 0.397}},
+         {{0.256, -0.540, 0.186}, {0.208, -1.344, 0.521}, {0.096, -1.650, 0.642}}}};
+    const hsvr::Vec3 kPivotC[2][4][3] = {
+        {{{5.8554, -0.2855, 0.2359}, {4.1105, 0.7110, 0.0230}, {2.6245, 1.4163, 0.0470}},
+         {{6.0940, -0.0587, 0.0072}, {5.4388, 1.3716, -0.1740}, {2.6218, 1.8627, -0.2350}},
+         {{5.6525, 0.1166, -0.0445}, {5.2507, 1.4093, -0.3250}, {2.3822, 1.7174, -0.3929}},
+         {{4.8085, 0.8129, -0.5403}, {4.1563, 1.4987, -0.5891}, {2.0853, 1.6603, -0.6451}}},
+        {{{-5.8552, 0.3133, -0.2359}, {-4.1048, -0.5340, -0.0180}, {-2.6246, -1.2764, -0.0419}},
+         {{-6.0861, 0.1133, -0.0140}, {-5.4330, -1.3496, 0.1709}, {-2.6100, -1.7666, 0.2231}},
+         {{-5.6523, -0.1168, 0.0444}, {-5.2377, -1.4348, 0.3300}, {-2.3807, -1.7362, 0.3971}},
+         {{-4.8346, -0.6900, 0.4773}, {-4.1104, -1.3272, 0.5208}, {-2.0856, -1.6524, 0.6421}}}};
+    std::atomic<bool> g_finger_pivot_on{true};
     const double g_finger_spread[5] = {0.35, 0.21, 0.03, -0.14, -0.31};
     const char* kFingerNames[5] = {"thumb", "index", "middle", "ring", "pinky"};
 
@@ -10567,12 +10597,15 @@ namespace
             bool thumb = f == 0;
             int b0 = ch[f][0], b1 = ch[f][1], b2 = ch[f][2];
             Vec3 seg1 = P(b2) - P(b1);
-            if (length(seg1) < 0.05) continue;
+            if (length(seg1) < 0.05 || length(P(b1) - P(b0)) < 0.05) continue;
             // The last segment has no child bone: it points as the one before it does, in its own bone's frame.
             Vec3 u = xf_rot(B[b1]).inverse().rotate(normalized(seg1));
-            auto seg = [&](int j) {
-                return normalized(j < 2 ? P(ch[f][j + 1]) - P(ch[f][j]) : xf_rot(B[ch[f][j]]).rotate(u));
-            };
+            // Each segment's direction in its own bone's frame, taken before anything turns, so it
+            // still holds when a joint turns about its pivot point (the bone then moves, and the
+            // line from one bone to the next no longer follows the phalanx).
+            Vec3 ul[3] = {xf_rot(B[b0]).inverse().rotate(normalized(P(b1) - P(b0))), u, u};
+            auto seg = [&](int j) { return normalized(xf_rot(B[ch[f][j]]).rotate(ul[j])); };
+
             Vec3 tip_before = P(b2) + xf_rot(B[b2]).rotate(u) * 2.5;
             // Per-joint curls (the wrap's, joint_curl) or one curl for the whole finger.
             const double* jc = joint_curl ? joint_curl[f] : nullptr;
@@ -10604,6 +10637,16 @@ namespace
                 turn_subtree(B, R.subtree[side][f][j], P(ch[f][j]), quat_axis_angle(axis, turn));
                 after[j] = bend_about(prev, seg(j), axis);
             }
+            // Joints at the finger's middle: each bone (and what it carries) moved so its pivot
+            // meets its parent's (bends and directions above are all read before this).
+            if (!thumb && g_finger_pivot_on.load() && (int)R.parent.size() > b2)
+                for (int j = 0; j < 3; ++j)
+                {
+                    int b = ch[f][j], pa = R.parent[b];
+                    if (pa < 0) break;
+                    Vec3 d = (P(pa) + xf_rot(B[pa]).rotate(kPivotC[side][f - 1][j])) - (P(b) + xf_rot(B[b]).rotate(kPivotV[side][f - 1][j]));
+                    for (int i : R.subtree[side][f][j]) B[i].tx += d.x, B[i].ty += d.y, B[i].tz += d.z;
+                }
             if (log && at < (int)sizeof(line) - 160)
             {
                 Vec3 tip = P(b2) + xf_rot(B[b2]).rotate(u) * 2.5;
@@ -10662,7 +10705,9 @@ namespace
         hsvr::Vec3 spot_local, palm_local;  // the held spot (thing's frame) and the palm (hand frame)
         hsvr::Vec3 hand_v;                  // the drawn hand's velocity (cm/s), for letting go
         std::vector<SurfacePoint> cloud;    // scenery with triangles only: its surface round the spot
-        bool resolved_seated = false;       // scenery: the fingers solved again once the hand sat on it
+        bool resolved_seated = false;       // the fingers solved again once the hand sat on it
+        double rigidity = 0.4;              // Hands Rigidity (Gauntlets): 0.4 bare, 0.7 half gauntlets, 0.75+ gloves/gauntlets
+        double pad = 0.0;                   // cm the thing's skin stands outside its collision
         int resolves_left = 0;              // finger solves still due for that
     };
     WrapGrab g_wrap[2];
@@ -10671,6 +10716,32 @@ namespace
     const double kWrapCrease = 0.5, kWrapSplay = 0.1, kWrapSunk = 0.5;
     const int kWrapSteps = 10, kWrapHalvings = 4, kWrapLiftSteps = 6;
     const double kFingerTip = 2.5; // cm past the last finger bone (as pose_hand_fingers)
+    // Willie's bare fingers (SK_Body_Man LOD0, reference pose), index/middle/ring/pinky, per segment and
+    // sample t = 0.2 .. 1.0: how far the finger's middle sits toward the back of the hand from the bone
+    // line, and half its palm-to-back depth (cm, mesh units). (One median table for all four left the
+    // index 0.6-0.9 cm too thin and the pinky 0.3-0.7 too fat: its knuckle touched at curl 0 and the
+    // finger closed into a fist in the air, offline check of fb4c8d6.)
+    const double kFingerShift[4][3][5] = {
+        {{-0.11, 0.02, 0.26, 0.54, 0.63}, {0.80, 1.04, 1.21, 1.26, 1.36}, {1.50, 1.68, 1.67, 1.67, 1.75}},
+        {{-0.05, 0.23, 0.89, 1.09, 1.36}, {1.47, 1.57, 1.64, 1.69, 1.82}, {1.89, 1.91, 2.01, 2.11, 2.22}},
+        {{0.13, 0.46, 1.08, 1.21, 1.40}, {1.52, 1.57, 1.62, 1.71, 1.75}, {1.76, 1.75, 1.83, 1.96, 1.84}},
+        {{0.77, 0.81, 1.20, 1.37, 1.46}, {1.53, 1.56, 1.62, 1.69, 1.74}, {1.73, 1.75, 1.84, 1.95, 1.84}}};
+    const double kFingerHalf[4][3][5] = {
+        {{1.53, 1.42, 1.23, 1.06, 1.05}, {1.08, 1.01, 0.87, 0.83, 0.84}, {0.80, 0.71, 0.68, 0.62, 0.59}},
+        {{1.70, 1.58, 1.09, 1.00, 0.98}, {0.92, 0.92, 0.94, 0.88, 0.82}, {0.76, 0.73, 0.73, 0.68, 0.33}},
+        {{1.53, 1.42, 1.05, 0.94, 0.91}, {0.84, 0.89, 0.84, 0.80, 0.71}, {0.65, 0.63, 0.66, 0.57, 0.49}},
+        {{1.29, 1.19, 0.96, 0.91, 0.88}, {0.77, 0.78, 0.74, 0.70, 0.64}, {0.61, 0.60, 0.57, 0.37, 0.49}}};
+    // A Willie's skin outside his collision body (Willie_PhysicsAsset_Capsules vs SK_Body_Man/SK_Head
+    // LOD0, by skin area nearest each body, median cm; bodies not listed: skin inside or on it, 0).
+    double body_skin_pad(const std::wstring& bone)
+    {
+        if (bone == STR("neck_01")) return 0.96;
+        if (bone == STR("neck_02")) return 0.55;
+        if (bone == STR("clavicle_l") || bone == STR("clavicle_r")) return 0.87;
+        if (bone == STR("spine_05")) return 0.74;
+        if (bone == STR("spine_04")) return 1.28;
+        return 0.0;
+    }
 
     double wrap_smooth(double x)
     {
@@ -10680,17 +10751,24 @@ namespace
 
     // A finger's three segments (component space of the snapshot): knuckle to middle, middle to last,
     // last to the tip.
-    void finger_segments(const XForm96* B, int side, int f, hsvr::Vec3 seg[3][2])
+    // (ref: the pose before the fingers were turned. Each segment runs from its bone along that bone's
+    // own direction and length, so it stays on the phalanx when the joints turn about their pivots.)
+    void finger_segments(const XForm96* B, int side, int f, hsvr::Vec3 seg[3][2], const XForm96* ref = nullptr)
     {
         using namespace hsvr;
         const int(*ch)[3] = g_frig.chain[side];
+        if (!ref) ref = B;
+        Vec3 r0 = xf_pos(ref[ch[f][0]]), r1 = xf_pos(ref[ch[f][1]]), r2 = xf_pos(ref[ch[f][2]]);
+        Vec3 u0 = r2 - r1;
+        Vec3 u = length(u0) > 0.05 ? xf_rot(ref[ch[f][1]]).inverse().rotate(normalized(u0)) : Vec3{1, 0, 0};
+        Vec3 d0 = r1 - r0;
+        Vec3 l0 = length(d0) > 0.05 ? xf_rot(ref[ch[f][0]]).inverse().rotate(d0) : Vec3{0, 0, 0};
+        Vec3 l1 = xf_rot(ref[ch[f][1]]).inverse().rotate(u0);
+        Vec3 l2 = u * kFingerTip;
         Vec3 p0 = xf_pos(B[ch[f][0]]), p1 = xf_pos(B[ch[f][1]]), p2 = xf_pos(B[ch[f][2]]);
-        Vec3 u0 = p2 - p1;
-        Vec3 u = length(u0) > 0.05 ? xf_rot(B[ch[f][1]]).inverse().rotate(normalized(u0)) : Vec3{1, 0, 0};
-        Vec3 tip = p2 + xf_rot(B[ch[f][2]]).rotate(u) * kFingerTip;
-        seg[0][0] = p0, seg[0][1] = p1;
-        seg[1][0] = p1, seg[1][1] = p2;
-        seg[2][0] = p2, seg[2][1] = tip;
+        seg[0][0] = p0, seg[0][1] = p0 + xf_rot(B[ch[f][0]]).rotate(l0);
+        seg[1][0] = p1, seg[1][1] = p1 + xf_rot(B[ch[f][1]]).rotate(l1);
+        seg[2][0] = p2, seg[2][1] = p2 + xf_rot(B[ch[f][2]]).rotate(l2);
     }
 
     struct WrapSolve
@@ -10700,7 +10778,16 @@ namespace
         int side = 0, f = 0;
         hsvr::Vec3 cp;
         hsvr::Quat cq;
-        double cs = 1.0, radius = 0.9;
+        double cs = 1.0, radius = 0.9, pad = 0.0;
+        // Measured finger (index-pinky, not the thumb): the bone line does not run down the finger's
+        // middle. From ~60% along the first phalanx it lies on or outside the palm-side skin, the finger
+        // sitting toward the back of the hand (SK_Body_Man LOD0 cross-sections in each bone's frame,
+        // left = right within 0.2 cm). So each sample is moved toward the back of the finger by
+        // kFingerShift and is kFingerHalf thick (half the palm-to-back depth), plus hand armour.
+        bool measured = false;
+        hsvr::Vec3 across;       // index_01 - pinky_01 (snapshot): the fingers bend about it
+        double back_sign = 1.0;  // cross(segment, across) * back_sign = toward the back of the hand
+        double armour[3] = {0, 0, 0}; // extra palm-side thickness per segment (snapshot cm) // pad: world cm the visible skin stands outside the collision
         WrapGrab* g = nullptr;
         Call* query = nullptr;
         FProperty* q_point = nullptr;
@@ -10744,7 +10831,7 @@ namespace
             query->run();
             ++queries;
             double d = query->number();
-            return d < 0.0 ? 1e9 : d / cs; // in snapshot centimetres
+            return d < 0.0 ? 1e9 : (std::max)(0.0, d - pad) / cs; // in snapshot centimetres
         }
         void place(const double c[3], hsvr::Vec3 seg[3][2])
         {
@@ -10753,31 +10840,66 @@ namespace
             double jc[5][3] = {};
             for (int k = 0; k < 3; ++k) jc[f][k] = c[k];
             pose_hand_fingers(tmp.data(), side, curl5, kWrapSplay, false, jc, f);
-            finger_segments(tmp.data(), side, f, seg);
+            finger_segments(tmp.data(), side, f, seg, B0);
         }
+        // Sample i (kWrapSamples) of segment k: where the finger's middle is and how thick it is there.
+        void sample(const hsvr::Vec3 seg[3][2], int k, int i, hsvr::Vec3& p, double& r) const
+        {
+            using namespace hsvr;
+            double t = kWrapSamples[i];
+            Vec3 a = seg[k][0], b = seg[k][1];
+            p = a + (b - a) * t;
+            if (!measured)
+            {
+                r = radius * (std::min)(1.0, t / kWrapCrease);
+                return;
+            }
+            Vec3 back = cross(b - a, across) * back_sign;
+            double bl = length(back);
+            if (bl > 1e-6) p = p + back * (kFingerShift[f - 1][k][i] / bl);
+            r = kFingerHalf[f - 1][k][i] + armour[k];
+        }
+        // The measured first segment's knuckle sample (t 0.2) sits in the palm's flesh: it touched at
+        // curl 0 and locked fingers into fists in the air. Skipped.
+        bool skip(int k, int i) const { return measured && k == 0 && i == 0; }
         bool touches(const double c[3], int k)
         {
             hsvr::Vec3 seg[3][2];
             place(c, seg);
-            for (double t : kWrapSamples)
-                if (distance(seg[k][0] + (seg[k][1] - seg[k][0]) * t) < radius * (std::min)(1.0, t / kWrapCrease)) return true;
+            for (int i = 0; i < 5; ++i)
+            {
+                if (skip(k, i)) continue;
+                hsvr::Vec3 p;
+                double r;
+                sample(seg, k, i, p, r);
+                if (distance(p) < r) return true;
+            }
             return false;
         }
-        // How far the finger is sunk in (radius - nearest), the engine reporting 0 inside.
+        // How far the finger is sunk in, as a share of its own thickness there ((thickness - nearest) /
+        // thickness), the engine reporting 0 inside.
         double sunk(const double c[3])
         {
             hsvr::Vec3 seg[3][2];
             place(c, seg);
             double worst = -1e9;
             for (int k = 0; k < 3; ++k)
-                for (double t : kWrapSamples) worst = (std::max)(worst, radius - distance(seg[k][0] + (seg[k][1] - seg[k][0]) * t));
+                for (int i = 0; i < 5; ++i)
+                {
+                    if (skip(k, i)) continue;
+                    hsvr::Vec3 p;
+                    double r;
+                    sample(seg, k, i, p, r);
+                    if (!measured) r = radius;
+                    worst = (std::max)(worst, (r - distance(p)) / (std::max)(0.05, r));
+                }
             return worst;
         }
         void solve(double out[3])
         {
             const int n = 3;
             double start[3] = {0, 0, 0};
-            if (sunk(start) > kWrapSunk * radius)
+            if (sunk(start) > kWrapSunk)
             {
                 double best_d = sunk(start), best_b = 0.0;
                 for (int step = 1; step <= kWrapLiftSteps; ++step)
@@ -10785,7 +10907,7 @@ namespace
                     double c[3] = {-g_finger_lift[f] * step / kWrapLiftSteps, 0, 0};
                     double d = sunk(c);
                     if (d < best_d) best_d = d, best_b = c[0];
-                    if (d <= kWrapSunk * radius) break;
+                    if (d <= kWrapSunk) break;
                 }
                 start[0] = best_b;
             }
@@ -10845,12 +10967,14 @@ namespace
         double ease = g.ease;
         double w = g.on ? wrap_smooth((now - g.since) / ease) : g.w_off * (1.0 - wrap_smooth((now - g.off_at) / ease));
         if (w <= 0.0 || !g_frig.ok) return 0.0;
-        // Scenery doesn't move and the hand is pinned on it: once the pin has eased the hand onto it,
-        // solve every finger once more there and keep those curls. Re-solving all along straightened
+        // Once the hand has been eased onto what it holds, solve every finger once more there; scenery
+        // doesn't move and the hand is pinned on it, so it keeps those curls. Re-solving all along straightened
         // them as the hand slid against the rail (b8b5cb1 test: middle 0.31/0.62/1 at seating, 0/0/0
         // two seconds later with the palm at 0 cm); freezing the first solve kept curls made 7 cm off
         // the rail, before the hand got there (d9c490e test).
-        if (g.world && g.seated && !g.resolved_seated && now - g.seated_at >= hsvr::config().pose_wrap_ease_s + 0.05)
+        // (Every grab: 127 of 205 first solves in his 13:44 playtest ran with the palm still 3 cm or more
+        // off, and those curls stayed on until that finger's next solve, up to pose_wrap_refresh_s.)
+        if (g.seated && !g.resolved_seated && now - g.seated_at >= hsvr::config().pose_wrap_ease_s + 0.05)
         {
             g.resolved_seated = true;
             g.resolves_left = 5; // (each finger keeps its curl until its new solve: no flick open)
@@ -10877,12 +11001,31 @@ namespace
                 ws.cq = component_rotation(g_frig.driver);
                 ws.cs = component_scale_z(g_frig.driver);
                 Vec3 hand = xf_pos(B[g_frig.hand[side]]), mid = xf_pos(B[g_frig.chain[side][2][0]]);
+                // The thumb (unmeasured) and a set pose_wrap_finger_radius_cm: one radius down the bone
+                // line, tapered at the joints (the framework's 9.5% of the hand). The other fingers:
+                // the measured shape (kFingerShift/kFingerHalf), plus hand armour on the palm side.
                 ws.radius = cfg.pose_wrap_finger_radius_cm > 0.0 ? cfg.pose_wrap_finger_radius_cm / ws.cs : 0.095 * length(mid - hand);
+                ws.pad = g.pad;
                 // Unsolved fingers first, then round and round.
                 int f = g.next % 5;
                 for (int k = 0; k < 5; ++k)
                     if (!g.solved[(g.next + k) % 5]) { f = (g.next + k) % 5; break; }
                 ws.f = f;
+                ws.measured = f != 0 && cfg.pose_wrap_finger_radius_cm <= 0.0;
+                if (ws.measured)
+                {
+                    const int(*ch)[3] = g_frig.chain[side];
+                    ws.across = xf_pos(B[ch[1][0]]) - xf_pos(B[ch[4][0]]);
+                    // Fixed per side (offline check on both hands: left +1, right -1; the sign taken
+                    // from the first segment flipped past a 90 degree knuckle bend).
+                    ws.back_sign = side == 0 ? 1.0 : -1.0;
+                    // Hand armour, palm side over bare (unpacked meshes): full gauntlets and gloves
+                    // (Hands Rigidity 0.75-1.0; SK_Armor_Hand_Gauntlet_010 +0.92/.84/1.02/.89/1.00,
+                    // +1.02/.83/.75/.79/.84, +.73/.69/.73/.72/.58 per sample) pad every segment;
+                    // half gauntlets (0.7: HalfGauntlets_1/_2 +0.83/+1.26 at t .4) only the first.
+                    double full = (std::max)(0.0, cfg.pose_wrap_gauntlet_pad_cm) / ws.cs, half = (std::max)(0.0, cfg.pose_wrap_halfgauntlet_pad_cm) / ws.cs;
+                    for (int k = 0; k < 3; ++k) ws.armour[k] = g.rigidity >= 0.745 ? full : (g.rigidity > 0.45 && k == 0 ? half : 0.0);
+                }
                 double out[3];
                 ws.solve(out);
                 for (int k = 0; k < 3; ++k) g.curls[f][k] = out[k];
@@ -11217,14 +11360,25 @@ namespace
                 g.bone = bone;
                 g.since = now;
                 g.ease = (std::max)(0.01, cfg.pose_wrap_ease_s);
-                if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str());
+                // Hand armour: the game sets Hands Rigidity (Gauntlets) above its bare 0.4 (0.8 in his
+                // 13:44 playtest with Gauntlets_10 on). Read once per grab.
+                g.rigidity = read_number_variable(pawn, STR("Hands Rigidity (Gauntlets)"));
+                if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls (hand rigidity %.2f)", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str(), g.rigidity);
             }
             // (Let go first: a hand that drops its hold before it was seated must not seat a stale thing.)
             if (comp && g.on && !g.seated && g.seat_tries < 5 && cfg.pose_grab_seat_palm)
             {
                 ++g.seat_tries;
                 g.seated = g.world ? seat_on_scenery(side, g, cfg) : seat_on_palm(side, pawn, g, cfg);
-                if (g.seated) { g.seated_at = now; g.far_base = -1.0; g.far_since = -1.0; }
+                if (g.seated)
+                {
+                    g.seated_at = now;
+                    g.far_base = -1.0;
+                    g.far_since = -1.0;
+                    // A Willie's skin stands outside some of his collision bodies (neck, clavicles, upper
+                    // spine: body_skin_pad), so fingers stopping at the capsule sank into his neck.
+                    g.pad = g.body && g.comp && cfg.pose_wrap_body_pad ? body_skin_pad(g.bone.ToString()) : 0.0;
+                }
             }
             else if (comp && g.on && g.seated && !g.world && cfg.log_wrap && g.checks < 3 && now - g.seated_at >= 0.1 + 0.4 * g.checks)
             {
@@ -11880,6 +12034,7 @@ namespace
         g_finger_joint_scale[0].store(cfg.pose_finger_scale_mcp);
         g_finger_joint_scale[1].store(cfg.pose_finger_scale_pip);
         g_finger_joint_scale[2].store(cfg.pose_finger_scale_dip);
+        g_finger_pivot_on.store(cfg.pose_finger_pivot_fix);
         if (pawn && g_pose_active.load()) wrap_tick(cfg, pawn);
         if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
