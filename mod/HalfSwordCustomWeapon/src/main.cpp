@@ -3123,7 +3123,7 @@ namespace
         UObject* base_mesh = object_property(actor, STR("BaseMesh"));
         float grip_was = 0;
         body_mass(grip, false, grip_was);
-        double base_share = (std::max)(0.0, mass_of(base_mesh) - grip_was);
+        double base_share = (std::max)(0.0, static_cast<double>(mass_of(base_mesh) - grip_was));
         const float connector_kg = 0.05f;
         double share = (std::max)(0.2, numbers["mass_kg"] - base_share - connector_kg);
         Call get_mat(grip, STR("GetMaterial"));
