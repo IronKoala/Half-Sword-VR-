@@ -1,0 +1,4 @@
+# crossbow: grip takes the fore end, the free hand's trigger takes the string (Matthew 2026-11-22),
+# cock, bolt from the quiver into the cradle, rear-grip trigger fires. Crossbow in the right, then the left hand.
+xbow_r|steps-xbow_r.txt|pose_hold_joint=1
+xbow_l|steps-xbow_l.txt|pose_hold_joint=1

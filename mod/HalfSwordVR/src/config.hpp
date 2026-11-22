@@ -743,9 +743,9 @@ namespace hsvr
         // cradle, trigger fires). The game's own string joint, bolt loading and Event Shoot do the work.
         bool crossbow = true;
         // A free hand closing this near the string's nut (cm) takes the string (when nearer it than a grip).
-        double crossbow_string_reach_cm = 8.0;
-        // ...and at least this much nearer the nut than any grip (the front grip is 6 cm from it).
-        double crossbow_string_margin_cm = 2.0;
+        // The free hand's trigger pulled this near the string's nut (cm) takes the string (grip takes the
+        // fore end; Matthew 2026-11-22).
+        double crossbow_string_reach_cm = 10.0;
         // A hand closing this near the quiver at his hip (cm, from its collision) takes a bolt out.
         double crossbow_quiver_reach_cm = 12.0;
         // A held bolt this near the cradle's loaded spot (cm) is loaded (the game's own rule is 10).

@@ -456,14 +456,13 @@ LAYOUT = [
         ('pose_holster_max_speed', '...moving slower than this (m/s; faster is a throw).'),
         ('pose_keep_scabbard_on_drop', '1 = a drawn weapon dropped or thrown leaves its scabbard on the belt.'),
     ]),
-    ('Crossbow', 'Two fixed grips; a free hand pulls the string back to cock it; a bolt from the hip quiver goes into the cradle; the trigger fires.', [
+    ('Crossbow', 'Two fixed grips (grip button); the free hand\'s TRIGGER takes the string, pull it back to cock; a bolt from the hip quiver goes into the cradle; the rear-grip hand\'s trigger fires.', [
         ('crossbow', '1 = crossbow handling on.'),
-        ('crossbow_string_reach_cm', 'How near the string your hand must close to take it (cm).'),
-        ('crossbow_string_margin_cm', '...and at least this much nearer the string than a grip (the front grip is 6 cm from it).'),
+        ('crossbow_string_reach_cm', 'Pull the free hand\'s trigger this near the string to take it (cm); grip takes the fore end.'),
         ('crossbow_quiver_reach_cm', 'How near the quiver your hand must close to take a bolt (cm).'),
         ('crossbow_bolt_seat_cm', "A bolt this near the cradle is loaded (cm; the game's own is 10)."),
-        ('crossbow_trigger_fire', 'Trigger pull that fires (0-1).'),
-        ('crossbow_trigger_release', 'Trigger must come back under this before it fires again.'),
+        ('crossbow_trigger_fire', 'Trigger pull that fires (rear-grip hand) or takes the string (free hand) (0-1).'),
+        ('crossbow_trigger_release', 'Trigger under this re-arms the shot, or lets go of the string.'),
         ('crossbow_trigger_grip_cm', 'Only the hand on the rear grip fires: within this of it (cm).'),
     ]),
     ('Swinging, throwing, whoosh', '', [
