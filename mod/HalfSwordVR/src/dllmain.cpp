@@ -497,6 +497,7 @@ namespace
     // Body turning (see "Your body faces where you face"): the turn you make with the mouse or
     // stick (the view's straight ahead), and the body's yaw relative to it.
     bool g_turn_valid = false;
+    double g_test_calib_skew = 0.0; // test build: hsvr.calib_skew, one calibration
     double g_turn_yaw = 0.0, g_body_rel = 0.0, g_last_written_yaw = 0.0, g_turn_time = 0.0;
 
     // Called by the stereo device while the frame's views are being set up (game thread).
@@ -1369,6 +1370,17 @@ namespace
     {
         using namespace hsvr;
         UObject* d = g_pose.driver;
+        if (g_test_calib_skew != 0.0)
+        {
+            // test build: the control yaw turned away from the new body, whoever would have turned it
+            if (UObject* controller = find_player_controller())
+                if (ue::FRotator* rotation = value_ptr<ue::FRotator>(controller, STR("ControlRotation")))
+                {
+                    rotation->Yaw += g_test_calib_skew;
+                    HSVR_LOG("Script: hsvr.calib_skew: control yaw turned %.1f deg from the body", g_test_calib_skew);
+                }
+            g_test_calib_skew = 0.0;
+        }
         double heading = actor_heading(g_pose.pawn);
         // The body needn't face the control yaw yet (restart 2026-11-22 10:04Z: mesh 90, control 77, and every
         // frame stored below was 13 deg off for that life). The mesh component's forward is its +Y; unlike
@@ -23040,6 +23052,41 @@ namespace
                 g_fake_tilt_roll.store(r);
                 g_fake_tilt_drop.store(d);
                 HSVR_LOG("Script: hsvr.fake_head_tilt pitch %.0f roll %.0f drop %.0f cm", p, r, d);
+            }
+            if (entry.command.rfind("hsvr.calib_skew ", 0) == 0)
+            {
+                g_test_calib_skew = std::atof(entry.command.c_str() + 16); // used at the next calibration
+                continue;
+            }
+            if (entry.command.rfind("hsvr.turn_add ", 0) == 0)
+            {
+                // Spawn yaw tests: hsvr.turn_add <deg>: turns him like the stick (then "open <map>" = a restart).
+                g_turn_yaw += std::atof(entry.command.c_str() + 14);
+                while (g_turn_yaw > 180.0) g_turn_yaw -= 360.0;
+                while (g_turn_yaw < -180.0) g_turn_yaw += 360.0;
+                HSVR_LOG("Script: hsvr.turn_add: straight ahead is now %.2f", g_turn_yaw);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.calib_probe", 0) == 0)
+            {
+                // Spawn yaw tests: hsvr.calib_probe: how far the helmet's front (else the head's) is turned from
+                // where the eyes look, and the mesh from the control yaw. 0 = centred.
+                using namespace hsvr;
+                UObject* pawn = nullptr;
+                UObject* mesh = find_pawn_mesh(&pawn);
+                Vec3 at;
+                Quat eye;
+                if (!mesh || !stereo_last_eye(0, at, eye)) continue;
+                auto yaw_of = [](const Vec3& v) { return std::atan2(v.y, v.x) * kRadToDeg; };
+                auto diff = [](double a, double b) {
+                    double r = std::fmod(a - b, 360.0);
+                    return r > 180.0 ? r - 360.0 : r < -180.0 ? r + 360.0 : r;
+                };
+                UObject* worn = g_helmet && g_helmet_pawn == pawn ? g_helmet : nullptr;
+                double front = yaw_of(socket_rotation(worn ? worn : mesh, bone_fname("head")).rotate(Vec3{0, 1, 0}));
+                HSVR_LOG("Script: hsvr.calib_probe: %s front %.2f deg from where the eyes look; mesh %.2f deg from the control yaw", worn ? "helmet" : "head (no helmet)",
+                         diff(front, yaw_of(eye.rotate(Vec3{1, 0, 0}))), diff(yaw_of(component_rotation(mesh).rotate(Vec3{0, 1, 0})), actor_heading(pawn)));
+                continue;
             }
             if (entry.command.rfind("hsvr.fake_head_drop ", 0) == 0)
             {
