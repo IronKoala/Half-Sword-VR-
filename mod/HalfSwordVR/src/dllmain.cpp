@@ -1553,15 +1553,17 @@ namespace
     // so a weapon in front of a wall doesn't hide the wall. Returns 0 when nothing is in the way, 1 on a
     // hit (`stop`: the shape's centre there, `normal`: the surface's), 2 when the shape starts inside
     // something (`normal`: the way out). `hit_name`: what it hit.
+    // `walls_only`: a shape starting inside something whose way out is mostly up or down (the floor, a
+    // table top) doesn't count: that thing is looked through. `depth`: how far in it starts (result 2).
     int world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, double half, bool complex, hsvr::Vec3& stop, hsvr::Vec3* normal = nullptr,
-                    std::wstring* hit_name = nullptr)
+                    std::wstring* hit_name = nullptr, bool walls_only = false, double* depth = nullptr)
     {
         static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
         static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
         if (!cdo || !gs || !g_pose.pawn) return 0;
-        UObject* ignore[8] = {};
+        UObject* ignore[16] = {};
         int ignored = 0;
-        for (int attempt = 0; attempt < 6; ++attempt)
+        for (int attempt = 0; attempt < 16; ++attempt)
         {
             Call trace(cdo, half > 0.0 ? STR("CapsuleTraceSingle") : STR("SphereTraceSingle"));
             if (!trace.fn) return 0;
@@ -1608,15 +1610,33 @@ namespace
                 }
             if (look_through)
             {
-                if (!actor || ignored >= 8) return 0;
+                if (!actor || ignored >= 16) return 0;
+                ignore[ignored++] = actor;
+                continue;
+            }
+            hsvr::Vec3 nrm = b.vec(STR("Normal"));
+            FProperty* ov = b.param(STR("bInitialOverlap"));
+            bool inside = ov && *(b.buffer.data() + ov->GetOffset_Internal()) != 0;
+            if (inside && walls_only && std::sqrt(nrm.x * nrm.x + nrm.y * nrm.y) < 0.3)
+            {
+                if (!actor || ignored >= 16) return 0;
                 ignore[ignored++] = actor;
                 continue;
             }
             if (hit_name) *hit_name = actor ? actor->GetName() : std::wstring(STR("?"));
-            if (normal) *normal = b.vec(STR("Normal"));
-            FProperty* ov = b.param(STR("bInitialOverlap"));
-            if (ov && *(b.buffer.data() + ov->GetOffset_Internal()) != 0)
+            if (normal) *normal = nrm;
+            if (inside)
             {
+                if (depth)
+                {
+                    // Not among BreakHitResult's outputs: read from the hit itself (a float in UE 5.4).
+                    *depth = 0.0;
+                    if (FProperty* pd = struct_member(struct_type(hit), STR("PenetrationDepth")))
+                    {
+                        const uint8_t* at = trace.buffer.data() + hit->GetOffset_Internal() + pd->GetOffset_Internal();
+                        *depth = pd->GetClass().GetName() == STR("DoubleProperty") ? *reinterpret_cast<const double*>(at) : *reinterpret_cast<const float*>(at);
+                    }
+                }
                 stop = from;
                 return 2;
             }
@@ -1667,13 +1687,24 @@ namespace
         Vec3 a{from.x, from.y, to.z + dz}, b{to.x, to.y, to.z + dz};
         Vec3 at, n;
         std::wstring what;
-        int r1 = world_sweep(a, b, r, half, false, at, &n, &what);
+        double depth = 0.0;
+        int r1 = world_sweep(a, b, r, half, false, at, &n, &what, true, &depth);
+        if (r1 == 2)
+        {
+            // Touching or in it: pushed out along its (flat) way out, then the move swept from there.
+            Vec3 nf = flat(n);
+            Vec3 out = a + nf * ((std::max)(0.0, depth) + 0.2);
+            Vec3 m = out_of(b - a, n);
+            Vec3 at3, n3;
+            int r3 = world_sweep(out, out + m, r, half, false, at3, &n3, nullptr, true);
+            Vec3 stop = r3 == 0 ? out + m : r3 == 1 ? at3 + flat(n3) * 0.1 : out;
+            blocked = true;
+            HSVR_LOG_EVERY(1.0, "Wall: he was %.1f cm into %ls: pushed out and kept out", depth, what.c_str());
+            return {stop.x, stop.y, to.z};
+        }
         if (r1 == 0) return to;
         blocked = true;
         Vec3 stop;
-        if (r1 == 2)
-            stop = a + out_of(b - a, n);
-        else
         {
             Vec3 nf = flat(n);
             if (length(nf) < 0.5) nf = flat(a - b);
@@ -1685,12 +1716,12 @@ namespace
             if (length(rest) > 1e-3)
             {
                 Vec3 at2, n2, end = stop + rest;
-                int r2 = world_sweep(stop, end, r, half, false, at2, &n2);
+                int r2 = world_sweep(stop, end, r, half, false, at2, &n2, nullptr, true);
                 stop = r2 == 0 ? end : r2 == 1 ? at2 + flat(n2) * 0.1 : stop;
             }
         }
         static std::wstring last_what;
-        if (what != last_what) { last_what = what; HSVR_LOG("Wall: he walks into %ls (%s)", what.c_str(), r1 == 2 ? "already touching it" : "swept"); }
+        if (what != last_what) { last_what = what; HSVR_LOG("Wall: he walks into %ls", what.c_str()); }
         HSVR_LOG_EVERY(1.0, "Wall: he stopped at %ls %.1f cm short of where he was going (radius %.0f, capsule half height %.0f)", what.c_str(), length(b - stop), r, h);
         return {stop.x, stop.y, to.z};
     }
@@ -1938,7 +1969,9 @@ namespace
         uint8_t* field = reinterpret_cast<uint8_t*>(abp) + sd->GetOffset_Internal();
         double v[3] = {0, 0, 0};
         read_three(field, sd, v);
-        double yaw = number_property(abp, ass) * 3.14159265358979323846 / 180.0;
+        double rot[3] = {0, 0, 0}; // an FRotator: pitch, yaw, roll (degrees; pitch and roll stay 0)
+        read_three(reinterpret_cast<uint8_t*>(abp) + ass->GetOffset_Internal(), ass, rot);
+        double yaw = rot[1] * 3.14159265358979323846 / 180.0;
         double c = std::cos(yaw), s = std::sin(yaw);
         // UnrotateVector by yaw: into his hips' frame.
         double x = c * v[0] + s * v[1], y = -s * v[0] + c * v[1];
@@ -2221,6 +2254,7 @@ namespace
     bool hand_rides_grab(int side);
     bool hand_on_scenery(int side); // the hand is pinned on fixed scenery (a world grab)
     bool hand_has_weapon(int side); // the game's hold has a weapon in this hand (his fist doesn't count)
+    bool hand_is_fist(int side);    // the game's hold has his fist in this hand
     bool g_wrap_on_side(int side);
     bool hand_world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, hsvr::Vec3& stop);
     bool stuck_is_thrust(UObject* weapon);
@@ -2613,6 +2647,7 @@ namespace
             }
             g_pose_active.store(false);
             g_hold_capsule.store(false);
+            g_wall_ok_have = false; // swept from where he gets up, not from where he fell
             return true;
         }
         if (g_inj.down_now)
@@ -3160,7 +3195,7 @@ namespace
         if (!on_weapon && hand_on_scabbard(side, target, Wh)) on_weapon = true, g_solved_on[side] |= 4;
         // A free hand stops at walls and scenery (the palm's middle, pose_hand_world_radius_cm round it).
         bool stopped = false;
-        if (!on_weapon && cfg.pose_hand_world_stop && !hand_has_weapon(side) && !g_wrap_on_side(side))
+        if ((!on_weapon || hand_is_fist(side)) && (g_solved_on[side] & ~1) == 0 && cfg.pose_hand_world_stop && !hand_has_weapon(side) && !g_wrap_on_side(side))
         {
             Vec3 palm_mid = target + fingers_world * cfg.pose_hand_world_reach_cm;
             Vec3 at;
@@ -3384,7 +3419,7 @@ namespace
             ArmFix& f = g_arm_fix[side];
             // Empty hands and fists; held weapons, two hands and scabbards with pose_arm_fresh_shoulder_held.
             // Not a grab (the hand is pinned where the game's joint holds it) or a wrap.
-            bool held = (g_solved_on[side] & 8) == 0 && (g_solved_on[side] != 0 || hand_has_weapon(side));
+            bool held = (g_solved_on[side] & 8) == 0 && !hand_is_fist(side) && (g_solved_on[side] != 0 || hand_has_weapon(side));
             f.want = g_arm_fix_on.load() && (held ? g_arm_fix_held.load() : true) && (g_solved_on[side] & 8) == 0 && !wrap_active(side) && !hand_on_scenery(side);
             double sc = component_scale_z(g_pose.driver);
             if (!(sc > 1e-3)) sc = 1.0;
@@ -5932,6 +5967,7 @@ namespace
     };
     HoldState g_hold[2];
     bool hand_has_weapon(int side) { return g_hold[side].weapon != nullptr && !is_fist(g_hold[side].weapon); }
+    bool hand_is_fist(int side) { return is_fist(g_hold[side].weapon); }
 
     // The game's off-hand search: with a two-handed weapon (longswords) in one hand and the other
     // free, about once a second the game drops "Block <other> OffHand Grab", and on the next tick
