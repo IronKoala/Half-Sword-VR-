@@ -234,6 +234,7 @@ LAYOUT = [
         ("pose_hand_world_stop", "1 = an empty hand stops at walls and scenery instead of going into them."),
         ("pose_hand_world_radius_cm", ""),
         ("pose_hand_world_reach_cm", ""),
+        ("pose_arm_fresh_shoulder", "1 = an empty hand doesn't bob with your steps while walking (arm re-aimed from this frame's shoulder)."),
         ("pose_finger_pivot_fix", "1 = finger joints bend at the finger's middle (0 = about the game's bones: fingers roll into circles)."),
         ("pose_finger_schedule", "1 = finger joints close in a natural order (no round 'circle' fingers)."),
         ("pose_finger_mcp_lag", ""),

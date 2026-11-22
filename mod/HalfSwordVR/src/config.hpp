@@ -813,6 +813,9 @@ namespace hsvr
         bool pose_hand_world_stop = true;
         double pose_hand_world_radius_cm = 3.5;
         double pose_hand_world_reach_cm = 6.0;
+        // 1 = an empty hand's arm is corrected after his body is evaluated, from this frame's shoulder
+        // (the solve only has last frame's, so the hand bobbed with each step while walking).
+        bool pose_arm_fresh_shoulder = true;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or

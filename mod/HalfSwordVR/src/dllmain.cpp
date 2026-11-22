@@ -2224,6 +2224,20 @@ namespace
     // the hand off the controller (1 on the held item, 2 two hands, 4 on a scabbard).
     hsvr::Vec3 g_solved_S[2], g_solved_E[2], g_solved_H[2];
     int g_solved_on[2] = {0, 0};
+    // An empty hand's arm, corrected after his body is evaluated (pose_arm_fresh_shoulder): the solve
+    // reads the shoulder from last frame's pose (BlueprintUpdateAnimation runs before this frame's spine
+    // and clavicles are evaluated), so the drawn hand landed off its target by exactly how far the
+    // shoulder moved since: about 8 times a second while walking, his footfall rate, 1.0-1.4 cm peak to
+    // peak (session 2026-11-22 03:45-04:04: "they are still bouncing and they're still jittering").
+    struct ArmFix
+    {
+        bool want = false;
+        hsvr::Vec3 reach_cs;  // the shoulder's own reach (shoulder_reach) on top of last frame's, component space
+        unsigned seq = 0;     // one per solve
+    };
+    ArmFix g_arm_fix[2];
+    std::atomic<bool> g_arm_fix_on{true};
+    bool wrap_active(int side);
     // ---- Your injuries (Matthew 2026-11-21) -----------------------------------------------------
     // The game's own limb values (Willie_BP, extracted 2026-11-19; HalfSwordDecomp\defaults\injuries.md):
     // - Limb health 0..100 per arm and leg. Get Damage only tries to break a bone once that limb's
@@ -3193,6 +3207,12 @@ namespace
         double c = dot(normalized(Wh.rotate(a.fingers_local)), axis);
         a.bend_deg = std::acos((std::max)(-1.0, (std::min)(1.0, c))) * 180.0 / 3.14159265358979323846;
         g_solved_S[side] = S, g_solved_E[side] = E, g_solved_H[side] = H;
+        {
+            ArmFix& f = g_arm_fix[side];
+            f.want = g_arm_fix_on.load() && g_solved_on[side] == 0 && !hand_has_weapon(side) && !wrap_active(side) && !hand_on_scenery(side);
+            f.reach_cs = component_inv.rotate(S - S_chest);
+            ++f.seq;
+        }
         node_set_rotation(*chain_node("upperarm" + sx), component_inv * Wu);
         node_set_rotation(*chain_node("lowerarm" + sx), component_inv * Wl);
         node_set_rotation(*chain_node("hand" + sx), component_inv * Wh);
@@ -9600,6 +9620,8 @@ namespace
         int array_offset = -1; // SourceMeshTransformArray inside the node
         int bone_count = 0;
         int hand[2] = {-1, -1};
+        int arm[2][2] = {{-1, -1}, {-1, -1}}; // [side][upperarm, lowerarm]
+        std::vector<int> arm_sub[2][3];         // [side][upperarm, lowerarm, hand]: it and all below it
         int chain[2][5][3]; // [side][thumb..pinky][_01.._03]
         std::vector<int> parent;
             std::vector<int> subtree[2][5][3];           // bone and all its descendants
@@ -9953,6 +9975,8 @@ namespace
             std::string sx = side == 0 ? "_l" : "_r";
             R.hand[side] = driver_bone_index(driver, "hand" + sx);
             if (R.hand[side] < 0) bones_ok = false;
+            R.arm[side][0] = driver_bone_index(driver, "upperarm" + sx);
+            R.arm[side][1] = driver_bone_index(driver, "lowerarm" + sx);
             for (int f = 0; f < 5; ++f)
                 for (int j = 0; j < 3; ++j)
                 {
@@ -9982,6 +10006,21 @@ namespace
                                 break;
                             }
                 }
+        for (int side = 0; side < 2; ++side)
+        {
+            const int roots[3] = {R.arm[side][0], R.arm[side][1], R.hand[side]};
+            for (int k = 0; k < 3; ++k)
+            {
+                if (roots[k] < 0) continue;
+                for (int i = 0; i < R.bone_count; ++i)
+                    for (int a = i, guard = 0; a >= 0 && guard < 64; a = R.parent[a], ++guard)
+                        if (a == roots[k])
+                        {
+                            R.arm_sub[side][k].push_back(i);
+                            break;
+                        }
+            }
+        }
         // The copy node: a struct property of the anim instance whose struct is a Copy Pose From Mesh.
         UScriptStruct* node_struct = nullptr;
         for (UStruct* level = static_cast<UStruct*>(instance->GetClassPrivate()); level && R.node_offset < 0; level = level->GetSuperStruct())
@@ -11468,6 +11507,62 @@ namespace
         return g.on || (g.off_at >= 0.0 && hsvr::now_seconds() - g.off_at < g.ease);
     }
 
+    // pose_arm_fresh_shoulder: in the copy's snapshot (this frame's evaluated driver, component space),
+    // the hand sits off where the solve aimed it by (this frame's shoulder - the shoulder the solve
+    // used). Bend the elbow and turn the upper arm about this frame's shoulder so the hand is back on
+    // its target, and keep the hand's own rotation. Only the drawn body: his physics hand is the
+    // driver's, so held things and grabs are left out (they ride the physics hand).
+    void arm_fresh_shoulder(XForm96* B)
+    {
+        using namespace hsvr;
+        FingerRig& R = g_frig;
+        static Vec3 prev_S[2];
+        static bool have_prev[2] = {false, false};
+        static unsigned used[2] = {0, 0};
+        for (int side = 0; side < 2; ++side)
+        {
+            int u = R.arm[side][0], l = R.arm[side][1], h = R.hand[side];
+            if (u < 0 || l < 0 || h < 0 || R.arm_sub[side][0].empty()) continue;
+            Vec3 S = xf_pos(B[u]);
+            const ArmFix f = g_arm_fix[side];
+            bool fresh = f.seq != used[side];
+            used[side] = f.seq;
+            Vec3 old = prev_S[side];
+            bool had = have_prev[side];
+            prev_S[side] = S, have_prev[side] = true;
+            if (!fresh || !f.want || !had) continue;
+            Vec3 shift = S - (old + f.reach_cs);
+            double m = length(shift);
+            if (m < 0.01 || m > 5.0) continue; // over 5 cm: a teleport or recentre, not a step
+            Vec3 E = xf_pos(B[l]), H = xf_pos(B[h]);
+            Vec3 T = H - shift;
+            Quat hq = xf_rot(B[h]);
+            double a1 = length(E - S), b1 = length(H - E);
+            if (a1 < 1.0 || b1 < 1.0) continue;
+            // The elbow, in the arm's own plane, to the shoulder-to-target distance.
+            Vec3 n = cross(E - S, H - E);
+            if (length(n) > 1e-6)
+            {
+                n = normalized(n);
+                double d = (std::min)(a1 + b1 - 0.01, (std::max)(std::fabs(a1 - b1) + 0.01, length(T - S)));
+                double cur = std::acos((std::max)(-1.0, (std::min)(1.0, dot(normalized(S - E), normalized(H - E)))));
+                double want = std::acos((std::max)(-1.0, (std::min)(1.0, (a1 * a1 + b1 * b1 - d * d) / (2.0 * a1 * b1))));
+                // Turning the forearm about n by +x opens it away from the upper arm: the inside angle shrinks by x.
+                if (std::fabs(cur - want) > 1e-6) turn_subtree(B, R.arm_sub[side][1], E, quat_axis_angle(n, cur - want));
+            }
+            // The whole arm about the shoulder, so the hand is on the target.
+            Vec3 from = xf_pos(B[h]) - S, to = T - S;
+            Vec3 ax = cross(from, to);
+            double s = length(ax), c = dot(from, to);
+            if (s > 1e-9) turn_subtree(B, R.arm_sub[side][0], S, quat_axis_angle(ax * (1.0 / s), std::atan2(s, c)));
+            // The hand keeps the rotation it was solved with.
+            Quat now_q = xf_rot(B[h]);
+            turn_subtree(B, R.arm_sub[side][2], xf_pos(B[h]), (hq * now_q.inverse()).normalized());
+            HSVR_LOG_EVERY(2.0, "Pose: %s hand re-aimed from this frame's shoulder: it had moved %.2f cm since the solve; hand now %.2f cm off its target",
+                           side == 0 ? "left" : "right", m, length(xf_pos(B[h]) - T));
+        }
+    }
+
     UFunction* g_copy_update_fn = nullptr;
     void fingers_after_copy_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
@@ -11505,6 +11600,7 @@ namespace
         double now = hsvr::now_seconds();
         bool log = g_finger_log_now.exchange(false) || (hsvr::config().log_fingers && now - last_log >= 1.0 && (g_fwant[0].on || g_fwant[1].on));
         if (log) last_log = now;
+        arm_fresh_shoulder(a->data);
         for (int side = 0; side < 2; ++side)
         {
             const FingerWant& w = g_fwant[side];
@@ -11791,6 +11887,7 @@ namespace
         g_finger_joint_scale[1].store(cfg.pose_finger_scale_pip);
         g_finger_joint_scale[2].store(cfg.pose_finger_scale_dip);
         g_finger_pivot_on.store(cfg.pose_finger_pivot_fix);
+        g_arm_fix_on.store(cfg.pose_arm_fresh_shoulder);
         g_wrap_untouched.store(cfg.pose_wrap_untouched_curl);
         if (pawn && g_pose_active.load()) wrap_tick(cfg, pawn);
         if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);

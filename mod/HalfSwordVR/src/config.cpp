@@ -677,6 +677,7 @@ namespace hsvr
         flag("pose_hand_world_stop", c.pose_hand_world_stop);
         num("pose_hand_world_radius_cm", c.pose_hand_world_radius_cm);
         num("pose_hand_world_reach_cm", c.pose_hand_world_reach_cm);
+        flag("pose_arm_fresh_shoulder", c.pose_arm_fresh_shoulder);
         num("pose_finger_mcp_lag", c.pose_finger_mcp_lag);
         num("pose_finger_pip_full", c.pose_finger_pip_full);
         flag("pose_wrap", c.pose_wrap);
