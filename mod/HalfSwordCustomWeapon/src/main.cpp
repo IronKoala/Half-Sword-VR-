@@ -1870,7 +1870,7 @@ namespace
                     if (narrow(extra) == n) parts.push_back({n.c_str(), comp(extra), {}});
             }
 
-        UObject* base = object_property(weapon, STR("BaseMesh"));
+        UObject* base_mesh = object_property(weapon, STR("BaseMesh"));
         double parts_before = 0;
         for (Part& pt : parts)
         {
@@ -1883,7 +1883,7 @@ namespace
                 name_of(object_property(pt.comp, STR("StaticMesh"))).c_str(), kg, lo.z, hi.z);
         }
         // BaseMesh (the grip dummy) has a mass of its own, which stays; the parts get the rest.
-        double whole_before = mass_of(base);
+        double whole_before = mass_of(base_mesh);
         double base_share = whole_before - parts_before;
         double parts_target = mass_total - base_share;
         if (base_share < 0 || parts_target < 0.25 * mass_total) parts_target = mass_total;
@@ -1947,10 +1947,10 @@ namespace
         double volume_all = 0;
         std::vector<double> volume(parts.size(), 0.0);
         int empty_parts = 0;
-        for (Hull& h : hulls) volume_all += h.volume;
+        for (const Hull& h : hulls) volume_all += h.volume;
         for (size_t i = 0; i < parts.size(); ++i)
         {
-            for (Hull& h : hulls)
+            for (const Hull& h : hulls)
                 for (auto& ms : parts[i].model_slots)
                     if (ms == h.slot) volume[i] += h.volume;
             if (volume[i] <= 0 && has_mesh(parts[i].comp)) ++empty_parts;
@@ -1969,7 +1969,7 @@ namespace
                 return pt.comp == head ? hl : transform_point(slot_xf, transform_point(head_xf, hl, false), true);
             };
             std::vector<std::vector<V3>> pieces;
-            for (Hull& h : hulls)
+            for (const Hull& h : hulls)
             {
                 bool mine = false;
                 for (auto& ms : pt.model_slots) mine = mine || ms == h.slot;
@@ -1999,7 +1999,7 @@ namespace
             log("  %s: new collision in place (%s; %zu pieces%s), mass setting %.3f kg", pt.name,
                 set.ret_bool() ? "changed" : "NOT changed", pieces.size(), volume[i] > 0 ? "" : ", none in the model: 1 cm box", kg);
         }
-        log("Whole weapon mass now %.3f kg (target %.3f kg)", mass_of(base), mass_total);
+        log("Whole weapon mass now %.3f kg (target %.3f kg)", mass_of(base_mesh), mass_total);
 
         // Damage points (Tip/Base scenes, damage boxes) on the head move with it: the game head's length
         // [olo, ohi] maps onto the model's head [head start, tip] (one piece: the whole model). Found by
