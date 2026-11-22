@@ -128,6 +128,11 @@ namespace
         int swing_slide = 1;
         double swing_slide_start_dps = 400.0, swing_slide_end_dps = 150.0, swing_slide_hold_s = 0.25;
         double swing_slide_down_s = 0.12, swing_slide_up_s = 0.4;
+        // Only slide for a far target (Matthew 2026-11-22): with the game's Camera Lock On on a target, a swing
+        // slides only when the target's head is farther from the weapon's grip than this (cm). 0 = automatic:
+        // main hand to tip + swing_slide_arm_cm. swing_slide_no_target: 1 = slide when nothing is locked on.
+        double swing_slide_min_target_cm = 0.0, swing_slide_arm_cm = 40.0;
+        int swing_slide_no_target = 1;
         std::wstring offhand = L"pommel"; // pommel: off hand at the handle's end (Matthew 2026-11-19); next: beside the main hand (game spacing)
     };
     Settings g_settings;
@@ -173,6 +178,9 @@ namespace
             else if (k == "swing_slide_hold_s") g_settings.swing_slide_hold_s = atof(v.c_str());
             else if (k == "swing_slide_down_s") g_settings.swing_slide_down_s = atof(v.c_str());
             else if (k == "swing_slide_up_s") g_settings.swing_slide_up_s = atof(v.c_str());
+            else if (k == "swing_slide_min_target_cm") g_settings.swing_slide_min_target_cm = atof(v.c_str());
+            else if (k == "swing_slide_arm_cm") g_settings.swing_slide_arm_cm = atof(v.c_str());
+            else if (k == "swing_slide_no_target") g_settings.swing_slide_no_target = atoi(v.c_str());
             else if (k == "offhand") g_settings.offhand = std::wstring(v.begin(), v.end());
         }
         fclose(f);
@@ -1299,6 +1307,12 @@ namespace
         UFunction* set_ref = nullptr;
         UFunction* ang_vel = nullptr;
         FProperty* blockers[4] = {};
+        // Camera Lock On (lock_on_target.md): Willie_BP "Lock On Found" (bool, false while the setting is off
+        // or nothing is found) and "Lock Camera At" (world position of the target's head beacon, never cleared).
+        FProperty* lock_found = nullptr;
+        FProperty* lock_at = nullptr;
+        double reach = 0;   // cm, main hand's spot to the tip
+        bool skip = false;  // this swing: target too close, no slide
         double log_t = 0;
     };
     SwingSlide g_slide;
@@ -1308,6 +1322,24 @@ namespace
         if (!p) return false;
         auto* b = static_cast<FBoolProperty*>(p);
         return (*(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal() + b->GetByteOffset()) & b->GetFieldMask()) != 0;
+    }
+
+    // At the start of a swing: is the locked-on target far enough away to slide for reach?
+    bool far_target(SwingSlide& s, UObject* pawn)
+    {
+        if (!s.lock_found || !s.lock_at || !pawn_flag(pawn, s.lock_found))
+        {
+            if (!g_settings.swing_slide_no_target) log("Swing slide: nothing locked on, no slide (swing_slide_no_target=0)");
+            return g_settings.swing_slide_no_target != 0;
+        }
+        V3 head = read_three(reinterpret_cast<uint8_t*>(pawn) + s.lock_at->GetOffset_Internal(), s.lock_at);
+        V3 grip = transform_point(world_transform(s.base), V3{0, 0, 0}, false);
+        double dx = head.x - grip.x, dy = head.y - grip.y, dz = head.z - grip.z;
+        double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        double need = g_settings.swing_slide_min_target_cm > 0 ? g_settings.swing_slide_min_target_cm : s.reach + g_settings.swing_slide_arm_cm;
+        bool far = d > need;
+        log("Swing slide: target's head %.0f cm from the grip (slides beyond %.0f cm): %s", d, need, far ? "slide" : "too close, no slide");
+        return far;
     }
 
     void slide_tick(float dt)
@@ -1341,13 +1373,15 @@ namespace
         double dps = std::sqrt(w.x * w.x + w.y * w.y + w.z * w.z);
         if (dps >= g_settings.swing_slide_start_dps)
         {
-            s.target = 1;
+            if (s.target == 0 && !s.skip)
+                s.skip = !far_target(s, pawn);  // decided once, when the swing starts
+            if (!s.skip) s.target = 1;
             s.calm = 0;
         }
         else if (dps <= g_settings.swing_slide_end_dps)
         {
             s.calm += dt;
-            if (s.calm >= g_settings.swing_slide_hold_s) s.target = 0;
+            if (s.calm >= g_settings.swing_slide_hold_s) s.target = 0, s.skip = false;
         }
         double was = s.a;
         double rate = dt / (std::max)(0.01, s.target > s.a ? g_settings.swing_slide_down_s : g_settings.swing_slide_up_s);
@@ -1589,6 +1623,11 @@ namespace
                     sl.blockers[i] = pawn->GetPropertyByNameInChain(names[i]);
                     if (!sl.blockers[i]) log("  ! pawn has no %s flag", narrow(names[i]).c_str());
                 }
+                sl.lock_found = pawn->GetPropertyByNameInChain(STR("Lock On Found"));
+                sl.lock_at = pawn->GetPropertyByNameInChain(STR("Lock Camera At"));
+                if (!sl.lock_found || !sl.lock_at) log("  ! pawn has no Lock On Found / Lock Camera At: slide ignores the target");
+                sl.reach = tip - r_target;
+                log("  swing slide: main hand to tip %.0f cm", sl.reach);
                 log("  swing slide: hand point (BaseMesh) z %.1f -> %.1f (model %.1f -> %.1f cm); constraint %s; functions %s/%s",
                     sl.top.z, sl.bottom.z, r_target, lo + hand, rc ? "found" : "NOT found", sl.set_ref ? "ok" : "MISSING",
                     sl.ang_vel ? "ok" : "MISSING");
