@@ -5928,6 +5928,7 @@ namespace
     bool is_fist(UObject* weapon);
     bool holster_snap(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg);
     UObject* scabbard_pin(UObject* scab);
+    void return_scabbard_pin(UObject* pawn, UObject* scab, bool free);
     void remove_fist(int side, UObject* pawn, const char* why);
     // A throw (B&S: released faster than 2 m/s): the game counts an unheld weapon's hits only while its
     // "Just Thrown" is set and "Last Parent" is the thrower (ModularWeaponBP @67055; hs_throwing.md),
@@ -16179,7 +16180,7 @@ namespace
             set_variable(pawn, name(L"Current Scabbard %ls").c_str(), 0.0, scab, nullptr);
             // Locked to the belt (2 cm / 5 deg), not the game's Free (15 cm / 30 deg, for its off hand to
             // take it): draw-test3 dragged a free scabbard 34-71 cm off the belt.
-            call_one_object(pawn, cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+            return_scabbard_pin(pawn, scab, cfg_scabbard_free());
         }
         set_bool_property(pawn, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
         FreeGrip g = handle_grip(side, mesh, w0_pos, w0_rot, palm, *best_h, best_t);
@@ -16630,7 +16631,7 @@ namespace
         }
         // Locked to the belt (2 cm / 5 deg), not the game's Free (15 cm / 30 deg, for its off hand to
             // take it): draw-test3 dragged a free scabbard 34-71 cm off the belt.
-            call_one_object(pawn, cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+            return_scabbard_pin(pawn, scab, cfg_scabbard_free());
         set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), true);
         DrawState d;
         d.active = true;
@@ -16684,6 +16685,8 @@ namespace
         return false;
     }
 
+    // Into the scabbard where it hangs (no Assign, which teleports it to its socket and pins it again:
+    // the other hand may be holding it at an angle). On the hand's own side too, with Cross Unsheath false.
     // Across the body (Matthew's playtest 11:25: the rondel drawn by the right hand from the left hip
     // could not go back): the game's own cross path (cross_sheathe.md). Check Scabbard Unsheath State
     // <slot side> already handles "Cross Unsheath": it reads the HAND's concrete and grip, and seats
@@ -16717,7 +16720,8 @@ namespace
             HSVR_LOG_EVERY(2.0, "Sheathe: %ls has sheath slot type %.0f; only belt slots sheathe across", w->GetName().c_str(), hafted);
             return false;
         }
-        if (stuck_rule_would_drop(pawn, ss))
+        const bool across = ss != side;
+        if (across && stuck_rule_would_drop(pawn, ss))
         {
             HSVR_LOG_EVERY(2.0, "Sheathe: %s hand waits to sheathe across: the game's stuck-hand rule would drop the other hand's item (that hand is by his body and the right hand has a two-handed grip)", hand);
             return false;
@@ -16728,7 +16732,7 @@ namespace
         Vec3 sp = component_location(scab);
         Quat sq = component_rotation(scab);
         FName sock = bone_fname(fit.socket);
-        bool ok = set_bool_property(pawn, STR("Cross Unsheath"), true);
+        bool ok = set_bool_property(pawn, STR("Cross Unsheath"), across);
         ok &= set_variable(pawn, nm(L"Sheath Slot %ls", S).c_str(), fit.slot);
         ok &= set_variable(pawn, nm(L"%ls Sheath Slot Name", S).c_str(), 0.0, nullptr, &sock);
         ok &= set_variable(pawn, nm(L"%ls Sheath Slot Concrete", H).c_str(), concrete);
@@ -16750,7 +16754,7 @@ namespace
                      made ? "" : " (not found)");
             return false;
         }
-        call_one_object(pawn, cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+        return_scabbard_pin(pawn, scab, cfg_scabbard_free());
         set_bool_property(pawn, nm(L"%ls Weapon Sheathing", S).c_str(), true);
         set_bool_property(pawn, nm(L"Block %ls Weapon From Sheathing", S).c_str(), true);
         set_bool_property(pawn, nm(L"Weapon UnSheathing %ls", S).c_str(), true);
@@ -16766,8 +16770,12 @@ namespace
         d.slot = fit.slot;
         g_draw[side] = d;
         controllers_buzz(side, 0.3f);
-        HSVR_LOG("Sheathe: %s hand puts %ls across into slot %ls %d (concrete %.0f; other hand %s)%s", hand, w->GetName().c_str(), S, fit.slot + 1, concrete,
-                 other_held ? "holding something, put back" : "empty", ok ? "" : " (a game variable was NOT set)");
+        if (across)
+            HSVR_LOG("Sheathe: %s hand puts %ls across into slot %ls %d (concrete %.0f; other hand %s)%s", hand, w->GetName().c_str(), S, fit.slot + 1, concrete,
+                     other_held ? "holding something, put back" : "empty", ok ? "" : " (a game variable was NOT set)");
+        else
+            HSVR_LOG("Sheathe: %s hand puts %ls into slot %ls %d, the scabbard left where it is held (concrete %.0f)%s", hand, w->GetName().c_str(), S,
+                     fit.slot + 1, concrete, ok ? "" : " (a game variable was NOT set)");
         return true;
     }
 
@@ -16936,7 +16944,9 @@ namespace
         if (only >= 0)
             HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's blade may go into the %s hip: %.2f s out of the other, the tip nearer this one", hand, into == 0 ? "left" : "right",
                            now_seconds() - g_sheathe_out_at[side]);
-        if (into == side)
+        if (into == side && mouths[into].real && held_scabbard(1 - side) == scab)
+            sheathe_cross_begin(side, pawn, w, *pinned); // held: not moved by Assign
+        else if (into == side)
             sheathe_begin(side, pawn, w);
         else if (mouths[into].real)
             sheathe_cross_begin(side, pawn, w, *pinned); // its scabbard already hangs there
@@ -17196,14 +17206,33 @@ namespace
         return true;
     }
 
+    UObject* child_component(UObject* parent, int index)
+    {
+        Call c(parent, STR("GetChildComponent"));
+        if (!c.fn) return nullptr;
+        if (FProperty* p = c.param(STR("ChildIndex"))) *reinterpret_cast<int32_t*>(c.buffer.data() + p->GetOffset_Internal()) = index;
+        c.run();
+        return c.object_result();
+    }
+
+    // The pin to the pelvis: the scabbard's constraint child. The game takes child 0 to be it (Return
+    // Scabbard Constraint To Locked @43), but an attach appends: a pin the game remade (Release Scabbard L
+    // Hand @1410-1531) comes after whatever was attached before it, e.g. the sound of Create Sheath
+    // Constraint R @3680.
     UObject* scabbard_pin(UObject* scab)
     {
-        Call c(scab, STR("GetChildComponent"));
-        if (!c.fn) return nullptr;
-        if (FProperty* p = c.param(STR("ChildIndex"))) *reinterpret_cast<int32_t*>(c.buffer.data() + p->GetOffset_Internal()) = 0;
-        c.run();
-        UObject* pin = c.object_result();
-        return pin && is_a(pin, STR("PhysicsConstraintComponent")) ? pin : nullptr;
+        if (!scab) return nullptr;
+        static UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+        UObject* child = child_component(scab, 0);
+        if (!child) return nullptr;
+        if (child->GetClassPrivate() == cls) return child;
+        Call n(scab, STR("GetNumChildrenComponents"));
+        FProperty* r = n.param(STR("ReturnValue"));
+        if (!r || !n.run()) return nullptr;
+        const int32_t count = *reinterpret_cast<int32_t*>(n.buffer.data() + r->GetOffset_Internal());
+        for (int32_t i = 1; i < count; ++i)
+            if (UObject* other = child_component(scab, i); other && other->GetClassPrivate() == cls) return other;
+        return nullptr;
     }
 
     // SetAngularSwing1Limit / Swing2 / Twist: (motion byte, angle) whatever the parameters are called.
@@ -17233,6 +17262,21 @@ namespace
             }
         }
         c.run();
+    }
+
+    // The game's lock (5 deg / 2 cm, Return Scabbard Constraint To Locked @293-488) or its draw's freedom
+    // (30 deg / 15 cm, Set Scabbard Constraint Free @293-488). Both act on child 0 only (@43), so a pin
+    // further down gets the same limits here.
+    void return_scabbard_pin(UObject* pawn, UObject* scab, bool free)
+    {
+        call_one_object(pawn, free ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+        UObject* pin = scabbard_pin(scab);
+        if (!pin || child_component(scab, 0) == pin) return;
+        for (const TCHAR* fn : {STR("SetAngularSwing1Limit"), STR("SetAngularSwing2Limit"), STR("SetAngularTwistLimit")})
+            pin_angular_limit(pin, fn, 1, free ? 30.0 : 5.0);
+        // (the same two parameters: motion byte, then size)
+        for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
+            pin_angular_limit(pin, fn, 1, free ? 15.0 : 2.0);
     }
 
     // The pin's limits as they are now (scabbard tests).
@@ -17427,16 +17471,60 @@ namespace
 
     bool scabbard_held(int side) { return g_scab[side].active; }
 
-    // Before his tick: keep the game's automatic off-hand scabbard grab (UG @451824-452352) from firing
-    // for the player. Its gate needs "L Hand Occupied by R Unsheath" false and its release fires when it
-    // is true while the rest of the gate (C) fails, so it is set to exactly C && a scabbard: neither runs.
+    // Current Scabbard R, taken from the game for one tick of his (scabbard_before_tick).
+    struct HiddenScabbard
+    {
+        UObject* pawn = nullptr;
+        UObject* scab = nullptr;
+    };
+    HiddenScabbard g_hidden_scab;
+
+    // After his tick, before anything else of the mod's reads it.
+    void scabbard_restore(UObject* pawn)
+    {
+        static bool tracked0 = track_freed(&g_hidden_scab.scab), tracked1 = track_freed(&g_hidden_scab.pawn);
+        (void)tracked0;
+        (void)tracked1;
+        if (!g_hidden_scab.scab || g_hidden_scab.pawn != pawn) return;
+        UObject* scab = g_hidden_scab.scab;
+        g_hidden_scab = HiddenScabbard{};
+        UObject** slot = value_ptr<UObject*>(pawn, STR("Current Scabbard R"));
+        if (!slot || *slot) return; // the game has written one since (UG @524207, @536841)
+        *slot = scab;
+        if (bool_property(pawn, STR("Weapon UnSheathing R"))) return;
+        // The draw or sheathe ended in that tick, and its Check then locks Current Scabbard L instead
+        // (Check Scabbard Unsheath State R @1413-1461, @3091-3139, @5327-5375). A held one stays wide.
+        if (held_scabbard(0) == scab || held_scabbard(1) == scab) return;
+        return_scabbard_pin(pawn, scab, false);
+    }
+
+    // Before his tick: neither the game's automatic off-hand scabbard grab (UG @451824-452352) nor its
+    // release (@452367-452895) may run for the player. The release teleports the scabbard onto its socket
+    // and remakes the pin (Release Scabbard L Hand @431, @1410-1531). It runs when "L Hand Occupied by R
+    // Unsheath" is true and the gate (C) is not. Check Scabbard Unsheath State R clears "Weapon
+    // UnSheathing R" earlier in the same tick as it seats or breaks, so Occupied held true for C cost the
+    // holding hand its scabbard at the seat (6 of 8 test grabs). So while the right side draws or sheathes
+    // Occupied stays false and Current Scabbard R is None for the tick: Grab Scabbard L Hand returns on
+    // that (@5-34). In Check R None only changes which scabbard it locks (put right in scabbard_restore)
+    // and runs Event Unsheathe Hafted at a break (@5284-7839), an empty event. "R Weapon Sheathing" alone
+    // is the game's approach gate (UG @508938-509305), which None would turn into a no-scabbard seat
+    // (@511061): there Occupied is C as before.
     void scabbard_before_tick(UObject* pawn)
     {
+        scabbard_restore(pawn); // (only if a tick's after hook was missed)
         if (!hsvr::config().pose_scabbard_block_auto) return;
-        bool c = !bool_property(pawn, STR("Hand L Torn Off")) && !bool_property(pawn, STR("Grabbed L")) && !bool_property(pawn, STR("Grab L Target Found")) &&
-                 !bool_property(pawn, STR("Fallen")) && read_number_variable(pawn, STR("Arm_L Health")) > 25.0 && read_number_variable(pawn, STR("L_GripType_Current")) == 0.0 &&
-                 (bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("R Weapon Sheathing")));
-        bool occupied = c && object_property(pawn, STR("Current Scabbard R")) != nullptr;
+        UObject** slot = value_ptr<UObject*>(pawn, STR("Current Scabbard R"));
+        UObject* scab = slot ? *slot : nullptr;
+        bool occupied = false;
+        if (scab && bool_property(pawn, STR("Weapon UnSheathing R")))
+        {
+            g_hidden_scab = HiddenScabbard{pawn, scab};
+            *slot = nullptr;
+        }
+        else if (scab && bool_property(pawn, STR("R Weapon Sheathing")))
+            occupied = !bool_property(pawn, STR("Hand L Torn Off")) && !bool_property(pawn, STR("Grabbed L")) && !bool_property(pawn, STR("Grab L Target Found")) &&
+                       !bool_property(pawn, STR("Fallen")) && read_number_variable(pawn, STR("Arm_L Health")) > 25.0 &&
+                       read_number_variable(pawn, STR("L_GripType_Current")) == 0.0;
         if (bool_property(pawn, STR("L Hand Occupied by R Unsheath")) != occupied)
         {
             set_bool_property(pawn, STR("L Hand Occupied by R Unsheath"), occupied);
@@ -17553,7 +17641,7 @@ namespace
                     s = ScabHold{};
                     bool drawing = false;
                     for (int k = 0; k < 2; ++k) drawing = drawing || g_draw[k].active;
-                    call_one_object(pawn, drawing && cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+                    return_scabbard_pin(pawn, scab, drawing && cfg_scabbard_free());
                     HSVR_LOG("Scabbard: back on the belt (%.1f deg, %.1f cm off), the game's lock put back", left, off_belt);
                     continue;
                 }
@@ -18455,6 +18543,7 @@ namespace
         }
         g_two = TwoHand{};
         g_anim_grip_two_side = -1;
+        g_hidden_scab = HiddenScabbard{};
         g_thrown.clear();
         g_item_track.clear();
         g_sheath_fit.clear();
@@ -18469,6 +18558,7 @@ namespace
         // except by his own Get Damage pre/post, which pairs it).
         if (!g_pose_active.load()) install_player_damage(false);
         if (!is_receive_tick(context, function)) return;
+        scabbard_restore(context); // first, posed or not: it was hidden for his tick only
         for (auto& pin : g_pawn_pins) set_variable(context, pin.first.c_str(), pin.second, nullptr, nullptr);
         if (g_pose_active.load())
         {
