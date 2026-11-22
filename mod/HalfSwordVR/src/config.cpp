@@ -391,6 +391,7 @@ namespace hsvr
         flag("test_room_respawn", c.test_room_respawn);
         num("test_room_respawn_seconds", c.test_room_respawn_seconds);
         num("test_room_despawn_seconds", c.test_room_despawn_seconds);
+        integer("test_room_crossbow", c.test_room_crossbow);
         flag("log_controllers", c.log_controllers);
         text("hand_bone_left", c.hand_bone_left);
         text("hand_bone_right", c.hand_bone_right);
@@ -436,6 +437,8 @@ namespace hsvr
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);
+        flag("pose_turn_spawn_guard", c.pose_turn_spawn_guard);
+        flag("pose_calib_body_facing", c.pose_calib_body_facing);
         flag("pose_stick_walk", c.pose_stick_walk);
         text("pose_move_relative", c.pose_move_relative);
         text("pose_stick_turn", c.pose_stick_turn);
@@ -588,7 +591,19 @@ namespace hsvr
         num("pose_throw_speed", c.pose_throw_speed);
         flag("pose_holster_snap", c.pose_holster_snap);
         flag("log_frames", c.log_frames);
+        flag("replay_capture", c.replay_capture);
+        num("replay_hold_s", c.replay_hold_s);
+        num("replay_before_s", c.replay_before_s);
+        num("replay_after_s", c.replay_after_s);
         flag("pose_keep_scabbard_on_drop", c.pose_keep_scabbard_on_drop);
+        flag("crossbow", c.crossbow);
+        num("crossbow_string_reach_cm", c.crossbow_string_reach_cm);
+        num("crossbow_string_margin_cm", c.crossbow_string_margin_cm);
+        num("crossbow_quiver_reach_cm", c.crossbow_quiver_reach_cm);
+        num("crossbow_bolt_seat_cm", c.crossbow_bolt_seat_cm);
+        num("crossbow_trigger_fire", c.crossbow_trigger_fire);
+        num("crossbow_trigger_release", c.crossbow_trigger_release);
+        num("crossbow_trigger_grip_cm", c.crossbow_trigger_grip_cm);
         num("pose_holster_zone_cm", c.pose_holster_zone_cm);
         num("pose_holster_max_speed", c.pose_holster_max_speed);
         num("pose_throw_multiplier", c.pose_throw_multiplier);
@@ -653,6 +668,7 @@ namespace hsvr
             c.pose_two_hand_mirror = (int)m;
         }
         flag("pose_two_hand_twist_only", c.pose_two_hand_twist_only);
+        flag("pose_two_hand_joint_both_turn", c.pose_two_hand_joint_both_turn);
         num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
         flag("pose_fists", c.pose_fists);
         text("pose_fist_class", c.pose_fist_class);
@@ -670,6 +686,10 @@ namespace hsvr
         flag("pose_fist_clear", c.pose_fist_clear);
         num("pose_fist_clear_margin_cm", c.pose_fist_clear_margin_cm);
         num("pose_fist_clear_retry_s", c.pose_fist_clear_retry_s);
+        flag("pose_fist_full_impulse", c.pose_fist_full_impulse);
+        flag("disarm", c.disarm);
+        num("disarm_grip_scale", c.disarm_grip_scale);
+        num("disarm_hold_s", c.disarm_hold_s);
         integer("pose_fist_shape", c.pose_fist_shape);
         flag("pose_fist_game_flags", c.pose_fist_game_flags);
         flag("pose_fingers_tracked", c.pose_fingers_tracked);
@@ -737,6 +757,7 @@ namespace hsvr
         num("joint_break_twist_free_arm_deg", c.joint_break_twist_free_arm_deg);
         num("joint_break_twist_free_back_deg", c.joint_break_twist_free_back_deg);
         num("joint_break_twist_gain", c.joint_break_twist_gain);
+        num("joint_break_free_min", c.joint_break_free_min);
         flag("joint_break_legs", c.joint_break_legs);
         num("joint_break_scale", c.joint_break_scale);
         flag("log_body_hits", c.log_body_hits);

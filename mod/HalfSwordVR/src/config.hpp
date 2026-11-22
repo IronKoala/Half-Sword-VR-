@@ -126,6 +126,15 @@ namespace hsvr
         // headset, both controllers and their buttons, his drawn hands, head, pelvis and feet, each held
         // item and its hold, crouch and the game's own state; logs\frames-<time>.csv (Matthew 2026-11-19).
         bool log_frames = true;
+        // Bug-marker replay (Matthew 2026-11-22): the mod keeps the last seconds of his head, hands,
+        // controllers, body bones and held weapons in memory (no disk writes); holding the left Y button
+        // (left B on Index) for replay_hold_s saves replay_before_s before the press and replay_after_s
+        // after it to Mods\HalfSwordVR\replays\replay-<time>.csv, with the log lines of that window.
+        // The press plays three strong pulses on both controllers (no other buzz in the mod repeats).
+        bool replay_capture = true;
+        double replay_hold_s = 0.8;
+        double replay_before_s = 10.0;
+        double replay_after_s = 5.0;
         // Write "Input:" lines to the log: which window has the keyboard, Esc and menu clicks,
         // gamepad sticks, and how fast the view is turning.
         bool log_input = true;
@@ -174,6 +183,9 @@ namespace hsvr
         // His body is removed this many seconds after he was out (never while you hold or grab him,
         // or a weapon in your hand is stuck in him). 0 = bodies stay.
         double test_room_despawn_seconds = 7.0;
+        // A crossbow on the second table and a quiver of 20 bolts on your hip: 1 = when you come in by
+        // the Train button, 2 = always (also test_room=1 boots), 0 = never.
+        int test_room_crossbow = 1;
         int stereo_slot_offset = 0; // 0 = find automatically
 
         // ---- Phase 2: controllers (read only) and the player physics test ----
@@ -283,6 +295,9 @@ namespace hsvr
         // The most your head can be turned from his hips (a neck's reach): past it the hips come
         // round with you at once.
         double pose_turn_max_deg = 85.0;
+        // Spawn yaw (playtest 2026-11-22 10:04Z: helmet, chest, hips and lean 13 deg off for a whole life).
+        bool pose_turn_spawn_guard = true;  // body turning never writes the last body's yaw onto a new one
+        bool pose_calib_body_facing = true; // calibrate against the way the body really faces, not the control yaw
         // Controller sticks: the left stick walks (toward where you look with "head", or where your
         // body faces with "body"), the right stick turns you ("smooth", "snap" or "off").
         bool pose_stick_walk = true;
@@ -503,6 +518,7 @@ namespace hsvr
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
         bool pose_two_hand_twist_only = true;
+        bool pose_two_hand_joint_both_turn = false; // joint hold, both hands on fixed grips: both wrists turn it (test)
         double pose_two_hand_swing_share = 0.0;
         // Whoosh judged on the weapon's speed against your body: the game's whoosh threshold for a weapon in
         // a tracked hand is raised by your walking speed x this (0 = off).
@@ -709,6 +725,22 @@ namespace hsvr
         // A drawn weapon dropped, thrown or passed to the other hand leaves its scabbard on the belt (B&S);
         // the game's own release takes it off (Matthew 2026-11-19: "the scabbard despawns").
         bool pose_keep_scabbard_on_drop = true;
+        // ---- Crossbow (Matthew 2026-11-22: two grips, pull the string to cock, a bolt into the
+        // cradle, trigger fires). The game's own string joint, bolt loading and Event Shoot do the work.
+        bool crossbow = true;
+        // A free hand closing this near the string's nut (cm) takes the string (when nearer it than a grip).
+        double crossbow_string_reach_cm = 8.0;
+        // ...and at least this much nearer the nut than any grip (the front grip is 6 cm from it).
+        double crossbow_string_margin_cm = 2.0;
+        // A hand closing this near the quiver at his hip (cm, from its collision) takes a bolt out.
+        double crossbow_quiver_reach_cm = 12.0;
+        // A held bolt this near the cradle's loaded spot (cm) is loaded (the game's own rule is 10).
+        double crossbow_bolt_seat_cm = 10.0;
+        // The trigger fires at this pull (0-1) and must come back under crossbow_trigger_release first.
+        double crossbow_trigger_fire = 0.75;
+        double crossbow_trigger_release = 0.3;
+        // The hand on the rear grip (by the trigger) is the one that fires: within this of it (cm).
+        double crossbow_trigger_grip_cm = 8.0;
         double pose_holster_zone_cm = 15.0;
         double pose_holster_max_speed = 3.0;
         double pose_throw_speed = 2.0;
@@ -793,6 +825,16 @@ namespace hsvr
         bool pose_fist_clear = true;
         double pose_fist_clear_margin_cm = 2.0;
         double pose_fist_clear_retry_s = 0.03;
+        // A fist blow's assisted impulse (hit_assist) goes into the victim's damage as is. The game
+        // scales a sliding contact by the weapon's cutting rate, ~0 for a fist ball, so without this
+        // a hard punch reached his damage as impulse ~1 (playtest 2026-11-22).
+        bool pose_fist_full_impulse = true;
+        // Grabbing a weapon someone else holds: a tug of war under the game's own grip rule; his hand
+        // lets go when its joint is pulled harder than his grip strength T x disarm_grip_scale (pain
+        // weakens it, out cold he has none) for disarm_hold_s, and it is yours.
+        bool disarm = true;
+        double disarm_grip_scale = 3.0;
+        double disarm_hold_s = 0.25;
         // The fist's finger shape in his animation: -2 = the game's own, -1 = the animation's grab
         // shape (its 'Grabbed' switch), 0..17 = that grip type, 100 = its guard fist ('Guarding' for
         // that hand, with the swing speed its fist blend reads held at 75 in the animation only).
@@ -927,10 +969,15 @@ namespace hsvr
         // or knee dislocates (the game relocates it by its own rules), or the back breaks (Break Back).
         // A twist's excess counts as a bend of excess x joint_break_twist_gain degrees.
         bool joint_break = true;
-        double joint_break_twist_free_neck_deg = 60.0;
-        double joint_break_twist_free_arm_deg = 60.0;
+        // A twist counts only for a limb a hand of yours is on (his head, neck, arm or back), and the
+        // free range shrinks to joint_break_free_min of itself (and the strain rate doubles) as his
+        // consciousness and pain take his resistance away. His neck stops turning at about 70 deg from
+        // where it sat (playtest 2026-11-22), so the neck's free range is well short of that.
+        double joint_break_twist_free_neck_deg = 40.0;
+        double joint_break_twist_free_arm_deg = 45.0;
         double joint_break_twist_free_back_deg = 30.0;
-        double joint_break_twist_gain = 2.0;
+        double joint_break_twist_gain = 3.0;
+        double joint_break_free_min = 0.4;
         // Knees too (the old rule read the calf's bend against the thigh).
         bool joint_break_legs = false;
         // Every part's strain rate x this (1 = the old game).
