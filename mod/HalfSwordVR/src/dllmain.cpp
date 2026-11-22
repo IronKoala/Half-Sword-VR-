@@ -5643,6 +5643,7 @@ namespace
         double handle_keep = 0.0;      // how much of its own motion along the line it keeps (0..1)
         bool handle_sliding_logged = false;
         double handle_damp = 0.0;      // the slide's damper along the handle (N s/m), from the trigger
+        double wrist_tcap_nm = -1.0;   // the old hold's turning limit this tick with its wrist stop (N m; -1 = none)
         double shoulder_cap_n = -1.0;  // the shoulder's limit on each held point's pull this tick (N; -1 = none)
         double settle_until = -1.0;    // pulled from settle_from into the hand until then
         bool flipped = false;          // turned end for end by the grip flip (for the log)
@@ -13315,15 +13316,49 @@ namespace
     }
 
     // Once per tick, after the holds: a joint no hold touched this tick goes (let go, dropped, swapped).
-    void jh_sweep()
+    void jh_sweep(UObject* pawn)
     {
+        // Speed net for whatever each hand holds, every tick, hold or not (sanity 5dd9267: on ticks with no hold
+        // a polehammer jammed in scenery got 88-158 k impulses and reached 816 m/s).
+        {
+            hsvr::Config cfg = hsvr::config();
+            if (pawn && cfg.pose_hold_joint && cfg.pose_hold_joint_speed_limit)
+                for (int s = 0; s < 2; ++s)
+                {
+                    UObject* w = object_property(pawn, s == 0 ? STR("Weapon L") : STR("Weapon R"));
+                    if (!w || is_fist(w)) continue;
+                    UObject* b = object_property(w, STR("BaseMesh"));
+                    if (!b) continue;
+                    Call lv(b, STR("GetPhysicsLinearVelocity"));
+                    lv.run();
+                    Call av(b, STR("GetPhysicsAngularVelocityInRadians"));
+                    av.run();
+                    hsvr::Vec3 v = lv.vec(), wv = av.vec();
+                    double spin = (std::max)(1.0, cfg.pose_bs_max_spin);
+                    if (length(v) <= 2000.0 && length(wv) <= spin) continue;
+                    HSVR_LOG_EVERY(0.25, "Joint hold: %s hand's %ls at %.0f cm/s, %.0f rad/s after the tick: held to the limit", s == 0 ? "left" : "right",
+                                   w->GetName().c_str(), length(v), length(wv));
+                    v = clamp_length(v, 2000.0);
+                    wv = clamp_length(wv, spin);
+                    Call slv(b, STR("SetPhysicsLinearVelocity"));
+                    slv.three(STR("NewVel"), v.x, v.y, v.z);
+                    slv.flag(STR("bAddToCurrent"), false);
+                    slv.run();
+                    Call sav(b, STR("SetPhysicsAngularVelocityInRadians"));
+                    sav.three(STR("NewAngVel"), wv.x, wv.y, wv.z);
+                    sav.flag(STR("bAddToCurrent"), false);
+                    sav.run();
+                }
+        }
         for (int s = 0; s < 2; ++s)
             for (int i = 0; i < 2; ++i)
             {
                 JointHand& j = g_jh[s][i];
                 if ((j.sphere || j.con) && (!j.touched || gone(j.weapon) || gone(j.sphere) || gone(j.con)))
                 {
-                    if (j.weapon && !gone(j.weapon)) HSVR_LOG("Joint hold: %s hand's joint on %ls removed", s == 0 ? "left" : "right", j.weapon->GetName().c_str());
+                    if (j.weapon && !gone(j.weapon))
+                        HSVR_LOG("Joint hold: %s hand's joint on %ls removed%s", s == 0 ? "left" : "right", j.weapon->GetName().c_str(),
+                                 pawn && object_property(pawn, s == 0 ? STR("Weapon L") : STR("Weapon R")) == j.weapon ? " (still in that hand: the hold skipped this tick)" : "");
                     if (i == 0 && j.weapon && !gone(j.weapon)) g_jh_gone[s] = JointGone{j.weapon, hsvr::now_seconds(), j.made_t, j.fade_until};
                     if (gone(j.sphere)) j.sphere = nullptr;
                     if (gone(j.con)) j.con = nullptr;
@@ -13403,6 +13438,7 @@ namespace
         // The angular drive's acceleration mode scales by the inertia about the centre of mass (r5: dividing
         // by the inertia about the grip, 3.3 vs 0.55 kg m^2 for the staff, left it ~5 N m of its 30).
         double tcap_nm = rf * mx * (std::max)(0.0, two ? 0.5 * (body.total + s2b.total) : body.total);
+        double wrist_nm = two ? -1.0 : g_hold[side].wrist_tcap_nm * mx;
         // One hand: the turn is a torque about the centre of mass, and turning about the GRIP needs the hand's
         // pull to hold the grip still against it (|F| = tau r m_eff / Ic). So the turn can be no stronger than
         // the hand's pull can follow: with B&S's full turn and the shoulder's ~28 N pull a polehammer grabbed
@@ -13418,6 +13454,15 @@ namespace
                                side == 0 ? "left" : "right", weapon->GetName().c_str(), most, tcap_nm, cap1, r_m * 100.0);
                 tcap_nm = most;
             }
+        }
+        // The wrist stop, as the old hold: a wrist bent far from the hand bottoms out and the forearm takes the
+        // load (up to pose_hold_wrist_stop_torque). Without it the joint's 30 N m was all used holding a 2.3 kg
+        // polehammer level 1.26 m out, and it hung backwards in the hand (sanity 5dd9267: 145-178 deg off for
+        // 2.3 s; the old hold seats it to 11 deg in 1.5 s). Not cut by the grip limit above.
+        if (wrist_nm > tcap_nm)
+        {
+            HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls: wrist stop, turn up to %.0f N m", side == 0 ? "left" : "right", weapon->GetName().c_str(), wrist_nm);
+            tcap_nm = wrist_nm;
         }
         double ka = rk * st / Ic / ang_scale, ca = rc * dst / Ic / ang_scale, tcap = tcap_nm / Ic;
         // Two hands: the main hand only rolls it about the line between the hands (pose_two_hand_twist_only,
@@ -14466,6 +14511,7 @@ namespace
                                        tcap / 1e4);
                     }
                 }
+                h.wrist_tcap_nm = tcap / 1e4; // (the joint hold uses it too: its own limit had no wrist stop)
                 // Two hands (playtest 2026-11-21 13:47, war staff): the right wrist's full turn (up to 680 N m)
                 // beat the two hands' capped pulls (37-70 N), so the staff went where the right wrist
                 // pointed (20-50 deg off the line between the hands), flailed on a wrist roll, and the left
@@ -18299,7 +18345,7 @@ namespace
                              g_grip_log[side].weapon_com_local.z);
                 }
         }
-        jh_sweep();
+        jh_sweep(pawn);
     }
 
     // ---- Deep recording (log_frames; Matthew 2026-11-19: "make it as deep as you can") ------------------
