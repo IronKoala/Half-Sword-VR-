@@ -16262,7 +16262,11 @@ namespace
             return false;
         }
         if (now_in != w)
-            HSVR_LOG("Holster: across the body, %ls's slot variable holds %s after Create Sheath Constraint %ls", w->GetName().c_str(), now_in ? "something else" : "nothing", T);
+        {
+            HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s across the body, but its slot variable holds %s after Create Sheath Constraint %ls: NOT hung, dropped",
+                     hand, w->GetName().c_str(), d, socket.c_str(), now_in ? "something else" : "nothing", T);
+            return false;
+        }
         drop_weapon(side, pawn, false);
         controllers_buzz(side, 0.4f);
         HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s at %.1f m/s: hung across the body (SheathSlot %.0f, slot %ls %d, other hand %s; concrete R %.0f L %.0f)%s",
