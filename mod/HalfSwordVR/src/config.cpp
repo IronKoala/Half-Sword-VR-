@@ -679,7 +679,7 @@ namespace hsvr
         num("pose_wrap_ease_s", c.pose_wrap_ease_s);
         num("pose_wrap_refresh_s", c.pose_wrap_refresh_s);
         num("pose_wrap_finger_radius_cm", c.pose_wrap_finger_radius_cm);
-        num("pose_wrap_body_pad_cm", c.pose_wrap_body_pad_cm);
+        flag("pose_wrap_body_pad", c.pose_wrap_body_pad);
         num("pose_wrap_gauntlet_pad_cm", c.pose_wrap_gauntlet_pad_cm);
         num("pose_wrap_halfgauntlet_pad_cm", c.pose_wrap_halfgauntlet_pad_cm);
         flag("pose_wrap_open_base", c.pose_wrap_open_base);

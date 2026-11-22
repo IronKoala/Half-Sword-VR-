@@ -10135,11 +10135,32 @@ namespace
     const double kWrapCrease = 0.5, kWrapSplay = 0.1, kWrapSunk = 0.5;
     const int kWrapSteps = 10, kWrapHalvings = 4, kWrapLiftSteps = 6;
     const double kFingerTip = 2.5; // cm past the last finger bone (as pose_hand_fingers)
-    // Willie's bare finger (index-pinky median, SK_Body_Man LOD0, reference pose), per segment and
+    // Willie's bare fingers (SK_Body_Man LOD0, reference pose), index/middle/ring/pinky, per segment and
     // sample t = 0.2 .. 1.0: how far the finger's middle sits toward the back of the hand from the bone
-    // line, and half its palm-to-back depth (cm, mesh units).
-    const double kFingerShift[3][5] = {{0.23, 0.50, 1.07, 1.23, 1.39}, {1.55, 1.58, 1.64, 1.70, 1.75}, {1.71, 1.73, 1.82, 1.89, 1.84}};
-    const double kFingerHalf[3][5] = {{1.62, 1.44, 1.04, 1.00, 0.97}, {0.87, 0.90, 0.85, 0.82, 0.78}, {0.74, 0.69, 0.65, 0.59, 0.49}};
+    // line, and half its palm-to-back depth (cm, mesh units). (One median table for all four left the
+    // index 0.6-0.9 cm too thin and the pinky 0.3-0.7 too fat: its knuckle touched at curl 0 and the
+    // finger closed into a fist in the air, offline check of fb4c8d6.)
+    const double kFingerShift[4][3][5] = {
+        {{-0.11, 0.02, 0.26, 0.54, 0.63}, {0.80, 1.04, 1.21, 1.26, 1.36}, {1.50, 1.68, 1.67, 1.67, 1.75}},
+        {{-0.05, 0.23, 0.89, 1.09, 1.36}, {1.47, 1.57, 1.64, 1.69, 1.82}, {1.89, 1.91, 2.01, 2.11, 2.22}},
+        {{0.13, 0.46, 1.08, 1.21, 1.40}, {1.52, 1.57, 1.62, 1.71, 1.75}, {1.76, 1.75, 1.83, 1.96, 1.84}},
+        {{0.77, 0.81, 1.20, 1.37, 1.46}, {1.53, 1.56, 1.62, 1.69, 1.74}, {1.73, 1.75, 1.84, 1.95, 1.84}}};
+    const double kFingerHalf[4][3][5] = {
+        {{1.53, 1.42, 1.23, 1.06, 1.05}, {1.08, 1.01, 0.87, 0.83, 0.84}, {0.80, 0.71, 0.68, 0.62, 0.59}},
+        {{1.70, 1.58, 1.09, 1.00, 0.98}, {0.92, 0.92, 0.94, 0.88, 0.82}, {0.76, 0.73, 0.73, 0.68, 0.33}},
+        {{1.53, 1.42, 1.05, 0.94, 0.91}, {0.84, 0.89, 0.84, 0.80, 0.71}, {0.65, 0.63, 0.66, 0.57, 0.49}},
+        {{1.29, 1.19, 0.96, 0.91, 0.88}, {0.77, 0.78, 0.74, 0.70, 0.64}, {0.61, 0.60, 0.57, 0.37, 0.49}}};
+    // A Willie's skin outside his collision body (Willie_PhysicsAsset_Capsules vs SK_Body_Man/SK_Head
+    // LOD0, by skin area nearest each body, median cm; bodies not listed: skin inside or on it, 0).
+    double body_skin_pad(const std::wstring& bone)
+    {
+        if (bone == STR("neck_01")) return 0.96;
+        if (bone == STR("neck_02")) return 0.55;
+        if (bone == STR("clavicle_l") || bone == STR("clavicle_r")) return 0.87;
+        if (bone == STR("spine_05")) return 0.74;
+        if (bone == STR("spine_04")) return 1.28;
+        return 0.0;
+    }
 
     double wrap_smooth(double x)
     {
@@ -10247,15 +10268,19 @@ namespace
             }
             Vec3 back = cross(b - a, across) * back_sign;
             double bl = length(back);
-            if (bl > 1e-6) p = p + back * (kFingerShift[k][i] / bl);
-            r = kFingerHalf[k][i] + armour[k];
+            if (bl > 1e-6) p = p + back * (kFingerShift[f - 1][k][i] / bl);
+            r = kFingerHalf[f - 1][k][i] + armour[k];
         }
+        // The measured first segment's knuckle sample (t 0.2) sits in the palm's flesh: it touched at
+        // curl 0 and locked fingers into fists in the air. Skipped.
+        bool skip(int k, int i) const { return measured && k == 0 && i == 0; }
         bool touches(const double c[3], int k)
         {
             hsvr::Vec3 seg[3][2];
             place(c, seg);
             for (int i = 0; i < 5; ++i)
             {
+                if (skip(k, i)) continue;
                 hsvr::Vec3 p;
                 double r;
                 sample(seg, k, i, p, r);
@@ -10263,7 +10288,8 @@ namespace
             }
             return false;
         }
-        // How far the finger is sunk in (thickness - nearest), the engine reporting 0 inside.
+        // How far the finger is sunk in, as a share of its own thickness there ((thickness - nearest) /
+        // thickness), the engine reporting 0 inside.
         double sunk(const double c[3])
         {
             hsvr::Vec3 seg[3][2];
@@ -10272,10 +10298,12 @@ namespace
             for (int k = 0; k < 3; ++k)
                 for (int i = 0; i < 5; ++i)
                 {
+                    if (skip(k, i)) continue;
                     hsvr::Vec3 p;
                     double r;
                     sample(seg, k, i, p, r);
-                    worst = (std::max)(worst, (measured ? r : radius) - distance(p));
+                    if (!measured) r = radius;
+                    worst = (std::max)(worst, (r - distance(p)) / (std::max)(0.05, r));
                 }
             return worst;
         }
@@ -10283,7 +10311,7 @@ namespace
         {
             const int n = 3;
             double start[3] = {0, 0, 0};
-            if (sunk(start) > kWrapSunk * radius)
+            if (sunk(start) > kWrapSunk)
             {
                 double best_d = sunk(start), best_b = 0.0;
                 for (int step = 1; step <= kWrapLiftSteps; ++step)
@@ -10291,7 +10319,7 @@ namespace
                     double c[3] = {-g_finger_lift[f] * step / kWrapLiftSteps, 0, 0};
                     double d = sunk(c);
                     if (d < best_d) best_d = d, best_b = c[0];
-                    if (d <= kWrapSunk * radius) break;
+                    if (d <= kWrapSunk) break;
                 }
                 start[0] = best_b;
             }
@@ -10400,9 +10428,9 @@ namespace
                 {
                     const int(*ch)[3] = g_frig.chain[side];
                     ws.across = xf_pos(B[ch[1][0]]) - xf_pos(B[ch[4][0]]);
-                    Vec3 seg0 = xf_pos(B[ch[f][1]]) - xf_pos(B[ch[f][0]]);
-                    Vec3 back_hand = xf_rot(B[g_frig.hand[side]]).rotate(Vec3{0, 0, 1}); // the palm faces hand -Z
-                    ws.back_sign = dot(cross(seg0, ws.across), back_hand) >= 0.0 ? 1.0 : -1.0;
+                    // Fixed per side (offline check on both hands: left +1, right -1; the sign taken
+                    // from the first segment flipped past a 90 degree knuckle bend).
+                    ws.back_sign = side == 0 ? 1.0 : -1.0;
                     // Hand armour, palm side over bare (unpacked meshes): full gauntlets and gloves
                     // (Hands Rigidity 0.75-1.0; SK_Armor_Hand_Gauntlet_010 +0.92/.84/1.02/.89/1.00,
                     // +1.02/.83/.75/.79/.84, +.73/.69/.73/.72/.58 per sample) pad every segment;
@@ -10759,17 +10787,9 @@ namespace
                     g.seated_at = now;
                     g.far_base = -1.0;
                     g.far_since = -1.0;
-                    // A Willie's skin stands outside his collision capsules (Willie_PhysicsAsset_Capsules
-                    // against SK_Body_Man LOD0: neck_02 median +0.6 cm, p90 +1.2; neck_01 +1.0/+2.1;
-                    // spine_05 +0.9/+2.4), so fingers stopping at the capsule sank into his neck. His head's
-                    // collision is BIGGER than the skin (median -2.7): no pad there.
-                    g.pad = 0.0;
-                    if (g.body && g.comp)
-                    {
-                        std::wstring bn = g.bone.ToString();
-                        bool head = bn == STR("head") || bn == STR("Head");
-                        if (!head) g.pad = (std::max)(0.0, cfg.pose_wrap_body_pad_cm);
-                    }
+                    // A Willie's skin stands outside some of his collision bodies (neck, clavicles, upper
+                    // spine: body_skin_pad), so fingers stopping at the capsule sank into his neck.
+                    g.pad = g.body && g.comp && cfg.pose_wrap_body_pad ? body_skin_pad(g.bone.ToString()) : 0.0;
                 }
             }
             else if (comp && g.on && g.seated && !g.world && cfg.log_wrap && g.checks < 3 && now - g.seated_at >= 0.1 + 0.4 * g.checks)

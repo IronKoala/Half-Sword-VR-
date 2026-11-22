@@ -814,10 +814,10 @@ namespace hsvr
         double pose_wrap_ease_s = 0.12;
         double pose_wrap_refresh_s = 0.5;
         double pose_wrap_finger_radius_cm = 0.0;
-        // Fingers stop this much further out on a Willie (his skin stands outside his collision);
-        // hand armour makes the fingers this much thicker on the palm side (full gauntlets/gloves:
+        // Fingers stop at a Willie's skin, not his collision (measured per body: neck, clavicles, upper
+        // spine stand out of it); hand armour makes the fingers this much thicker on the palm side (full gauntlets/gloves:
         // every segment; half gauntlets: the first).
-        double pose_wrap_body_pad_cm = 0.8;
+        bool pose_wrap_body_pad = true;
         double pose_wrap_gauntlet_pad_cm = 0.85;
         double pose_wrap_halfgauntlet_pad_cm = 1.0;
         bool pose_wrap_open_base = true;
