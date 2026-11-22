@@ -23820,6 +23820,28 @@ namespace
                 if (w && !had.count(w) && w->GetName().rfind(STR("Default__"), 0) != 0 && hsvr::length(actor_location(w) - at) < 150.0) weapon = w;
             HSVR_LOG("TestRoom: %s (tier %d) made at (%.0f, %.0f, %.0f): %ls (%ls)", kind.label, tier, at.x, at.y, at.z, cls->GetName().c_str(),
                      weapon ? weapon->GetName().c_str() : STR("NOT found after"));
+            // A shield lies on its face: of its own three axes, the one that leaves it lowest is put upright
+            // (a pavise's face is not its Z: it stood on its edge, 45-65 cm up, test 2026-11-22 22:17).
+            if (weapon && kind.premade == 2)
+                if (UObject* base = object_property(weapon, STR("BaseMesh")))
+                {
+                    hsvr::Vec3 pos = component_location(base);
+                    hsvr::Quat q0 = component_rotation(base);
+                    const double half_pi = 1.5707963267948966;
+                    hsvr::Quat tries[3] = {q0, q0 * hsvr::quat_axis_angle(hsvr::Vec3{1, 0, 0}, half_pi), q0 * hsvr::quat_axis_angle(hsvr::Vec3{0, 1, 0}, half_pi)};
+                    double best_h = 1e18, hs[3] = {-1, -1, -1};
+                    int best = 0;
+                    for (int t = 0; t < 3; ++t)
+                    {
+                        set_component_transform(base, pos, tries[t]);
+                        hsvr::Vec3 o, e;
+                        if (!room_weapon_box(weapon, o, e)) continue;
+                        hs[t] = 2.0 * e.z;
+                        if (e.z < best_h - 0.5) { best_h = e.z; best = t; }
+                    }
+                    set_component_transform(base, pos, tries[best]);
+                    HSVR_LOG("TestRoom: %ls laid on its face: heights %.0f / %.0f / %.0f cm, took %d", weapon->GetName().c_str(), hs[0], hs[1], hs[2], best);
+                }
             if (weapon && !room_lay(weapon, player)) HSVR_LOG("TestRoom: %ls: nothing found under it; left where it was made", weapon->GetName().c_str());
             else if (weapon) room_keep_on_table(weapon);
             return weapon;
