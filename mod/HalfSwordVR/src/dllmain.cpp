@@ -24173,9 +24173,10 @@ namespace
                 // On the floor between the book and where you started, 20 cm along for each one there.
                 hsvr::Vec3 toward = hsvr::normalized(hsvr::Vec3{b.centre.x - g_room.origin.x, b.centre.y - g_room.origin.y, 0.0});
                 double floor_z = room_floor_z(player);
-                for (int i = 0; i < 6 && !spot; ++i)
+                // 4 rows of 6, 25 cm apart (a pile from one point crept for seconds: test 2026-11-22 22:11).
+                for (int i = 0; i < 24 && !spot; ++i)
                 {
-                    floor_spot.at = hsvr::Vec3{b.centre.x, b.centre.y, floor_z + 30.0} - toward * 60.0 + g_room.forward * (i * 20.0 - 50.0);
+                    floor_spot.at = hsvr::Vec3{b.centre.x, b.centre.y, floor_z + 30.0} - toward * (60.0 + (i / 6) * 25.0) + g_room.forward * ((i % 6) * 20.0 - 50.0);
                     floor_spot.q = hsvr::quat_from_axes(hsvr::Vec3{0, 0, 1}, hsvr::cross(right, hsvr::Vec3{0, 0, 1}), right);
                     if (room_spot_free(floor_spot, boxes)) spot = &floor_spot;
                 }
@@ -24835,6 +24836,12 @@ namespace
             Vec3 at = component_location(base);
             // The generator's own throwaway weapons (destroyed, waiting for clean-up) sit at 0,0,0.
             if (at.x == 0.0 && at.y == 0.0 && at.z == 0.0) continue;
+            // Where it lies is the middle of what you see of it, not its grip (a polearm slid to have its
+            // centre of mass over the table has its grip 99 cm out from the table's middle).
+            {
+                Vec3 bo, be;
+                if (room_weapon_box(w, bo, be)) at = bo;
+            }
             ++loose;
             int best = -1;
             Vec3 local{};
@@ -25028,6 +25035,10 @@ namespace
             if (!base) continue;
             Vec3 at = component_location(base);
             if (at.x == 0.0 && at.y == 0.0 && at.z == 0.0) continue;
+            {
+                Vec3 bo, be;
+                if (room_weapon_box(wp, bo, be)) at = bo; // the middle of what you see of it (room_report)
+            }
             if (at.z < floor_z - 300.0 || hsvr::length(at - me) > 5000.0) { ++lost; continue; }
             bool table = false;
             for (const Vec3& t : g_room.table_at)
@@ -25041,7 +25052,13 @@ namespace
             else
             {
                 auto it = g_room_marks.find(wp);
-                if (it != g_room_marks.end() && hsvr::length(at - it->second) > 3.0) ++moved;
+                if (it != g_room_marks.end() && hsvr::length(at - it->second) > 3.0)
+                {
+                    ++moved;
+                    if (w == "room_moved")
+                        HSVR_LOG("TestRoom: %ls moved %.0f cm since the mark, from (%.0f, %.0f, %.0f) to (%.0f, %.0f, %.0f)", wp->GetName().c_str(), hsvr::length(at - it->second),
+                                 it->second.x, it->second.y, it->second.z, at.x, at.y, at.z);
+                }
             }
         }
         if (mark) { value = (double)g_room_marks.size(); return true; }
