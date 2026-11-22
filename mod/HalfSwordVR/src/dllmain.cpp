@@ -8880,6 +8880,27 @@ namespace
         return true;
     }
 
+    // What that arm's hand holds or is taking never collides with the pavise on its forearm. The pair is
+    // made as soon as the hand starts taking it (its pending grip, before Weapon <S> is set and while the
+    // grab's settle pulls it in past the shield), not after his tick once Weapon <S> is set: a mace taken
+    // by the mounted arm's hand knocked the pavise 1.1-5.7 cm / 5-11 deg off its place for under a second
+    // (test 886981a, 3 of 3; Matthew 2026-11-22 chose to fix it before install).
+    void mount_beside(int arm, UObject* pawn, UObject* held)
+    {
+        Mount& m = g_mount[arm];
+        if (!m.weapon || m.pawn != pawn) return;
+        UObject* want = held ? held : g_pending_item[arm] ? g_pending_item[arm] : g_hold[arm].weapon;
+        if (want == m.weapon) want = nullptr;
+        if (want == m.beside) return;
+        destroy_joint(m.beside_joint);
+        m.beside = want;
+        if (UObject* other = want ? object_property(want, STR("BaseMesh")) : nullptr)
+        {
+            m.beside_joint = pair_joint(pawn, m.base, other, FName(), 0);
+            HSVR_LOG("Pavise: the %s forearm's pavise and %ls in that hand no longer collide", arm == 0 ? "left" : "right", want->GetName().c_str());
+        }
+    }
+
     // After his tick.
     void mount_tick(UObject* pawn)
     {
@@ -8939,12 +8960,7 @@ namespace
                 static const FName sockets[2] = {bone_fname("shield_l_socket"), bone_fname("shield_r_socket")};
                 if (m.anchor) set_component_transform(m.anchor, socket_location(m.mesh, sockets[arm]), socket_rotation(m.mesh, sockets[arm]), false);
             }
-            if (in_hand[arm] != m.beside)
-            {
-                destroy_joint(m.beside_joint);
-                m.beside = in_hand[arm];
-                if (UObject* other = m.beside ? object_property(m.beside, STR("BaseMesh")) : nullptr) m.beside_joint = pair_joint(pawn, m.base, other, FName(), 0);
-            }
+            mount_beside(arm, pawn, in_hand[arm]);
             if (m.gripped) set_anim_grip(arm, (int)(std::max)(0.0, hsvr::config().pose_shield_hand_grip_type));
             const double now = hsvr::now_seconds();
             if (now - m.last_log >= 1.0)
@@ -13956,6 +13972,9 @@ namespace
             HSVR_LOG("Grab: %s grip took %ls (%.1f cm from the hand): %s, hand now holds %ls", hand, best->GetName().c_str(), best_d,
                      ok ? "set up" : "set-up call missing", now ? now->GetName().c_str() : STR("nothing"));
         }
+        // A grab this tick: its item and a forearm's pavise stop colliding before the physics step.
+        for (int arm = 0; arm < 2; ++arm)
+            if (g_mount[arm].weapon) mount_beside(arm, pawn, object_property(pawn, arm == 0 ? STR("Weapon L") : STR("Weapon R")));
         crossbow_tick(cfg, state, pawn, mesh);
         fists_from_fingers(cfg, state, pawn, menu_up);
     }
