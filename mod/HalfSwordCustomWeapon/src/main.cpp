@@ -1920,6 +1920,27 @@ namespace
         return c;
     }
 
+    // Height (model z) of a convex piece's centre: tetrahedra from its mean point to each triangle.
+    double hull_centroid_z(const Hull& h)
+    {
+        if (h.points.empty()) return 0;
+        V3 a{0, 0, 0};
+        for (const V3& p : h.points) a = {a.x + p.x, a.y + p.y, a.z + p.z};
+        double n = (double)h.points.size();
+        a = {a.x / n, a.y / n, a.z / n};
+        double vs = 0, vz = 0;
+        for (size_t i = 0; i + 2 < h.faces.size(); i += 3)
+        {
+            const V3 &p = h.points[h.faces[i]], &q = h.points[h.faces[i + 1]], &r = h.points[h.faces[i + 2]];
+            V3 c = cross(sub(q, a), sub(r, a));
+            V3 d = sub(p, a);
+            double v = std::fabs(d.x * c.x + d.y * c.y + d.z * c.z) / 6.0;
+            vs += v;
+            vz += v * (p.z + q.z + r.z + a.z) / 4.0;
+        }
+        return vs > 0 ? vz / vs : a.z;
+    }
+
     // base = the model's path without extension (<pack folder>/<name>); its .obj, _collision.obj, .txt and
     // textures sit there. held: the player holds it now (F9 style); otherwise only the weapon is changed,
     // and the hands are fitted when the player takes it (held_tick).
@@ -2102,6 +2123,65 @@ namespace
             if (volume[i] <= 0 && has_mesh(parts[i].comp)) ++empty_parts;
         }
         double share_target = (std::max)(0.05, parts_target - token_kg * empty_parts);
+        // Each part's share: its pieces' volume x density (the handle wood and leather, the rest steel; the
+        // converter's estimate, model_to_weapon.py STEEL/GRIP/HAFT), then shifted between the parts so the
+        // weapon balances where the converter says ("balance", cm above the top of the grip: the model's own
+        // balance unless the user typed one). Masses m_i at heights z_i become m_i * exp(k (z_i - b)), k found
+        // by bisection so that the centre of mass is at b (as close as the parts allow).
+        std::vector<double> weight(parts.size(), 0.0), zc(parts.size(), 0.0);
+        {
+            double grip_density = (model_hafted ? 0.75 : 1.0) / 7.85;
+            for (size_t i = 0; i < parts.size(); ++i)
+            {
+                double wz = 0;
+                for (const Hull& h : hulls)
+                    for (auto& ms : parts[i].model_slots)
+                        if (ms == h.slot)
+                        {
+                            double w = h.volume * (h.slot == "Grip" ? grip_density : 1.0);
+                            weight[i] += w;
+                            wz += w * hull_centroid_z(h);
+                        }
+                if (weight[i] > 0) zc[i] = wz / weight[i];
+            }
+            double wsum = 0, wz = 0;
+            for (size_t i = 0; i < parts.size(); ++i)
+            {
+                wsum += weight[i];
+                wz += weight[i] * zc[i];
+            }
+            if (wsum > 0 && numbers.count("balance"))
+            {
+                double b = numbers["balance"];
+                double span = (std::max)(1.0, tip - numbers["pommel_end"]);
+                auto moment = [&](double k) {
+                    double m = 0;
+                    for (size_t i = 0; i < parts.size(); ++i)
+                        if (weight[i] > 0) m += weight[i] * std::exp(k * (zc[i] - b) / span) * (zc[i] - b);
+                    return m;
+                };
+                double lo = -12, hi = 12;
+                for (int it = 0; it < 60; ++it)
+                {
+                    double mid = 0.5 * (lo + hi);
+                    (moment(mid) > 0 ? hi : lo) = mid;
+                }
+                double k = 0.5 * (lo + hi);
+                double after = 0, before_z = wz / wsum;
+                for (size_t i = 0; i < parts.size(); ++i)
+                    if (weight[i] > 0) weight[i] *= std::exp(k * (zc[i] - b) / span);
+                double nsum = 0, nz = 0;
+                for (size_t i = 0; i < parts.size(); ++i)
+                {
+                    nsum += weight[i];
+                    nz += weight[i] * zc[i];
+                }
+                after = nz / nsum;
+                log("  balance: parts give %.1f cm, wanted %.1f cm, now %.1f cm above the grip", before_z, b, after);
+            }
+        }
+        double weight_all = 0;
+        for (double w : weight) weight_all += w;
 
         for (size_t i = 0; i < parts.size(); ++i)
         {
@@ -2124,7 +2204,7 @@ namespace
                 for (V3 p : h.points) local.push_back(to_slot(p));
                 pieces.push_back(local);
             }
-            float kg = volume_all > 0 ? (float)(share_target * volume[i] / volume_all) : 0.0f;
+            float kg = weight_all > 0 ? (float)(share_target * weight[i] / weight_all) : 0.0f;
             if (pieces.empty())
             {
                 // Nothing in the model for this part (no guard, no side pieces): a 1 cm box inside the
@@ -2145,7 +2225,7 @@ namespace
             log("  %s: new collision in place (%s; %zu pieces%s), mass setting %.3f kg", pt.name,
                 set.ret_bool() ? "changed" : "NOT changed", pieces.size(), volume[i] > 0 ? "" : ", none in the model: 1 cm box", kg);
         }
-        log("Whole weapon mass now %.3f kg (target %.3f kg)", mass_of(base_mesh), mass_total);
+        // (The whole weapon's mass is read in measure_weapon, once the swapped parts are welded again.)
 
         // Damage points (Tip/Base scenes, damage boxes) on the head move with it: the game head's length
         // [olo, ohi] maps onto the model's head [head start, tip] (one piece: the whole model). Found by
@@ -2161,6 +2241,20 @@ namespace
             if (!rp || from_hi - from_lo < 1.0) continue;
             V3 r = read_three(reinterpret_cast<uint8_t*>(c) + rp->GetOffset_Internal(), rp);
             double z = to_lo + (r.z - from_lo) * (to_hi - to_lo) / (from_hi - from_lo);
+            if (cls.find(STR("BoxComponent")) != std::wstring::npos)
+            {
+                // The hit box (dismembering cuts gather their markers with it) stretches with the head.
+                FProperty* ep = c->GetPropertyByNameInChain(STR("BoxExtent"));
+                if (ep)
+                {
+                    V3 e = read_three(reinterpret_cast<uint8_t*>(c) + ep->GetOffset_Internal(), ep);
+                    double ez = e.z * (to_hi - to_lo) / (from_hi - from_lo);
+                    Call ext(c, STR("SetBoxExtent"));
+                    ext.three(STR("InBoxExtent"), e.x, e.y, ez).flag(STR("bUpdateOverlaps"), false);
+                    ext.run();
+                    log("  hit box %s: extent z %.1f -> %.1f", narrow(c->GetName()).c_str(), e.z, ez);
+                }
+            }
             Call move(c, STR("K2_SetRelativeLocation"));
             move.three(STR("NewLocation"), r.x, r.y, z).flag(STR("bTeleport"), true);
             move.run();
@@ -2193,6 +2287,8 @@ namespace
         {
             static FName tip_tag(STR("Tip"), FNAME_Add);
             static FName off_tag(STR("CW_Tip_Off"), FNAME_Add);
+            static FName base_tag(STR("Base"), FNAME_Add);
+            static FName base_off_tag(STR("CW_Base_Off"), FNAME_Add);
             std::map<std::string, UObject*> parent_of;
             int untagged = 0;
             for (Part& pt : parts)
@@ -2203,6 +2299,15 @@ namespace
                 std::vector<UObject*> all;
                 descendants(pt.comp, all);
                 for (UObject* c : all) untagged += retag(c, tip_tag, off_tag);
+            }
+            // A part that gets the model's own Base loses the carrier's (the last direct child tagged Base wins,
+            // and ours must be the one).
+            for (const DPoint& d : data->points)
+            {
+                if (d.flags.empty() || d.flags[0] != "BASE") continue;
+                auto it = parent_of.find(d.slot);
+                if (it == parent_of.end()) continue;
+                for (UObject* c : children_of(it->second)) retag(c, base_tag, base_off_tag);
             }
             // Model cm -> world: the model's frame in the head's local units (as the visible model).
             auto world_of = [&](V3 p) {
@@ -2219,6 +2324,11 @@ namespace
                 V3 wf = sub(world_of(V3{d.p.x + d.f.x, d.p.y + d.f.y, d.p.z + d.f.z}), w);
                 V3 wu = sub(world_of(V3{d.p.x + d.u.x, d.p.y + d.u.y, d.p.z + d.u.z}), w);
                 wchar_t buf[32];
+                if (!d.flags.empty() && d.flags[0] == "BASE")
+                {
+                    if (add_damage_point(weapon, it->second, w, unit(wf), unit(wu), {base_tag})) ++added;
+                    continue;
+                }
                 std::vector<FName> tags{tip_tag};
                 swprintf(buf, 32, L"sTip%03d", d.sTip);
                 tags.emplace_back(buf, FNAME_Add);
@@ -2528,6 +2638,116 @@ namespace
         return true;
     }
 
+    // A point in one component's space to another's, as plain numbers (4 engine calls to set up, then
+    // free): x' = o + X*x + Y*y + Z*z from where the component puts its origin and unit axes.
+    struct Affine
+    {
+        V3 o{}, X{1, 0, 0}, Y{0, 1, 0}, Z{0, 0, 1};
+        V3 apply(V3 p) const
+        {
+            return {o.x + X.x * p.x + Y.x * p.y + Z.x * p.z, o.y + X.y * p.x + Y.y * p.y + Z.y * p.z,
+                    o.z + X.z * p.x + Y.z * p.y + Z.z * p.z};
+        }
+    };
+    Affine affine_of(const Xf& x, bool inverse)
+    {
+        Affine a;
+        a.o = transform_point(x, {0, 0, 0}, inverse);
+        a.X = sub(transform_point(x, {1, 0, 0}, inverse), a.o);
+        a.Y = sub(transform_point(x, {0, 1, 0}, inverse), a.o);
+        a.Z = sub(transform_point(x, {0, 0, 1}, inverse), a.o);
+        return a;
+    }
+    double dist(V3 a, V3 b)
+    {
+        V3 d = sub(a, b);
+        return std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    }
+
+    // What the game measured from the carrier's parts in its BeginPlay, measured again for the converted
+    // weapon (decompile: weapon_damage_points.md §9, §10):
+    // - Mass Default and Center of Mass: BaseMesh's whole welded body. SetStaticMesh unwelded the swapped
+    //   parts and they only weld back while BaseMesh simulates, so (the game's own pattern) simulate, read,
+    //   stop again (stopping does not unweld; BeginPlay's Delay(0) tail turns simulation on as usual).
+    // - The lengths: the game sweeps a 100 cm sphere down BaseMesh's local z from +1000 and up from -1000
+    //   onto the weapon's collision; the first contact is the point of the hulls that maximises
+    //   z + sqrt(100^2 - r^2) (top) / minimises z - sqrt(...) (bottom), r = distance from the axis.
+    void measure_weapon(UObject* actor, const std::wstring& model_base)
+    {
+        UObject* base = object_property(actor, STR("BaseMesh"));
+        const ModelData* data = model_data(model_base);
+        auto bi = g_built.find(actor);
+        if (!base || !data || bi == g_built.end()) return;
+        const Built& b = bi->second;
+
+        Call sim_on(base, STR("SetSimulatePhysics"));
+        sim_on.flag(STR("bSimulate"), true).run();
+        float mass = mass_of(base);
+        V3 com{};
+        {
+            Call c(base, STR("GetCenterOfMass"));
+            FProperty* r = c.run() ? c.param(STR("ReturnValue")) : nullptr;
+            if (r) com = read_three(c.buffer.data() + r->GetOffset_Internal(), r);
+        }
+        Call sim_off(base, STR("SetSimulatePhysics"));
+        sim_off.flag(STR("bSimulate"), false).run();
+        Xf base_xf = world_transform(base);
+        V3 com_local = transform_point(base_xf, com, true);
+        set_number(actor, STR("Mass Default"), mass);
+        if (FProperty* p = actor->GetPropertyByNameInChain(STR("Center of Mass")))
+            write_three(reinterpret_cast<uint8_t*>(actor) + p->GetOffset_Internal(), p, com_local.x, com_local.y, com_local.z);
+        log("  whole weapon %.3f kg, centre of mass (%.1f %.1f %.1f) in BaseMesh space", mass, com_local.x, com_local.y, com_local.z);
+
+        // Model cm -> world (as the model was placed on the head) -> BaseMesh local.
+        Xf head_xf = world_transform(b.head);
+        if (head_xf.bytes.empty() || base_xf.bytes.empty()) return;
+        Affine to_world = affine_of(head_xf, false), to_base = affine_of(base_xf, true);
+        V3 top_l{0, 0, 1}, bot_l{0, 0, -1};
+        double top_s = 1 + 100, bot_s = -1 - 100; // the dummy's own sphere (r 1 at the origin)
+        for (const Hull& h : data->hulls)
+            for (V3 p : h.points)
+            {
+                p.z += b.shift;
+                V3 l = to_base.apply(to_world.apply(V3{p.x / b.hs.x, p.y / b.hs.y, p.z / b.hs.z}));
+                double r2 = l.x * l.x + l.y * l.y;
+                if (r2 > 100.0 * 100.0) continue;
+                double cap = std::sqrt(100.0 * 100.0 - r2);
+                if (l.z + cap > top_s) top_s = l.z + cap, top_l = l;
+                if (l.z - cap < bot_s) bot_s = l.z - cap, bot_l = l;
+            }
+        Affine base_to_world = affine_of(base_xf, false);
+        V3 T = base_to_world.apply(top_l), B = base_to_world.apply(bot_l);
+        double len = dist(T, B);
+        auto at = [&](const TCHAR* n, V3& out) {
+            UObject* c = object_property(actor, n);
+            if (c) out = world_location(c);
+            return c != nullptr;
+        };
+        V3 R{}, L{}, LOff{}, RAlt{}, LAlt{};
+        bool hr = at(STR("Grip R Hand Default Pos"), R), hl = at(STR("Grip L Hand Default Pos"), L),
+             hoff = at(STR("Grip L Hand Off Hand"), LOff), hra = at(STR("Grip R Hand Alt Pos"), RAlt),
+             hla = at(STR("Grip L Hand Alt Pos"), LAlt);
+        set_number(actor, STR("Weapon Length"), len);
+        if (len > 1e-3) set_number(actor, STR("AI Balance Point (temp)"), dist(B, com) / len);
+        if (hr) set_number(actor, STR("Length to Bottom"), dist(B, R));
+        double old_top_r = 0;
+        if (FProperty* p = actor->GetPropertyByNameInChain(STR("Length to Top R Default")))
+            old_top_r = *reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(actor) + p->GetOffset_Internal());
+        if (hr && old_top_r != 0) set_number(actor, STR("Length to Top R Default"), dist(T, R)); // shields keep 0
+        if (hl) set_number(actor, STR("Length to Top L Default"), dist(T, L));
+        set_number(actor, STR("Length to Bottom (From Pivot)"), dist(T, world_location(base)));
+        if (hr && hoff) set_number(actor, STR("Length to Top 2H"), (std::min)(dist(T, R), dist(T, LOff)));
+        if (hra && hla) set_number(actor, STR("Length to Top Alt"), (std::min)(dist(T, RAlt), dist(T, LAlt)));
+        if (UObject* tippy = object_property(actor, STR("TippyTipScene")))
+        {
+            Call mv(tippy, STR("K2_SetWorldLocation"));
+            mv.three(STR("NewLocation"), T.x, T.y, T.z).flag(STR("bTeleport"), true);
+            mv.run();
+        }
+        log("  measured: length %.1f cm (top %.1f, bottom %.1f in BaseMesh z), balance %.2f of the length", len, top_l.z,
+            bot_l.z, len > 1e-3 ? dist(B, com) / len : 0.0);
+    }
+
     // Every ModularWeaponBP after its BeginPlay (which built the parts from the passport).
     void weapon_begin_play(UObject* actor)
     {
@@ -2566,10 +2786,11 @@ namespace
         // The name the trader and menus show (the passport keeps the marker).
         if (FName* n = actor->GetValuePtrByPropertyNameInChain<FName>(STR("Name"))) *n = FName(pk->title.c_str(), FNAME_Add);
         // Values the game measured from the old parts in BeginPlay (carrier_passport_impl.md b2).
-        const Built& b = g_built[actor];
-        auto num = [&](const char* k) { auto i = b.numbers.find(k); return i == b.numbers.end() ? 0.0 : i->second; };
-        set_number(actor, STR("Weapon Length"), num("tip") - num("pommel_end"));
-        if (UObject* base = object_property(actor, STR("BaseMesh"))) set_number(actor, STR("Mass Default"), mass_of(base));
+        measure_weapon(actor, pk->dir + pk->model);
+        // The damage tags are scaled by the weapon's Quality (0 good x1.25, 1 x1, 2 low x0.85): 1 keeps the
+        // converter's numbers as they are (weapon_damage_points.md).
+        uint8_t quality = 1;
+        if (!byte_property(actor, STR("Quality"), true, quality)) log("  ! could not set Quality");
     }
 
     // When the player takes a converted weapon, its hands are fitted (grip type, hand spots, slide).

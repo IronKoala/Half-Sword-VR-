@@ -17,7 +17,10 @@ z = along the weapon, 0 at the top of the grip, cm.
 
 Written as <name>_points.txt, one point per line:
     <slot> x y z  fx fy fz  ux uy uz  sTip sEdge dSharp dBlunt rig  [flags...]
-slot = the model part it belongs to (Head, Guard, Grip, Pommel).
+slot = the model part it belongs to (Head, Guard, Grip, Pommel). A point with the flag BASE is that part's
+"Base" (where a stuck blade's slide depth is measured from), not a damage point.
+Cutting and piercing points carry BoxCollision too: without it a stuck cut gathers no markers and cannot
+dismember (decompile: Constraint_Weapon_Stuck_BP STUCK @11282, Dismemberment Check @89).
 """
 import math
 
@@ -85,6 +88,12 @@ def point(slot, p, fwd, up, sTip, sEdge, dSharp, dBlunt, rig, flags=()):
                 dSharp=int(dSharp), dBlunt=int(dBlunt), rig=int(rig), flags=list(flags))
 
 
+def base_point(slot, p):
+    """The part's "Base": a stuck point slides in up to its distance from the Tip + 5 cm."""
+    return dict(slot=slot, p=[float(v) for v in p], f=[0.0, 0.0, 1.0], u=[-1.0, 0.0, 0.0], sTip=0, sEdge=0, dSharp=0,
+                dBlunt=0, rig=0, flags=["BASE"])
+
+
 def sword_points(pos, numbers, over):
     guard_top, tip = numbers["guard_top"], numbers["tip"]
     blade_len = tip - guard_top
@@ -106,7 +115,7 @@ def sword_points(pos, numbers, over):
     rig = over.get("rig", preset["rig"])
     dSharp = 2 if blade_len < 50 else 4 if blade_len >= 75 else 3
     blunt = kind == "none"
-    flags = [] if blunt else (["Piercing"] + (["Double"] if double else []))
+    flags = [] if blunt else (["Piercing", "BoxCollision"] + (["Double"] if double else []))
     zs = np.array([s[0] for s in secs])
     cs = np.array([s[1] for s in secs])
 
@@ -138,6 +147,8 @@ def sword_points(pos, numbers, over):
     if numbers["handle_bottom"] - numbers["pommel_end"] > 0.3:
         pz = 0.5 * (numbers["handle_bottom"] + numbers["pommel_end"])
         pts.append(point("Pommel", [0, 0, pz], [0, 0, -1], [-1, 0, 0], 0, 0, 0, 1, 110))
+    if not blunt:  # where a stuck blade's slide depth is measured from (Base, direct child of the part)
+        pts.append(base_point("Head", [centre(guard_top), 0.0, guard_top]))
     info = dict(kind="sword", edges=kind, tip_angle=None if angle is None else round(angle, 1), sTip=sTip, sEdge=sEdge,
                 rig=rig, dSharp=dSharp, base=guard_top)
     return pts, info
@@ -170,7 +181,8 @@ def hafted_points(pos, numbers, over):
         sTip = over.get("sTip", sTip)
         sEdge, rig = over.get("sEdge", pr["sEdge"]), over.get("rig", pr["rig"])
         pts.append(point("Head", [0.5 * (x0 + x1), 0, tip - 0.1], [0, 0, 1], [-1, 0, 0], sTip, sEdge, 0, 0, rig,
-                         ["Piercing", "Double"]))
+                         ["Piercing", "BoxCollision", "Double"]))
+        pts.append(base_point("Head", [0.5 * (x0 + x1), 0.0, 0.0]))
         info.update(tip_angle=None if angle is None else round(angle, 1), sTip=sTip, sEdge=sEdge, rig=rig)
     elif kind == "axe":
         pr = PRESETS["axe"]
@@ -180,7 +192,7 @@ def hafted_points(pos, numbers, over):
         zmid = 0.5 * (float(band[:, 2].min()) + float(band[:, 2].max()))
         sEdge, rig = over.get("sEdge", pr["sEdge"]), over.get("rig", pr["rig"])
         pts.append(point("Head", [far - sgn * 1.0, 0, zmid], [0, 0, 1], [sgn, 0, 0], 0, sEdge, 4, 0, rig,
-                         ["Piercing", "NoStab"]))
+                         ["Piercing", "BoxCollision", "NoStab"]))
         # the back: beak/spike if it narrows to a point, else a hammer face
         back = head[head[:, 0] * sgn < -1.5]
         if len(back) > 3:
@@ -193,6 +205,7 @@ def hafted_points(pos, numbers, over):
             else:
                 pts.append(point("Head", [bfar + sgn * 0.5, 0, float(back[:, 2].mean())], [-sgn, 0, 0], [0, 0, 1],
                                  5, 0, 0, 1, 140))
+        pts.append(base_point("Head", [0.0, 0.0, zmid]))
         if tip - zmid > 6:  # a top spike
             pts.append(point("Head", [0, 0, tip - 0.1], [0, 0, 1], [-1, 0, 0], 60, 0, 0, 0, 110, ["Piercing"]))
         info.update(sEdge=sEdge, rig=rig)

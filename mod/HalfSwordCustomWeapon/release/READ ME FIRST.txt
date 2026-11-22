@@ -15,7 +15,7 @@ Install the mod
    (it holds dlls\main.dll, CustomWeapon.ini, enabled.txt).
 
 Add a weapon
-1. Get a weapon model as GLB/glTF (best: it keeps its textures), OBJ, or a Skyrim Special Edition
+1. Get a weapon model as GLB/glTF or FBX (best: they keep their textures), OBJ, or a Skyrim Special Edition
    weapon mod (.nif with its textures folder: pick the .nif, or drop the whole mod folder).
    Swords, daggers, axes, maces, hammers and spears work.
 2. Start WeaponConverter.exe and press Browse (or drop the model on the window, or on the exe).
@@ -26,7 +26,10 @@ Add a weapon
    "Blade is on the wrong end".
 5. Under "In the game", give it a name and tick Free play (and/or Progression; progression comes in
    a later build).
-6. Press "Install into Half Sword". It copies the weapon into the mod folder (weapons\<name>\).
+6. Optional, under "Damage": which edges cut, the head type, edge and point sharpness, rigidity and the
+   balance point. Left empty they come from the model's shape (the summary under the picture shows
+   what was found).
+7. Press "Install into Half Sword". It copies the weapon into the mod folder (weapons\<name>\).
    Nothing is written there before you press Install. "Install all" does every converted weapon.
 
 In the game

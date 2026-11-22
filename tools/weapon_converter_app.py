@@ -36,7 +36,7 @@ except Exception:
     TkinterDnD = None
 
 UNITS = [("metres", 100.0), ("centimetres", 1.0), ("millimetres", 0.1), ("inches", 2.54)]
-MODEL_TYPES = "*.glb *.gltf *.obj *.nif *.stl *.ply *.dae *.off"
+MODEL_TYPES = "*.glb *.gltf *.fbx *.obj *.nif *.stl *.ply *.dae *.off"
 MODEL_EXTS = tuple(e[1:] for e in MODEL_TYPES.split())
 TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or spear", "hafted")]
 # Hand spots the user can place on the picture (written as spot_<key>= in the model's .txt, cm along the
@@ -642,7 +642,7 @@ class App:
             self.events.put(("measured", path, raw))
 
     def has_units(self, path):
-        return os.path.splitext(path)[1].lower() in (".glb", ".gltf")
+        return os.path.splitext(path)[1].lower() in (".glb", ".gltf", ".fbx")
 
     def measured(self, path, raw):
         it = self.item_of(path)
