@@ -14409,6 +14409,22 @@ namespace
     // (sanity 8503226: both let-gos were a remake).
     struct JointGone { UObject* weapon = nullptr; double at = -1.0, made_t = -1.0, fade_until = -1.0; };
     JointGone g_jh_gone[2];
+    // A level change (the test room reopened between cases, leaving an arena) frees the held weapon and the
+    // joint's parts; jh_sweep's own gone() checks only see a batch while it is being pruned, so without this
+    // the next sweep read the old weapon's name (crash 2026-11-22 21:22Z, pctest b-shared-57142d1).
+    bool g_jh_tracked = on_freed([] {
+        for (auto& side : g_jh)
+            for (JointHand& j : side)
+            {
+                if (gone(j.weapon)) j.weapon = nullptr;
+                if (gone(j.sphere)) j.sphere = nullptr;
+                if (gone(j.con)) j.con = nullptr;
+                if (!j.sphere && !j.con) j = JointHand{};
+                else if (!j.weapon) j.touched = false; // its weapon is gone: the next sweep removes what is left
+            }
+        for (JointGone& g : g_jh_gone)
+            if (gone(g.weapon)) g = JointGone{};
+    });
 
     bool cfg_slerp() { return hsvr::config().pose_hold_joint_slerp; }
 
