@@ -54,6 +54,7 @@ PARTS = ("pommel", "grip", "guard", "blade")
 EDGES = [("Detect", None), ("Both edges", "double"), ("One edge (side from the model)", "single"),
          ("One edge (the other side)", "single_other"), ("No edge (blunt)", "none")]
 HEADS = [("Detect", None), ("Spear point", "spear"), ("Axe blade", "axe"), ("Blunt (mace, hammer)", "blunt")]
+RANKS = ["Beggar", "Peasant", "Commoner", "Militia", "Soldier", "Veteran", "Man-at-arms", "Knight"]
 STAT_FIELDS = (("edge_sharp", "Edge sharpness"), ("tip_sharp", "Point sharpness"), ("rigidity", "Rigidity"))
 ZONE_COLOURS = {"Pommel": "#b07a3c", "Grip": "#7a4a2a", "Guard": "#c9a227", "Head": "#8fa3b8"}
 # Display units. Everything inside stays centimetres and kilograms; only what is shown and typed changes.
@@ -118,7 +119,9 @@ def write_pack(mod_dir, it):
              "title=" + title,
              "model=" + name + ".obj",
              "free_play=" + ("1" if it["free_play"] else "0"),
-             "progression=" + ("1" if it["progression"] else "0")]
+             "progression=" + ("1" if it["progression"] else "0"),
+             "tier=" + str(it.get("tier", 3)),
+             "price=" + str(it.get("price", 0))]
     if it["result"][1].get("type") == "shield":
         lines.append("carrier=" + it.get("shield_grip", "shield_buckler"))
     open(os.path.join(folder, "pack.txt"), "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
@@ -352,9 +355,18 @@ class App:
         self.shield_var = tk.StringVar(value=SHIELD_GRIPS[0][0])
         ttk.Combobox(game, textvariable=self.shield_var, values=[t for t, _ in SHIELD_GRIPS], state="readonly",
                      width=22).pack(side="left")
+        game2 = ttk.Frame(form)
+        game2.grid(row=11, column=1, columnspan=2, sticky="w", **pad)
+        ttk.Label(game2, text="Progression: sold from rank").pack(side="left", padx=(0, 3))
+        self.rank_var = tk.StringVar(value=RANKS[3])
+        ttk.Combobox(game2, textvariable=self.rank_var, values=RANKS, state="readonly", width=12).pack(side="left", padx=(0, 10))
+        ttk.Label(game2, text="price (crowns)").pack(side="left", padx=(0, 3))
+        self.price_var = tk.StringVar()
+        ttk.Entry(game2, textvariable=self.price_var, width=7).pack(side="left")
         ttk.Label(form, text="Install adds the weapon to the game as a new weapon: in free play's weapon list, "
-                             "and/or for sale at the merchant in progression.",
-                  foreground="#777", wraplength=640).grid(row=11, column=1, columnspan=2, sticky="w", padx=8)
+                             "and/or for sale at the merchant in progression once you reach that rank (price "
+                             "empty: by rank).",
+                  foreground="#777", wraplength=640).grid(row=15, column=1, columnspan=2, sticky="w", padx=8)
         ttk.Label(form, text="Damage").grid(row=12, column=0, sticky="w", **pad)
         dmg = ttk.Frame(form)
         dmg.grid(row=12, column=1, columnspan=2, sticky="w", **pad)
@@ -532,6 +544,11 @@ class App:
         it["title"] = self.title_var.get().strip() or it["title"]
         it["free_play"], it["progression"] = self.free_var.get(), self.prog_var.get()
         it["shield_grip"] = dict(SHIELD_GRIPS).get(self.shield_var.get(), SHIELD_GRIPS[0][1])
+        it["tier"] = RANKS.index(self.rank_var.get()) if self.rank_var.get() in RANKS else 3
+        try:
+            it["price"] = max(0, int(float(self.price_var.get().replace(",", "."))))
+        except ValueError:
+            it["price"] = 0
         it["stats"] = self.read_stats()[0] or it.get("stats", {})
         it.update(flip=self.flip, raw=self.raw_length, result=self.result, result_inputs=self.result_inputs,
                   views=self.result_views)
@@ -558,6 +575,8 @@ class App:
         self.free_var.set(it["free_play"])
         self.prog_var.set(it["progression"])
         self.shield_var.set(next((t for t, v in SHIELD_GRIPS if v == it.get("shield_grip")), SHIELD_GRIPS[0][0]))
+        self.rank_var.set(RANKS[it.get("tier", 3)])
+        self.price_var.set(str(it["price"]) if it.get("price") else "")
         st = it.get("stats", {})
         self.edges_var.set(next(t for t, v in EDGES if v == st.get("edges")))
         self.head_var.set(next(t for t, v in HEADS if v == st.get("head")))

@@ -2379,6 +2379,8 @@ namespace
     {
         std::wstring id, dir, title, model; // dir ends with a slash; model: file name without .obj
         bool free_play = true, progression = false;
+        int tier = 3;      // progression: the player's rank it needs (0 Beggar .. 7 Knight)
+        int price = 0;     // progression: the merchant's asking price in crowns (0: by tier)
         int kind = K_ARMING;
         FName marker;
         int32_t hash = 1;
@@ -2443,6 +2445,8 @@ namespace
             pk.model = widen(model);
             pk.free_play = !kv.count("free_play") || kv["free_play"] != "0";
             pk.progression = kv.count("progression") && kv["progression"] == "1";
+            if (kv.count("tier")) pk.tier = (std::max)(0, (std::min)(7, atoi(kv["tier"].c_str())));
+            if (kv.count("price")) pk.price = (std::max)(0, atoi(kv["price"].c_str()));
             const ModelData* d = model_data(pk.dir + pk.model);
             if (!d)
             {
@@ -2479,6 +2483,7 @@ namespace
     {
         UScriptStruct* type = nullptr;
         int32_t size = 0, name = -1, id = -1, weapon_class = -1, grip = -1, price = -1, tier = -1;
+        FProperty *price_p = nullptr, *tier_p = nullptr, *id_p = nullptr;
     } g_pp;
 
     bool passport_layout()
@@ -2495,11 +2500,11 @@ namespace
             std::wstring n = p->GetName();
             auto pre = [&](const wchar_t* x) { return n.rfind(x, 0) == 0; };
             if (pre(L"Name_")) l.name = p->GetOffset_Internal();
-            else if (pre(L"ID_")) l.id = p->GetOffset_Internal();
+            else if (pre(L"ID_")) l.id = p->GetOffset_Internal(), l.id_p = p;
             else if (pre(L"WeaponClass_")) l.weapon_class = p->GetOffset_Internal();
             else if (pre(L"GripModule_")) l.grip = p->GetOffset_Internal();
-            else if (pre(L"Price_")) l.price = p->GetOffset_Internal();
-            else if (pre(L"Tier_")) l.tier = p->GetOffset_Internal();
+            else if (pre(L"Price_")) l.price = p->GetOffset_Internal(), l.price_p = p;
+            else if (pre(L"Tier_")) l.tier = p->GetOffset_Internal(), l.tier_p = p;
         }
         log("Weapon passport: %d bytes; Name @%d, ID @%d, WeaponClass @%d, GripModule @%d, Price @%d, Tier @%d", l.size, l.name, l.id,
             l.weapon_class, l.grip, l.price, l.tier);
@@ -2582,6 +2587,20 @@ namespace
         return true;
     }
 
+    // A number into a passport member of whatever numeric type it has (int, byte/enum, float, double).
+    void put_number(uint8_t* passport, FProperty* p, double v)
+    {
+        if (!p) return;
+        uint8_t* at = passport + p->GetOffset_Internal();
+        auto kind = p->GetClass().GetName();
+        if (kind == STR("IntProperty")) *reinterpret_cast<int32_t*>(at) = (int32_t)std::lround(v);
+        else if (kind == STR("Int64Property")) *reinterpret_cast<int64_t*>(at) = (int64_t)std::llround(v);
+        else if (kind == STR("FloatProperty")) *reinterpret_cast<float*>(at) = (float)v;
+        else if (kind == STR("DoubleProperty")) *reinterpret_cast<double*>(at) = v;
+        else if (kind == STR("ByteProperty") || kind == STR("EnumProperty")) *at = (uint8_t)std::lround(v);
+        else log("  ! passport member %s is a %s: not written", narrow(p->GetName()).c_str(), narrow(kind).c_str());
+    }
+
     const Pack* pack_for(FName marker)
     {
         for (const Pack& pk : g_packs)
@@ -2625,6 +2644,115 @@ namespace
             ++added;
         }
         log("Free mode list: %d converted weapons added (list now %d)", added, arr->Num);
+    }
+
+    // ---- progression: the merchant (decompile: add_new_weapons.md "Steps 3, 4, 7 facts" §3) -----------
+    // GI_Settings "Renew Merchant" rebuilds the merchant's weapons (Merchant Inventory) from the random pools
+    // after fights, time skips, rank-ups and the Restock button; nothing filters by tier, so the mod does:
+    // a converted weapon is offered when its tier <= the player's. Each offer gets a random ID (buying
+    // compares whole passports: two identical ones would merge). The shop asks 2x the passport Price.
+    // Old offers of ours are removed first, and our passports are taken out of the pools too (unsold
+    // weapons with a grip module go back there and could be drawn again as if the game's own).
+    int number_of(UObject* owner, const TCHAR* name, bool& found)
+    {
+        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        found = p != nullptr;
+        if (!p) return 0;
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
+        auto kind = p->GetClass().GetName();
+        if (kind == STR("IntProperty")) return *reinterpret_cast<int32_t*>(at);
+        if (kind == STR("ByteProperty") || kind == STR("EnumProperty")) return *at;
+        if (kind == STR("FloatProperty")) return (int)*reinterpret_cast<float*>(at);
+        if (kind == STR("DoubleProperty")) return (int)*reinterpret_cast<double*>(at);
+        found = false;
+        return 0;
+    }
+
+    // Removes our passports (by marker) from a passport array; how many.
+    int purge_ours(RawArray* arr)
+    {
+        if (!arr || !arr->Data) return 0;
+        auto* base = static_cast<uint8_t*>(const_cast<void*>(arr->Data));
+        int32_t w = 0, removed = 0;
+        for (int32_t r = 0; r < arr->Num; ++r)
+        {
+            uint8_t* pp = base + (size_t)r * g_pp.size;
+            if (passport_name(pp).ToString().rfind(STR("cw "), 0) == 0)
+            {
+                ++removed;
+                continue;
+            }
+            if (w != r) memmove(base + (size_t)w * g_pp.size, pp, g_pp.size);
+            ++w;
+        }
+        arr->Num = w;
+        return removed;
+    }
+
+    // A plain passport array property (Array<Str_Passport_Weapon1>) on an object.
+    RawArray* passport_array(UObject* owner, const TCHAR* name)
+    {
+        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        if (!p || p->GetClass().GetName() != STR("ArrayProperty")) return nullptr;
+        return reinterpret_cast<RawArray*>(reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal());
+    }
+
+    bool append_passport(RawArray* arr, const std::vector<uint8_t>& pp)
+    {
+        int32_t n = arr->Num;
+        if (n + 1 > arr->Max)
+        {
+            void* grown = FMemory::Realloc(const_cast<void*>(arr->Data), (size_t)(n + 4) * g_pp.size);
+            if (!grown) return false;
+            arr->Data = grown;
+            arr->Max = n + 4;
+        }
+        memcpy(static_cast<uint8_t*>(const_cast<void*>(arr->Data)) + (size_t)n * g_pp.size, pp.data(), g_pp.size);
+        arr->Num = n + 1;
+        return true;
+    }
+
+    void merchant_renewed(UnrealScriptFunctionCallableContext& context, void*)
+    {
+        UObject* gi = context.Context;
+        load_packs();
+        if (!carrier_templates()) return;
+        RawArray* stock = weapon_passports(gi, STR("Merchant Inventory"));
+        if (!stock)
+        {
+            log("  ! GI_Settings Merchant Inventory weapons not found");
+            return;
+        }
+        int old = purge_ours(stock);
+        // The pools: on GI_Settings or the game manager, wherever the game keeps them.
+        int pooled = 0;
+        std::vector<UObject*> owners{gi};
+        if (UObject* gm = UObjectGlobals::FindFirstOf(STR("BP_GameManager_C"))) owners.push_back(gm);
+        for (UObject* o : owners)
+            for (const TCHAR* pool : {STR("Available Weapons 1H"), STR("Available Weapons 2H"), STR("Available Shields")})
+                pooled += purge_ours(passport_array(o, pool));
+        bool have_tier = false;
+        int player_tier = number_of(gi, STR("Player Tier"), have_tier);
+        if (!have_tier)
+            for (UObject* o : owners)
+                if (!have_tier) player_tier = number_of(o, STR("Player Tier"), have_tier);
+        if (!have_tier) log("  ! Player Tier not found: every progression weapon is offered");
+        static uint32_t rng = (uint32_t)GetTickCount() | 1;
+        int added = 0;
+        for (const Pack& pk : g_packs)
+        {
+            if (!pk.progression || (have_tier && pk.tier > player_tier)) continue;
+            std::vector<uint8_t> pp;
+            if (!make_passport(pk, pp)) continue;
+            rng ^= rng << 13, rng ^= rng >> 17, rng ^= rng << 5;
+            put_number(pp.data(), g_pp.id_p, (double)(rng & 0x7fffffff | 1));
+            int buy = pk.price > 0 ? pk.price : (int)(15 + 20 * pk.tier); // asking price
+            put_number(pp.data(), g_pp.price_p, (std::max)(1, buy / 2));   // the shop asks 2x
+            put_number(pp.data(), g_pp.tier_p, pk.tier);
+            if (append_passport(stock, pp)) ++added;
+        }
+        log("Merchant renewed: %d converted weapons offered (player tier %d%s), %d old offers and %d pool copies removed",
+            added, player_tier, have_tier ? "" : " unknown", old, pooled);
     }
 
     bool set_number(UObject* owner, const TCHAR* name, double value)
@@ -2820,18 +2948,30 @@ namespace
     bool g_free_mode_hooked = false;
     double g_hook_clock = 0;
 
+    bool g_merchant_hooked = false;
+
     void hook_tick(float dt)
     {
-        if (g_free_mode_hooked) return;
+        if (g_free_mode_hooked && g_merchant_hooked) return;
         g_hook_clock += dt;
         if (g_hook_clock < 1.0) return;
         g_hook_clock = 0;
         auto* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr,
                                                                 STR("/Game/Blueprints/GameInstances/GI_Settings.GI_Settings_C:Set Up Free Mode Inventory"));
-        if (!fn) return;
-        UObjectGlobals::RegisterHook(fn, [](UnrealScriptFunctionCallableContext&, void*) {}, &free_mode_list_built, nullptr);
-        g_free_mode_hooked = true;
-        log("Hooked GI_Settings Set Up Free Mode Inventory: converted weapons join the free mode list");
+        if (fn && !g_free_mode_hooked)
+        {
+            UObjectGlobals::RegisterHook(fn, [](UnrealScriptFunctionCallableContext&, void*) {}, &free_mode_list_built, nullptr);
+            g_free_mode_hooked = true;
+            log("Hooked GI_Settings Set Up Free Mode Inventory: converted weapons join the free mode list");
+        }
+        auto* renew = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr,
+                                                                   STR("/Game/Blueprints/GameInstances/GI_Settings.GI_Settings_C:Renew Merchant"));
+        if (renew && !g_merchant_hooked)
+        {
+            UObjectGlobals::RegisterHook(renew, [](UnrealScriptFunctionCallableContext&, void*) {}, &merchant_renewed, nullptr);
+            g_merchant_hooked = true;
+            log("Hooked GI_Settings Renew Merchant: progression weapons are offered by the merchant");
+        }
     }
 
     void tick(UObject* engine, float dt)
