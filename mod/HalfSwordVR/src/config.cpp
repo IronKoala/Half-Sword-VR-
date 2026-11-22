@@ -633,6 +633,10 @@ namespace hsvr
         flag("pose_fist_clear", c.pose_fist_clear);
         num("pose_fist_clear_margin_cm", c.pose_fist_clear_margin_cm);
         num("pose_fist_clear_retry_s", c.pose_fist_clear_retry_s);
+        flag("pose_fist_full_impulse", c.pose_fist_full_impulse);
+        flag("disarm", c.disarm);
+        num("disarm_grip_scale", c.disarm_grip_scale);
+        num("disarm_hold_s", c.disarm_hold_s);
         integer("pose_fist_shape", c.pose_fist_shape);
         flag("pose_fist_game_flags", c.pose_fist_game_flags);
         flag("pose_fingers_tracked", c.pose_fingers_tracked);
@@ -671,6 +675,7 @@ namespace hsvr
         num("joint_break_twist_free_arm_deg", c.joint_break_twist_free_arm_deg);
         num("joint_break_twist_free_back_deg", c.joint_break_twist_free_back_deg);
         num("joint_break_twist_gain", c.joint_break_twist_gain);
+        num("joint_break_free_min", c.joint_break_free_min);
         flag("joint_break_legs", c.joint_break_legs);
         num("joint_break_scale", c.joint_break_scale);
         flag("log_body_hits", c.log_body_hits);
