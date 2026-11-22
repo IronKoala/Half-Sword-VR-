@@ -35,6 +35,10 @@ namespace hsvr
         // Controllers and headset placed in the world from the view anchor as it will be this frame
         // (where he is now), not as it was set up for the frame before (hands shook while walking).
         bool tracking_current_anchor = true;
+        // 1 = the room walking handed to his capsule is taken into the view at once, not smoothed with
+        // anchor_smoothing: the capsule moves by it the same frame, so smoothing it swung the world by
+        // each step (and hands placed earlier in the frame were off by the smoothing's step).
+        bool anchor_room_unsmoothed = true;
         // Near clip plane of the eyes, cm. Helmet walls sit 2.3-4.6 cm from your eyes (measured on every
         // helmet mesh, helmet_see_through.md), and off to the side their depth along the view is even
         // less: at 4 cm the sides of closed helmets were cut away and you saw the world through them.
@@ -212,6 +216,13 @@ namespace hsvr
         // Forward bend = (head pitch below the horizon - pose_lean_pitch_dead_deg) x pose_lean_pitch_gain,
         // at most pose_lean_max_deg (the game's own lean reaches 60). Sideways = head roll likewise.
         bool pose_lean = true;
+        // 1 = also bend him from your head's pitch and roll (the bend above); 0 = his torso only leans to
+        // where your neck actually is, as closed PR #8/#10 did (Matthew 2026-11-21: that leaning was
+        // "basically perfect"; with the head-angle bend his spine was never in line with his own).
+        bool pose_lean_head_angle = false;
+        // Looking down, his chest leans back out of the view by up to this many cm (reached at 60 degrees
+        // down, from 5), from closed PR #8/#10. 0 = off.
+        double pose_lean_look_down_back_cm = 16.0;
         double pose_lean_pitch_dead_deg = 10.0;
         double pose_lean_pitch_gain = 0.7;
         double pose_lean_max_deg = 60.0;
@@ -227,8 +238,16 @@ namespace hsvr
         // away does he step: his capsule (and so his feet) comes back under your neck over
         // pose_lean_walk_catchup_s and stays with you while you walk, until it is under your neck again.
         // 0 = the old way (his hips always under your neck).
-        double pose_lean_step_radius_cm = 30.0;
+        double pose_lean_step_radius_cm = 8.0;
+        // Your lean and room steps are measured this far (cm) below your head joint, turning with your head
+        // (about the base of your neck), so a nod or head tilt is neither a lean nor a step. 0 = at the head joint.
+        double pose_room_neck_base_cm = 12.0;
         double pose_lean_walk_catchup_s = 0.15;
+        // 1 = past the radius his hips follow your neck at once (at most pose_lean_follow_speed_cms), so
+        // your neck is never more than the radius from over his hips (closed PR #8/#10: 8 cm, 400 cm/s).
+        // 0 = past the radius he steps all the way under you (pose_lean_walk_catchup_s).
+        bool pose_lean_follow_past_radius = true;
+        double pose_lean_follow_speed_cms = 400.0;
         // A lean you hold still is a new stance: once your neck has moved less than
         // pose_lean_settle_speed_cms for pose_lean_settle_s, he steps under you (0 = never; stays leaned).
         double pose_lean_settle_s = 0.8;
@@ -256,6 +275,9 @@ namespace hsvr
         // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
         // turns you as well.
         bool pose_body_turn = true;
+        // 1 = while the controllers are tracked, the mouse neither turns him nor tilts his look (the
+        // control pitch is held at 0); with mouse and keyboard play the mouse works as before.
+        bool pose_mouse_off_with_controllers = true;
         double pose_turn_dead_zone_deg = 60.0;
         double pose_turn_speed_dps = 150.0;
         // The most your head can be turned from his hips (a neck's reach): past it the hips come
@@ -666,7 +688,12 @@ namespace hsvr
         // Drawing from a scabbard: a squeeze within this distance of a sheathed weapon's grip draws it
         // (pulled out along the scabbard; the game releases it at 85%), eased into the hand over settle_s.
         bool pose_draw = true;
-        double pose_draw_touch_cm = 8.0;
+        double pose_draw_touch_cm = 10.0;
+        // A weapon WITHOUT a scabbard (axe, mace, hammer on the belt) or a shield on the back is taken off
+        // the body B&S-style (its HolderHips/HolderBack: playerGrabFromHandle false, the holder's touch
+        // zone, Interactable.touchRadius 0.1 m): a squeeze within this distance of any part of it takes it,
+        // and the hand lands on its nearest handle (Matthew 2026-11-21: "I can't grab weapons off my hip").
+        double pose_draw_zone_cm = 10.0;
         double pose_draw_settle_s = 0.15;
         double pose_draw_step_cm = 6.0; // the most it moves along the scabbard per tick
         double pose_draw_force_scale = 0.3; // the hold's force/torque caps while drawing or sheathing
@@ -774,6 +801,10 @@ namespace hsvr
         // With per-joint fingers: the end joint bends this much of the middle joint's angle (the tendon
         // couples them, ~0.67); 0 = as the hand skeleton reports it.
         double pose_finger_dip_coupling = 0.67;
+        // The fingers' full bend at each joint x this (knuckle / middle / end; thumb not included).
+        double pose_finger_scale_mcp = 1.0;
+        double pose_finger_scale_pip = 1.0;
+        double pose_finger_scale_dip = 1.0;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
@@ -788,6 +819,8 @@ namespace hsvr
         // the fist: palm = hand bone + along x (middle knuckle - hand bone) + palm_cm toward the palm.
         bool pose_grab_seat_palm = true;
         double pose_grab_palm_cm = 2.0;
+        // Scenery: the palm point stays this far off the surface (the hand sat half in the fence).
+        double pose_grab_scenery_gap_cm = 1.5;
         double pose_grab_palm_along = 0.5;
         // The mod holds what the game's grab holds (its hand joint lets things hang off the hand). Loose
         // objects: driven to their place in the hand (framework physics.track): accel cap accel/heft m/s^2,
@@ -799,6 +832,10 @@ namespace hsvr
         double pose_grab_drive_ang_accel = 1200.0;
         double pose_grab_body_pull_n = 600.0;
         double pose_grab_body_pull_hz = 4.0;
+        // The pull only takes the part of your hand's distance from the held spot past this (slack):
+        // holding a throat with your hand still 10-13 cm from it pulled at the cap (900+ N with his
+        // trained grip) and the game's strangle knocked them out in 0.45 s (13:50 playtest).
+        double pose_grab_body_pull_slack_cm = 12.0;
         // The body pull's spring is sized for at least this many kg: a throat or chest bone is light
         // (0.9 kg), but pulling it means moving his whole upper body.
         double pose_grab_body_pull_min_kg = 12.0;

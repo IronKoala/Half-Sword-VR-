@@ -16,6 +16,10 @@ namespace hsvr
         // Where the player is aiming (the controller's heading, set by the mouse), in degrees.
         bool has_heading = false;
         double heading_yaw = 0.0;
+        // Part of head_position - actor_position that is exact and must not be smoothed: the room
+        // walking already handed to the capsule (the capsule moved by it this same frame, so smoothing it
+        // swung the view, and the hands placed before the smoothing stepped, by the step itself).
+        Vec3 exact_offset;
     };
     using AnchorProvider = bool (*)(PlayerAnchor& out);
     void stereo_set_anchor_provider(AnchorProvider provider);
