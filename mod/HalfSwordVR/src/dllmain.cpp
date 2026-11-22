@@ -4373,7 +4373,18 @@ namespace
     // A blade just drawn still has its tip at the mouth, lined up: no sheathe until it has been taken
     // well away first (playtest 02:44: every draw went straight back into a sheathe, 1 ms after it freed).
     bool g_sheathe_armed[2] = {true, true};
-    double g_sheathe_clear_since[2] = {-1.0, -1.0}; // while not armed: since when the tip has been clear of every mouth
+    // While not armed: the hip the blade came out of (or could not go into), since when, and since when the
+    // tip has been clear of that hip.
+    int g_sheathe_from[2] = {1, 1};
+    double g_sheathe_out_at[2] = {-1e9, -1e9};
+    double g_sheathe_clear_since[2] = {-1.0, -1.0};
+    void sheathe_disarm(int side, int hip)
+    {
+        g_sheathe_armed[side] = false;
+        g_sheathe_from[side] = hip;
+        g_sheathe_out_at[side] = hsvr::now_seconds();
+        g_sheathe_clear_since[side] = -1.0;
+    }
     // Where each drawn weapon's own scabbard really opens, measured when it was drawn (it sat seated):
     // the blade's start (the guard end of its blade zone) and its line, in the scabbard's frame. The
     // belt socket is only where the scabbard hangs from, and moves with it when the off hand angles it.
@@ -16540,8 +16551,8 @@ namespace
         {
             if (!*scab_at) *scab_at = stale;
             set_variable(pawn, slot_var.c_str(), 3.0);
-            g_sheathe_armed[side] = false; // not again every tick: once the tip has been clear
-            HSVR_LOG("Sheathe: %s hand to the %s hip: Assign %ls %s (slot %.0f of %d, scabbard %s); not sheathed until the tip has been clear", hand, hip, T,
+            sheathe_disarm(side, ts); // not again every tick: once the tip has been clear of that hip
+            HSVR_LOG("Sheathe: %s hand to the %s hip: Assign %ls %s (slot %.0f of %d, scabbard %s); not sheathed there until the tip has been clear", hand, hip, T,
                      ran ? "ran" : "was not found", picked, slot, !got ? "none" : got == own ? "its own" : "another's");
             return -1;
         }
@@ -16611,7 +16622,7 @@ namespace
             set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), false);
             set_variable(pawn, nm(L"%ls Sheath Slot Concrete").c_str(), 11.0);
             set_variable(pawn, nm(L"Sheath Slot %ls").c_str(), 3.0);
-            g_sheathe_armed[side] = false;
+            sheathe_disarm(side, side);
             HSVR_LOG("Sheathe: %ls's slot %ls %d does not hold it after Create Sheath Constraint %ls%s; not sheathed", w->GetName().c_str(), S, slot + 1, S,
                      made ? "" : " (not found)");
             return false;
@@ -16733,7 +16744,7 @@ namespace
             set_bool_property(pawn, STR("Cross Unsheath"), false);
             set_variable(pawn, nm(L"%ls Sheath Slot Concrete", H).c_str(), 11.0);
             set_variable(pawn, nm(L"Sheath Slot %ls", S).c_str(), 3.0);
-            g_sheathe_armed[side] = false;
+            sheathe_disarm(side, ss);
             HSVR_LOG("Sheathe: %ls's slot %ls %d does not hold it after Create Sheath Constraint %ls%s; not sheathed across", w->GetName().c_str(), S, fit.slot + 1, S,
                      made ? "" : " (not found)");
             return false;
@@ -16848,44 +16859,48 @@ namespace
         for (Mouth& m : mouths)
             if (m.ok) m.d = length(tip - m.at), m.c = dot(blade, m.ax);
 
+        int only = -1; // not armed: the one hip it may go into
         if (!g_sheathe_armed[side])
         {
-            // Clear of every mouth. The own hip's alone re-armed it on the tick after any pull-out on the
-            // other hip, the tip still at that mouth: it went straight back in, Block set again, and Check
-            // refuses the break until it has been pushed in (Check Scabbard Unsheath State L @2808).
-            // For 0.35 s without a break: as the slide joint breaks, the blade flicks and a pulled scabbard
-            // springs back, so for a tick or two the tip reads 30-50 cm clear (test j3 2026-11-22 02:58Z:
-            // armed 26 ms after a draw across, back into the sheathe 0.15 s later).
+            // The hip the blade came out of takes it again once the tip has been over 30 cm from that hip's
+            // mouths for 0.35 s without a break: as the slide joint breaks the blade flicks and a pulled
+            // scabbard springs back, so for a tick or two the tip reads 30-50 cm clear (test j3 2026-11-22
+            // 02:58Z: back into the sheathe 0.15 s after a draw across, then Block set, and Check refuses the
+            // break until pushed in, Check Scabbard Unsheath State L @2808). The other hip takes it once it
+            // has been out 0.35 s and the tip is nearer that mouth: between the hips the tip is 20-23 cm
+            // from both, so "clear of every mouth" kept a drawn sword out of the other hip for 6 s (test
+            // g_reach 03:18Z).
             const double clear_cm = 2.0 * cfg.pose_sheathe_mouth_cm + 10.0, clear_s = 0.35;
-            double& since = g_sheathe_clear_since[side];
-            double nearest = (std::min)(mouths[0].d, mouths[1].d);
-            if (nearest <= clear_cm)
-            {
-                since = -1.0;
-                return;
-            }
-            if (UObject* mesh = object_property(pawn, STR("Mesh")))
-                for (const auto& hip_slots : k_belt)
-                    for (const BeltSlot& b : hip_slots)
-                        if (!object_property(pawn, b.var)) nearest = (std::min)(nearest, length(tip - socket_location(mesh, bone_fname(b.socket))));
-            if (nearest <= clear_cm)
-            {
-                since = -1.0;
-                return;
-            }
             const double now = now_seconds();
-            if (since < 0.0) since = now;
-            if (now - since < clear_s) return;
-            since = -1.0;
-            g_sheathe_armed[side] = true;
-            HSVR_LOG("Sheathe: %s hand's blade is clear of every mouth (tip %.0f cm from the nearest); it can be sheathed again", hand, nearest);
-            return;
+            const int from = g_sheathe_from[side], other = 1 - from;
+            double from_d = mouths[from].d;
+            if (UObject* mesh = object_property(pawn, STR("Mesh")))
+                for (const BeltSlot& b : k_belt[from])
+                    if (!object_property(pawn, b.var)) from_d = (std::min)(from_d, length(tip - socket_location(mesh, bone_fname(b.socket))));
+            double& since = g_sheathe_clear_since[side];
+            if (from_d <= clear_cm)
+                since = -1.0;
+            else if (since < 0.0)
+                since = now;
+            if (since >= 0.0 && now - since >= clear_s)
+            {
+                since = -1.0;
+                g_sheathe_armed[side] = true;
+                HSVR_LOG("Sheathe: %s hand's blade is clear of the %s hip it came from (tip %.0f cm); it can be sheathed on either", hand,
+                         from == 0 ? "left" : "right", from_d);
+            }
+            else
+            {
+                if (now - g_sheathe_out_at[side] < clear_s || !mouths[other].ok || mouths[other].d >= from_d) return;
+                only = other;
+            }
         }
         const double min_cos = std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0);
         int into = -1, closest = mouths[0].d <= mouths[1].d ? 0 : 1;
         for (int hip = 0; hip < 2; ++hip)
         {
             const Mouth& m = mouths[hip];
+            if (only >= 0 && hip != only) continue;
             if (!m.ok || m.d > cfg.pose_sheathe_mouth_cm || m.c < min_cos || (hip != side && !cfg.pose_sheathe_cross)) continue;
             if (into < 0 || m.d < mouths[into].d) into = hip;
         }
@@ -16896,6 +16911,9 @@ namespace
                            closest == 0 ? "left" : "right", mouths[closest].real ? "scabbard's" : "belt socket's",
                            std::acos((std::max)(-1.0, (std::min)(1.0, mouths[closest].c))) * 57.2958, cfg.pose_sheathe_mouth_cm, cfg.pose_sheathe_angle_deg);
         if (into < 0) return;
+        if (only >= 0)
+            HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's blade may go into the %s hip: %.2f s out of the other, the tip nearer this one", hand, into == 0 ? "left" : "right",
+                           now_seconds() - g_sheathe_out_at[side]);
         if (into == side)
             sheathe_begin(side, pawn, w);
         else if (mouths[into].real)
@@ -17036,8 +17054,8 @@ namespace
                     HSVR_LOG("Sheathe: %ls, pulled back out, is a held weapon again (%s; its no-collide joints made again)", d.weapon->GetName().c_str(),
                              undo ? "Unsheathed Mode run" : "the game had unsheathed it");
                 }
+                sheathe_disarm(side, d.slot_side);
                 d = DrawState{};
-                g_sheathe_armed[side] = false;
                 continue;
             }
             if (now - d.last_log > 0.5)
