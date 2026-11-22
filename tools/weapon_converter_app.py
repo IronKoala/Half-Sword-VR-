@@ -325,28 +325,57 @@ class App:
         main = ttk.Frame(canvas, padding=10)
         win = canvas.create_window(0, 0, window=main, anchor="nw")
         min_h = 520  # the picture keeps at least this much room for the whole panel before it scrolls
+        self.fit_size = (0, 0, 0, 0)
 
         def fit(_=None):
-            ch, need = canvas.winfo_height(), max(main.winfo_reqheight(), min_h)
-            canvas.itemconfigure(win, width=canvas.winfo_width(), height=max(ch, need))
-            canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), max(ch, need)))
-            if need > ch:
+            """The panel's height: what its contents ask for (read again often: a frame inside a canvas gets
+            no event when its contents grow, Matthew's PC test of eaa5801), at least the window's."""
+            canvas.update_idletasks() if _ == "now" else None
+            rw, rh = main.winfo_reqwidth(), max(main.winfo_reqheight(), min_h)
+            cw, ch = canvas.winfo_width(), canvas.winfo_height()
+            key = (rw, rh, cw, ch)
+            if key == self.fit_size:
+                return
+            self.fit_size = key
+            # The window asks for the whole panel (so it opens as big as before), up to the screen's height.
+            cap = max(min_h, root.winfo_screenheight() - 160)
+            canvas.configure(width=rw, height=min(rh, cap))
+            h = max(ch, rh)
+            canvas.itemconfigure(win, width=max(cw, 1), height=h)
+            canvas.configure(scrollregion=(0, 0, max(cw, 1), h))
+            if rh > ch > 1:
                 if not vbar.winfo_ismapped():
                     vbar.pack(side="right", fill="y", before=canvas)
             elif vbar.winfo_ismapped():
                 vbar.pack_forget()
                 canvas.yview_moveto(0)
+
+        def keep_fitting():
+            try:
+                fit()
+            finally:
+                root.after(250, keep_fitting)
         canvas.bind("<Configure>", fit)
-        main.bind("<Configure>", lambda e: canvas.after_idle(fit))
+        root.after(50, keep_fitting)
+
+        def over_panel(e):
+            w_ = root.winfo_containing(e.x_root, e.y_root)
+            while w_ is not None:
+                if w_ is canvas:
+                    return True
+                w_ = w_.master
+            return False
 
         def wheel(e):
-            if vbar.winfo_ismapped():
-                canvas.yview_scroll(-1 if (getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4) else 1, "units")
-        for w_ in (canvas, main):
-            w_.bind("<Enter>", lambda e: (canvas.bind_all("<MouseWheel>", wheel), canvas.bind_all("<Button-4>", wheel),
-                                          canvas.bind_all("<Button-5>", wheel)))
-            w_.bind("<Leave>", lambda e: (canvas.unbind_all("<MouseWheel>"), canvas.unbind_all("<Button-4>"),
-                                          canvas.unbind_all("<Button-5>")))
+            # The panel scrolls wherever the pointer is over it; the weapon list and the log scroll themselves.
+            if not vbar.winfo_ismapped() or not over_panel(e):
+                return
+            canvas.yview_scroll(-1 if (getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4) else 1, "units")
+            return "break"
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            root.bind_all(ev, wheel, add="+")
+            # A dropdown would change its value on a wheel notch; it scrolls the panel instead.
+            root.bind_class("TCombobox", ev, lambda e: (wheel(e), "break")[1])
         main.columnconfigure(1, weight=1)
         self.main = main
 
