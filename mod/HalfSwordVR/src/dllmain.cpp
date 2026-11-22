@@ -10865,15 +10865,28 @@ namespace
             if (probe.number() < 0.0)
             {
                 Vec3 across = normalized(socket_location(mesh, bone_fname("index_01" + sx)) - socket_location(mesh, bone_fname("pinky_01" + sx)));
+                // Aims on the face and also 4 cm into the thing and 4 cm along the fingers: a finger
+                // wraps over the rail's top and round its back, and with aims on the face alone the
+                // nearest samples were 4-6 cm from the fingertips (e7b7af1 test), so the fingers
+                // stopped 2.5-4 cm short of the wood. Rays from outside toward a point inside hit
+                // the surface all round it.
+                Vec3 pd = normalized(hq.rotate(Vec3{0, 0, -1}));
+                Vec3 fd = knuckle - hp;
+                fd = normalized(fd - pd * dot(fd, pd));
+                const std::vector<Vec3>& dirs = sphere_dirs(48);
+                double t0 = now_seconds();
                 for (double k : {-1.0, 0.0, 1.0})
-                {
-                    Vec3 aim = spot + across * (3.5 * k);
-                    for (const Vec3& dir : sphere_dirs(80))
-                    {
-                        Vec3 h, n;
-                        if (trace_component(g.comp, aim + dir * 12.0, aim - dir * 2.0, h, n)) g.cloud.push_back(SurfacePoint{h, n});
-                    }
-                }
+                    for (double in : {0.0, 4.0})
+                        for (double along : {0.0, 4.0})
+                        {
+                            Vec3 aim = spot + across * (3.5 * k) + pd * in + fd * along;
+                            for (const Vec3& dir : dirs)
+                            {
+                                Vec3 h, n;
+                                if (trace_component(g.comp, aim + dir * 14.0, aim - dir * 2.0, h, n)) g.cloud.push_back(SurfacePoint{h, n});
+                            }
+                        }
+                if (cfg.log_wrap) HSVR_LOG("Wrap: %s surface sampled in %.1f ms", L ? "left" : "right", (now_seconds() - t0) * 1000.0);
             }
         }
         if (cfg.pose_grab_scenery_gap_cm > 0.0 && length(palm - spot) > 0.01)
