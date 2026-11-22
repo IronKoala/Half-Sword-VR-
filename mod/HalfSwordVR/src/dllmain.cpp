@@ -12277,11 +12277,12 @@ namespace
         Vec3 bp = component_location(base);
         Quat binv = component_rotation(base).inverse();
         Vec3 hand_local = binv.rotate(at - bp);
-        // Nearer a grip than the string: the grip (two hands).
+        // Nearer a grip than the string: the grip (two hands). The front grip is only 6 cm from the
+        // resting nut (test 2026-11-22), so the string needs the hand clearly nearer it.
         double t = 0.0, hd = 1e9;
         const std::vector<Handle>& hs = item_handles(xb, base);
         nearest_handle(hs, hand_local, t, hd);
-        if (hd < d)
+        if (hd < d + cfg.crossbow_string_margin_cm)
         {
             HSVR_LOG("Crossbow: %s hand closed %.1f cm from the string but %.1f cm from a grip: the grip", side == 0 ? "left" : "right", d, hd);
             return false;
@@ -12307,8 +12308,13 @@ namespace
         s.since = now_seconds();
         Call grabbed(xb, STR("Event String Grabbed"));
         bool ok = grabbed.run();
-        set_variable(xb, STR("String Stretch Pointer Position Z"), 0.0);
-        xbow_string_joint(joint, 0.0, 1); // the nut held where the hand has it
+        // The joint's reference 0 is ~6 cm IN FRONT of the resting nut (the bow arms' drives stop it
+        // short), and 19 (the game's cocked value) is at the loaded spot: the nut sits at
+        // 19 - (cm from it to the loaded spot). Holding the reference at 0 jumped the nut 6 cm forward
+        // on every grab (test 2026-11-22).
+        double ref0 = (std::max)(0.0, 19.0 - travel);
+        set_variable(xb, STR("String Stretch Pointer Position Z"), ref0);
+        xbow_string_joint(joint, ref0, 1); // the nut held where the hand has it
         if (UObject* m = object_property(pawn, STR("Mesh"))) ignore_arm_collision(pawn, m, xb, base, side);
         if (is_fist(object_property(pawn, hand_weapon_name(side)))) remove_fist(side, pawn, "the hand takes the crossbow string");
         controllers_buzz(side, 0.3f);
@@ -12347,7 +12353,7 @@ namespace
         Vec3 hand_local = bq.inverse().rotate(hand_grab_point(mesh, s.side) - bp);
         double along = dot(hand_local - s.rest_local, s.dir_local) - s.s0;
         s.pull = (std::min)(s.travel, (std::max)(0.0, along));
-        double ref = 19.0 * s.pull / s.travel; // the game's own cocked reference is 19
+        double ref = (std::max)(0.0, 19.0 - (s.travel - s.pull)); // 19 = the game's own cocked reference, at the loaded spot
         set_variable(s.xbow, STR("String Stretch Pointer Position Z"), ref);
         xbow_string_joint(s.joint, ref, 1);
         // The game cocks it itself near the end (its tick); if it has not, 0.6 s at full pull does.

@@ -590,6 +590,7 @@ namespace hsvr
         flag("pose_keep_scabbard_on_drop", c.pose_keep_scabbard_on_drop);
         flag("crossbow", c.crossbow);
         num("crossbow_string_reach_cm", c.crossbow_string_reach_cm);
+        num("crossbow_string_margin_cm", c.crossbow_string_margin_cm);
         num("crossbow_quiver_reach_cm", c.crossbow_quiver_reach_cm);
         num("crossbow_bolt_seat_cm", c.crossbow_bolt_seat_cm);
         num("crossbow_trigger_fire", c.crossbow_trigger_fire);

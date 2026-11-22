@@ -445,6 +445,7 @@ LAYOUT = [
     ('Crossbow', 'Two fixed grips; a free hand pulls the string back to cock it; a bolt from the hip quiver goes into the cradle; the trigger fires.', [
         ('crossbow', '1 = crossbow handling on.'),
         ('crossbow_string_reach_cm', 'How near the string your hand must close to take it (cm).'),
+        ('crossbow_string_margin_cm', '...and at least this much nearer the string than a grip (the front grip is 6 cm from it).'),
         ('crossbow_quiver_reach_cm', 'How near the quiver your hand must close to take a bolt (cm).'),
         ('crossbow_bolt_seat_cm', "A bolt this near the cradle is loaded (cm; the game's own is 10)."),
         ('crossbow_trigger_fire', 'Trigger pull that fires (0-1).'),

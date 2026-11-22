@@ -17,7 +17,8 @@ Not done yet (later work): weight and feel, how hard the string is to pull, and 
 | Setting | Default | Meaning |
 |---|---|---|
 | `crossbow` | 1 | Crossbow handling on. |
-| `crossbow_string_reach_cm` | 10 | How near the nut a hand must close to take the string. |
+| `crossbow_string_reach_cm` | 8 | How near the nut a hand must close to take the string. |
+| `crossbow_string_margin_cm` | 2 | ...and at least this much nearer the nut than a grip (the front grip is 6 cm from the resting nut). |
 | `crossbow_quiver_reach_cm` | 12 | How near the quiver a hand must close to take a bolt. |
 | `crossbow_bolt_seat_cm` | 10 | A bolt this near the cradle loads (the game's own rule is 10). |
 | `crossbow_trigger_fire` | 0.75 | Trigger pull that fires. |
