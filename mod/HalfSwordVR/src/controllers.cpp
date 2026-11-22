@@ -262,6 +262,14 @@ namespace hsvr
             hand.joint_deg[2] = finger_bend(joints, middle, 5);
             hand.joint_deg[3] = finger_bend(joints, ring, 5);
             hand.joint_deg[4] = finger_bend(joints, little, 5);
+            // Each joint on its own (Matthew 2026-11-21: "fingers have joints"): the bend at the knuckle
+            // (metacarpal -> proximal -> intermediate), the middle joint and the end joint, over the
+            // rig's full bend there (the framework's CURL table, degrees).
+            static const float full_deg[5][3] = {{25.8f, 34.4f, 45.8f}, {69.9f, 95.1f, 60.2f}, {77.9f, 100.3f, 64.7f}, {81.9f, 100.3f, 61.9f}, {88.2f, 95.1f, 60.2f}};
+            const int* chains[5] = {thumb, index, middle, ring, little};
+            for (int f = 1; f < 5; ++f)
+                for (int k = 0; k < 3; ++k)
+                    hand.joint_frac[f][k] = clamp01(finger_bend(joints, chains[f] + k, 3) / full_deg[f][k]);
             hand.joint_curl[0] = clamp01(hand.joint_deg[0] / 110.0f);
             for (int f = 1; f < 5; ++f) hand.joint_curl[f] = clamp01(hand.joint_deg[f] / 250.0f);
             return true;
