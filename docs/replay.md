@@ -31,7 +31,7 @@ Settings (`[Logging]` section): `replay_capture`, `replay_hold_s`, `replay_befor
 
 Times are seconds from the mark. Positions are cm in Unreal world axes, rotations quaternions.
 The file starts with `# key: value` lines (map, VR or pretend headset, marks, item names by
-index), then a CSV header and one row per tick, then `#log` lines.
+index), then a CSV header and one row per tick, then `#log` lines. Bone columns are `bone_<name>_x` .. `_qw` (build 2b1647a wrote them without the `bone_` prefix).
 
 Cost: one fixed ~1.5 KB frame per tick into a preallocated ring (4096 ticks, ~6 MB), one engine
 call per recorded bone with reused call buffers; item names are read only when a hand's item
