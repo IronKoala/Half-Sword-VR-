@@ -10124,7 +10124,9 @@ namespace
         hsvr::Vec3 spot_local, palm_local;  // the held spot (thing's frame) and the palm (hand frame)
         hsvr::Vec3 hand_v;                  // the drawn hand's velocity (cm/s), for letting go
         std::vector<SurfacePoint> cloud;    // scenery with triangles only: its surface round the spot
-        bool resolved_seated = false;       // scenery: the fingers solved again once the hand sat on it
+        bool resolved_seated = false;       // the fingers solved again once the hand sat on it
+        bool gauntlet = false;              // his hand wears hand armour (thicker fingers)
+        double pad = 0.0;                   // cm the thing's skin stands outside its collision
         int resolves_left = 0;              // finger solves still due for that
     };
     WrapGrab g_wrap[2];
@@ -10162,7 +10164,7 @@ namespace
         int side = 0, f = 0;
         hsvr::Vec3 cp;
         hsvr::Quat cq;
-        double cs = 1.0, radius = 0.9;
+        double cs = 1.0, radius = 0.9, pad = 0.0, crease_floor = 0.0; // pad: world cm the visible skin stands outside the collision
         WrapGrab* g = nullptr;
         Call* query = nullptr;
         FProperty* q_point = nullptr;
@@ -10206,7 +10208,7 @@ namespace
             query->run();
             ++queries;
             double d = query->number();
-            return d < 0.0 ? 1e9 : d / cs; // in snapshot centimetres
+            return d < 0.0 ? 1e9 : (std::max)(0.0, d - pad) / cs; // in snapshot centimetres
         }
         void place(const double c[3], hsvr::Vec3 seg[3][2])
         {
@@ -10222,7 +10224,7 @@ namespace
             hsvr::Vec3 seg[3][2];
             place(c, seg);
             for (double t : kWrapSamples)
-                if (distance(seg[k][0] + (seg[k][1] - seg[k][0]) * t) < radius * (std::min)(1.0, t / kWrapCrease)) return true;
+                if (distance(seg[k][0] + (seg[k][1] - seg[k][0]) * t) < radius * (std::max)(crease_floor, (std::min)(1.0, t / kWrapCrease))) return true;
             return false;
         }
         // How far the finger is sunk in (radius - nearest), the engine reporting 0 inside.
@@ -10307,12 +10309,14 @@ namespace
         double ease = g.ease;
         double w = g.on ? wrap_smooth((now - g.since) / ease) : g.w_off * (1.0 - wrap_smooth((now - g.off_at) / ease));
         if (w <= 0.0 || !g_frig.ok) return 0.0;
-        // Scenery doesn't move and the hand is pinned on it: once the pin has eased the hand onto it,
-        // solve every finger once more there and keep those curls. Re-solving all along straightened
+        // Once the hand has been eased onto what it holds, solve every finger once more there; scenery
+        // doesn't move and the hand is pinned on it, so it keeps those curls. Re-solving all along straightened
         // them as the hand slid against the rail (b8b5cb1 test: middle 0.31/0.62/1 at seating, 0/0/0
         // two seconds later with the palm at 0 cm); freezing the first solve kept curls made 7 cm off
         // the rail, before the hand got there (d9c490e test).
-        if (g.world && g.seated && !g.resolved_seated && now - g.seated_at >= hsvr::config().pose_wrap_ease_s + 0.05)
+        // (Every grab: 127 of 205 first solves in his 13:44 playtest ran with the palm still 3 cm or more
+        // off, and those curls stayed on until that finger's next solve, up to pose_wrap_refresh_s.)
+        if (g.seated && !g.resolved_seated && now - g.seated_at >= hsvr::config().pose_wrap_ease_s + 0.05)
         {
             g.resolved_seated = true;
             g.resolves_left = 5; // (each finger keeps its curl until its new solve: no flick open)
@@ -10339,7 +10343,14 @@ namespace
                 ws.cq = component_rotation(g_frig.driver);
                 ws.cs = component_scale_z(g_frig.driver);
                 Vec3 hand = xf_pos(B[g_frig.hand[side]]), mid = xf_pos(B[g_frig.chain[side][2][0]]);
-                ws.radius = cfg.pose_wrap_finger_radius_cm > 0.0 ? cfg.pose_wrap_finger_radius_cm / ws.cs : 0.095 * length(mid - hand);
+                // Auto: 15.5% of the hand's length. His fingers' skin sits a median 1.05-1.85 cm from
+                // the bone line (SK_Body_Man LOD0, mid-segment); the framework's 9.5% (0.9 cm) let
+                // every finger sink 0.2-0.9 cm into whatever it held. Hand armour adds
+                // pose_wrap_gauntlet_pad_cm.
+                ws.radius = cfg.pose_wrap_finger_radius_cm > 0.0 ? cfg.pose_wrap_finger_radius_cm / ws.cs : 0.155 * length(mid - hand);
+                if (g.gauntlet) ws.radius += (std::max)(0.0, cfg.pose_wrap_gauntlet_pad_cm) / ws.cs;
+                ws.pad = g.pad;
+                ws.crease_floor = (std::min)(1.0, (std::max)(0.0, cfg.pose_wrap_crease_floor));
                 // Unsolved fingers first, then round and round.
                 int f = g.next % 5;
                 for (int k = 0; k < 5; ++k)
@@ -10679,14 +10690,33 @@ namespace
                 g.bone = bone;
                 g.since = now;
                 g.ease = (std::max)(0.01, cfg.pose_wrap_ease_s);
-                if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str());
+                // Hand armour: the game sets Hands Rigidity (Gauntlets) above its bare 0.4 (0.8 in his
+                // 13:44 playtest with gauntlets on). Read once per grab.
+                g.gauntlet = read_number_variable(pawn, STR("Hands Rigidity (Gauntlets)")) > 0.45;
+                if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls%s", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str(), g.gauntlet ? " (hand armour)" : "");
             }
             // (Let go first: a hand that drops its hold before it was seated must not seat a stale thing.)
             if (comp && g.on && !g.seated && g.seat_tries < 5 && cfg.pose_grab_seat_palm)
             {
                 ++g.seat_tries;
                 g.seated = g.world ? seat_on_scenery(side, g, cfg) : seat_on_palm(side, pawn, g, cfg);
-                if (g.seated) { g.seated_at = now; g.far_base = -1.0; g.far_since = -1.0; }
+                if (g.seated)
+                {
+                    g.seated_at = now;
+                    g.far_base = -1.0;
+                    g.far_since = -1.0;
+                    // A Willie's skin stands outside his collision capsules (Willie_PhysicsAsset_Capsules
+                    // against SK_Body_Man LOD0: neck_02 median +0.6 cm, p90 +1.2; neck_01 +1.0/+2.1;
+                    // spine_05 +0.9/+2.4), so fingers stopping at the capsule sank into his neck. His head's
+                    // collision is BIGGER than the skin (median -2.7): no pad there.
+                    g.pad = 0.0;
+                    if (g.body && g.comp)
+                    {
+                        std::wstring bn = g.bone.ToString();
+                        bool head = bn == STR("head") || bn == STR("Head");
+                        if (!head) g.pad = (std::max)(0.0, cfg.pose_wrap_body_pad_cm);
+                    }
+                }
             }
             else if (comp && g.on && g.seated && !g.world && cfg.log_wrap && g.checks < 3 && now - g.seated_at >= 0.1 + 0.4 * g.checks)
             {
