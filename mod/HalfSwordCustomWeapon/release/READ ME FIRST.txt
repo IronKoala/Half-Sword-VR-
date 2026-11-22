@@ -24,12 +24,17 @@ Add a weapon
 4. Press Convert and look at the picture: handle on the left, blade or head on the right, and the
    coloured bar under it marks pommel, grip, guard and blade. If the blade is on the left, press
    "Blade is on the wrong end".
-5. Press "Install into Half Sword". It copies the weapon into the mod folder and selects it. Nothing
-   is written there before you press Install.
+5. Under "In the game", give it a name and tick Free play (and/or Progression; progression comes in
+   a later build).
+6. Press "Install into Half Sword". It copies the weapon into the mod folder (weapons\<name>\).
+   Nothing is written there before you press Install. "Install all" does every converted weapon.
 
 In the game
-- Pick up a sword in your RIGHT hand and press F9. The sword becomes your model.
-- It lasts for that sword until it's dropped/replaced; press F9 again on another sword.
+- Your weapons are NEW weapons: in free mode they are in the weapon list of the inventory screen,
+  next to the game's own. No game weapon is changed.
+- The game saves them like its own weapons. Each one is saved as a game weapon of the same kind with
+  a special name, so if you remove this mod, saved converted weapons turn into that game weapon
+  instead of disappearing, and come back when you reinstall.
 - Problems: see HalfSwordCustomWeapon\CustomWeapon.log.
 
 Remove: delete the HalfSwordCustomWeapon folder from ue4ss\Mods.

@@ -45,6 +45,8 @@
 #include <Unreal/UFunction.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/UFunctionStructs.hpp>
+#include <Unreal/Core/HAL/UnrealMemory.hpp>
 
 #include <windows.h>
 
@@ -994,7 +996,7 @@ namespace
     }
 
     void apply_test_blade(UObject* weapon);
-    void apply_full_weapon(UObject* weapon, const std::wstring& base_name);
+    bool apply_full_weapon(UObject* weapon, const std::wstring& base, bool held);
 
     bool vector_sizes_ok()
     {
@@ -1046,7 +1048,7 @@ namespace
         // whole weapon; a bare OBJ only replaces the head (the first test).
         std::wstring base_name = model_base_name();
         if (has_collision_file(base_name))
-            apply_full_weapon(weapon, base_name);
+            apply_full_weapon(weapon, g_dir + base_name, true);
         else
         {
             apply_test_blade(weapon);
@@ -1279,6 +1281,65 @@ namespace
         return true;
     }
 
+    // ---- converted weapons: loaded model files, cached --------------------------------------------
+    // The game spawns a weapon for every trader list row and loot point, so the files are read once and
+    // kept until they change on disk.
+    struct ModelData
+    {
+        Model model;
+        std::vector<Hull> hulls;
+        std::map<std::string, double> numbers;
+        uint64_t stamp = 0;
+    };
+    std::map<std::wstring, ModelData> g_models;
+
+    uint64_t file_stamp(const std::wstring& path)
+    {
+        WIN32_FILE_ATTRIBUTE_DATA a{};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return 0;
+        return (uint64_t(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
+    }
+
+    const ModelData* model_data(const std::wstring& base)
+    {
+        uint64_t stamp = file_stamp(base + L".obj") ^ (file_stamp(base + L"_collision.obj") * 3) ^ (file_stamp(base + L".txt") * 7);
+        auto it = g_models.find(base);
+        if (it != g_models.end() && it->second.stamp == stamp) return &it->second;
+        ModelData d;
+        d.stamp = stamp;
+        d.numbers = read_numbers(base + L".txt");
+        d.hulls = load_hulls(base + L"_collision.obj");
+        if (!load_obj(base + L".obj", d.model))
+        {
+            log("  ! could not read %s.obj", narrow(base).c_str());
+            return nullptr;
+        }
+        return &(g_models[base] = std::move(d));
+    }
+
+    // What the hands need when the player takes a converted weapon (fit_hands runs again then).
+    struct Built
+    {
+        UObject* head = nullptr;
+        V3 hs{1, 1, 1};
+        double shift = 0;
+        std::map<std::string, double> numbers;
+    };
+    std::map<UObject*, Built> g_built;
+
+    // A scene component's direct children (USceneComponent::AttachChildren).
+    std::vector<UObject*> children_of(UObject* comp)
+    {
+        std::vector<UObject*> out;
+        if (!comp) return out;
+        auto* arr = comp->GetValuePtrByPropertyNameInChain<RawArray>(STR("AttachChildren"));
+        if (!arr || !arr->Data) return out;
+        auto* items = static_cast<UObject* const*>(arr->Data);
+        for (int32_t i = 0; i < arr->Num; ++i)
+            if (items[i]) out.push_back(items[i]);
+        return out;
+    }
+
     // Puts Willie's hands on the model's handle (decompile: grip_type_flow.md, grab_and_mass.md):
     // - The grip type decides one or two hands. Willie copies the weapon's "Grip R Hand Default" into
     //   R_GripType_Default when it is equipped (Set Up Right Hand Weapon @16075) and derives the current
@@ -1509,7 +1570,7 @@ namespace
                 if (key && std::string(key) == "spot_main") regrip_main(pawn, mark);
                 moved_l = moved_l || narrow(n) == "Grip L Hand Off Hand";
             }
-            if (moved_l && off_mark)
+            if (moved_l && off_mark && pawn)
             {
                 FProperty* p = pawn->GetPropertyByNameInChain(STR("L Hand In Offhand Attached"));
                 if (pawn_flag(pawn, p))
@@ -1598,8 +1659,8 @@ namespace
             place(r_mark, "main hand", r_target);
             regrip_main(pawn, r_mark);
         }
-        g_slide = SwingSlide{};
-        if (long_handle && g_settings.swing_slide)
+        if (pawn) g_slide = SwingSlide{};
+        if (pawn && long_handle && g_settings.swing_slide)
         {
             UObject* base = object_property(weapon, STR("BaseMesh"));
             UObject* rc = object_property(pawn, STR("PhysicsConstraint R Hand"));
@@ -1644,7 +1705,7 @@ namespace
         // A hand already holding keeps its old spot until it grips again: let go the way the game itself
         // does when it switches grips (Break R/L Constraint); each hand re-attaches at its new marker.
         auto attached = [&](const TCHAR* name) {
-            FProperty* p = pawn->GetPropertyByNameInChain(name);
+            FProperty* p = pawn ? pawn->GetPropertyByNameInChain(name) : nullptr;
             if (!p) return false;
             auto* b = static_cast<FBoolProperty*>(p);
             return (*(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal() + b->GetByteOffset()) & b->GetFieldMask()) != 0;
@@ -1713,16 +1774,22 @@ namespace
         c.run();
     }
 
-    void apply_full_weapon(UObject* weapon, const std::wstring& base_name)
+    // base = the model's path without extension (<pack folder>/<name>); its .obj, _collision.obj, .txt and
+    // textures sit there. held: the player holds it now (F9 style); otherwise only the weapon is changed,
+    // and the hands are fitted when the player takes it (held_tick).
+    bool apply_full_weapon(UObject* weapon, const std::wstring& base, bool held)
     {
-        auto numbers = read_numbers(g_dir + base_name + L".txt");
-        auto hulls = load_hulls(g_dir + base_name + L"_collision.obj");
-        Model model;
-        if (!load_obj(g_dir + base_name + L".obj", model) || hulls.empty() || numbers.empty())
+        const ModelData* data = model_data(base);
+        if (!data) return false;
+        auto numbers = data->numbers;
+        const auto& hulls = data->hulls;
+        Model model = data->model;
+        std::wstring base_name = base.substr(base.find_last_of(L"\\/") + 1);
+        if (hulls.empty() || numbers.empty())
         {
             log("  ! %s: need %s.obj, %s_collision.obj and %s.txt", narrow(base_name).c_str(), narrow(base_name).c_str(),
                 narrow(base_name).c_str(), narrow(base_name).c_str());
-            return;
+            return false;
         }
         double guard_top = numbers["guard_top"];
         double tip = numbers["tip"];
@@ -1749,7 +1816,7 @@ namespace
         if (flail)
         {
             log("  ! flails are not supported (their head hangs on a simulating chain)");
-            return;
+            return false;
         }
         struct Part
         {
@@ -1792,7 +1859,7 @@ namespace
         if (!head)
         {
             log("  ! no weapon part with a mesh found (Head, Blade, Weapon), or it was already replaced");
-            return;
+            return false;
         }
         // Extra pieces the model has nothing for: shrunk to a 1 cm box inside the model and made light.
         for (const TCHAR* extra : {STR("Sub Module 1 Mesh"), STR("SubModule 2 Mesh"), STR("Spike")})
@@ -1838,7 +1905,7 @@ namespace
         if (head_xf.bytes.empty() || hs.x == 0 || hs.y == 0 || hs.z == 0)
         {
             log("  ! could not read the head's transform");
-            return;
+            return false;
         }
         auto to_head_local = [&](V3 u) { return V3{u.x / hs.x, u.y / hs.y, u.z / hs.z}; };
 
@@ -1940,11 +2007,8 @@ namespace
         // ones are NODE_AddSceneComponent copies.
         double from_lo = olo.z, from_hi = ohi.z;
         double to_lo = ((one_piece ? numbers["pommel_end"] : guard_top) + shift) / hs.z, to_hi = (tip + shift) / hs.z;
-        std::vector<UObject*> comps;
-        UObjectGlobals::FindAllOf(STR("SceneComponent"), comps);
-        for (UObject* c : comps)
+        for (UObject* c : children_of(head))
         {
-            if (object_property(c, STR("AttachParent")) != head) continue;
             std::wstring cls = c->GetClassPrivate()->GetName();
             if (cls.find(STR("ProceduralMesh")) != std::wstring::npos || cls.find(STR("StaticMesh")) != std::wstring::npos) continue;
             FProperty* rp = c->GetPropertyByNameInChain(STR("RelativeLocation"));
@@ -1962,9 +2026,8 @@ namespace
         {
             if (pt.comp == head || std::string(pt.name) != "Grip_0") continue;
             Xf gx = world_transform(pt.comp);
-            for (UObject* c : comps)
+            for (UObject* c : children_of(pt.comp))
             {
-                if (object_property(c, STR("AttachParent")) != pt.comp) continue;
                 std::wstring cls = c->GetClassPrivate()->GetName();
                 if (cls.find(STR("ProceduralMesh")) != std::wstring::npos || cls.find(STR("StaticMesh")) != std::wstring::npos) continue;
                 V3 hl = transform_point(head_xf, world_location(c), true);
@@ -1988,20 +2051,382 @@ namespace
         }
         for (V3& n : model.normals) n = unit(V3{n.x * hs.x, n.y * hs.y, n.z * hs.z});
         UObject* proc = build_visual(weapon, head, model, material);
-        if (proc) apply_own_textures(weapon, proc, material, g_dir + base_name);
-        fit_hands(player_pawn(), weapon, head_xf, hs, shift, numbers);
-        log(proc ? "Done. Swing it at something and check the hits." : "  ! visual model failed (collision swap above still applies)");
+        if (proc) apply_own_textures(weapon, proc, material, base);
+        g_built[weapon] = Built{head, hs, shift, numbers};
+        fit_hands(held ? player_pawn() : nullptr, weapon, head_xf, hs, shift, numbers);
+        log(proc ? "Done." : "  ! visual model failed (collision swap above still applies)");
+        return true;
     }
 
-    bool g_key_was_down = false;
+    // ---- converted weapons added to the game: carrier passports -------------------------------------
+    // Matthew 2026-11-22: converted weapons are NEW weapons in free play (and progression), not a game
+    // weapon reshaped with F9. Decompile notes: defaults\add_new_weapons.md, carrier_passport_impl.md.
+    // The game keeps every weapon as a passport (Str_Passport_Weapon1: weapon class, part classes, sizes,
+    // Name, ID, Price, Tier). A converted weapon is a passport of a game weapon of the same kind (the
+    // "carrier") whose Name is a marker, "cw <id>" ("cw sword <id>" for swords: Blossfechten keeps only
+    // names with "sword" or "messer"; never "great"). When any weapon with a marker spawns (menu, trader,
+    // loot, save), the converted model is put on it at the end of its BeginPlay, after the game built
+    // the parts and before anyone reads them. The passport itself is never changed (the game saves and
+    // compares it), so without this mod a saved converted weapon is simply the carrier: nothing is lost.
+    enum Kind { K_DAGGER, K_ARMING, K_BASTARD, K_LONGSWORD, K_MACE, K_AXE2H, K_SPEAR, K_COUNT };
+    const char* const kind_names[K_COUNT] = {"dagger", "arming", "bastard", "longsword", "mace", "axe2h", "spear"};
+
+    struct Pack
+    {
+        std::wstring id, dir, title, model; // dir ends with a slash; model: file name without .obj
+        bool free_play = true, progression = false;
+        int kind = K_ARMING;
+        FName marker;
+        int32_t hash = 1;
+    };
+    std::vector<Pack> g_packs;
+
+    std::wstring widen(const std::string& s)
+    {
+        if (s.empty()) return {};
+        int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+        std::wstring w(n, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
+        return w;
+    }
+
+    int kind_for(const std::map<std::string, std::string>& kv, const std::map<std::string, double>& nums)
+    {
+        auto c = kv.find("carrier");
+        if (c != kv.end())
+            for (int k = 0; k < K_COUNT; ++k)
+                if (c->second == kind_names[k]) return k;
+        auto num = [&](const char* k) { auto i = nums.find(k); return i == nums.end() ? 0.0 : i->second; };
+        bool hafted = num("hafted") > 0.5;
+        double grip = -num("handle_bottom"), total = num("tip") - num("pommel_end");
+        if (!hafted)
+        {
+            if (total < 55) return K_DAGGER;
+            if (grip < g_settings.two_hand_grip_cm) return K_ARMING;
+            return grip < 20 ? K_BASTARD : K_LONGSWORD;
+        }
+        if (total < 90) return K_MACE;
+        return total < 160 ? K_AXE2H : K_SPEAR;
+    }
+
+    // Every weapons\<id>\pack.txt in the mod folder (written by WeaponConverter's Install).
+    void load_packs()
+    {
+        std::vector<Pack> packs;
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW((g_dir + L"weapons\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            g_packs.clear();
+            return;
+        }
+        do
+        {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+            Pack pk;
+            pk.id = fd.cFileName;
+            pk.dir = g_dir + L"weapons\\" + pk.id + L"\\";
+            FILE* f = _wfopen((pk.dir + L"pack.txt").c_str(), L"r");
+            if (!f) continue;
+            std::map<std::string, std::string> kv;
+            char line[512];
+            while (fgets(line, sizeof line, f))
+            {
+                if (line[0] == ';' || line[0] == '#') continue;
+                std::string l(line);
+                size_t eq = l.find('=');
+                if (eq == std::string::npos) continue;
+                std::string v = l.substr(eq + 1);
+                while (!v.empty() && (v.back() == '\n' || v.back() == '\r' || v.back() == ' ')) v.pop_back();
+                kv[l.substr(0, eq)] = v;
+            }
+            fclose(f);
+            pk.title = widen(kv.count("title") ? kv["title"] : narrow(pk.id));
+            std::string model = kv.count("model") ? kv["model"] : narrow(pk.id) + ".obj";
+            if (model.size() > 4 && _stricmp(model.c_str() + model.size() - 4, ".obj") == 0) model.resize(model.size() - 4);
+            pk.model = widen(model);
+            pk.free_play = !kv.count("free_play") || kv["free_play"] != "0";
+            pk.progression = kv.count("progression") && kv["progression"] == "1";
+            const ModelData* d = model_data(pk.dir + pk.model);
+            if (!d)
+            {
+                log("Weapon %s: model %s.obj missing, skipped", narrow(pk.id).c_str(), model.c_str());
+                continue;
+            }
+            pk.kind = kind_for(kv, d->numbers);
+            bool sword = pk.kind <= K_LONGSWORD;
+            pk.marker = FName((std::wstring(sword ? L"cw sword " : L"cw ") + pk.id).c_str(), FNAME_Add);
+            uint32_t hsh = 2166136261u;
+            for (wchar_t ch : pk.id) hsh = (hsh ^ (uint32_t)towlower(ch)) * 16777619u;
+            pk.hash = (int32_t)(hsh & 0x7fffffff) | 1;
+            packs.push_back(pk);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        if (packs.size() != g_packs.size()) log("Converted weapons found: %zu", packs.size());
+        for (const Pack& pk : packs)
+        {
+            bool known = false;
+            for (const Pack& old : g_packs) known = known || old.id == pk.id;
+            if (!known)
+                log("  %s \"%s\": carried by a game %s; free play %s, progression %s", narrow(pk.id).c_str(), narrow(pk.title).c_str(),
+                    kind_names[pk.kind], pk.free_play ? "yes" : "no", pk.progression ? "yes" : "no");
+        }
+        g_packs = std::move(packs);
+    }
+
+    // Passport layout, read from the game (member names carry GUID suffixes: matched by prefix).
+    struct PassportLayout
+    {
+        UScriptStruct* type = nullptr;
+        int32_t size = 0, name = -1, id = -1, weapon_class = -1, grip = -1, price = -1, tier = -1;
+    } g_pp;
+
+    bool passport_layout()
+    {
+        if (g_pp.type) return true;
+        auto* t = UObjectGlobals::StaticFindObject<UScriptStruct*>(nullptr, nullptr,
+                                                                    STR("/Game/Blueprints/Structure/Passports/Str_Passport_Weapon1.Str_Passport_Weapon1"));
+        if (!t) return false;
+        PassportLayout l;
+        l.type = t;
+        l.size = t->GetStructureSize();
+        for (FProperty* p : t->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            auto pre = [&](const wchar_t* x) { return n.rfind(x, 0) == 0; };
+            if (pre(L"Name_")) l.name = p->GetOffset_Internal();
+            else if (pre(L"ID_")) l.id = p->GetOffset_Internal();
+            else if (pre(L"WeaponClass_")) l.weapon_class = p->GetOffset_Internal();
+            else if (pre(L"GripModule_")) l.grip = p->GetOffset_Internal();
+            else if (pre(L"Price_")) l.price = p->GetOffset_Internal();
+            else if (pre(L"Tier_")) l.tier = p->GetOffset_Internal();
+        }
+        log("Weapon passport: %d bytes; Name @%d, ID @%d, WeaponClass @%d, GripModule @%d, Price @%d, Tier @%d", l.size, l.name, l.id,
+            l.weapon_class, l.grip, l.price, l.tier);
+        if (l.size <= 0 || l.name < 0 || l.id < 0 || l.weapon_class < 0 || l.grip < 0)
+        {
+            log("  ! passport members not found: converted weapons are off");
+            return false;
+        }
+        g_pp = l;
+        return true;
+    }
+
+    FName& passport_name(uint8_t* passport) { return *reinterpret_cast<FName*>(passport + g_pp.name); }
+    UObject* passport_class(const uint8_t* passport, int32_t at) { return *reinterpret_cast<UObject* const*>(passport + at); }
+
+    // The weapon passports inside a Str_Inventory struct property (member WeaponPssports_6_..., sic).
+    RawArray* weapon_passports(UObject* owner, const TCHAR* property)
+    {
+        FProperty* p = owner ? owner->GetPropertyByNameInChain(property) : nullptr;
+        UScriptStruct* inv = struct_type(p);
+        if (!inv) return nullptr;
+        for (FProperty* m : inv->ForEachProperty())
+            if (m->GetName().rfind(L"WeaponPssports_", 0) == 0)
+                return reinterpret_cast<RawArray*>(reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal() + m->GetOffset_Internal());
+        return nullptr;
+    }
+
+    // Carrier passports, copied from the game's own free mode list (DA_FreeMode_Inventory_Tier_Knight):
+    // arming sword (Grip_12_T2), bastard (Grip_15_T3), longsword (Grip_20_T4), mace (Mace_Grip_I_S),
+    // great axe (ModularWeaponBP_Axe2H), spear (ModularWeaponBP_Spear_A). The dagger has no passport there:
+    // a knife class alone (grip-less classes need only WeaponClass).
+    std::vector<uint8_t> g_tmpl[K_COUNT];
+
+    bool carrier_templates()
+    {
+        if (!g_tmpl[K_ARMING].empty()) return true;
+        if (!passport_layout()) return false;
+        UObject* da = load_asset(L"/Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight");
+        RawArray* arr = weapon_passports(da, STR("Inventory"));
+        if (!arr || !arr->Data)
+        {
+            log("  ! free mode weapon list (DA_FreeMode_Inventory_Tier_Knight Inventory) not found");
+            return false;
+        }
+        for (int32_t i = 0; i < arr->Num; ++i)
+        {
+            const uint8_t* pp = static_cast<const uint8_t*>(arr->Data) + (size_t)i * g_pp.size;
+            UObject* cls = passport_class(pp, g_pp.weapon_class);
+            UObject* grip = passport_class(pp, g_pp.grip);
+            std::wstring c = cls ? cls->GetName() : L"", g = grip ? grip->GetName() : L"";
+            int k = g == L"Weapon_Sword_Grip_12_T2_C"   ? K_ARMING
+                    : g == L"Weapon_Sword_Grip_15_T3_C" ? K_BASTARD
+                    : g == L"Weapon_Sword_Grip_20_T4_C" ? K_LONGSWORD
+                    : g == L"Weapon_Part_Mace_Grip_I_S_C" ? K_MACE
+                    : c == L"ModularWeaponBP_Axe2H_C"   ? K_AXE2H
+                    : c == L"ModularWeaponBP_Spear_A_C" ? K_SPEAR
+                                                        : -1;
+            if (k >= 0 && g_tmpl[k].empty()) g_tmpl[k].assign(pp, pp + g_pp.size);
+        }
+        if (UObject* knife = load_asset(L"/Game/Assets/Weapons/Built_Weapons/Tools/BP_Weapon_Tool_Knife_A.BP_Weapon_Tool_Knife_A_C"))
+        {
+            g_tmpl[K_DAGGER].assign(g_pp.size, 0);
+            *reinterpret_cast<UObject**>(g_tmpl[K_DAGGER].data() + g_pp.weapon_class) = knife;
+        }
+        std::string have;
+        for (int k = 0; k < K_COUNT; ++k) have += std::string(" ") + kind_names[k] + (g_tmpl[k].empty() ? ":MISSING" : ":ok");
+        log("Carrier passports from the game:%s", have.c_str());
+        return !g_tmpl[K_ARMING].empty();
+    }
+
+    bool make_passport(const Pack& pk, std::vector<uint8_t>& out)
+    {
+        if (!carrier_templates()) return false;
+        int k = pk.kind;
+        if (g_tmpl[k].empty()) k = k <= K_LONGSWORD ? K_ARMING : K_MACE; // missing carrier: nearest kind
+        if (g_tmpl[k].empty()) return false;
+        out = g_tmpl[k];
+        passport_name(out.data()) = pk.marker;
+        *reinterpret_cast<int32_t*>(out.data() + g_pp.id) = pk.hash;
+        return true;
+    }
+
+    const Pack* pack_for(FName marker)
+    {
+        for (const Pack& pk : g_packs)
+            if (pk.marker == marker) return &pk;
+        return nullptr;
+    }
+
+    // GI_Settings "Set Up Free Mode Inventory" rebuilds the free mode list from the data asset plus the
+    // player's Insured Items each time the inventory screen opens (never saved); the converted weapons
+    // are appended after it, unless the same weapon is already there (insured).
+    void free_mode_list_built(UnrealScriptFunctionCallableContext& context, void*)
+    {
+        UObject* gi = context.Context;
+        load_packs();
+        if (g_packs.empty() || !carrier_templates()) return;
+        RawArray* arr = weapon_passports(gi, STR("Free Mode Player Inventory"));
+        if (!arr)
+        {
+            log("  ! GI_Settings Free Mode Player Inventory weapons not found");
+            return;
+        }
+        int added = 0;
+        for (const Pack& pk : g_packs)
+        {
+            if (!pk.free_play) continue;
+            bool there = false;
+            for (int32_t i = 0; i < arr->Num && !there; ++i)
+                there = passport_name(static_cast<uint8_t*>(const_cast<void*>(arr->Data)) + (size_t)i * g_pp.size) == pk.marker;
+            std::vector<uint8_t> pp;
+            if (there || !make_passport(pk, pp)) continue;
+            int32_t n = arr->Num;
+            if (n + 1 > arr->Max)
+            {
+                void* grown = FMemory::Realloc(const_cast<void*>(arr->Data), (size_t)(n + 4) * g_pp.size);
+                if (!grown) break;
+                arr->Data = grown;
+                arr->Max = n + 4;
+            }
+            memcpy(static_cast<uint8_t*>(const_cast<void*>(arr->Data)) + (size_t)n * g_pp.size, pp.data(), g_pp.size);
+            arr->Num = n + 1;
+            ++added;
+        }
+        log("Free mode list: %d converted weapons added (list now %d)", added, arr->Num);
+    }
+
+    bool set_number(UObject* owner, const TCHAR* name, double value)
+    {
+        FProperty* p = owner ? owner->GetPropertyByNameInChain(name) : nullptr;
+        if (!p) return false;
+        uint8_t* at = reinterpret_cast<uint8_t*>(owner) + p->GetOffset_Internal();
+        auto kind = p->GetClass().GetName();
+        if (kind == STR("DoubleProperty")) *reinterpret_cast<double*>(at) = value;
+        else if (kind == STR("FloatProperty")) *reinterpret_cast<float*>(at) = (float)value;
+        else return false;
+        return true;
+    }
+
+    // Every ModularWeaponBP after its BeginPlay (which built the parts from the passport).
+    void weapon_begin_play(UObject* actor)
+    {
+        static UClass* weapon_class = nullptr;
+        if (!weapon_class)
+        {
+            weapon_class = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C"));
+            if (!weapon_class) return;
+        }
+        if (!actor || !actor->IsA(weapon_class) || !passport_layout()) return;
+        uint8_t* pp = actor->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Weapon Passport"));
+        if (!pp) return;
+        FName marker = passport_name(pp);
+        const Pack* pk = pack_for(marker);
+        if (!pk)
+        {
+            if (marker.ToString().rfind(STR("cw "), 0) != 0) return; // a game weapon
+            load_packs();                                             // installed while the game runs?
+            pk = pack_for(marker);
+            if (!pk)
+            {
+                log("A converted weapon (%s) spawned but its folder is gone: it stays the game weapon it is carried by",
+                    narrow(marker.ToString()).c_str());
+                return;
+            }
+        }
+        log("---- %s spawned: \"%s\" from weapons\\%s ----", name_of(actor).c_str(), narrow(pk->title).c_str(), narrow(pk->id).c_str());
+        load_settings();
+        double mass_was = g_settings.mass_kg;
+        g_settings.mass_kg = 0; // the pack's own mass (from the converter)
+        bool ok = apply_full_weapon(actor, pk->dir + pk->model, false);
+        g_settings.mass_kg = mass_was;
+        if (!ok) return;
+        // The name the trader and menus show (the passport keeps the marker).
+        if (FName* n = actor->GetValuePtrByPropertyNameInChain<FName>(STR("Name"))) *n = FName(pk->title.c_str(), FNAME_Add);
+        // Values the game measured from the old parts in BeginPlay (carrier_passport_impl.md b2).
+        const Built& b = g_built[actor];
+        auto num = [&](const char* k) { auto i = b.numbers.find(k); return i == b.numbers.end() ? 0.0 : i->second; };
+        set_number(actor, STR("Weapon Length"), num("tip") - num("pommel_end"));
+        if (UObject* base = object_property(actor, STR("BaseMesh"))) set_number(actor, STR("Mass Default"), mass_of(base));
+    }
+
+    // When the player takes a converted weapon, its hands are fitted (grip type, hand spots, slide).
+    UObject* g_last_held = nullptr;
+    double g_held_clock = 0;
+
+    void held_tick(float dt)
+    {
+        g_held_clock += dt;
+        if (g_held_clock < 0.1) return;
+        g_held_clock = 0;
+        UObject* pawn = player_pawn();
+        UObject* weapon = object_property(pawn, STR("Weapon R"));
+        if (weapon == g_last_held) return;
+        g_last_held = weapon;
+        auto it = weapon ? g_built.find(weapon) : g_built.end();
+        if (it == g_built.end()) return;
+        uint8_t* pp = weapon->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Weapon Passport"));
+        if (!pp || !pack_for(passport_name(pp))) return; // an old pointer reused by another weapon
+        log("---- player took %s ----", name_of(weapon).c_str());
+        Built& b = it->second;
+        fit_hands(pawn, weapon, world_transform(b.head), b.hs, b.shift, b.numbers);
+    }
+
+    // The free mode list function is a Blueprint function called from Blueprint: hooked once it is loaded.
+    bool g_free_mode_hooked = false;
+    double g_hook_clock = 0;
+
+    void hook_tick(float dt)
+    {
+        if (g_free_mode_hooked) return;
+        g_hook_clock += dt;
+        if (g_hook_clock < 1.0) return;
+        g_hook_clock = 0;
+        auto* fn = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr,
+                                                                STR("/Game/Blueprints/GameInstances/GI_Settings.GI_Settings_C:Set Up Free Mode Inventory"));
+        if (!fn) return;
+        UObjectGlobals::RegisterHook(fn, [](UnrealScriptFunctionCallableContext&, void*) {}, &free_mode_list_built, nullptr);
+        g_free_mode_hooked = true;
+        log("Hooked GI_Settings Set Up Free Mode Inventory: converted weapons join the free mode list");
+    }
 
     void tick(UObject* engine, float dt)
     {
         g_engine = engine;
+        hook_tick(dt);
+        held_tick(dt);
         slide_tick(dt);
-        bool down = (GetAsyncKeyState(g_settings.key) & 0x8000) != 0;
-        if (down && !g_key_was_down) apply();
-        g_key_was_down = down;
     }
 } // namespace
 
@@ -2026,7 +2451,10 @@ class HalfSwordCustomWeapon : public CppUserModBase
         Hook::RegisterEngineTickPreCallback(
                 [](auto&, UEngine* engine, float dt, bool) { tick(reinterpret_cast<UObject*>(engine), dt); },
                 {false, false, STR("HalfSwordCustomWeapon"), STR("Tick")});
-        log("Ready: hold a weapon in the right hand and press key 0x%X", g_settings.key);
+        Hook::RegisterBeginPlayPostCallback([](auto&, auto* actor) { weapon_begin_play(reinterpret_cast<UObject*>(actor)); },
+                                            {false, false, STR("HalfSwordCustomWeapon"), STR("WeaponBeginPlay")});
+        load_packs();
+        log("Ready: converted weapons in weapons\\ are added to the game");
     }
 };
 

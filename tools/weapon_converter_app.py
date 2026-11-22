@@ -94,17 +94,23 @@ def find_mod_folder():
     return None
 
 
-def set_model_in_ini(mod_dir, model_file):
-    ini = os.path.join(mod_dir, "CustomWeapon.ini")
-    lines = open(ini, encoding="utf-8").read().splitlines() if os.path.isfile(ini) else []
-    done = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith("model="):
-            lines[i] = "model=" + model_file
-            done = True
-    if not done:
-        lines.append("model=" + model_file)
-    open(ini, "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
+def write_pack(mod_dir, it):
+    """One weapon = one folder weapons/<id>/ in the mod: the converted files and pack.txt, which says how the
+    weapon enters the game. The mod adds every pack it finds as a new weapon (no game weapon is changed)."""
+    name = it["result"][0]
+    folder = os.path.join(mod_dir, "weapons", it["name"])
+    if os.path.isdir(folder):
+        shutil.rmtree(folder)
+    os.makedirs(folder)
+    for f in os.listdir(it["work"]):
+        shutil.copy2(os.path.join(it["work"], f), os.path.join(folder, f))
+    title = re.sub(r"[\r\n=]+", " ", it["title"]).strip() or name
+    lines = ["; written by WeaponConverter: how this weapon enters Half Sword",
+             "title=" + title,
+             "model=" + name + ".obj",
+             "free_play=" + ("1" if it["free_play"] else "0"),
+             "progression=" + ("1" if it["progression"] else "0")]
+    open(os.path.join(folder, "pack.txt"), "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
 
 
 def load_settings():
@@ -320,6 +326,19 @@ class App:
         ttk.Label(form, text="type a new length to stretch or shrink just that part; drag the white marks between the "
                              "coloured parts under the picture to move where one part ends and the next begins.",
                   foreground="#777", wraplength=640).grid(row=9, column=1, columnspan=2, sticky="w", padx=8)
+        ttk.Label(form, text="In the game").grid(row=10, column=0, sticky="w", **pad)
+        game = ttk.Frame(form)
+        game.grid(row=10, column=1, columnspan=2, sticky="w", **pad)
+        ttk.Label(game, text="Name").pack(side="left", padx=(0, 3))
+        self.title_var = tk.StringVar()
+        ttk.Entry(game, textvariable=self.title_var, width=26).pack(side="left", padx=(0, 10))
+        self.free_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(game, text="Free play", variable=self.free_var).pack(side="left", padx=(0, 6))
+        self.prog_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(game, text="Progression", variable=self.prog_var).pack(side="left")
+        ttk.Label(form, text="Install adds the weapon to the game as a new weapon: in free play's weapon list, "
+                             "and/or for sale at the merchant in progression.",
+                  foreground="#777", wraplength=640).grid(row=11, column=1, columnspan=2, sticky="w", padx=8)
         ttk.Label(form, text="Units").grid(row=3, column=0, sticky="w", **pad)
         unit_name = self.settings.get("units")
         self.units_var = tk.StringVar(value=unit_name if unit_name in UNIT_SYSTEMS else next(iter(UNIT_SYSTEMS)))
@@ -411,7 +430,8 @@ class App:
                 name, n = f"{base}_{n}", n + 1
             names.add(name.lower())
             item = {"path": f, "name": name, "raw": None, "length_cm": None, "mass_kg": None,
-                    "type": TYPES[0][0], "flip": False, "slide": False, "spots": {}, "splits": None, "part_len": {}, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
+                    "type": TYPES[0][0], "flip": False, "slide": False, "spots": {}, "splits": None, "part_len": {},
+                    "title": base.replace("_", " ").strip() or "Weapon", "free_play": True, "progression": False, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
                     "result": None, "result_inputs": None, "views": None, "status": "reading the model...",
                     "iid": f"item{id(f)}_{len(self.items)}"}
             self.items.append(item)
@@ -463,6 +483,8 @@ class App:
                 it[key] = None
         it["type"] = self.type_var.get()
         it["slide"] = self.slide_var.get()
+        it["title"] = self.title_var.get().strip() or it["title"]
+        it["free_play"], it["progression"] = self.free_var.get(), self.prog_var.get()
         it.update(flip=self.flip, raw=self.raw_length, result=self.result, result_inputs=self.result_inputs,
                   views=self.result_views)
         self.refresh_row(it)
@@ -484,6 +506,9 @@ class App:
         self.mass_var.set("" if it["mass_kg"] is None else f"{it['mass_kg'] / mk:.3f}".rstrip("0").rstrip("."))
         self.type_var.set(it["type"])
         self.slide_var.set(it["slide"])
+        self.title_var.set(it["title"])
+        self.free_var.set(it["free_play"])
+        self.prog_var.set(it["progression"])
         self.quiet = False
         self.show_model_info()
         self.show_part_lengths()
@@ -1110,11 +1135,16 @@ class App:
     def install(self):
         if self.result is None or self.busy:
             return
-        if self.copy_items([self.cur], self.cur):
-            name = self.cur["name"]
-            self.status.config(text=f"Installed: CustomWeapon.ini now uses {name}.obj.")
-            messagebox.showinfo("Weapon Converter", f"{name} is installed.\n\nIn Half Sword, hold a sword in your "
-                                                    "right hand and press F9 to swap it for this weapon.")
+        if self.copy_items([self.cur]):
+            title = self.cur["title"]
+            where = self.where_text(self.cur)
+            self.status.config(text=f"Installed: {title} ({where}).")
+            messagebox.showinfo("Weapon Converter", f"{title} is installed as a new weapon ({where}).\n\n"
+                                "Start Half Sword (or go back to its menu) to find it.")
+
+    def where_text(self, it):
+        places = [p for p, on in (("free play", it["free_play"]), ("progression merchant", it["progression"])) if on]
+        return " and ".join(places) if places else "in neither free play nor progression: tick one to use it"
 
     def install_all(self):
         if self.busy:
@@ -1124,29 +1154,23 @@ class App:
         if not done:
             self.status.config(text="Convert the weapons first (Convert all).")
             return
-        use = self.cur if self.cur in done else done[0]
-        if self.copy_items(done, use):
+        if self.copy_items(done):
             left = len(self.items) - len(done)
-            self.status.config(text=f"Installed {len(done)} weapons; CustomWeapon.ini uses {use['name']}.obj."
-                                    + (f" {left} not converted yet." if left else ""))
-            messagebox.showinfo("Weapon Converter",
-                                f"{len(done)} weapons are installed.\n\nThe game uses the one picked in the list "
-                                f"({use['name']}). To try another: pick it in the list and press \"Install into Half "
-                                "Sword\" (this works while the game runs), then hold a weapon in the right hand in "
-                                "Half Sword and press F9.")
+            self.status.config(text=f"Installed {len(done)} weapons." + (f" {left} not converted yet." if left else ""))
+            messagebox.showinfo("Weapon Converter", f"{len(done)} weapons are installed as new weapons.\n\n"
+                                "Start Half Sword (or go back to its menu) to find them.")
 
-    def copy_items(self, items, use):
+    def copy_items(self, items):
         mod_dir = self.mod_var.get()
         if not mod_dir or not os.path.isdir(mod_dir):
             messagebox.showerror("Weapon Converter", "Pick the HalfSwordCustomWeapon mod folder first.")
             return False
+        self.save_editor()
         try:
             for it in items:
-                for f in os.listdir(it["work"]):
-                    shutil.copy2(os.path.join(it["work"], f), os.path.join(mod_dir, f))
+                write_pack(mod_dir, it)
                 it["status"] = "installed"
                 self.refresh_row(it)
-            set_model_in_ini(mod_dir, use["name"] + ".obj")
         except OSError as e:
             messagebox.showerror("Weapon Converter", f"Could not write to the mod folder:\n{e}")
             return False
