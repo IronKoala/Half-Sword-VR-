@@ -19956,6 +19956,20 @@ namespace
                 d.block_cleared = true;
                 HSVR_LOG("Sheathe: in past the mouth (%.1f cm out)", z);
             }
+            if (d.sheathing && !d.block_cleared)
+            {
+                // Pulled back out before it was in past the mouth: the block holds off the game's whole-blade
+                // abort too, so it stayed sheathing for good (test j2 2026-11-22 18:27Z: 59.0 cm in of 65.2,
+                // then 102 cm out and never free). 8 cm back and the whole blade out: the block goes, and
+                // below it is a draw.
+                d.z_in = (std::min)(d.z_in, z);
+                if (z > d.z_in + 8.0 && z > d.length)
+                {
+                    set_bool_property(pawn, d.slot_side == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
+                    d.block_cleared = true;
+                    HSVR_LOG("Sheathe: back out before the mouth (%.1f cm out, was %.1f of %.1f): the game may free it", z, d.z_in, d.length);
+                }
+            }
             if (d.sheathing && d.block_cleared)
             {
                 // Pulled back out: with "<S> Weapon Sheathing" set the game frees it only a whole blade's
