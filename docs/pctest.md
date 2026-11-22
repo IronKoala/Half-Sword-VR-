@@ -1,5 +1,8 @@
 # Unattended test runs: many cases in one launch
 
+**Every thread uses this runner for unattended tests from 2026-11-22 (Matthew).** Don't write a new
+per-thread runner; fix or extend this one (PR to `tools/pctest`).
+
 `tools/pctest/run-suite.ps1` runs a list of test cases on the PC with the pretend headset. It replaces the
 per-thread copies of `run-cross-*.ps1` (one launch per case).
 
@@ -45,6 +48,36 @@ tw_b3_light_right_arm|steps-cross-tw_b3_light_right_arm.txt|pose_hold_joint=1
 A steps file with a line `# fresh` always gets a launch of its own. Use it for a case that needs a clean
 launch, or one that uses a test aid that `case_reset_inputs` doesn't put back (a test copy's own commands:
 add their state to `case_reset_inputs` instead when you can).
+
+## Waiting for things to happen (hsvr.wait)
+
+Fixed step times have to cover the slowest run, so most of a case was spent waiting (a hand that reached the
+strap in 0.5 s, then 3 s more before the grip). Use a wait instead:
+
+```
+hsvr.wait <what> <op> <value> <timeout s> [hold s] [label]
+```
+
+The steps after it are held until `<what> <op> <value>` has been true for `<hold>` seconds (0 = at once), or
+`<timeout>` passes. They then run as many seconds after that moment as they were after the wait in the file,
+so a file stays readable with its old times. `<what>` is anything `hsvr.expect` reads, plus
+`hand_speed_l` / `hand_speed_r` (cm/s of the hand bone: below ~5 means it has arrived). A timeout counts as a
+failed check (and marks a replay); a wait that is met counts as nothing. The log says
+`WAIT OK: ... after 0.48 s` or `WAIT TIMEOUT: ...`, so every case now also measures how long things took.
+
+Before and after:
+
+```
+7.2:hsvr.hand_at 0 strap 0          7.2:hsvr.hand_at 0 strap 0
+10.7:hsvr.squeeze 0 1               7.3:hsvr.wait hand_speed_l < 5 3.4 0.2 hand on the strap
+12.7:hsvr.expect strap_l = 1 ...    7.4:hsvr.squeeze 0 1
+                                    7.5:hsvr.wait strap_l = 1 2 0 in the hand by the strap
+                                    7.6:hsvr.expect mount_l = 0 ...
+```
+
+Keep a fixed gap where the test is about time passing (a settle, a hold that must last, a sample every
+second): a wait only replaces "long enough for X to have happened". Use the old file's gap as the timeout,
+so a slow run fails no sooner than before.
 
 ## Running
 

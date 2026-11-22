@@ -24016,6 +24016,124 @@ namespace
         find_pawn_mesh(&pawn);
         if (pawn && !set_bool_property(pawn, STR("Immortal"), true)) HSVR_LOG_EVERY(30.0, "Script: hsvr.player_immortal: no Immortal variable on the player");
     }
+    // A value the tests can check (hsvr.expect, hsvr.wait): false when <what> is not known.
+    bool script_value(const std::string& w, double& value)
+    {
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        value = 0.0;
+        bool known = true;
+        if (w == "held_r") value = object_property(pawn, STR("Weapon R")) ? 1.0 : 0.0;
+        else if (w == "hand_speed_l" || w == "hand_speed_r")
+        {
+            // How fast the hand bone moves (cm/s) between two reads; for "hsvr.wait hand_speed_l < 5 3 0.2"
+            // (the hand has arrived). The first read, or one more than 0.5 s after the last, is 1e9.
+            int side = w.back() == 'l' ? 0 : 1;
+            static hsvr::Vec3 last[2];
+            static double last_t[2] = {-1.0, -1.0};
+            double t = hsvr::now_seconds();
+            hsvr::Vec3 at = g_pose.mesh ? socket_location(g_pose.mesh, bone_fname(side == 0 ? "hand_l" : "hand_r")) : hsvr::Vec3{};
+            double dt = t - last_t[side];
+            value = last_t[side] >= 0.0 && dt > 1e-4 && dt < 0.5 ? hsvr::length(at - last[side]) / dt : 1e9;
+            last[side] = at;
+            last_t[side] = t;
+            if (!g_pose.mesh) known = false;
+        }
+        else if (w == "held_l") value = object_property(pawn, STR("Weapon L")) ? 1.0 : 0.0;
+        else if (w == "grabbed_r") value = bool_property(pawn, STR("Grabbed R")) ? 1.0 : 0.0;
+        else if (w == "grabbed_l") value = bool_property(pawn, STR("Grabbed L")) ? 1.0 : 0.0;
+        else if (w == "letgo") value = g_count_letgo.load();
+        else if (w == "kicks") value = g_count_kicks.load();
+        else if (w == "lag_r") value = g_worst_lag[1].load();
+        else if (w == "lag_l") value = g_worst_lag[0].load();
+        else if (w == "stamina") value = read_number_variable(pawn, STR("Stamina"));
+        else if (w == "strength_r") value = g_hold[1].body_strength;
+        else if (w == "strength_l") value = g_hold[0].body_strength;
+        else if (w == "two_hand") value = g_two.active ? 1.0 : 0.0;
+        else if (w == "fist_r") value = is_fist(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
+        else if (w == "fist_l") value = is_fist(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
+        else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
+        else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
+        else if (w == "actor_z") value = pawn ? actor_location(pawn).z : 0.0;
+        else if (w == "xbow_string" || w == "xbow_bolt")
+        {
+            // the crossbow in either hand: String Loaded / Bolt Loaded
+            UObject* xb = object_property(pawn, STR("Weapon R"));
+            if (!is_crossbow(xb)) xb = object_property(pawn, STR("Weapon L"));
+            value = is_crossbow(xb) && bool_property(xb, w == "xbow_string" ? STR("String Loaded") : STR("Bolt Loaded")) ? 1.0 : 0.0;
+        }
+        else if (w == "xbow_quiver")
+        {
+            UObject* q = object_property(pawn, STR("Attached Bolt Quiver"));
+            int32_t* c = q ? value_ptr<int32_t>(q, STR("Projectile Count")) : nullptr;
+            value = c ? *c : -1.0;
+        }
+        else if (w == "bolt_r") value = is_bolt(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
+        else if (w == "bolt_l") value = is_bolt(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
+        else if (w == "xstring") value = g_xstring.on ? g_xstring.side + 1.0 : 0.0;
+        else if (w.rfind("var:", 0) == 0 && pawn)
+        {
+            // var:<pawn variable>, '_' for spaces (var:Leg_R_Tonus); a variable named with '_' is tried as written first
+            std::wstring n(w.begin() + 4, w.end());
+            FProperty* p = prop_chain(pawn, n.c_str());
+            if (!p)
+            {
+                for (auto& ch : n)
+                    if (ch == L'_') ch = L' ';
+                p = prop_chain(pawn, n.c_str());
+            }
+            if (p) value = number_property(pawn, p);
+            else known = false;
+        }
+        else known = false;
+        return known;
+    }
+
+    bool script_compare(double value, const std::string& op, double want, bool& known)
+    {
+        if (op == "<") return value < want;
+        if (op == "<=") return value <= want;
+        if (op == "=" || op == "==") return std::fabs(value - want) < 1e-6;
+        if (op == ">=") return value >= want;
+        if (op == ">") return value > want;
+        known = false;
+        return false;
+    }
+
+    // One check of a case passed or failed (hsvr.expect, hsvr.wait); the first failure marks a replay.
+    void case_check(bool ok, const hsvr::Config& cfg)
+    {
+        if (ok)
+        {
+            ++g_case.pass;
+            return;
+        }
+        ++g_case.fail;
+        if (!g_case.replay_marked && cfg.replay_capture)
+        {
+            g_case.replay_marked = true;
+            replay::g_fake_mark.store(true);
+            HSVR_LOG("Script: failed check: replay marked");
+        }
+    }
+
+    // hsvr.wait <what> <op> <value> <timeout s> [hold s] [label]: the steps after it wait until the
+    // check holds (for <hold> seconds, 0 = at once) or <timeout> passes, and then run as many seconds
+    // after that moment as they were after the wait. Same <what> as hsvr.expect. A timeout is a failed
+    // check; a pass is not counted (it is a wait, not a check).
+    struct ScriptWait
+    {
+        bool on = false;
+        size_t index = 0;    // the wait's entry
+        size_t end = 0;      // the entries there were then (a batch written later is not moved)
+        double at = 0.0;     // its time
+        double since = 0.0;  // when it started
+        double deadline = 0.0, hold = 0.0, true_since = -1.0;
+        std::string what, op, label;
+        double want = 0.0;
+    };
+    ScriptWait g_wait;
+
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -24098,6 +24216,32 @@ namespace
             {
                 menu_at = now;
                 HSVR_LOG("Script: first menu on screen at %.1f s; M+ steps count from here", now);
+            }
+        }
+        if (g_wait.on)
+        {
+            double v = 0.0;
+            bool known = script_value(g_wait.what, v);
+            bool ok = script_compare(v, g_wait.op, g_wait.want, known) && known;
+            if (!ok) g_wait.true_since = -1.0;
+            else if (g_wait.true_since < 0.0) g_wait.true_since = now;
+            bool met = ok && now - g_wait.true_since >= g_wait.hold;
+            if (!met && now < g_wait.deadline && known) return;
+            g_wait.on = false;
+            // The steps after the wait: as long after now as they were after the wait.
+            double shift = now - g_wait.at;
+            for (size_t i = g_wait.index + 1; i < g_wait.end && i < entries.size(); ++i)
+                if (!entries[i].done && !entries[i].after_menu && entries[i].at >= g_wait.at) entries[i].at += shift;
+            if (met)
+                HSVR_LOG("WAIT OK: %s %s %g (is %g) after %.2f s%s%s", g_wait.what.c_str(), g_wait.op.c_str(), g_wait.want, v, now - g_wait.since,
+                         g_wait.label.empty() ? "" : " - ", g_wait.label.c_str());
+            else
+            {
+                if (!known) HSVR_LOG("WAIT FAIL: could not read %s %s", g_wait.what.c_str(), g_wait.op.c_str());
+                else
+                    HSVR_LOG("WAIT TIMEOUT: %s %s %g (is %g) after %.2f s%s%s", g_wait.what.c_str(), g_wait.op.c_str(), g_wait.want, v, now - g_wait.since,
+                             g_wait.label.empty() ? "" : " - ", g_wait.label.c_str());
+                case_check(false, cfg);
             }
         }
         for (ScriptEntry& entry : entries)
@@ -24241,6 +24385,7 @@ namespace
                         ++dropped;
                     }
                 case_reset_inputs();
+                g_wait.on = false;
                 g_case = CaseState{};
                 g_case.name = entry.command.substr(10);
                 g_case.number = ++g_case_count;
@@ -24323,6 +24468,38 @@ namespace
                 HSVR_LOG("Script: hsvr.mark: test counters cleared");
                 continue;
             }
+            if (entry.command.rfind("hsvr.wait ", 0) == 0)
+            {
+                char what[64] = {0}, op[4] = {0};
+                double want = 0.0, timeout = 0.0;
+                int used = 0;
+                int got_n = sscanf(entry.command.c_str() + 10, "%63s %3s %lf %lf%n", what, op, &want, &timeout, &used);
+                if (got_n < 4 || timeout <= 0.0)
+                {
+                    HSVR_LOG("WAIT FAIL: bad step \"%s\" (hsvr.wait <what> <op> <value> <timeout s> [hold s] [label])", entry.command.c_str());
+                    case_check(false, cfg);
+                    continue;
+                }
+                std::string rest = entry.command.substr(10 + (size_t)used);
+                double hold = 0.0;
+                int used2 = 0;
+                if (sscanf(rest.c_str(), " %lf%n", &hold, &used2) == 1) rest = rest.substr((size_t)used2);
+                else hold = 0.0;
+                size_t f = rest.find_first_not_of(" \t");
+                g_wait = ScriptWait{};
+                g_wait.on = true;
+                g_wait.index = (size_t)(&entry - entries.data());
+                g_wait.end = entries.size();
+                g_wait.at = entry.at;
+                g_wait.since = now;
+                g_wait.deadline = now + timeout;
+                g_wait.hold = (std::max)(0.0, hold);
+                g_wait.what = what;
+                g_wait.op = op;
+                g_wait.want = want;
+                g_wait.label = f == std::string::npos ? std::string() : rest.substr(f);
+                return; // the gate above checks it from the next tick
+            }
             if (entry.command.rfind("hsvr.expect ", 0) == 0)
             {
                 // hsvr.expect <what> <op> <value> [label]; what: held_r, held_l, grabbed_r, grabbed_l,
@@ -24330,82 +24507,13 @@ namespace
                 char what[64] = {0}, op[4] = {0}, label[128] = {0};
                 double want = 0.0;
                 int got_n = sscanf(entry.command.c_str() + 12, "%63s %3s %lf %127[^\n]", what, op, &want, label);
-                UObject* pawn = nullptr;
-                find_pawn_mesh(&pawn);
                 std::string w = what;
                 double value = 0.0;
-                bool known = true;
-                if (w == "held_r") value = object_property(pawn, STR("Weapon R")) ? 1.0 : 0.0;
-                else if (w == "held_l") value = object_property(pawn, STR("Weapon L")) ? 1.0 : 0.0;
-                else if (w == "grabbed_r") value = bool_property(pawn, STR("Grabbed R")) ? 1.0 : 0.0;
-                else if (w == "grabbed_l") value = bool_property(pawn, STR("Grabbed L")) ? 1.0 : 0.0;
-                else if (w == "letgo") value = g_count_letgo.load();
-                else if (w == "kicks") value = g_count_kicks.load();
-                else if (w == "lag_r") value = g_worst_lag[1].load();
-                else if (w == "lag_l") value = g_worst_lag[0].load();
-                else if (w == "stamina") value = read_number_variable(pawn, STR("Stamina"));
-                else if (w == "strength_r") value = g_hold[1].body_strength;
-                else if (w == "strength_l") value = g_hold[0].body_strength;
-                else if (w == "two_hand") value = g_two.active ? 1.0 : 0.0;
-                else if (w == "fist_r") value = is_fist(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
-                else if (w == "fist_l") value = is_fist(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
-                else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
-                else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
-                else if (w == "actor_z") value = pawn ? actor_location(pawn).z : 0.0;
-                else if (w == "xbow_string" || w == "xbow_bolt")
-                {
-                    // the crossbow in either hand: String Loaded / Bolt Loaded
-                    UObject* xb = object_property(pawn, STR("Weapon R"));
-                    if (!is_crossbow(xb)) xb = object_property(pawn, STR("Weapon L"));
-                    value = is_crossbow(xb) && bool_property(xb, w == "xbow_string" ? STR("String Loaded") : STR("Bolt Loaded")) ? 1.0 : 0.0;
-                }
-                else if (w == "xbow_quiver")
-                {
-                    UObject* q = object_property(pawn, STR("Attached Bolt Quiver"));
-                    int32_t* c = q ? value_ptr<int32_t>(q, STR("Projectile Count")) : nullptr;
-                    value = c ? *c : -1.0;
-                }
-                else if (w == "bolt_r") value = is_bolt(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
-                else if (w == "bolt_l") value = is_bolt(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
-                else if (w == "xstring") value = g_xstring.on ? g_xstring.side + 1.0 : 0.0;
-                else if (w.rfind("var:", 0) == 0 && pawn)
-                {
-                    // var:<pawn variable>, '_' for spaces (var:Leg_R_Tonus); a variable named with '_' is tried as written first
-                    std::wstring n(w.begin() + 4, w.end());
-                    FProperty* p = prop_chain(pawn, n.c_str());
-                    if (!p)
-                    {
-                        for (auto& ch : n)
-                            if (ch == L'_') ch = L' ';
-                        p = prop_chain(pawn, n.c_str());
-                    }
-                    if (p) value = number_property(pawn, p);
-                    else known = false;
-                }
-                else known = false;
-                std::string o = op;
-                bool pass = false;
-                if (o == "<") pass = value < want;
-                else if (o == "<=") pass = value <= want;
-                else if (o == "=" || o == "==") pass = std::fabs(value - want) < 1e-6;
-                else if (o == ">=") pass = value >= want;
-                else if (o == ">") pass = value > want;
-                else known = false;
+                bool known = script_value(w, value);
+                bool pass = script_compare(value, op, want, known);
                 if (got_n < 3 || !known) HSVR_LOG("EXPECT FAIL: could not read \"%s\"", entry.command.c_str());
                 else HSVR_LOG("EXPECT %s: %s %s %g (is %g)%s%s", pass ? "PASS" : "FAIL", what, op, want, value, label[0] ? " - " : "", label);
-                bool ok = got_n >= 3 && known && pass;
-                if (ok) ++g_case.pass;
-                else
-                {
-                    ++g_case.fail;
-                    // The first failed check of a case (or of a launch without cases) saves a replay.
-                    if (!g_case.replay_marked && cfg.replay_capture)
-                    {
-                        g_case.replay_marked = true;
-                        replay::g_fake_mark.store(true);
-                        HSVR_LOG("Script: failed check: replay marked");
-                    }
-                }
+                case_check(got_n >= 3 && known && pass, cfg);
                 continue;
             }
             if (entry.command.rfind("hsvr.pawn_set ", 0) == 0)
