@@ -24221,22 +24221,39 @@ namespace
             TestRoom::WeaponSpot floor_spot;
             if (!spot)
             {
-                // On the floor between the book and where you started, 20 cm along for each one there.
                 hsvr::Vec3 toward = hsvr::normalized(hsvr::Vec3{b.centre.x - g_room.origin.x, b.centre.y - g_room.origin.y, 0.0});
                 double floor_z = room_floor_z(player);
-                // 3 rows of 8, 25 cm apart (a pile from one point crept for seconds: test 2026-11-22 22:11),
-                // never within 80 cm of where he stands (two dropped against his legs were pushed away:
-                // test 2026-11-22 22:14).
+                // Behind the books, away from him and the tables: 3 rows of 8, 25 cm apart, the weapon along
+                // `right` like on the tables (in front of the book a pile crept for seconds, and weapons laid
+                // within reach of his legs were pushed about: tests 2026-11-22 22:11-22:21). A spot must
+                // have floor under its middle and 40 cm each way (no wall, no furniture), and lie 80 cm
+                // or more from him.
                 hsvr::Vec3 me = actor_location(player);
+                double side = ((b.centre.x - g_room.origin.x) * right.x + (b.centre.y - g_room.origin.y) * right.y) >= 0.0 ? 1.0 : -1.0;
+                hsvr::Quat lying = hsvr::quat_from_axes(hsvr::Vec3{0, 0, 1}, hsvr::cross(right, hsvr::Vec3{0, 0, 1}), right);
                 for (int i = 0; i < 24 && !spot; ++i)
                 {
-                    floor_spot.at = hsvr::Vec3{b.centre.x, b.centre.y, floor_z + 30.0} - toward * (45.0 + (i / 8) * 25.0) + g_room.forward * ((i % 8) * 20.0 - 70.0);
+                    floor_spot.at = hsvr::Vec3{g_room.origin.x, g_room.origin.y, floor_z + 30.0} - g_room.forward * (90.0 + (i / 8) * 25.0) +
+                                    right * (side * (150.0 - (i % 8) * 20.0));
+                    floor_spot.q = lying;
                     if (std::hypot(floor_spot.at.x - me.x, floor_spot.at.y - me.y) < 80.0) continue;
-                    // Along his forward, not pointing at him (a polearm laid toward him reached his feet).
-                    floor_spot.q = hsvr::quat_from_axes(hsvr::Vec3{0, 0, 1}, hsvr::cross(g_room.forward, hsvr::Vec3{0, 0, 1}), g_room.forward);
-                    if (room_spot_free(floor_spot, boxes, true)) spot = &floor_spot;
+                    bool floor_ok = true;
+                    for (double along : {-40.0, 0.0, 40.0})
+                    {
+                        hsvr::Vec3 p = floor_spot.at + right * along;
+                        double gz = 0.0;
+                        if (!ground_below(player, p.x, p.y, floor_z + 60.0, gz) || std::fabs(gz - floor_z) > 8.0) floor_ok = false;
+                    }
+                    if (floor_ok && room_spot_free(floor_spot, boxes)) spot = &floor_spot;
                 }
-                if (!spot) spot = &floor_spot;
+                if (!spot)
+                {
+                    // No free floor behind the books (a wall): between the book and where he started.
+                    floor_spot.at = hsvr::Vec3{b.centre.x, b.centre.y, floor_z + 30.0} - toward * 60.0;
+                    floor_spot.q = lying;
+                    spot = &floor_spot;
+                    HSVR_LOG("TestRoom: book: no free floor behind the books; in front of the book instead");
+                }
             }
             hsvr::Quat q = spot->q;
             if (kRoomKinds[k].premade == 2) q = hsvr::quat_from_axes(right, hsvr::cross(hsvr::Vec3{0, 0, 1}, right), hsvr::Vec3{0, 0, 1});
