@@ -1329,6 +1329,7 @@ namespace
 
     hsvr::Vec3 g_wall_ok;          // where his capsule last stood legally (pose_body_wall_stop)
     bool g_wall_ok_have = false;
+    UObject* g_ground_ignore = nullptr; // ground_below also looks through this actor (room_lay: the item being laid)
     UObject* g_wall_pawn = nullptr; // whose (a respawn starts over)
     double g_kept_z = 0.0;          // his capsule's height as capsule_hold last kept it
     bool g_kept_have = false;
@@ -1542,7 +1543,7 @@ namespace
         if (!cdo || !pawn) return false;
         const double bottom = from_z - 200.0;
         double start = from_z;
-        for (int attempt = 0; attempt < 5 && start > bottom; ++attempt)
+        for (int attempt = 0; attempt < (g_ground_ignore ? 12 : 5) && start > bottom; ++attempt)
         {
             Call trace(cdo, STR("LineTraceSingle"));
             if (!trace.fn) return false;
@@ -1572,7 +1573,7 @@ namespace
                     actor = b.object_result(STR("HitActor"));
                 }
             }
-            bool look_through = actor && (actor == pawn || is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")));
+            bool look_through = actor && (actor == pawn || actor == g_ground_ignore || is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")));
             if (!look_through)
             {
                 ground_z = hit_z;
@@ -23537,7 +23538,7 @@ namespace
         g_room.tables.clear();
         for (int t = 0; t < 2; ++t)
         {
-            Vec3 at = g_room.origin + g_room.forward * 110.0 + right * (t == 0 ? -104.0 : 104.0); // 35 cm between them (Matthew 2026-11-20)
+            Vec3 at = g_room.origin + g_room.forward * 125.0 + right * (t == 0 ? -104.0 : 104.0); // 35 cm between them (Matthew 2026-11-20); 125 (was 110): a weapon in his hand at rest stayed clear of the tables (test 2026-11-22 21:58)
             at.z = floor_z;
             UObject* table = room_static(player, STR("/Game/Assets/Props/Furniture/Meshes/SM_Prop_Furniture_Table_011.SM_Prop_Furniture_Table_011"), at, yaw_quat(g_room.table_yaw));
             HSVR_LOG("TestRoom: weapon table %ls at (%.0f, %.0f, %.0f) (static)", table ? table->GetName().c_str() : STR("NOT made"), at.x, at.y, at.z);
@@ -23621,6 +23622,46 @@ namespace
         return true;
     }
 
+    // Where a weapon lies, seen from above: a segment along its length (BaseMesh +Z, which the table
+    // spots lay along `right`) with a thickness, or a disc for one lying flat (a shield). Got from the
+    // world box, which for a long weapon turned off the world axes covers far more than the weapon (a
+    // polearm 16 deg off took a 60 cm wide box, so the free spot beside it read as taken: "the tables
+    // are full" at the first book click, test 2026-11-22 21:59).
+    struct RoomFoot { hsvr::Vec3 c, axis; double half = 0.0, r = 0.0; };
+    bool room_weapon_foot(UObject* weapon, RoomFoot& f)
+    {
+        using hsvr::Vec3;
+        Vec3 o, e;
+        if (!room_weapon_box(weapon, o, e)) return false;
+        f.c = Vec3{o.x, o.y, 0.0};
+        UObject* base = object_property(weapon, STR("BaseMesh"));
+        Vec3 a = base ? component_rotation(base).rotate(Vec3{0, 0, 1}) : Vec3{0, 0, 1};
+        double n = std::sqrt(a.x * a.x + a.y * a.y);
+        if (n < 0.5)
+        {
+            f.axis = Vec3{1, 0, 0};
+            f.half = 0.0;
+            f.r = (std::max)(e.x, e.y);
+            return true;
+        }
+        Vec3 an{a.x / n, a.y / n, 0.0};
+        const double t = 6.0;
+        bool use_x = std::fabs(an.x) >= std::fabs(an.y);
+        f.half = (std::max)(0.0, ((use_x ? e.x : e.y) - t) / (std::max)(0.3, std::fabs(use_x ? an.x : an.y)));
+        f.half = (std::min)(f.half, std::hypot(e.x, e.y));
+        double across = (use_x ? e.y : e.x) - f.half * std::fabs(use_x ? an.y : an.x); // what is left over the other way: its width
+        f.r = (std::clamp)(across, 3.0, 40.0);
+        f.axis = an;
+        return true;
+    }
+    double room_foot_distance(const RoomFoot& f, const hsvr::Vec3& p)
+    {
+        hsvr::Vec3 d{p.x - f.c.x, p.y - f.c.y, 0.0};
+        double along = (std::clamp)(d.x * f.axis.x + d.y * f.axis.y, -f.half, f.half);
+        hsvr::Vec3 q{f.c.x + f.axis.x * along, f.c.y + f.axis.y * along, 0.0};
+        return std::hypot(p.x - q.x, p.y - q.y) - f.r;
+    }
+
     // A weapon laid on whatever is under it: its visible bounds measured (room_weapon_box), the surface found with
     // straight-down traces along its length (the highest hit), then moved so its lowest point is 0.5 cm
     // above that, with no speed. It is never dropped from a height.
@@ -23638,7 +23679,10 @@ namespace
         {
             Vec3 p = o + along * (-half + half * i / 3.0);
             double gz = 0.0;
-            if (ground_below(player, p.x, p.y, o.z + e.z + 2.0, gz))
+            g_ground_ignore = weapon; // a shield or tool is no ModularWeaponBP: its own top was taken for the table (pavise 28 cm up, 2026-11-22)
+            bool got = ground_below(player, p.x, p.y, o.z + e.z + 2.0, gz);
+            g_ground_ignore = nullptr;
+            if (got)
             {
                 top = (std::max)(top, gz);
                 ++hits;
@@ -23663,6 +23707,57 @@ namespace
         }
         HSVR_LOG("TestRoom: %ls laid down: surface z %.1f (%d of 7 traces), moved %.1f cm", weapon->GetName().c_str(), top, hits, dz);
         return true;
+    }
+
+    // A weapon laid on a table is slid along its length (the table's `right`) until it lies within the
+    // table top and its centre of mass is over it: a polearm laid from its spot stuck 65 cm out into
+    // the gap, where his held crossbow lifted it until it tipped off (test 2026-11-22 21:58), and one
+    // whose head hangs over the edge tips off by itself.
+    void room_keep_on_table(UObject* weapon)
+    {
+        using hsvr::Vec3;
+        if (g_room.table_at.empty()) return;
+        RoomFoot f;
+        if (!room_weapon_foot(weapon, f)) return;
+        Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+        const Vec3* table = nullptr;
+        for (const Vec3& t : g_room.table_at)
+        {
+            Vec3 d{f.c.x - t.x, f.c.y - t.y, 0.0};
+            if (std::fabs(d.x * g_room.forward.x + d.y * g_room.forward.y) < 55.0 && std::fabs(d.x * right.x + d.y * right.y) < 130.0) table = &t;
+        }
+        if (!table) return;
+        double ly = (f.c.x - table->x) * right.x + (f.c.y - table->y) * right.y;
+        double c = std::fabs(f.axis.x * right.x + f.axis.y * right.y);
+        double ext = f.half * c + f.r * std::sqrt((std::max)(0.0, 1.0 - c * c));
+        const double edge = 85.0; // the top is 90 cm each side of its centre along `right`
+        double shift = 0.0;
+        if (2.0 * ext >= 2.0 * edge) shift = -ly;
+        else if (ly - ext < -edge) shift = -edge - (ly - ext);
+        else if (ly + ext > edge) shift = edge - (ly + ext);
+        double com_y = 1e9;
+        if (UObject* base = object_property(weapon, STR("BaseMesh")))
+        {
+            Call cm(base, STR("GetCenterOfMass"));
+            if (cm.run())
+            {
+                Vec3 com = cm.vec();
+                if (hsvr::length(Vec3{com.x - f.c.x, com.y - f.c.y, 0.0}) < 300.0)
+                {
+                    com_y = (com.x - table->x) * right.x + (com.y - table->y) * right.y + shift;
+                    if (com_y > 60.0) shift -= com_y - 60.0;
+                    else if (com_y < -60.0) shift += -60.0 - com_y;
+                }
+            }
+        }
+        if (std::fabs(shift) < 0.5) return;
+        Call mv(weapon, STR("K2_AddActorWorldOffset"));
+        mv.three(STR("DeltaLocation"), right.x * shift, right.y * shift, 0.0);
+        mv.flag(STR("bSweep"), false);
+        mv.flag(STR("bTeleport"), true);
+        mv.run();
+        HSVR_LOG("TestRoom: %ls slid %.0f cm along the table (%.0f cm long, centre %.0f from the table's middle, centre of mass %.0f)", weapon->GetName().c_str(), shift,
+                 2.0 * ext, ly, com_y);
     }
 
     // Weapon kinds (Enum_WeaponType_Specific 1 Swords 1H, 2 Swords 2H, 3 Maces 1H, 4 Maces 2H, 5 Hafted
@@ -23726,6 +23821,7 @@ namespace
             HSVR_LOG("TestRoom: %s (tier %d) made at (%.0f, %.0f, %.0f): %ls (%ls)", kind.label, tier, at.x, at.y, at.z, cls->GetName().c_str(),
                      weapon ? weapon->GetName().c_str() : STR("NOT found after"));
             if (weapon && !room_lay(weapon, player)) HSVR_LOG("TestRoom: %ls: nothing found under it; left where it was made", weapon->GetName().c_str());
+            else if (weapon) room_keep_on_table(weapon);
             return weapon;
         }
         HSVR_LOG("TestRoom: %s NOT made at any tier", kind.label);
@@ -23775,14 +23871,14 @@ namespace
     }
 
     // A weapon spot is free when no loose weapon's bounds take in any of 3 points along it.
-    bool room_spot_free(const TestRoom::WeaponSpot& s, const std::vector<std::pair<hsvr::Vec3, hsvr::Vec3>>& boxes)
+    bool room_spot_free(const TestRoom::WeaponSpot& s, const std::vector<RoomFoot>& feet)
     {
         hsvr::Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
         for (double along : {-30.0, 0.0, 30.0})
         {
             hsvr::Vec3 p = s.at + right * along;
-            for (const auto& b : boxes)
-                if (std::fabs(p.x - b.first.x) <= b.second.x + 4.0 && std::fabs(p.y - b.first.y) <= b.second.y + 4.0) return false;
+            for (const RoomFoot& f : feet)
+                if (room_foot_distance(f, p) < 4.0) return false;
         }
         return true;
     }
@@ -24060,12 +24156,12 @@ namespace
             // The first free spot on the tables; else on the floor in front of the book.
             std::vector<UObject*> weapons;
             UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
-            std::vector<std::pair<hsvr::Vec3, hsvr::Vec3>> boxes;
+            std::vector<RoomFoot> boxes;
             for (UObject* w : weapons)
             {
-                if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || is_fist(w)) continue;
-                hsvr::Vec3 o, e;
-                if (room_weapon_box(w, o, e)) boxes.emplace_back(o, e);
+                if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || is_fist(w) || !object_alive(w) || bool_property(w, STR("Is Sheathed"))) continue;
+                RoomFoot f;
+                if (room_weapon_foot(w, f)) boxes.push_back(f);
             }
             const TestRoom::WeaponSpot* spot = nullptr;
             for (const TestRoom::WeaponSpot& s : g_room.spots)
