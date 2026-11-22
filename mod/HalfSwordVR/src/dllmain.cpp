@@ -12654,7 +12654,7 @@ namespace
     // stock at 30 cm/s), quiver, cradle.
     struct XbowTestHand
     {
-        int target = 0; // 0 off, 1 rear, 2 front, 3 string, 4 pull, 5 quiver, 6 cradle
+        int target = 0; // 0 off, 1 rear, 2 front, 3 string, 4 pull, 5 quiver, 6 cradle, 7 keep (rigid to the other hand)
         double arg = 0.0;
         double t0 = 0.0;
         bool have_start = false;
@@ -12662,11 +12662,26 @@ namespace
         hsvr::Vec3 corr{0, 0, 0};
     };
     XbowTestHand g_xtest[2];
+    hsvr::Vec3 g_xtest_grip[2]; // each fake controller's grip point last tick (for "keep")
 
     bool xbow_test_grip(int side, hsvr::Vec3& grip)
     {
         using namespace hsvr;
         XbowTestHand& x = g_xtest[side];
+        if (x.target == 7)
+        {
+            // Keep: this controller stays where it was against the other one when the command came
+            // (both hands on one weapon move it rigidly, with no steering onto the moving weapon).
+            if (!x.have_start)
+            {
+                x.start_local = g_xtest_grip[side] - g_xtest_grip[1 - side];
+                x.have_start = true;
+            }
+            grip = g_xtest_grip[1 - side] + x.start_local;
+            g_xtest_grip[side] = grip;
+            return true;
+        }
+        g_xtest_grip[side] = grip;
         if (x.target == 0 || !g_pose.pawn) return false;
         UObject* pawn = g_pose.pawn;
         UObject* mesh = object_property(pawn, STR("Mesh"));
@@ -12729,6 +12744,7 @@ namespace
         double cl = length(x.corr);
         if (cl > 40.0) x.corr = x.corr * (40.0 / cl);
         grip = target + x.corr;
+        g_xtest_grip[side] = grip;
         (void)last;
         HSVR_LOG_EVERY(0.5, "Test: xbow_hand %s: target %d, grab point %.1f cm from it", side == 0 ? "left" : "right", x.target, length(target - now_at));
         return true;
@@ -25085,7 +25101,7 @@ namespace
                     std::string t = what;
                     XbowTestHand& x = g_xtest[side];
                     x = XbowTestHand{};
-                    x.target = t == "rear" ? 1 : t == "front" ? 2 : t == "string" ? 3 : t == "pull" ? 4 : t == "quiver" ? 5 : t == "cradle" ? 6 : 0;
+                    x.target = t == "rear" ? 1 : t == "front" ? 2 : t == "string" ? 3 : t == "pull" ? 4 : t == "quiver" ? 5 : t == "cradle" ? 6 : t == "keep" ? 7 : 0;
                     x.arg = arg;
                     x.t0 = hsvr::now_seconds();
                     HSVR_LOG("Script: hsvr.xbow_hand %s -> %s (%d) %.1f", side == 0 ? "left" : "right", what, x.target, arg);
