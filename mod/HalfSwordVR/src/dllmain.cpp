@@ -26578,6 +26578,12 @@ namespace
         for (int i = 0; i < 5; ++i) g_slot_test[i] = slot_test[i];
         g_fake_jitter_cm.store(0.0);
         g_script_player_immortal = false;
+        g_fake_look.store(true);
+        for (int i = 0; i < 2; ++i)
+        {
+            g_xtest[i] = XbowTestHand{};
+            g_xwrist[i] = XbowWrist{};
+        }
     }
 
     void case_end_log()
