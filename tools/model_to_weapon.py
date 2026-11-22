@@ -57,6 +57,112 @@ PART_WORDS = [("Pommel", r"pommel|knob|butt|ferrule"), ("Guard", r"guard|cross|q
               ("Grip", r"grip|handle|hilt|haft|shaft|pole|staff|shank"),
               ("Head", r"blade|head|axe|spike|point|hammer|flange|mace|bit")]
 MANY_TRIANGLES = 30000
+CHAIN_WORDS = r"chain|link|ring|rope|cord"
+
+
+def _rotation_to(a, b):
+    """The smallest rotation taking direction a onto direction b (Rodrigues)."""
+    a = a / max(np.linalg.norm(a), 1e-12)
+    b = b / max(np.linalg.norm(b), 1e-12)
+    v, c = np.cross(a, b), float(np.dot(a, b))
+    if c < -0.999999:  # opposite: half a turn round any axis across a
+        ax = np.cross(a, [1.0, 0, 0])
+        if np.linalg.norm(ax) < 1e-6:
+            ax = np.cross(a, [0, 1.0, 0])
+        ax /= np.linalg.norm(ax)
+        return 2 * np.outer(ax, ax) - np.eye(3)
+    k = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + k + k @ k / (1 + c)
+
+
+def flail_layout(positions, normals, tris, mesh_of_vertex, meshes):
+    """A flail laid out straight in the weapon frame: the staff on z <= 0 (its top end at 0), the chain from 0
+    to Lc, the head beyond. Each of the three is moved as one rigid piece (a chain drawn hanging stays the
+    shape it was drawn). Parts come from mesh names (chain/link/ring, grip/handle/haft/staff, head/ball/...)
+    or else from the pieces of the model that do not touch: the longest is the staff, the thickest the
+    head (small pieces close to it, spikes, join it), the rest the chain.
+    Returns (pos, nrm, label per vertex ('Grip', 'Link', 'Head'), Lc)."""
+    import re
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    # Pieces that do not touch: vertices merged by position first (UV seams split a mesh's vertices).
+    _, key = np.unique(np.round(positions, 4), axis=0, return_inverse=True)
+    key = key.ravel()
+    a = np.concatenate([key[tris[:, 0]], key[tris[:, 1]]])
+    b = np.concatenate([key[tris[:, 1]], key[tris[:, 2]]])
+    n = int(key.max()) + 1
+    _, comp_of_key = connected_components(coo_matrix((np.ones(len(a)), (a, b)), shape=(n, n)), directed=False)
+    comp = comp_of_key[key]
+    label = np.array([""] * len(positions), dtype=object)
+    for k, (names, _) in enumerate(meshes):
+        text = " ".join(names).lower()
+        sel = mesh_of_vertex == k
+        if re.search(CHAIN_WORDS, text):
+            label[sel] = "Link"
+        else:
+            part = part_of(names)
+            if part in ("Grip", "Pommel"):
+                label[sel] = "Grip"
+            elif part in ("Head", "Guard"):
+                label[sel] = "Head"
+    if not ((label == "Grip").any() and (label == "Link").any() and (label == "Head").any()):
+        label[:] = ""
+        info = {}
+        for c in np.unique(comp):
+            q = positions[comp == c]
+            if len(q) < 4:
+                continue
+            ctr = q.mean(axis=0)
+            _, sv, vt = np.linalg.svd(q - ctr, full_matrices=False)
+            ext = np.ptp((q - ctr) @ vt.T, axis=0)
+            info[c] = (ext, ctr)
+        if len(info) < 3:
+            sys.exit("a flail needs its staff, chain and head as separate pieces of the model (or meshes named "
+                     "handle/staff, chain/link and head/ball)")
+        staff = max(info, key=lambda c: info[c][0][0])
+        rest = [c for c in info if c != staff]
+        head = max(rest, key=lambda c: info[c][0][1] * info[c][0][2])  # the thickest across
+        h_ext, h_ctr = info[head]
+        label[comp == staff] = "Grip"
+        label[comp == head] = "Head"
+        for c in rest:
+            if c != head:
+                near = np.linalg.norm(info[c][1] - h_ctr) < 0.75 * float(h_ext[0]) + 1e-6
+                label[comp == c] = "Head" if near else "Link"
+        label[label == ""] = "Link"  # tiny bits
+        if not (label == "Link").any():
+            sys.exit("no chain found between the staff and the head")
+    gp, lp, hp = positions[label == "Grip"], positions[label == "Link"], positions[label == "Head"]
+    # The staff: its long axis, pointing to the end nearer the chain.
+    gc = gp.mean(axis=0)
+    _, _, vt = np.linalg.svd(gp - gc, full_matrices=False)
+    ax, side = vt[0], vt[1]
+    if np.dot(lp.mean(axis=0) - gc, ax) < 0:
+        ax, side = -ax, side
+    t = (gp - gc) @ ax
+    top = gc + ax * float(t.max())
+    basis = np.vstack([side, np.cross(ax, side), ax])  # rows x, y, z; det +1
+    pos = (positions - top) @ basis.T
+    nrm = normals @ basis.T
+    # The chain: from its point nearest the staff's top to its point nearest the head, onto +z from 0.
+    L = pos[label == "Link"]
+    hc = pos[label == "Head"].mean(axis=0)
+    S = L[np.argmin(np.linalg.norm(L, axis=1))]
+    E = L[np.argmin(np.linalg.norm(L - hc, axis=1))]
+    Lc = float(np.linalg.norm(E - S))
+    if Lc < 1.0:
+        sys.exit("the chain is shorter than 1 cm")
+    R = _rotation_to(E - S, np.array([0, 0, 1.0]))
+    sel = label == "Link"
+    pos[sel] = (pos[sel] - S) @ R.T
+    nrm[sel] = nrm[sel] @ R.T
+    # The head: from the chain's end towards its middle, onto +z beyond the chain.
+    Rh = _rotation_to(hc - E, np.array([0, 0, 1.0]))
+    sel = label == "Head"
+    pos[sel] = (pos[sel] - E) @ Rh.T + np.array([0, 0, Lc])
+    nrm[sel] = nrm[sel] @ Rh.T
+    return pos, nrm, label, Lc
+
 
 
 def part_of(names):
@@ -413,7 +519,7 @@ def main(argv=None):
     ap.add_argument("--flip", action="store_true")
     ap.add_argument("--hand-slide", action="store_true",
                     help="long handle held by guard + pommel, the guard hand slides down it in swings (e.g. the Spit)")
-    ap.add_argument("--type", choices=["sword", "hafted", "double", "shield"],
+    ap.add_argument("--type", choices=["sword", "hafted", "double", "shield", "flail"],
                     help="sword: guard between grip and blade; hafted: head on the end of a haft (axe, mace, "
                          "hammer, spear); double: a blade or head on both ends of a haft. Default: detected "
                          "(sword or hafted)")
@@ -544,6 +650,15 @@ def main(argv=None):
         print(f"shield: {w_:.1f} cm wide, {h_:.1f} cm high, {t_:.1f} cm thick; front on the "
               f"{'+' if front > 0 else '-'} side, found by {cue or 'its curve/boss'}"
               f"{' (turned round by --flip)' if args.flip else ''}")
+    elif args.type == "flail":
+        frame_pos, frame_nrm, flail_label, chain_len = flail_layout(positions, normals, tris, mesh_of_vertex, meshes)
+        frame_nrm /= np.maximum(np.linalg.norm(frame_nrm, axis=1, keepdims=True), 1e-12)
+        z = frame_pos[:, 2]
+        named, hafted, vertex_part = False, True, None
+        end = float(z[flail_label == "Grip"].min())
+        handle_bottom, guard_bottom, guard_top = end, 0.0, chain_len
+        print(f"flail: staff {-end:.1f} cm, chain {chain_len:.1f} cm, head "
+              f"{float(z[flail_label == 'Head'].max()) - chain_len:.1f} cm (laid out straight)")
     else:
         # ---- named parts ----------------------------------------------------------------------------------
         mesh_part = [part_of(names) for names, _ in meshes]
@@ -786,6 +901,19 @@ def main(argv=None):
     # ---- collision pieces -----------------------------------------------------------------------------
     if shield:
         pieces = wp.build_pieces_grid(frame_pos, tris, 3, 3)
+    elif args.type == "flail":
+        # Staff and head in slabs of about 15 cm, the chain in slabs of about 5 cm (it bends only at the
+        # game's joints, but stays slim).
+        pieces = []
+        tri_label = flail_label[tris[:, 0]]
+        for slot, step in (("Grip", 15.0), ("Link", 5.0), ("Head", 15.0)):
+            sub = tris[tri_label == slot]
+            if len(sub) == 0:
+                continue
+            used = np.unique(sub)
+            lo, hi = frame_pos[used, 2].min(), frame_pos[used, 2].max()
+            k = max(1, int(math.ceil((hi - lo) / step)))
+            pieces += [(slot, pts, hull) for pts, hull in wp._slices(frame_pos, sub, 2, np.linspace(lo, hi, k + 1))]
     elif named:
         # Each part from its own meshes; a mesh with no recognised name goes by where it sits.
         parts = vertex_part.copy()
@@ -873,6 +1001,16 @@ def main(argv=None):
     wp.write_visual_obj(os.path.join(args.out, name + ".obj"), f"{name} converted by tools/model_to_weapon.py",
                         frame_pos, frame_nrm, uvs, tris)
     wp.write_collision(os.path.join(args.out, name + "_collision.obj"), name, pieces)
+    if args.type == "flail":
+        # One visual per moving part (the mod puts each on its own body).
+        tri_label = flail_label[tris[:, 0]]
+        for slot in ("Grip", "Link", "Head"):
+            sub = tris[tri_label == slot]
+            used = np.unique(sub)
+            remap = np.full(len(frame_pos), -1)
+            remap[used] = np.arange(len(used))
+            wp.write_visual_obj(os.path.join(args.out, f"{name}_flail_{slot}.obj"), f"{name} flail {slot}",
+                                frame_pos[used], frame_nrm[used], uvs[used], remap[sub])
     if texture_set is not None:
         colour, nx, ny, orm = texture_set
         wp.save_rgb(os.path.join(args.out, name + "_BaseColor.png"), colour, False)
@@ -924,7 +1062,8 @@ def main(argv=None):
     numbers = {"mass_kg": float(mass), "pommel_end": round(end, 2), "handle_bottom": round(float(handle_bottom), 2),
                "handle_top": 0.0, "guard_bottom": round(float(guard_bottom), 2), "guard_top": round(float(guard_top), 2),
                "tip": round(top, 2), "hafted": 1 if hafted else 0, "double": 1 if args.type == "double" else 0,
-               "hand_slide": 1 if args.hand_slide else 0, "shield": 1 if shield else 0}
+               "hand_slide": 1 if args.hand_slide else 0, "shield": 1 if shield else 0,
+               "flail": 1 if args.type == "flail" else 0}
     if shield:
         w_, t_, h_ = np.ptp(frame_pos, axis=0)
         numbers.update(width=round(float(w_), 2), thickness=round(float(t_), 2), height=round(float(h_), 2))
@@ -955,8 +1094,12 @@ def main(argv=None):
     ab[flipab] = 1 - ab[flipab]
     tv = tri_v[pick]
     samples = tv[:, 0] + ab[:, :1] * (tv[:, 1] - tv[:, 0]) + ab[:, 1:] * (tv[:, 2] - tv[:, 0])
-    dpts, dinfo = (dp.shield_points(np.vstack([frame_pos, samples]), numbers, over) if shield else
-                   dp.compute(np.vstack([frame_pos, samples]), numbers, hafted, over))
+    if args.type == "flail":
+        head_sel = np.concatenate([flail_label == "Head", flail_label[tris[pick, 0]] == "Head"])
+        dpts, dinfo = dp.flail_points(np.vstack([frame_pos, samples])[head_sel], numbers, over)
+    else:
+        dpts, dinfo = (dp.shield_points(np.vstack([frame_pos, samples]), numbers, over) if shield else
+                       dp.compute(np.vstack([frame_pos, samples]), numbers, hafted, over))
     dp.write(os.path.join(args.out, name + "_points.txt"), dpts)
     print(f"balance {numbers['balance']:.1f} cm above the grip (model {com:.1f}); damage points: {len(dpts)} "
           f"({', '.join(f'{k} {v}' for k, v in dinfo.items())})")
@@ -964,7 +1107,7 @@ def main(argv=None):
     json.dump({"source": os.path.basename(args.model), "scale": scale_note, "mass_kg": mass, "mass_note": mass_note,
                "zones_cm": numbers, "volumes_cm3": {s: round(v, 1) for s, v in volume.items()},
                "parts_by_name": named, "lengths_before_stretch_cm": lens_before,
-               "type": "shield" if shield else "hafted" if hafted else "sword", "damage": dinfo, "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
+               "type": "shield" if shield else "flail" if args.type == "flail" else "hafted" if hafted else "sword", "damage": dinfo, "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
               open(os.path.join(args.out, name + ".json"), "w"), indent=2)
     if shield:
         print(f"shield {numbers['width']:.1f} x {numbers['height']:.1f} cm; {len(pieces)} collision pieces")

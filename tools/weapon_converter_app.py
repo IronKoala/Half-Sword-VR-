@@ -39,7 +39,8 @@ UNITS = [("metres", 100.0), ("centimetres", 1.0), ("millimetres", 0.1), ("inches
 MODEL_TYPES = "*.glb *.gltf *.fbx *.obj *.nif *.stl *.ply *.dae *.off"
 MODEL_EXTS = tuple(e[1:] for e in MODEL_TYPES.split())
 TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or spear", "hafted"),
-         ("Double-ended (head or blade at both ends)", "double"), ("Shield", "shield")]
+         ("Double-ended (head or blade at both ends)", "double"), ("Shield", "shield"),
+         ("Flail (staff, chain and head)", "flail")]
 # How a shield is held: which of the game's shields carries it (its grip is that shield's own).
 SHIELD_GRIPS = [("Fist grip (buckler)", "shield_buckler"), ("Arm straps (targe)", "shield_targe"),
                 ("Arm straps, big (pavise)", "shield_pavise")]
@@ -131,7 +132,7 @@ def write_pack(mod_dir, it):
     kind = it["result"][1].get("type")
     if kind == "shield":
         lines.append("carrier=" + it.get("shield_grip", "shield_buckler"))
-    elif kind not in ("hafted", "double"):
+    elif kind not in ("hafted", "double", "flail"):
         scab = it.get("scabbard", "fit")
         if scab == "own":
             model = it.get("scabbard_model")
@@ -234,11 +235,12 @@ def render_view(pos, nrm, uv, tris, colour_img, zones, view, width, height, s, f
     return img
 
 
-def zone_bar(zones, zmin, s, width, hafted, fmt_len=lambda cm: f"{cm:.0f} cm", double=False):
+def zone_bar(zones, zmin, s, width, hafted, fmt_len=lambda cm: f"{cm:.0f} cm", double=False, flail=False):
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (width, 26), (34, 36, 40))
     d = ImageDraw.Draw(img)
-    names = {"Pommel": "lower head" if double else "butt" if hafted else "pommel", "Grip": "haft" if hafted else "grip", "Guard": "guard",
+    names = {"Pommel": "lower head" if double else "butt" if hafted else "pommel",
+             "Grip": "staff" if flail else "haft" if hafted else "grip", "Guard": "chain" if flail else "guard",
              "Head": "head" if hafted else "blade"}
     for slot, lo, hi in zones:
         x0, x1 = 10 + (lo - zmin) * s, 10 + (hi - zmin) * s
@@ -1229,6 +1231,8 @@ class App:
                 what += f" (point angle {dm['tip_angle']:.0f} degrees)"
         elif kind == "shield":
             what = f"shield bash, point {dm.get('sTip')}"
+        elif str(kind).startswith("flail"):
+            what = (f"{dm.get('spikes')} spikes" if dm.get("spikes") else "round head (blunt)")
         elif kind == "spear":
             what = f"spear point {dm.get('sTip')}, edges {dm.get('sEdge')}"
         elif kind == "axe":
@@ -1247,7 +1251,8 @@ class App:
         name, info = self.result
         flat, edge, zones, zmin, s, width = self.result_views
         L = self.fmt_len
-        bar = zone_bar(zones, zmin, s, width, info["type"] == "hafted", L, bool(info["zones_cm"].get("double")))
+        bar = zone_bar(zones, zmin, s, width, info["type"] in ("hafted", "flail"), L, bool(info["zones_cm"].get("double")),
+                       info["type"] == "flail")
         pic = Image.new("RGB", (width, flat.height + edge.height + bar.height), (34, 36, 40))
         pic.paste(flat, (0, 0))
         pic.paste(edge, (0, flat.height))
@@ -1286,6 +1291,12 @@ class App:
                      " (estimated, and heavier than any real weapon: the model is probably much thicker than "
                      "the real thing. Type a weight, for example " +
                      ("1.5 for a sword or 2 for an axe)" if self.units()[2] == "kg" else "3.3 for a sword or 4.4 for an axe)"))
+        if info["type"] == "flail":
+            self.summary.config(text=f"Flail, {L(zn['tip'] - zn['pommel_end'])}, {mass}.\nStaff {L(-zn['pommel_end'])}, "
+                                     f"chain {L(zn['guard_top'])}, head {L(zn['tip'] - zn['guard_top'])} (laid out "
+                                     "straight; in the game the chain swings at the staff and at the head)."
+                                     + self.damage_text(info))
+            return
         if info["type"] == "shield":
             self.summary.config(text=f"Shield, {L(zn['width'])} wide, {L(zn['height'])} high, {mass}."
                                      + self.damage_text(info) + "\nThe picture shows its front, then its side with "

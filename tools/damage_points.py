@@ -251,6 +251,51 @@ def shield_points(pos, numbers, over):
     return pts, dict(kind="shield", sTip=sTip, rig=rig)
 
 
+def flail_points(head, numbers, over):
+    """A flail head (the vertices of the head only, laid out on +z beyond the chain): like the game's flails
+    (weapon_damage_points.md / custom_weapon_hafted.md §6): a spike point (sTip 85, rig 200, Forward out
+    along the spike) on each spike, found as the head's points standing out furthest from its middle (at
+    least 25 % beyond the median, 3 cm apart, up to 12); a round head gets 8 blunt points round it and one
+    at the end (dBlunt 1). Plus the end point (+Z) and the Base in the head's middle; two blunt points on
+    the staff's top end (the game's staffs: rig 99/115)."""
+    rig = over.get("rig", 200)
+    pts = []
+    c = 0.5 * (head.min(axis=0) + head.max(axis=0))
+    d = head - c
+    r = np.linalg.norm(d, axis=1)
+    r[d[:, 2] < -0.7 * np.maximum(r, 1e-9)] = 0  # nothing pointing back at the chain
+    med = float(np.median(r)) if len(r) else 0.0
+    order = np.argsort(-r)
+    spikes = []
+    for i in order:
+        if r[i] < 1.25 * med or len(spikes) >= 12:
+            break
+        if all(np.linalg.norm(head[i] - head[j]) > 3.0 for j in spikes):
+            spikes.append(i)
+    if len(spikes) >= 3:
+        sTip = over.get("sTip", 85)
+        for i in spikes:
+            f = _unit(d[i])
+            up = _unit(np.cross(f, [0, 0, 1.0])) if abs(f[2]) < 0.95 else np.array([1.0, 0, 0])
+            pts.append(point("Head", head[i] - 0.3 * f, f, up, sTip, over.get("sEdge", 0), 0, 0, rig))
+        kind = "spiked"
+    else:
+        sTip = over.get("sTip", 5)
+        for ang in range(0, 360, 45):
+            a = math.radians(ang)
+            dirn = np.array([math.cos(a), math.sin(a), 0.0])
+            far = head[int(np.argmax(d @ dirn))]
+            pts.append(point("Head", far - 0.3 * dirn, dirn, [0, 0, 1], sTip, 0, 0, 1, rig))
+        kind = "round"
+    top = head[int(np.argmax(head[:, 2]))]
+    if not any(np.linalg.norm(head[i] - top) < 3.0 for i in spikes):
+        pts.append(point("Head", top - np.array([0, 0, 0.3]), [0, 0, 1], [-1, 0, 0], 5, 0, 0, 1 if kind == "round" else 0, rig))
+    pts.append(base_point("Head", c))
+    pts.append(point("Grip", [0, 0, -2.0], [0, 0, 1], [-1, 0, 0], 0, 0, 0, 0, 99, ["NoStab"]))
+    pts.append(point("Grip", [0, 0, -0.5 * (-numbers["handle_bottom"])], [0, 0, 1], [-1, 0, 0], 0, 0, 0, 0, 115, ["NoStab"]))
+    return pts, dict(kind="flail " + kind, spikes=len(spikes) if kind == "spiked" else 0, rig=rig)
+
+
 def lower_end_points(pos, numbers, hafted, over):
     """A double-ended weapon's bottom head or blade (the "Pommel" part, pommel_end..handle_bottom): the same
     rules on the model turned end over end (z' = handle_bottom - z), then turned back."""

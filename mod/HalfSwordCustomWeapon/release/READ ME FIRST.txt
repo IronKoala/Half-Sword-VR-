@@ -17,7 +17,8 @@ Install the mod
 Add a weapon
 1. Get a weapon model as GLB/glTF or FBX (best: they keep their textures), OBJ, or a Skyrim Special Edition
    weapon mod (.nif with its textures folder: pick the .nif, or drop the whole mod folder).
-   Swords, daggers, axes, maces, hammers and spears work.
+   Swords, daggers, axes, maces, hammers, spears, double-ended weapons, shields and flails (pick Flail as
+   the weapon type; staff, chain and head must be separate pieces or named meshes).
 2. Start WeaponConverter.exe and press Browse (or drop the model on the window, or on the exe).
 3. Type the real length in cm (downloaded models often have odd scales) and the weight in kg if you
    know it (leave it empty and it is estimated). Weapon type can stay on Detect.

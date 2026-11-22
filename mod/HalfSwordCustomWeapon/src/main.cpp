@@ -2374,9 +2374,9 @@ namespace
     // loot, save), the converted model is put on it at the end of its BeginPlay, after the game built
     // the parts and before anyone reads them. The passport itself is never changed (the game saves and
     // compares it), so without this mod a saved converted weapon is simply the carrier: nothing is lost.
-    enum Kind { K_DAGGER, K_ARMING, K_BASTARD, K_LONGSWORD, K_MACE, K_AXE2H, K_SPEAR, K_BUCKLER, K_TARGE, K_PAVISE, K_COUNT };
+    enum Kind { K_DAGGER, K_ARMING, K_BASTARD, K_LONGSWORD, K_MACE, K_AXE2H, K_SPEAR, K_BUCKLER, K_TARGE, K_PAVISE, K_FLAIL, K_COUNT };
     const char* const kind_names[K_COUNT] = {"dagger", "arming", "bastard", "longsword", "mace", "axe2h", "spear",
-                                             "shield_buckler", "shield_targe", "shield_pavise"};
+                                             "shield_buckler", "shield_targe", "shield_pavise", "flail"};
 
     struct Pack
     {
@@ -2399,6 +2399,7 @@ namespace
                 if (c->second == kind_names[k]) return k;
         auto num = [&](const char* k) { auto i = nums.find(k); return i == nums.end() ? 0.0 : i->second; };
         if (num("shield") > 0.5) return K_BUCKLER;
+        if (num("flail") > 0.5) return K_FLAIL;
         bool hafted = num("hafted") > 0.5;
         double grip = -num("handle_bottom"), total = num("tip") - num("pommel_end");
         if (!hafted)
@@ -2569,6 +2570,7 @@ namespace
                     : c == L"ModularWeaponBP_Spear_A_C" ? K_SPEAR
                     : c == L"Shield_Buckler_C"          ? K_BUCKLER
                     : c == L"Shield_Pavise_Light_C"     ? K_PAVISE
+                    : c == L"ModularWeaponBP_Flail_A_C" ? K_FLAIL
                                                         : -1;
             if (k >= 0 && g_tmpl[k].empty()) g_tmpl[k].assign(pp, pp + g_pp.size);
         }
@@ -2596,7 +2598,7 @@ namespace
     {
         if (!carrier_templates()) return false;
         int k = pk.kind;
-        if (g_tmpl[k].empty()) k = k <= K_LONGSWORD ? K_ARMING : k >= K_BUCKLER ? (k == K_BUCKLER ? K_PAVISE : K_BUCKLER) : K_MACE; // nearest kind
+        if (g_tmpl[k].empty()) k = k <= K_LONGSWORD ? K_ARMING : k == K_FLAIL ? K_MACE : k >= K_BUCKLER ? (k == K_BUCKLER ? K_PAVISE : K_BUCKLER) : K_MACE; // nearest kind
         if (g_tmpl[k].empty()) return false;
         out = g_tmpl[k];
         passport_name(out.data()) = pk.marker;
@@ -3054,6 +3056,185 @@ namespace
         return true;
     }
 
+    // ---- flails (step 6; decompile: custom_weapon_hafted.md §6) --------------------------------------
+    // Carrier ModularWeaponBP_Flail_A: `Grip` (the staff, welded to BaseMesh), `Link 1` (the chain, its own
+    // simulating body), `Head` (simulating; connector) with `Blade1` under it (the head: hit binding, Tips,
+    // Base, most of the mass). Joints: `PhysicsConstraint` on Grip (Link 1 <-> Grip, at the staff's top) and
+    // `PhysicsConstraint1` on Link 1 (Head <-> Link 1, at the chain's end). The converter lays the flail out
+    // straight (model_to_weapon.py --type flail): staff z <= 0, chain 0..guard_top, head beyond, and writes
+    // one visual per part (<model>_flail_Grip/Link/Head.obj). The model's staff top goes on the first joint,
+    // so that joint stays; the second joint is moved to the model's chain end and both are re-initialised
+    // (SetConstrainedComponents) because a mesh swap recreates the bodies.
+    bool apply_flail(UObject* actor, const Pack& pk)
+    {
+        UObject* grip = object_property(actor, STR("Grip"));
+        UObject* link = object_property(actor, STR("Link 1"));
+        UObject* headc = object_property(actor, STR("Head"));
+        UObject* blade = object_property(actor, STR("Blade1"));
+        UObject* pc0 = object_property(actor, STR("PhysicsConstraint"));
+        UObject* pc1 = object_property(actor, STR("PhysicsConstraint1"));
+        if (!grip || !link || !headc || !blade || !pc0 || !pc1)
+        {
+            log("  ! flail carrier %s lacks Grip/Link 1/Head/Blade1/PhysicsConstraint(1)", name_of(actor).c_str());
+            return false;
+        }
+        const ModelData* data = model_data(pk.dir + pk.model);
+        if (!data || data->hulls.empty()) return false;
+        auto numbers = data->numbers;
+        double chain = numbers["guard_top"];
+
+        V3 gs{1, 1, 1};
+        {
+            Call sc(grip, STR("K2_GetComponentScale"));
+            FProperty* r = sc.run() ? sc.param(STR("ReturnValue")) : nullptr;
+            if (r) gs = read_three(sc.buffer.data() + r->GetOffset_Internal(), r);
+            if (gs.x == 0 || gs.y == 0 || gs.z == 0) gs = {1, 1, 1};
+        }
+        Xf gxf = world_transform(grip);
+        if (gxf.bytes.empty()) return false;
+        Affine G = affine_of(gxf, false), Ginv = affine_of(gxf, true);
+        V3 pl = Ginv.apply(world_location(pc0));
+        V3 off{pl.x * gs.x, pl.y * gs.y, pl.z * gs.z}; // model cm + off = Grip local cm
+        auto world = [&](V3 p) { return G.apply(V3{(p.x + off.x) / gs.x, (p.y + off.y) / gs.y, (p.z + off.z) / gs.z}); };
+        log("Flail %s: staff %.1f cm, chain %.1f cm, head to %.1f cm; staff top on the first joint (Grip z %.1f)", narrow(pk.id).c_str(),
+            -numbers["pommel_end"], chain, numbers["tip"] - chain, pl.z);
+
+        struct FPart
+        {
+            const char* slot;
+            UObject* comp;
+            double density; // relative to steel
+        };
+        FPart parts[] = {{"Grip", grip, 0.75 / 7.85}, {"Link", link, 1.0}, {"Head", blade, 1.0}};
+        double w[3] = {0, 0, 0}, wsum = 0;
+        for (int i = 0; i < 3; ++i)
+        {
+            for (const Hull& h : data->hulls)
+                if (h.slot == parts[i].slot) w[i] += h.volume * parts[i].density;
+            wsum += w[i];
+        }
+        UObject* base_mesh = object_property(actor, STR("BaseMesh"));
+        float grip_was = 0;
+        body_mass(grip, false, grip_was);
+        double base_share = (std::max)(0.0, mass_of(base_mesh) - grip_was);
+        const float connector_kg = 0.05f;
+        double share = (std::max)(0.2, numbers["mass_kg"] - base_share - connector_kg);
+        Call get_mat(grip, STR("GetMaterial"));
+        get_mat.i32(STR("ElementIndex"), 0);
+        UObject* staff_mat = get_mat.run() ? get_mat.ret_object() : nullptr;
+        Call get_mat2(blade, STR("GetMaterial"));
+        get_mat2.i32(STR("ElementIndex"), 0);
+        UObject* head_mat = get_mat2.run() ? get_mat2.ret_object() : nullptr;
+
+        for (int i = 0; i < 3; ++i)
+        {
+            FPart& fp = parts[i];
+            Affine C = affine_of(world_transform(fp.comp), true);
+            auto local = [&](V3 p) { return C.apply(world(p)); };
+            std::vector<std::vector<V3>> pieces;
+            for (const Hull& h : data->hulls)
+                if (h.slot == fp.slot)
+                {
+                    std::vector<V3> pts;
+                    for (V3 p : h.points) pts.push_back(local(p));
+                    pieces.push_back(pts);
+                }
+            if (pieces.empty())
+            {
+                log("  ! flail: no %s pieces in the model", fp.slot);
+                return false;
+            }
+            UObject* mesh = build_part_mesh(actor, fp.comp, pieces);
+            if (!mesh) return false;
+            float kg = (float)(wsum > 0 ? share * w[i] / wsum : share / 3);
+            body_mass(fp.comp, true, kg);
+            Call set(fp.comp, STR("SetStaticMesh"));
+            set.object(STR("NewMesh"), mesh).run();
+            hide(fp.comp);
+            log("  %s (%s): %zu collision pieces, %.2f kg", narrow(fp.comp->GetName()).c_str(), fp.slot, pieces.size(), kg);
+
+            Model m;
+            std::wstring vis = pk.dir + pk.model + L"_flail_" + widen(fp.slot);
+            if (!load_obj(vis + L".obj", m)) continue;
+            V3 o = local(V3{0, 0, 0});
+            for (V3& n : m.normals) n = unit(sub(local(n), o));
+            for (V3& p : m.positions) p = local(p);
+            UObject* mat = i == 0 ? staff_mat : head_mat;
+            UObject* proc = build_visual(actor, fp.comp, m, mat);
+            if (proc) apply_own_textures(actor, proc, mat, pk.dir + pk.model);
+        }
+        // Head: only the connector at the chain's end now.
+        {
+            Affine C = affine_of(world_transform(headc), true);
+            std::vector<V3> cube;
+            for (int k = 0; k < 8; ++k)
+                cube.push_back(C.apply(world(V3{(k & 1) ? 0.5 : -0.5, (k & 2) ? 0.5 : -0.5, chain + ((k & 4) ? 0.5 : -0.5)})));
+            UObject* mesh = build_part_mesh(actor, headc, {cube});
+            if (mesh)
+            {
+                float kg = connector_kg;
+                body_mass(headc, true, kg);
+                Call set(headc, STR("SetStaticMesh"));
+                set.object(STR("NewMesh"), mesh).run();
+                hide(headc);
+            }
+        }
+        // The joints: the second one onto the chain's end, both re-initialised from their components' places.
+        {
+            V3 e = world(V3{0, 0, chain});
+            Call mv(pc1, STR("K2_SetWorldLocation"));
+            mv.three(STR("NewLocation"), e.x, e.y, e.z).flag(STR("bTeleport"), true).run();
+            Call j1(pc1, STR("SetConstrainedComponents"));
+            j1.object(STR("Component1"), headc).object(STR("Component2"), link).run();
+            Call j0(pc0, STR("SetConstrainedComponents"));
+            j0.object(STR("Component1"), link).object(STR("Component2"), grip).run();
+            log("  joints: chain end at (%.1f %.1f %.1f), both re-initialised", e.x, e.y, e.z);
+        }
+        // Damage points: the carrier's untagged on every part, the model's added (Head -> Blade1, Grip -> Grip).
+        if (!data->points.empty())
+        {
+            static FName tip_tag(STR("Tip"), FNAME_Add), off_tag(STR("CW_Tip_Off"), FNAME_Add), base_tag(STR("Base"), FNAME_Add),
+                    base_off_tag(STR("CW_Base_Off"), FNAME_Add);
+            int untagged = 0, added = 0;
+            for (UObject* c0 : {grip, link, headc})
+            {
+                std::vector<UObject*> all{c0};
+                descendants(c0, all);
+                for (UObject* c : all) untagged += retag(c, tip_tag, off_tag);
+            }
+            for (UObject* c : children_of(blade)) retag(c, base_tag, base_off_tag);
+            for (UObject* c : children_of(headc)) retag(c, base_tag, base_off_tag);
+            for (const DPoint& d : data->points)
+            {
+                UObject* parent = d.slot == "Grip" ? grip : d.slot == "Link" ? link : blade;
+                V3 wp_ = world(d.p);
+                V3 wf = unit(sub(world(V3{d.p.x + d.f.x, d.p.y + d.f.y, d.p.z + d.f.z}), wp_));
+                V3 wu = unit(sub(world(V3{d.p.x + d.u.x, d.p.y + d.u.y, d.p.z + d.u.z}), wp_));
+                if (!d.flags.empty() && d.flags[0] == "BASE")
+                {
+                    if (add_damage_point(actor, parent, wp_, wf, wu, {base_tag})) ++added;
+                    continue;
+                }
+                std::vector<FName> tags{tip_tag};
+                wchar_t buf[32];
+                swprintf(buf, 32, L"sTip%03d", d.sTip), tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"sEdge%03d", d.sEdge), tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"dSharp%d", d.dSharp), tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"dBlunt%d", d.dBlunt), tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"rig%03d", d.rig), tags.emplace_back(buf, FNAME_Add);
+                for (auto& fl : d.flags) tags.emplace_back(widen(fl).c_str(), FNAME_Add);
+                if (add_damage_point(actor, parent, wp_, wf, wu, tags)) ++added;
+            }
+            log("  damage points: %d of the carrier's untagged, %d of the model's added", untagged, added);
+        }
+        Built b;
+        b.head = grip, b.hs = gs, b.shift = off.z, b.numbers = numbers, b.off = V3{off.x, off.y, 0};
+        g_built[actor] = b;
+        fit_hands(nullptr, actor, gxf, gs, off.z, numbers);
+        log("Done.");
+        return true;
+    }
+
     // ---- the scabbard (step 4; decompile: add_new_weapons.md "Steps 3, 4, 7 facts" §4) ----------------
     // A sword's scabbard is the weapon actor's StaticMeshComponent "Scabbard" (from the blade module), laid
     // out in BaseMesh's frame (+Z to the tip, mouth at z 5.2). Sheathing needs SheathSlot 0 AND a valid
@@ -3249,7 +3430,9 @@ namespace
         load_settings();
         double mass_was = g_settings.mass_kg;
         g_settings.mass_kg = 0; // the pack's own mass (from the converter)
-        bool ok = pk->kind >= K_BUCKLER ? apply_shield(actor, *pk) : apply_full_weapon(actor, pk->dir + pk->model, false);
+        bool ok = pk->kind == K_FLAIL     ? apply_flail(actor, *pk)
+                  : pk->kind >= K_BUCKLER ? apply_shield(actor, *pk)
+                                          : apply_full_weapon(actor, pk->dir + pk->model, false);
         g_settings.mass_kg = mass_was;
         if (!ok) return;
         // The name the trader and menus show (the passport keeps the marker).
