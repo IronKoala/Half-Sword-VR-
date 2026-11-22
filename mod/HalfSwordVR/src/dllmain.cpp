@@ -20211,12 +20211,13 @@ namespace
         }
 
         // The marker's buzz: three 0.1 s full-strength pulses with 0.12 s gaps, both hands together
-        // (every other buzz in the mod is one pulse or one hit envelope on one hand).
+        // (every other buzz in the mod is one pulse or one hit envelope on one hand; they are muted
+        // while it plays, so its gaps stay silent).
         const float kPulseT[] = {0.0f, 0.001f, 0.143f, 0.144f, 0.314f, 0.315f, 0.457f, 0.458f, 0.629f, 0.63f, 0.771f, 0.772f, 1.0f};
         const float kPulseV[] = {1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f};
         void pulse_both()
         {
-            for (int h = 0; h < 2; ++h) hsvr::controllers_hit(h, kPulseT, kPulseV, (int)(sizeof(kPulseT) / sizeof(kPulseT[0])), 0.7, 1.0f);
+            for (int h = 0; h < 2; ++h) hsvr::controllers_signature(h, kPulseT, kPulseV, (int)(sizeof(kPulseT) / sizeof(kPulseT[0])), 0.7, 1.0f);
         }
 
         std::string csv_header(const std::vector<std::string>& bones)

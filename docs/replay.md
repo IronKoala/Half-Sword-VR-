@@ -7,14 +7,14 @@ every physics-body bone of his visible body in memory. Nothing goes to disk unti
 
 **Hold the left Y button (left B on Valve Index) for about 0.8 s** the moment something looks
 wrong. Both controllers give **three strong pulses** (nothing else in the mod buzzes like that):
-the marker is in and it is recording. It keeps recording 5 more seconds, then writes the 10 s
+the marker is in and it is recording. While the pattern plays every other vibration on both controllers is muted, so it never blurs into hit or grip buzzes. The pulses confirm the recording; the "Replay: saved" log line confirms the file. It keeps recording 5 more seconds, then writes the 10 s
 before the press and the 5 s after it to
 
     Mods\HalfSwordVR\replays\replay-<date>_<time>.csv
 
 with the mod's log lines of that window at the end. Pressing again within those 5 s adds a second
 mark to the same file and records 5 s past it. A quick tap of Y still flips the left grip; holding
-Y with right B (the arm measure) makes no marker.
+Y with right B (the arm measure) makes no marker, unless Y went down 0.8 s or more before B (that only saves an extra capture).
 
 Settings (`[Logging]` section): `replay_capture`, `replay_hold_s`, `replay_before_s`,
 `replay_after_s`. Test scripts can press it with `hsvr.replay_mark`.

@@ -57,6 +57,9 @@ namespace hsvr
         };
         std::mutex g_hit_mutex;
         std::vector<HitEnvelope> g_hits[2];
+        // A signature pattern (controllers_signature): while it plays, nothing else buzzes that hand.
+        HitEnvelope g_sig[2];
+        bool g_sig_on[2] = {false, false};
 
         float envelope_at(const HitEnvelope& e, double u)
         {
@@ -477,6 +480,21 @@ namespace hsvr
             g_trigger_was_down[h] = down;
             float buzz = g_buzz[h].exchange(0.0f);
             float hit = hit_amplitude(h);
+            {
+                std::lock_guard<std::mutex> lock(g_hit_mutex);
+                if (g_sig_on[h])
+                {
+                    double u = (now_seconds() - g_sig[h].start) / g_sig[h].seconds;
+                    if (u >= 1.0) g_sig_on[h] = false;
+                    else
+                    {
+                        // Only the pattern: other buzzes and hits are dropped, so its gaps stay silent.
+                        float v = envelope_at(g_sig[h], (std::max)(0.0, u)) * g_sig[h].volume;
+                        if (v > 0.01f) pulse(xr, session, h, v, 1.0 / 60.0);
+                        continue;
+                    }
+                }
+            }
             // A hit plays as B&S sends it: the summed envelope, 1/30 s at a time, every frame.
             if (hit > 0.01f && hit >= buzz) pulse(xr, session, h, hit, 1.0 / 30.0);
             else if (buzz > 0.01f) pulse(xr, session, h, (std::min)(1.0f, buzz), 0.02);
@@ -550,6 +568,18 @@ namespace hsvr
         std::lock_guard<std::mutex> lock(g_hit_mutex);
         if (g_hits[hand].size() >= 16) g_hits[hand].erase(g_hits[hand].begin());
         g_hits[hand].push_back(std::move(e));
+    }
+
+    void controllers_signature(int hand, const float* key_t, const float* key_v, int keys, double seconds, float volume)
+    {
+        if (hand < 0 || hand > 1 || keys <= 0 || seconds <= 0.0) return;
+        std::lock_guard<std::mutex> lock(g_hit_mutex);
+        g_sig[hand].t.assign(key_t, key_t + keys);
+        g_sig[hand].v.assign(key_v, key_v + keys);
+        g_sig[hand].start = now_seconds();
+        g_sig[hand].seconds = seconds;
+        g_sig[hand].volume = volume;
+        g_sig_on[hand] = true;
     }
 
     void controllers_buzz(int hand, float amplitude)
