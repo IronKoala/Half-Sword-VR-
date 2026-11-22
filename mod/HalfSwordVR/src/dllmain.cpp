@@ -13117,6 +13117,13 @@ namespace
         int drives = -1; // which angular drives are on: bit 0 twist, bit 1 swing (-1 = not set yet)
     };
     JointHand g_jh[2][2]; // [side][0 = the hand's own joint, 1 = its joint as the second hand on the other's weapon]
+    // A hand's own joint removed while its weapon stays in hand (a tick the hold skipped: a fist, a stab's
+    // release) is remade the next tick; it keeps its age and its open fade gate, or it couldn't brake for 0.3 s
+    // (sanity 8503226: both let-gos were a remake).
+    struct JointGone { UObject* weapon = nullptr; double at = -1.0, made_t = -1.0, fade_until = -1.0; };
+    JointGone g_jh_gone[2];
+
+    bool cfg_slerp() { return hsvr::config().pose_hold_joint_slerp; }
 
     void jh_destroy(JointHand& j)
     {
@@ -13240,8 +13247,12 @@ namespace
             vel.flag(STR("bEnableDriveY"), true);
             vel.flag(STR("bEnableDriveZ"), true);
             vel.run();
+            // SLERP: one turn toward the target, whatever the angle. TwistAndSwing splits the turn into a twist about
+            // the blade and a swing off it, which breaks down near a 180 deg swing: a flip back stayed at 0 of 180 deg
+            // and a polehammer grabbed end-for-end turned away from the hand (sanity 8503226). Two hands need no
+            // swing-free drive: the sphere is turned only by the twist about the hands' line (joint_hold).
             Call mode(c, STR("SetAngularDriveMode"));
-            mode.byte(STR("DriveMode"), 1); // TwistAndSwing (set per tick in jh_drive)
+            mode.byte(STR("DriveMode"), cfg_slerp() ? 0 : 1);
             mode.run();
         }
         j.sphere = s;
@@ -13253,6 +13264,14 @@ namespace
         j.fresh = true;
         j.prev_t = -1.0;
         j.fade_until = -1.0;
+        if (turns && g_jh_gone[side].weapon == weapon && j.made_t - g_jh_gone[side].at < 0.5)
+        {
+            j.made_t = g_jh_gone[side].made_t;
+            j.fade_until = g_jh_gone[side].fade_until;
+            HSVR_LOG("Joint hold: %s hand's joint on %ls remade %.0f ms after it went: keeps its age", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                     (hsvr::now_seconds() - g_jh_gone[side].at) * 1000.0);
+        }
+        g_jh_gone[side] = JointGone{};
         HSVR_LOG("Joint hold: %s hand %s joint made on %ls at (%.1f, %.1f, %.1f) on it", side == 0 ? "left" : "right", turns ? "turning" : "pull-only",
                  weapon->GetName().c_str(), at_local.x, at_local.y, at_local.z);
         return true;
@@ -13264,13 +13283,23 @@ namespace
         if (want != j.drives)
         {
             j.drives = want;
-            for (const TCHAR* fn : {STR("SetOrientationDriveTwistAndSwing"), STR("SetAngularVelocityDriveTwistAndSwing")})
+            if (cfg_slerp())
             {
-                Call d(j.con, fn);
-                d.flag(STR("bEnableTwistDrive"), (want & 1) != 0);
-                d.flag(STR("bEnableSwingDrive"), (want & 2) != 0);
-                d.run();
+                Call d1(j.con, STR("SetOrientationDriveSLERP"));
+                d1.first_flag(want != 0);
+                d1.run();
+                Call d2(j.con, STR("SetAngularVelocityDriveSLERP"));
+                d2.first_flag(want != 0);
+                d2.run();
             }
+            else
+                for (const TCHAR* fn : {STR("SetOrientationDriveTwistAndSwing"), STR("SetAngularVelocityDriveTwistAndSwing")})
+                {
+                    Call d(j.con, fn);
+                    d.flag(STR("bEnableTwistDrive"), (want & 1) != 0);
+                    d.flag(STR("bEnableSwingDrive"), (want & 2) != 0);
+                    d.run();
+                }
         }
         Call lin(j.con, STR("SetLinearDriveParams"));
         lin.number(STR("PositionStrength"), k);
@@ -13295,6 +13324,7 @@ namespace
                 if ((j.sphere || j.con) && (!j.touched || gone(j.weapon) || gone(j.sphere) || gone(j.con)))
                 {
                     if (j.weapon && !gone(j.weapon)) HSVR_LOG("Joint hold: %s hand's joint on %ls removed", s == 0 ? "left" : "right", j.weapon->GetName().c_str());
+                    if (i == 0 && j.weapon && !gone(j.weapon)) g_jh_gone[s] = JointGone{j.weapon, hsvr::now_seconds(), j.made_t, j.fade_until};
                     if (gone(j.sphere)) j.sphere = nullptr;
                     if (gone(j.con)) j.con = nullptr;
                     jh_destroy(j);
@@ -13356,7 +13386,7 @@ namespace
         m.prev_p = want_pivot;
         m.prev_grip = pivot_world;
         m.prev_t = now;
-        if ((speed >= cfg.pose_hold_joint_fade_min_speed || rel >= cfg.pose_hold_joint_fade_min_speed) && now - m.made_t > 0.3)
+        if ((speed >= cfg.pose_hold_joint_fade_min_speed || rel >= cfg.pose_hold_joint_fade_min_speed) && now - m.made_t > cfg.pose_hold_joint_fade_after_s)
             m.fade_until = now + (std::max)(0.0, cfg.pose_hold_joint_fade_keep_s);
         bool may_fade = now < m.fade_until;
         auto hand_cap = [&](double bs_n, double err_cm) {
@@ -14504,7 +14534,8 @@ namespace
             // picked up before the hold (sanity 5b22359: a polehammer kept in place for the grab reached 25-38 m/s
             // of physics speed, which the joint inherited and threw it 224 cm).
             JointHand& jm = g_jh[side][0];
-            if (by_joint && jm.fresh)
+            bool fresh = by_joint && jm.fresh;
+            if (fresh)
             {
                 jm.fresh = false;
                 HSVR_LOG("Joint hold: %s %ls starts at %.0f cm/s, %.1f rad/s (it had %.0f cm/s, %.1f rad/s)", side == 0 ? "left" : "right", weapon->GetName().c_str(),
@@ -14520,7 +14551,7 @@ namespace
             }
             // The old hold's own limits on what it sets (2000 cm/s, pose_bs_max_spin): a joint gone wrong must
             // not throw a weapon across the map (fade gate off: a polehammer at 697 m/s, 76 m).
-            if (by_joint && cfg.pose_hold_joint_speed_limit)
+            if (by_joint && !fresh && cfg.pose_hold_joint_speed_limit) // (lv / av are this tick's readings from before the fresh start)
             {
                 double spin = (std::max)(1.0, cfg.pose_bs_max_spin);
                 // The engine's own reading (v_lin / w_now may be measured from positions, which a teleport makes huge).

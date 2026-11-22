@@ -372,6 +372,8 @@ LAYOUT = [
         ('pose_hold_joint_carry_weight', "Engine-joint hold: 1 = your hand carries the weapon's weight at the grip (split between two hands by leverage), so it doesn't sag."),
         ('pose_hold_joint_fade_min_speed', "Engine-joint hold: your hand must move at least this fast (cm/s) before a grip far behind eases toward B&S's cap (stops pressing a propped weapon)."),
         ('pose_hold_joint_fade_keep_s', "Engine-joint hold: once the hand (or the weapon against it) moves that fast, the ease to B&S's cap stays allowed this long (s), so it can brake what it started."),
+        ('pose_hold_joint_fade_after_s', "Engine-joint hold: no ease to B&S's cap this soon after a joint is made (s)."),
+        ('pose_hold_joint_slerp', 'Engine-joint hold: 1 = turns the weapon with one SLERP drive (handles flips and end-for-end grabs); 0 = twist and swing drives.'),
         ('pose_hold_joint_turn_by_grip', "Engine-joint hold, one hand: the weapon's turn is no stronger than your hand's pull can keep the grip in place against (1 = long weapons aren't swung out of your hand on a grab)."),
         ('pose_hold_joint_speed_limit', 'Engine-joint hold: 1 = a held weapon never goes faster than 20 m/s or pose_bs_max_spin (a safety net against throws).'),
         ('pose_hold_let_go_ignore_self', '1 = a weapon stopped by his own body is never let go by the stuck rule.'),
