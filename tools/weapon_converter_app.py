@@ -754,7 +754,8 @@ class App:
                 self.length_var.set(f"{it['length_cm'] / self.units()[1]:.1f}")
                 self.quiet = False
             self.show_model_info()
-            self.status.config(text="Check the length, then Convert.")
+            self.status.config(text="Check the length; the preview comes by itself.")
+            self.schedule_first_preview()
         self.refresh_row(it)
 
     def show_model_info(self):
@@ -802,7 +803,7 @@ class App:
         """The damage settings typed in the editor: ({key: value or None}, problem)."""
         lu, lk, _, _ = self.units()
         st = {"edges": dict(EDGES)[self.edges_var.get()], "head": dict(HEADS)[self.head_var.get()],
-              "held": dict(HELD)[self.held_var.get()], "turn": bool(self.turn_var.get())}
+              "held": dict(HELD)[self.held_var.get()], "turn": bool(self.turn_var.get())}  # noqa
         for key, label in STAT_FIELDS:
             t = self.stat_vars[key].get().strip().replace(",", ".")
             if not t:
@@ -827,7 +828,8 @@ class App:
     @staticmethod
     def stats_key(st):
         st = st or {}
-        return tuple(st.get(k) for k in ("edges", "head", "edge_sharp", "tip_sharp", "rigidity", "balance_cm", "held", "turn"))
+        return tuple(st.get(k) for k in ("edges", "head", "edge_sharp", "tip_sharp", "rigidity", "balance_cm", "held")) + \
+            (bool(st.get("turn")),)
 
     def inputs(self):
         """(length cm, mass kg text or "", type, flip): always metric inside, whatever is shown."""
@@ -874,6 +876,24 @@ class App:
         if self.result is not None and not self.same_inputs(self.inputs()[0], self.result_inputs):
             self.install_btn.config(state="disabled")
             self.status.config(text="Changed: press Preview again before installing.")
+        self.schedule_first_preview()
+
+    def schedule_first_preview(self):
+        """The first picture comes by itself, a second after the length is known (no Preview press needed)."""
+        if getattr(self, "first_preview_job", None):
+            self.root.after_cancel(self.first_preview_job)
+        self.first_preview_job = self.root.after(1000, self.first_preview)
+
+    def first_preview(self):
+        self.first_preview_job = None
+        it = self.cur
+        if it is None or it["result"] is not None or self.busy or it.get("auto_previewed"):
+            return
+        values, problem = self.inputs()
+        if problem:
+            return
+        it["auto_previewed"] = True
+        self.convert()
 
     # ---- converting ------------------------------------------------------------------------------------
     def convert(self):
@@ -1391,7 +1411,9 @@ class App:
         """The full conversion (textures, damage points, real volume) of weapons shown as previews."""
         for n, (it, values) in enumerate(todo, 1):
             self.events.put(("progress", it, f"converting for the game ({n} of {len(todo)})..."))
-            self.convert_worker(self.argv_for(it, values), values, it)
+            it["full_ok"] = False
+            self.convert_worker(self.argv_for(it, values), values, it)  # raises on failure
+            it["full_ok"] = True
 
     def needs_full(self, items):
         """(item, inputs) to convert for the game: previews, and items changed since (lines moved, ...)."""
@@ -1403,6 +1425,8 @@ class App:
             values = values or it["result_inputs"]
             if it["result"][1].get("preview") or not self.same_inputs(values, it["result_inputs"]):
                 out.append((it, values))
+        for it, _ in out:
+            it["full_ok"] = False
         return out
 
     def install(self):
@@ -1415,12 +1439,12 @@ class App:
             self.status.config(text="Converting for the game (textures, damage)... then it installs.")
             self.run(self.full_worker, todo)
             return
-        self.finish_install_one()
+        self.finish_install_one(self.cur)
 
-    def finish_install_one(self):
-        if self.copy_items([self.cur]):
-            title = self.cur["title"]
-            where = self.where_text(self.cur)
+    def finish_install_one(self, it):
+        if self.copy_items([it]):
+            title = it["title"]
+            where = self.where_text(it)
             self.status.config(text=f"Installed: {title} ({where}).")
             messagebox.showinfo("Weapon Converter", f"{title} is installed as a new weapon ({where}).\n\n"
                                 "Start Half Sword (or go back to its menu) to find it.")
@@ -1533,9 +1557,10 @@ class App:
             pend, self.pending_install = getattr(self, "pending_install", None), None
             if pend:
                 which, items = pend
-                if all(it["result"] is not None and not it["result"][1].get("preview") for it in items):
+                if all(it.get("full_ok", True) and it["result"] is not None and not it["result"][1].get("preview")
+                       for it in items):
                     if which == "one":
-                        self.finish_install_one()
+                        self.finish_install_one(items[0])
                     else:
                         self.finish_install_all(items)
                 else:
