@@ -13111,6 +13111,9 @@ namespace
         double made_t = -1.0;            // when it was made
         hsvr::Vec3 prev_p{0, 0, 0};      // the point held last tick (world), for its speed
         double prev_t = -1.0;
+        hsvr::Vec3 prev_grip{0, 0, 0};   // where the point held actually was last tick (world)
+        double fade_until = -1.0;        // the ease to B&S's cap stays allowed until then (it must also brake)
+        bool fresh = false;              // made this tick: the weapon is given the old hold's velocity once
         int drives = -1; // which angular drives are on: bit 0 twist, bit 1 swing (-1 = not set yet)
     };
     JointHand g_jh[2][2]; // [side][0 = the hand's own joint, 1 = its joint as the second hand on the other's weapon]
@@ -13247,6 +13250,9 @@ namespace
         j.made_at = at_local;
         j.turns = turns;
         j.made_t = hsvr::now_seconds();
+        j.fresh = true;
+        j.prev_t = -1.0;
+        j.fade_until = -1.0;
         HSVR_LOG("Joint hold: %s hand %s joint made on %ls at (%.1f, %.1f, %.1f) on it", side == 0 ? "left" : "right", turns ? "turning" : "pull-only",
                  weapon->GetName().c_str(), at_local.x, at_local.y, at_local.z);
         return true;
@@ -13340,10 +13346,19 @@ namespace
         // the ease kept itself over the threshold and the cap pumped at 18 Hz (r6).
         double now = now_seconds();
         Vec3 want_pivot = target_pos + target_rot.rotate(pivot);
-        double speed = (m.prev_t > 0.0 && now - m.prev_t > 1e-4) ? length(want_pivot - m.prev_p) / (now - m.prev_t) : 0.0;
+        double gap = now - m.prev_t;
+        bool have_prev = m.prev_t > 0.0 && gap > 1e-4;
+        double speed = have_prev ? length(want_pivot - m.prev_p) / gap : 0.0;
+        // The grip's own speed against the hand's: a weapon the boosted pull set going must be braked with the
+        // same pull (sanity 5b22359: a hand step opened the gate for one tick, the hand stopped, the shoulder
+        // cap couldn't stop the arming sword at 20 m/s and it was dropped 238 cm away).
+        double rel = have_prev ? length((pivot_world - m.prev_grip) - (want_pivot - m.prev_p)) / gap : 0.0;
         m.prev_p = want_pivot;
+        m.prev_grip = pivot_world;
         m.prev_t = now;
-        bool may_fade = speed >= cfg.pose_hold_joint_fade_min_speed && now - m.made_t > 0.3;
+        if ((speed >= cfg.pose_hold_joint_fade_min_speed || rel >= cfg.pose_hold_joint_fade_min_speed) && now - m.made_t > 0.3)
+            m.fade_until = now + (std::max)(0.0, cfg.pose_hold_joint_fade_keep_s);
+        bool may_fade = now < m.fade_until;
         auto hand_cap = [&](double bs_n, double err_cm) {
             double sc = g_hold[side].shoulder_cap_n;
             if (!cfg.pose_hold_joint_shoulder || sc < 0.0 || sc >= bs_n) return bs_n;
@@ -14485,16 +14500,36 @@ namespace
             Vec3 rp = pivot_now - com;
             double ig = ((std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp)) / 1e4; // kg m^2 about the grip
             by_joint = joint_hold(side, pawn, base, weapon, mass, ig, pivot, target_pos, target_rot, pos, rot, body, com, cfg);
+            // A new joint starts from the old hold's answer for this tick, not from whatever speed the weapon
+            // picked up before the hold (sanity 5b22359: a polehammer kept in place for the grab reached 25-38 m/s
+            // of physics speed, which the joint inherited and threw it 224 cm).
+            JointHand& jm = g_jh[side][0];
+            if (by_joint && jm.fresh)
+            {
+                jm.fresh = false;
+                HSVR_LOG("Joint hold: %s %ls starts at %.0f cm/s, %.1f rad/s (it had %.0f cm/s, %.1f rad/s)", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                         length(set_v), length(w_next), length(lv.vec()), length(av.vec()));
+                Call slv(base, STR("SetPhysicsLinearVelocity"));
+                slv.three(STR("NewVel"), set_v.x, set_v.y, set_v.z);
+                slv.flag(STR("bAddToCurrent"), false);
+                slv.run();
+                Call sav(base, STR("SetPhysicsAngularVelocityInRadians"));
+                sav.three(STR("NewAngVel"), w_next.x, w_next.y, w_next.z);
+                sav.flag(STR("bAddToCurrent"), false);
+                sav.run();
+            }
             // The old hold's own limits on what it sets (2000 cm/s, pose_bs_max_spin): a joint gone wrong must
             // not throw a weapon across the map (fade gate off: a polehammer at 697 m/s, 76 m).
             if (by_joint && cfg.pose_hold_joint_speed_limit)
             {
                 double spin = (std::max)(1.0, cfg.pose_bs_max_spin);
-                if (length(v_lin) > 2000.0 || length(w_now) > spin)
+                // The engine's own reading (v_lin / w_now may be measured from positions, which a teleport makes huge).
+                Vec3 ev = lv.vec(), ew = av.vec();
+                if (length(ev) > 2000.0 || length(ew) > spin)
                 {
                     HSVR_LOG_EVERY(0.25, "Joint hold: %s %ls at %.0f cm/s, %.0f rad/s: held to %.0f cm/s, %.0f rad/s", side == 0 ? "left" : "right",
-                                   weapon->GetName().c_str(), length(v_lin), length(w_now), (std::min)(2000.0, length(v_lin)), (std::min)(spin, length(w_now)));
-                    Vec3 lv2 = clamp_length(v_lin, 2000.0), av2 = clamp_length(w_now, spin);
+                                   weapon->GetName().c_str(), length(ev), length(ew), (std::min)(2000.0, length(ev)), (std::min)(spin, length(ew)));
+                    Vec3 lv2 = clamp_length(ev, 2000.0), av2 = clamp_length(ew, spin);
                     Call slv(base, STR("SetPhysicsLinearVelocity"));
                     slv.three(STR("NewVel"), lv2.x, lv2.y, lv2.z);
                     slv.flag(STR("bAddToCurrent"), false);
@@ -17759,9 +17794,22 @@ namespace
             }
             UObject* base = object_property(item, STR("BaseMesh"));
             if (!base || !g_pose.hand_valid[side]) continue;
+            // Kept in place by teleport until the hold starts: its physics speed is zeroed too, or gravity
+            // and contacts wind it up under the teleports (sanity 5b22359: 0 -> 32 m/s in 0.13 s).
+            auto still = [&] {
+                Call slv(base, STR("SetPhysicsLinearVelocity"));
+                slv.three(STR("NewVel"), 0.0, 0.0, 0.0);
+                slv.flag(STR("bAddToCurrent"), false);
+                slv.run();
+                Call sav(base, STR("SetPhysicsAngularVelocityInRadians"));
+                sav.three(STR("NewAngVel"), 0.0, 0.0, 0.0);
+                sav.flag(STR("bAddToCurrent"), false);
+                sav.run();
+            };
             if (g.hold_at)
             {
                 set_component_transform(base, g.at_pos, g.at_rot, true);
+                still();
                 continue;
             }
             Vec3 hp = g_pose.target[side];
@@ -17769,6 +17817,7 @@ namespace
             Quat rot = (hr * g.rel).normalized();
             Vec3 pos = hp + hr.rotate(g.in_anchor) - rot.rotate(g.pivot);
             set_component_transform(base, pos, rot, true);
+            still();
         }
     }
 
