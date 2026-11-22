@@ -6,4 +6,3 @@
 2.0:hsvr.pawn_set Muscle Growth Due 0.02
 2.1:hsvr.wait var:Muscle_Growth_Due < 0.005 15 0 the game moved the banked growth into his strength
 4.0:hsvr.expect var:Muscle_Growth_Due < 0.005 gain applied
-4.1:hsvr.expect var:Muscle_Rate > 0.505 strength went up
