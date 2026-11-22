@@ -1543,6 +1543,42 @@ namespace
         return false;
     }
 
+    // A free hand stops at the world (Matthew 2026-11-22 03:56: "my hand defies the laws of physics…
+    // I can just put my hand inside of the post"; nothing stopped it, it went wherever the controller
+    // was). A sphere swept from his shoulder to his palm on the Visibility channel, complex collision
+    // (the Yard fence is triangles only); creatures and weapons are looked through. `stop`: where the
+    // sphere's centre stops. False when nothing is in the way.
+    bool hand_world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, hsvr::Vec3& stop)
+    {
+        static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        if (!cdo || !gs || !g_pose.pawn) return false;
+        Call trace(cdo, STR("SphereTraceSingle"));
+        if (!trace.fn) return false;
+        trace.object(STR("WorldContextObject"), g_pose.pawn);
+        trace.three(STR("Start"), from.x, from.y, from.z);
+        trace.three(STR("End"), to.x, to.y, to.z);
+        trace.number(STR("Radius"), radius);
+        trace.flag(STR("bTraceComplex"), true);
+        trace.flag(STR("bIgnoreSelf"), true);
+        if (!trace.run()) return false;
+        FProperty* ret = trace.param(STR("ReturnValue"));
+        if (!ret || !(*(trace.buffer.data() + ret->GetOffset_Internal()) & 1)) return false;
+        FProperty* hit = trace.param(STR("OutHit"));
+        if (!hit) return false;
+        Call b(gs, STR("BreakHitResult"));
+        FProperty* hp = b.param(STR("Hit"));
+        if (!hp) return false;
+        std::memcpy(b.buffer.data() + hp->GetOffset_Internal(), trace.buffer.data() + hit->GetOffset_Internal(), (std::min)(hp->GetSize(), hit->GetSize()));
+        b.run();
+        UObject* actor = b.object_result(STR("HitActor"));
+        if (actor && (actor == g_pose.pawn || is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")))) return false;
+        FProperty* ip = b.param(STR("bInitialOverlap"));
+        if (ip && *(b.buffer.data() + ip->GetOffset_Internal()) != 0) return false; // his shoulder already in it: leave the hand be
+        stop = b.vec(STR("Location"));
+        return true;
+    }
+
     struct FootState
     {
         bool valid = false;
@@ -2028,6 +2064,9 @@ namespace
     bool hand_on_grab(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool hand_rides_grab(int side);
     bool hand_on_scenery(int side); // the hand is pinned on fixed scenery (a world grab)
+    bool hand_has_weapon(int side); // the game's hold has a weapon (or fist) in this hand
+    bool g_wrap_on_side(int side);
+    bool hand_world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, hsvr::Vec3& stop);
     bool stuck_is_thrust(UObject* weapon);
     bool two_hand_pose(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool hand_on_scabbard(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
@@ -2949,6 +2988,19 @@ namespace
         g_solved_on[side] = on_weapon ? 1 : 0;
         if (two_hand_pose(side, target, Wh)) on_weapon = true, g_solved_on[side] |= 2;
         if (!on_weapon && hand_on_scabbard(side, target, Wh)) on_weapon = true, g_solved_on[side] |= 4;
+        // A free hand stops at walls and scenery (the palm's middle, pose_hand_world_radius_cm round it).
+        bool stopped = false;
+        if (!on_weapon && cfg.pose_hand_world_stop && !hand_has_weapon(side) && !g_wrap_on_side(side))
+        {
+            Vec3 palm_mid = target + fingers_world * cfg.pose_hand_world_reach_cm;
+            Vec3 at;
+            if (hand_world_sweep(S, palm_mid, cfg.pose_hand_world_radius_cm, at))
+            {
+                target = target + (at - palm_mid);
+                stopped = true;
+                HSVR_LOG_EVERY(1.0, "Hand: %s hand stopped by the world %.1f cm short of your controller", side == 0 ? "left" : "right", length(at - palm_mid));
+            }
+        }
         if (!on_weapon && hand_on_grab(side, cfg, target, Wh))
         {
             on_weapon = true, g_solved_on[side] |= 8;
@@ -2961,7 +3013,7 @@ namespace
         // Where your real hand is, while his stays on a stopped weapon.
         ghost_hand(side, cfg, on_weapon && hand_on_weapon_amount(side) > 0.5 && length(controller_wrist - target) > cfg.pose_ghost_from_cm, controller_wrist,
                    controller_rot);
-        if (on_weapon)
+        if (on_weapon || stopped)
         {
             to = target - S;
             double d = length(to);
@@ -5653,6 +5705,7 @@ namespace
         double far_since = -1.0, far_logged = 0.0;
     };
     HoldState g_hold[2];
+    bool hand_has_weapon(int side) { return g_hold[side].weapon != nullptr; }
 
     // The game's off-hand search: with a two-handed weapon (longswords) in one hand and the other
     // free, about once a second the game drops "Block <other> OffHand Grab", and on the next tick
@@ -10155,6 +10208,146 @@ namespace
     {
         hsvr::Vec3 p, n;
     };
+    // A held mesh's convex collision (BodySetup.AggGeom.ConvexElems), in the component's own frame
+    // (unscaled mesh units). The engine's distance to a convex (Chaos FConvex::PhiWithNormal) only
+    // measures against the face whose plane is farthest from the point, so beside an edge it says
+    // 5-7 cm where the true distance is under 1 (rock replay, 9592808): fingers that touched were
+    // told they didn't and closed to a fist. Measured exactly here instead.
+    struct ConvexTri
+    {
+        hsvr::Vec3 a, b, c, n; // n: outward
+    };
+    struct ConvexShape
+    {
+        std::vector<ConvexTri> tris;
+    };
+    double read_num(const uint8_t* at, FProperty* p)
+    {
+        if (!p) return 0.0;
+        if (p->GetClass().GetName() == STR("DoubleProperty")) return *reinterpret_cast<const double*>(at + p->GetOffset_Internal());
+        return *reinterpret_cast<const float*>(at + p->GetOffset_Internal());
+    }
+    hsvr::Vec3 read_vec_struct(const uint8_t* at, UScriptStruct* type)
+    {
+        return {read_num(at, struct_member(type, STR("X"))), read_num(at, struct_member(type, STR("Y"))), read_num(at, struct_member(type, STR("Z")))};
+    }
+    // Reads the convex hulls of a static mesh component's mesh. False when it has none.
+    bool load_convex(UObject* comp, std::vector<ConvexShape>& out)
+    {
+        using namespace hsvr;
+        out.clear();
+        if (!comp || !is_a(comp, STR("StaticMeshComponent"))) return false;
+        UObject* sm = object_property(comp, STR("StaticMesh"));
+        UObject* bs = sm ? object_property(sm, STR("BodySetup")) : nullptr;
+        // Complex-as-simple (the Yard fence): its triangles are the collision, a hull it may carry is
+        // not (that would make the rail a solid block).
+        if (FProperty* tf = bs ? prop_chain(bs, STR("CollisionTraceFlag")) : nullptr)
+            if (*(reinterpret_cast<const uint8_t*>(bs) + tf->GetOffset_Internal()) == 3) return false;
+        FProperty* agg = bs ? prop_chain(bs, STR("AggGeom")) : nullptr;
+        UScriptStruct* agg_t = struct_type(agg);
+        FProperty* ce = struct_member(agg_t, STR("ConvexElems"));
+        if (!ce || ce->GetClass().GetName() != STR("ArrayProperty")) return false;
+        const uint8_t* agg_at = reinterpret_cast<const uint8_t*>(bs) + agg->GetOffset_Internal();
+        const RawArray* elems = reinterpret_cast<const RawArray*>(agg_at + ce->GetOffset_Internal());
+        FProperty* inner = static_cast<FArrayProperty*>(ce)->GetInner();
+        UScriptStruct* elem_t = struct_type(inner);
+        if (!elem_t || elems->Num <= 0 || elems->Num > 64) return false;
+        int32_t esize = inner->GetSize();
+        FProperty* vd = struct_member(elem_t, STR("VertexData"));
+        FProperty* id = struct_member(elem_t, STR("IndexData"));
+        FProperty* tr = struct_member(elem_t, STR("Transform"));
+        if (!vd || !id) return false;
+        FProperty* vinner = static_cast<FArrayProperty*>(vd)->GetInner();
+        UScriptStruct* vec_t = struct_type(vinner);
+        int32_t vsize = vinner->GetSize();
+        // The element's own transform (usually identity).
+        UScriptStruct* tr_t = struct_type(tr);
+        FProperty* tr_t_p = struct_member(tr_t, STR("Translation"));
+        FProperty* tr_r_p = struct_member(tr_t, STR("Rotation"));
+        for (int32_t e = 0; e < elems->Num; ++e)
+        {
+            const uint8_t* el = reinterpret_cast<const uint8_t*>(elems->Data) + (size_t)e * esize;
+            const RawArray* verts = reinterpret_cast<const RawArray*>(el + vd->GetOffset_Internal());
+            const RawArray* idx = reinterpret_cast<const RawArray*>(el + id->GetOffset_Internal());
+            if (verts->Num < 4 || idx->Num < 12 || verts->Num > 4096 || idx->Num > 3 * 8192) continue;
+            Vec3 et{0, 0, 0};
+            Quat eq{0, 0, 0, 1};
+            if (tr && tr_t_p && tr_r_p)
+            {
+                const uint8_t* ta = el + tr->GetOffset_Internal();
+                et = read_vec_struct(ta + tr_t_p->GetOffset_Internal(), struct_type(tr_t_p));
+                const uint8_t* ra = ta + tr_r_p->GetOffset_Internal();
+                UScriptStruct* q_t = struct_type(tr_r_p);
+                eq = Quat{read_num(ra, struct_member(q_t, STR("X"))), read_num(ra, struct_member(q_t, STR("Y"))), read_num(ra, struct_member(q_t, STR("Z"))),
+                          read_num(ra, struct_member(q_t, STR("W")))};
+                if (length(Vec3{eq.x, eq.y, eq.z}) < 1e-9 && std::fabs(eq.w) < 1e-9) eq = Quat{0, 0, 0, 1};
+                eq = eq.normalized();
+            }
+            std::vector<Vec3> v((size_t)verts->Num);
+            Vec3 mid{0, 0, 0};
+            for (int32_t i = 0; i < verts->Num; ++i)
+            {
+                v[i] = et + eq.rotate(read_vec_struct(reinterpret_cast<const uint8_t*>(verts->Data) + (size_t)i * vsize, vec_t));
+                mid = mid + v[i];
+            }
+            mid = mid * (1.0 / verts->Num);
+            const int32_t* ix = reinterpret_cast<const int32_t*>(idx->Data);
+            ConvexShape shape;
+            for (int32_t t = 0; t + 2 < idx->Num; t += 3)
+            {
+                int32_t i0 = ix[t], i1 = ix[t + 1], i2 = ix[t + 2];
+                if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= verts->Num || i1 >= verts->Num || i2 >= verts->Num) continue;
+                ConvexTri ct{v[i0], v[i1], v[i2], cross(v[i1] - v[i0], v[i2] - v[i0])};
+                double nl = length(ct.n);
+                if (nl < 1e-9) continue;
+                ct.n = ct.n * (1.0 / nl);
+                if (dot(ct.n, ct.a - mid) < 0.0) ct.n = ct.n * -1.0; // outward, whatever the winding
+                shape.tris.push_back(ct);
+            }
+            if (shape.tris.size() >= 4) out.push_back(std::move(shape));
+        }
+        return !out.empty();
+    }
+    // Closest point on triangle abc to p (Ericson, Real-Time Collision Detection 5.1.5).
+    hsvr::Vec3 closest_on_tri(const hsvr::Vec3& p, const hsvr::Vec3& a, const hsvr::Vec3& b, const hsvr::Vec3& c)
+    {
+        using namespace hsvr;
+        Vec3 ab = b - a, ac = c - a, ap = p - a;
+        double d1 = dot(ab, ap), d2 = dot(ac, ap);
+        if (d1 <= 0 && d2 <= 0) return a;
+        Vec3 bp = p - b;
+        double d3 = dot(ab, bp), d4 = dot(ac, bp);
+        if (d3 >= 0 && d4 <= d3) return b;
+        double vc = d1 * d4 - d3 * d2;
+        if (vc <= 0 && d1 >= 0 && d3 <= 0) return a + ab * (d1 / (d1 - d3));
+        Vec3 cp = p - c;
+        double d5 = dot(ab, cp), d6 = dot(ac, cp);
+        if (d6 >= 0 && d5 <= d6) return c;
+        double vb = d5 * d2 - d1 * d6;
+        if (vb <= 0 && d2 >= 0 && d6 <= 0) return a + ac * (d2 / (d2 - d6));
+        double va = d3 * d6 - d5 * d4;
+        if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+        double den = 1.0 / (va + vb + vc);
+        return a + ab * (vb * den) + ac * (vc * den);
+    }
+    // Distance from p (component frame, mesh units) to the nearest hull; 0 inside one.
+    double convex_distance(const std::vector<ConvexShape>& shapes, const hsvr::Vec3& p)
+    {
+        double best = 1e18;
+        for (const ConvexShape& s : shapes)
+        {
+            bool inside = true;
+            for (const ConvexTri& t : s.tris)
+                if (hsvr::dot(p - t.a, t.n) > 0.0) { inside = false; break; }
+            if (inside) return 0.0;
+            for (const ConvexTri& t : s.tris)
+            {
+                hsvr::Vec3 d = p - closest_on_tri(p, t.a, t.b, t.c);
+                best = (std::min)(best, hsvr::dot(d, d));
+            }
+        }
+        return std::sqrt(best);
+    }
     struct WrapGrab
     {
         bool on = false;
@@ -10186,6 +10379,7 @@ namespace
         hsvr::Vec3 spot_local, palm_local;  // the held spot (thing's frame) and the palm (hand frame)
         hsvr::Vec3 hand_v;                  // the drawn hand's velocity (cm/s), for letting go
         std::vector<SurfacePoint> cloud;    // scenery with triangles only: its surface round the spot
+        std::vector<ConvexShape> convex;    // a static mesh's convex hulls (measured exactly)
         bool resolved_seated = false;       // the fingers solved again once the hand sat on it
         double rigidity = 0.4;              // Hands Rigidity (Gauntlets): 0.4 bare, 0.7 half gauntlets, 0.75+ gloves/gauntlets
         double pad = 0.0;                   // cm the thing's skin stands outside its collision
@@ -10195,6 +10389,8 @@ namespace
     bool g_wrap_on_side(int side) { return g_wrap[side].on; }
     const double kWrapSamples[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
     const double kWrapCrease = 0.5, kWrapSplay = 0.1, kWrapSunk = 0.5;
+    const double kNoTouch = -9.0; // a solved joint that touched nothing (see wrap_fingers)
+    std::atomic<double> g_wrap_untouched{0.45};
     const int kWrapSteps = 10, kWrapHalvings = 4, kWrapLiftSteps = 6;
     const double kFingerTip = 2.5; // cm past the last finger bone (as pose_hand_fingers)
     // Willie's bare fingers (SK_Body_Man LOD0, reference pose), index/middle/ring/pinky, per segment and
@@ -10221,6 +10417,15 @@ namespace
         if (bone == STR("clavicle_l") || bone == STR("clavicle_r")) return 0.87;
         if (bone == STR("spine_05")) return 0.74;
         if (bone == STR("spine_04")) return 1.28;
+        return 0.0;
+    }
+    double body_skin_pad(const FName& bone)
+    {
+        static const FName names[6] = {FName(STR("neck_01"), FNAME_Add), FName(STR("neck_02"), FNAME_Add), FName(STR("clavicle_l"), FNAME_Add),
+                                       FName(STR("clavicle_r"), FNAME_Add), FName(STR("spine_05"), FNAME_Add), FName(STR("spine_04"), FNAME_Add)};
+        static const double pads[6] = {0.96, 0.55, 0.87, 0.87, 0.74, 1.28};
+        for (int i = 0; i < 6; ++i)
+            if (bone == names[i]) return pads[i];
         return 0.0;
     }
 
@@ -10260,6 +10465,15 @@ namespace
         hsvr::Vec3 cp;
         hsvr::Quat cq;
         double cs = 1.0, radius = 0.9, pad = 0.0;
+        // A Willie: the nearest of ALL his bodies (K2_GetClosestPointOnPhysicsAsset; 0 inside), each
+        // with its own skin pad. Only the grabbed bone's capsule was asked before, so at the throat
+        // fingers passed neck_02's short capsule into his jaw and collarbones and closed to fists.
+        Call* pa = nullptr;
+        FProperty *pa_pos = nullptr, *pa_bone = nullptr, *pa_dist = nullptr, *pa_ret = nullptr;
+        bool pad_by_bone = false;
+        hsvr::Vec3 op;      // the held component's place, turn and scale this solve (for its convex hulls)
+        hsvr::Quat oq;
+        double os = 1.0;
         // Measured finger (index-pinky, not the thumb): the bone line does not run down the finger's
         // middle. From ~60% along the first phalanx it lies on or outside the palm-side skin, the finger
         // sitting toward the back of the hand (SK_Body_Man LOD0 cross-sections in each bone's frame,
@@ -10307,12 +10521,27 @@ namespace
                 double e = std::sqrt(e4[0]), plane = hsvr::dot(p - near4[0]->p, near4[0]->n);
                 return (plane >= 0.0 ? (std::max)(plane, e - 1.5) : e) / cs;
             }
+            if (pa)
+            {
+                write_three(pa->buffer.data() + pa_pos->GetOffset_Internal(), pa_pos, p.x, p.y, p.z);
+                pa->run();
+                ++queries;
+                bool ok = *(pa->buffer.data() + pa_ret->GetOffset_Internal()) != 0;
+                double d = read_num(pa->buffer.data(), pa_dist);
+                if (!ok || d < 0.0) return 1e9;
+                double bp = pad_by_bone ? body_skin_pad(*reinterpret_cast<FName*>(pa->buffer.data() + pa_bone->GetOffset_Internal())) : 0.0;
+                return (std::max)(0.0, d - bp) / cs;
+            }
             write_three(query->buffer.data() + q_point->GetOffset_Internal(), q_point, p.x, p.y, p.z);
             *reinterpret_cast<FName*>(query->buffer.data() + q_bone->GetOffset_Internal()) = g->bone;
             query->run();
             ++queries;
             double d = query->number();
-            return d < 0.0 ? 1e9 : (std::max)(0.0, d - pad) / cs; // in snapshot centimetres
+            if (d < 0.0) d = 1e9;
+            // The engine errs only high, and only on convex hulls (its spheres, boxes and capsules are
+            // exact): the smaller of the two.
+            if (!g->convex.empty()) d = (std::min)(d, convex_distance(g->convex, oq.inverse().rotate(p - op) * (1.0 / os)) * os);
+            return d >= 1e9 ? 1e9 : (std::max)(0.0, d - pad) / cs; // in snapshot centimetres
         }
         void place(const double c[3], hsvr::Vec3 seg[3][2])
         {
@@ -10428,13 +10657,10 @@ namespace
                 held = hit + 1;
                 while (held < n && touches(curls, held)) ++held;
             }
-            if (held < n)
-            {
-                double c[3];
-                at(curls, held, 1.0, c);
-                std::memcpy(curls, c, sizeof(curls));
-            }
-            for (int k = 0; k < 3; ++k) out[k] = (std::min)(1.0, curls[k]);
+            // Segments that met nothing over the whole sweep (past the thing's edge) don't close to a
+            // fist in the air: they follow your own finger (kNoTouch; wrap_fingers swaps in your curl).
+            // (9592808 test: ring and pinky fisted beside a rock and a throat.)
+            for (int k = 0; k < 3; ++k) out[k] = k >= held ? kNoTouch : (std::min)(1.0, curls[k]);
         }
     };
 
@@ -10442,12 +10668,14 @@ namespace
     // Returns the wrap's weight (0 = the hand's own curls).
     double wrap_fingers(const XForm96* B, int side, double joint_out[5][3], const double own[5], double& splay, const double (*own_joint)[3] = nullptr)
     {
+        HSVR_SUB("anim:wrap_fingers");
         using namespace hsvr;
         WrapGrab& g = g_wrap[side];
         double now = now_seconds();
         double ease = g.ease;
         double w = g.on ? wrap_smooth((now - g.since) / ease) : g.w_off * (1.0 - wrap_smooth((now - g.off_at) / ease));
         if (w <= 0.0 || !g_frig.ok) return 0.0;
+        int log_shown = -1; // the finger whose solve was logged this frame: its shown curls are logged too
         // Once the hand has been eased onto what it holds, solve every finger once more there; scenery
         // doesn't move and the hand is pinned on it, so it keeps those curls. Re-solving all along straightened
         // them as the hand slid against the rail (b8b5cb1 test: middle 0.31/0.62/1 at seating, 0/0/0
@@ -10481,6 +10709,25 @@ namespace
                 ws.cp = component_location(g_frig.driver);
                 ws.cq = component_rotation(g_frig.driver);
                 ws.cs = component_scale_z(g_frig.driver);
+                Call pq(g.comp, STR("K2_GetClosestPointOnPhysicsAsset"));
+                if (g.body && cfg.pose_wrap_all_bodies && pq.fn)
+                {
+                    ws.pa_pos = pq.param(STR("WorldPosition"));
+                    ws.pa_bone = pq.param(STR("BoneName"));
+                    ws.pa_dist = pq.param(STR("Distance"));
+                    ws.pa_ret = pq.param(STR("ReturnValue"));
+                    if (ws.pa_pos && ws.pa_bone && ws.pa_dist && ws.pa_ret)
+                    {
+                        ws.pa = &pq;
+                        ws.pad_by_bone = cfg.pose_wrap_body_pad;
+                    }
+                }
+                if (!g.convex.empty())
+                {
+                    ws.op = component_location(g.comp);
+                    ws.oq = component_rotation(g.comp);
+                    ws.os = component_scale_z(g.comp);
+                }
                 Vec3 hand = xf_pos(B[g_frig.hand[side]]), mid = xf_pos(B[g_frig.chain[side][2][0]]);
                 // The thumb (unmeasured) and a set pose_wrap_finger_radius_cm: one radius down the bone
                 // line, tapered at the joints (the framework's 9.5% of the hand). The other fingers:
@@ -10523,6 +10770,7 @@ namespace
                 if (cfg.log_wrap && (first || reseat || now - g.last_log >= 1.0))
                 {
                     g.last_log = now;
+                    log_shown = f;
                     // (Where the snapshot's hand is against the drawn hand, and how far its palm is from the thing.)
                     Vec3 hand_w = ws.cp + ws.cq.rotate(hand * ws.cs);
                     Vec3 drawn = g_pose.mesh ? socket_location(g_pose.mesh, bone_fname(side == 0 ? "hand_l" : "hand_r")) : hand_w;
@@ -10535,7 +10783,9 @@ namespace
                         // Scenery: how far each joint and the tip end up from the sampled surface, and
                         // how far the nearest sample is (a finger off the cloud's edge sees no surface).
                         Vec3 seg[3][2];
-                        ws.place(out, seg);
+                        double shown[3];
+                        for (int k = 0; k < 3; ++k) shown[k] = out[k] <= kNoTouch + 0.5 ? 0.0 : out[k]; // (untouched: logged straight)
+                        ws.place(shown, seg);
                         double dj[4], near_tip = 1e9;
                         for (int k = 0; k < 3; ++k) dj[k] = ws.distance(seg[k][0]) * ws.cs;
                         dj[3] = ws.distance(seg[2][1]) * ws.cs;
@@ -10553,7 +10803,43 @@ namespace
             if (f != 0 && own_joint) for (int k = 0; k < 3; ++k) base[k] = own_joint[f][k];
             else if (f != 0 && g_finger_schedule.load()) finger_schedule(own[f], base);
             double ww = g.solved[f] ? w : 0.0;
-            for (int k = 0; k < 3; ++k) joint_out[f][k] = base[k] + (g.curls[f][k] - base[k]) * ww;
+            int joint_borrow = -1; // the neighbour a wholly untouched finger copies
+            for (int k = 0; k < 3; ++k)
+            {
+                double c = g.curls[f][k];
+                if (c <= kNoTouch + 0.5)
+                {
+                    // Touched nothing. Part of the finger touched: the rest keeps the curl of its last
+                    // touching joint. None of it touched: as the nearest neighbouring finger that
+                    // touched at this joint (not for the thumb, whose curls mean something else), else
+                    // relaxed (your own curl, at most pose_wrap_untouched_curl). Your own curl alone was
+                    // nearly a fist: middle >= 0.95, ring 0.98 while holding (his 11-21 plays).
+                    c = -1.0;
+                    // (Untouched joints are always the tail of the finger, so "part touched" is the
+                    // knuckle having touched. Past it: the middle joint at least relaxed, the end joint as
+                    // the middle; a knuckle-only touch gave 0/0/0.45, a straight finger with a bent tip.)
+                    bool prev_touched = k > 0 && g.curls[f][0] > kNoTouch + 0.5;
+                    if (prev_touched)
+                        c = k == 1 ? (std::max)((std::min)(base[k], g_wrap_untouched.load()), (std::max)(0.0, joint_out[f][0]))
+                                   : (std::max)(0.0, joint_out[f][k - 1]);
+                    else if (k == 0 && f != 0)
+                    {
+                        for (int dfi : {-1, 1, -2, 2})
+                        {
+                            int n = f + dfi;
+                            if (n < 1 || n > 4 || !g.solved[n] || g.curls[n][0] <= kNoTouch + 0.5) continue;
+                            joint_borrow = n;
+                            break;
+                        }
+                        if (joint_borrow >= 0) c = g.curls[joint_borrow][0];
+                    }
+                    else if (k > 0 && joint_borrow >= 0)
+                        c = g.curls[joint_borrow][k] > kNoTouch + 0.5 ? g.curls[joint_borrow][k] : (std::max)(0.0, joint_out[f][k - 1]);
+                    if (c < 0.0) c = (std::min)(base[k], g_wrap_untouched.load());
+                }
+                joint_out[f][k] = base[k] + (c - base[k]) * ww;
+            }
+            if (f == log_shown) HSVR_LOG("Wrap: %s %s shown %.2f/%.2f/%.2f", side == 0 ? "left" : "right", kFingerNames[f], joint_out[f][0], joint_out[f][1], joint_out[f][2]);
         }
         splay += (kWrapSplay - splay) * w;
         return w;
@@ -10844,6 +11130,14 @@ namespace
                 // Hand armour: the game sets Hands Rigidity (Gauntlets) above its bare 0.4 (0.8 in his
                 // 13:44 playtest with Gauntlets_10 on). Read once per grab.
                 g.rigidity = read_number_variable(pawn, STR("Hands Rigidity (Gauntlets)"));
+                bool hulls = load_convex(comp, g.convex);
+                if (cfg.log_wrap && is_a(comp, STR("StaticMeshComponent")))
+                {
+                    size_t tris = 0;
+                    for (const ConvexShape& c : g.convex) tris += c.tris.size();
+                    if (hulls) HSVR_LOG("Wrap: %s hand: %ls has %d convex hulls (%d triangles), measured exactly", L ? "left" : "right", comp->GetName().c_str(), (int)g.convex.size(), (int)tris);
+                    else HSVR_LOG("Wrap: %s hand: %ls: no convex hulls read (none, complex-as-simple, or unreadable): the engine's distance", L ? "left" : "right", comp->GetName().c_str());
+                }
                 if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls (hand rigidity %.2f)", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str(), g.rigidity);
             }
             // (Let go first: a hand that drops its hold before it was seated must not seat a stale thing.)
@@ -11516,6 +11810,7 @@ namespace
         g_finger_joint_scale[1].store(cfg.pose_finger_scale_pip);
         g_finger_joint_scale[2].store(cfg.pose_finger_scale_dip);
         g_finger_pivot_on.store(cfg.pose_finger_pivot_fix);
+        g_wrap_untouched.store(cfg.pose_wrap_untouched_curl);
         if (pawn && g_pose_active.load()) wrap_tick(cfg, pawn);
         if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
