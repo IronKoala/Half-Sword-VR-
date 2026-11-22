@@ -10125,7 +10125,7 @@ namespace
         hsvr::Vec3 hand_v;                  // the drawn hand's velocity (cm/s), for letting go
         std::vector<SurfacePoint> cloud;    // scenery with triangles only: its surface round the spot
         bool resolved_seated = false;       // the fingers solved again once the hand sat on it
-        bool gauntlet = false;              // his hand wears hand armour (thicker fingers)
+        double rigidity = 0.4;              // Hands Rigidity (Gauntlets): 0.4 bare, 0.7 half gauntlets, 0.75+ gloves/gauntlets
         double pad = 0.0;                   // cm the thing's skin stands outside its collision
         int resolves_left = 0;              // finger solves still due for that
     };
@@ -10135,6 +10135,11 @@ namespace
     const double kWrapCrease = 0.5, kWrapSplay = 0.1, kWrapSunk = 0.5;
     const int kWrapSteps = 10, kWrapHalvings = 4, kWrapLiftSteps = 6;
     const double kFingerTip = 2.5; // cm past the last finger bone (as pose_hand_fingers)
+    // Willie's bare finger (index-pinky median, SK_Body_Man LOD0, reference pose), per segment and
+    // sample t = 0.2 .. 1.0: how far the finger's middle sits toward the back of the hand from the bone
+    // line, and half its palm-to-back depth (cm, mesh units).
+    const double kFingerShift[3][5] = {{0.23, 0.50, 1.07, 1.23, 1.39}, {1.55, 1.58, 1.64, 1.70, 1.75}, {1.71, 1.73, 1.82, 1.89, 1.84}};
+    const double kFingerHalf[3][5] = {{1.62, 1.44, 1.04, 1.00, 0.97}, {0.87, 0.90, 0.85, 0.82, 0.78}, {0.74, 0.69, 0.65, 0.59, 0.49}};
 
     double wrap_smooth(double x)
     {
@@ -10164,7 +10169,16 @@ namespace
         int side = 0, f = 0;
         hsvr::Vec3 cp;
         hsvr::Quat cq;
-        double cs = 1.0, radius = 0.9, pad = 0.0, crease_floor = 0.0; // pad: world cm the visible skin stands outside the collision
+        double cs = 1.0, radius = 0.9, pad = 0.0;
+        // Measured finger (index-pinky, not the thumb): the bone line does not run down the finger's
+        // middle. From ~60% along the first phalanx it lies on or outside the palm-side skin, the finger
+        // sitting toward the back of the hand (SK_Body_Man LOD0 cross-sections in each bone's frame,
+        // left = right within 0.2 cm). So each sample is moved toward the back of the finger by
+        // kFingerShift and is kFingerHalf thick (half the palm-to-back depth), plus hand armour.
+        bool measured = false;
+        hsvr::Vec3 across;       // index_01 - pinky_01 (snapshot): the fingers bend about it
+        double back_sign = 1.0;  // cross(segment, across) * back_sign = toward the back of the hand
+        double armour[3] = {0, 0, 0}; // extra palm-side thickness per segment (snapshot cm) // pad: world cm the visible skin stands outside the collision
         WrapGrab* g = nullptr;
         Call* query = nullptr;
         FProperty* q_point = nullptr;
@@ -10219,22 +10233,50 @@ namespace
             pose_hand_fingers(tmp.data(), side, curl5, kWrapSplay, false, jc, f);
             finger_segments(tmp.data(), side, f, seg);
         }
+        // Sample i (kWrapSamples) of segment k: where the finger's middle is and how thick it is there.
+        void sample(const hsvr::Vec3 seg[3][2], int k, int i, hsvr::Vec3& p, double& r) const
+        {
+            using namespace hsvr;
+            double t = kWrapSamples[i];
+            Vec3 a = seg[k][0], b = seg[k][1];
+            p = a + (b - a) * t;
+            if (!measured)
+            {
+                r = radius * (std::min)(1.0, t / kWrapCrease);
+                return;
+            }
+            Vec3 back = cross(b - a, across) * back_sign;
+            double bl = length(back);
+            if (bl > 1e-6) p = p + back * (kFingerShift[k][i] / bl);
+            r = kFingerHalf[k][i] + armour[k];
+        }
         bool touches(const double c[3], int k)
         {
             hsvr::Vec3 seg[3][2];
             place(c, seg);
-            for (double t : kWrapSamples)
-                if (distance(seg[k][0] + (seg[k][1] - seg[k][0]) * t) < radius * (std::max)(crease_floor, (std::min)(1.0, t / kWrapCrease))) return true;
+            for (int i = 0; i < 5; ++i)
+            {
+                hsvr::Vec3 p;
+                double r;
+                sample(seg, k, i, p, r);
+                if (distance(p) < r) return true;
+            }
             return false;
         }
-        // How far the finger is sunk in (radius - nearest), the engine reporting 0 inside.
+        // How far the finger is sunk in (thickness - nearest), the engine reporting 0 inside.
         double sunk(const double c[3])
         {
             hsvr::Vec3 seg[3][2];
             place(c, seg);
             double worst = -1e9;
             for (int k = 0; k < 3; ++k)
-                for (double t : kWrapSamples) worst = (std::max)(worst, radius - distance(seg[k][0] + (seg[k][1] - seg[k][0]) * t));
+                for (int i = 0; i < 5; ++i)
+                {
+                    hsvr::Vec3 p;
+                    double r;
+                    sample(seg, k, i, p, r);
+                    worst = (std::max)(worst, (measured ? r : radius) - distance(p));
+                }
             return worst;
         }
         void solve(double out[3])
@@ -10343,19 +10385,31 @@ namespace
                 ws.cq = component_rotation(g_frig.driver);
                 ws.cs = component_scale_z(g_frig.driver);
                 Vec3 hand = xf_pos(B[g_frig.hand[side]]), mid = xf_pos(B[g_frig.chain[side][2][0]]);
-                // Auto: 15.5% of the hand's length. His fingers' skin sits a median 1.05-1.85 cm from
-                // the bone line (SK_Body_Man LOD0, mid-segment); the framework's 9.5% (0.9 cm) let
-                // every finger sink 0.2-0.9 cm into whatever it held. Hand armour adds
-                // pose_wrap_gauntlet_pad_cm.
-                ws.radius = cfg.pose_wrap_finger_radius_cm > 0.0 ? cfg.pose_wrap_finger_radius_cm / ws.cs : 0.155 * length(mid - hand);
-                if (g.gauntlet) ws.radius += (std::max)(0.0, cfg.pose_wrap_gauntlet_pad_cm) / ws.cs;
+                // The thumb (unmeasured) and a set pose_wrap_finger_radius_cm: one radius down the bone
+                // line, tapered at the joints (the framework's 9.5% of the hand). The other fingers:
+                // the measured shape (kFingerShift/kFingerHalf), plus hand armour on the palm side.
+                ws.radius = cfg.pose_wrap_finger_radius_cm > 0.0 ? cfg.pose_wrap_finger_radius_cm / ws.cs : 0.095 * length(mid - hand);
                 ws.pad = g.pad;
-                ws.crease_floor = (std::min)(1.0, (std::max)(0.0, cfg.pose_wrap_crease_floor));
                 // Unsolved fingers first, then round and round.
                 int f = g.next % 5;
                 for (int k = 0; k < 5; ++k)
                     if (!g.solved[(g.next + k) % 5]) { f = (g.next + k) % 5; break; }
                 ws.f = f;
+                ws.measured = f != 0 && cfg.pose_wrap_finger_radius_cm <= 0.0;
+                if (ws.measured)
+                {
+                    const int(*ch)[3] = g_frig.chain[side];
+                    ws.across = xf_pos(B[ch[1][0]]) - xf_pos(B[ch[4][0]]);
+                    Vec3 seg0 = xf_pos(B[ch[f][1]]) - xf_pos(B[ch[f][0]]);
+                    Vec3 back_hand = xf_rot(B[g_frig.hand[side]]).rotate(Vec3{0, 0, 1}); // the palm faces hand -Z
+                    ws.back_sign = dot(cross(seg0, ws.across), back_hand) >= 0.0 ? 1.0 : -1.0;
+                    // Hand armour, palm side over bare (unpacked meshes): full gauntlets and gloves
+                    // (Hands Rigidity 0.75-1.0; SK_Armor_Hand_Gauntlet_010 +0.92/.84/1.02/.89/1.00,
+                    // +1.02/.83/.75/.79/.84, +.73/.69/.73/.72/.58 per sample) pad every segment;
+                    // half gauntlets (0.7: HalfGauntlets_1/_2 +0.83/+1.26 at t .4) only the first.
+                    double full = (std::max)(0.0, cfg.pose_wrap_gauntlet_pad_cm) / ws.cs, half = (std::max)(0.0, cfg.pose_wrap_halfgauntlet_pad_cm) / ws.cs;
+                    for (int k = 0; k < 3; ++k) ws.armour[k] = g.rigidity >= 0.745 ? full : (g.rigidity > 0.45 && k == 0 ? half : 0.0);
+                }
                 double out[3];
                 ws.solve(out);
                 for (int k = 0; k < 3; ++k) g.curls[f][k] = out[k];
@@ -10691,9 +10745,9 @@ namespace
                 g.since = now;
                 g.ease = (std::max)(0.01, cfg.pose_wrap_ease_s);
                 // Hand armour: the game sets Hands Rigidity (Gauntlets) above its bare 0.4 (0.8 in his
-                // 13:44 playtest with gauntlets on). Read once per grab.
-                g.gauntlet = read_number_variable(pawn, STR("Hands Rigidity (Gauntlets)")) > 0.45;
-                if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls%s", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str(), g.gauntlet ? " (hand armour)" : "");
+                // 13:44 playtest with Gauntlets_10 on). Read once per grab.
+                g.rigidity = read_number_variable(pawn, STR("Hands Rigidity (Gauntlets)"));
+                if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls (hand rigidity %.2f)", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str(), g.rigidity);
             }
             // (Let go first: a hand that drops its hold before it was seated must not seat a stale thing.)
             if (comp && g.on && !g.seated && g.seat_tries < 5 && cfg.pose_grab_seat_palm)
