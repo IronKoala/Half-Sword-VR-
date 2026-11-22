@@ -75,6 +75,12 @@ Before and after:
                                     7.6:hsvr.expect mount_l = 0 ...
 ```
 
+Use `hand_speed` only for "arrived after a reach": an idle fake hand drifts at 4-6 cm/s, so a wait for a
+still hand after `hsvr.arm_move` can time out; keep a fixed settle there (0.5 s).
+
+Measured 2026-11-22 (same dll, shared launches): xbow_r 42 s -> 23 s, bastard_2h 45 s -> 38 s, results the
+same. Reaches took 0.2-1.4 s where the files waited 3-4 s.
+
 Keep a fixed gap where the test is about time passing (a settle, a hold that must last, a sample every
 second): a wait only replaces "long enough for X to have happened". Use the old file's gap as the timeout,
 so a slow run fails no sooner than before.
@@ -92,3 +98,11 @@ slice of `HalfSwordVR.log` (the first case's slice starts at the launch), save p
 `launch-<n>` folder per launch with the whole log, UE4SS.log and the save after it.
 
 Judge scripts that read a run folder's `HalfSwordVR.log` work on a case folder as before.
+
+## Side effects to know
+
+- The mod keeps its newest 40 `logs\HalfSwordVR-*.log`; the runner copies any not yet kept to
+  `private\play-logs` before it launches, so test launches never lose his play logs.
+- Every launch with the test room adds one save copy (~5 MB) to the mod's `save_backups` (3.3 GB on
+  2026-11-22). Nothing deletes them.
+- Worked examples (steps with waits): `HalfSwordDecomp\private\pctest-check\wait\`.

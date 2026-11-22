@@ -60,6 +60,13 @@ foreach ($f in $files) { if ((Get-Sha1 $f.live) -ne (Get-Sha1 $f.bak)) { throw "
 if (Test-Path $cmdPath) { throw "someone left a commands file; not touching anything" }
 if (Get-ChildItem "$mod\test-save-*.sav" -ErrorAction SilentlyContinue) { throw "save probes from another run are in the mod folder; not touching anything" }
 New-Item -ItemType Directory -Force $Out | Out-Null
+# The mod keeps only its newest 40 logs\HalfSwordVR-*.log, so test launches would push his play logs out:
+# every one not yet kept is copied to private\play-logs first (only new ones: cheap after the first run).
+$keep = "$priv\play-logs"
+New-Item -ItemType Directory -Force $keep | Out-Null
+foreach ($lg in @(Get-ChildItem "$mod\logs" -Filter "HalfSwordVR-*.log" -ErrorAction SilentlyContinue)) {
+  if (-not (Test-Path (Join-Path $keep $lg.Name))) { Copy-Item $lg.FullName $keep }
+}
 Copy-Item $List "$Out\list.txt"
 # Progress goes to the screen and <Out>\run.txt (never into a function's return value).
 function Say([string]$t) { Add-Content "$Out\run.txt" $t -Encoding ascii; Write-Host $t }
