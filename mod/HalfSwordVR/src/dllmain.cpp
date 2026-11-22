@@ -1543,6 +1543,42 @@ namespace
         return false;
     }
 
+    // A free hand stops at the world (Matthew 2026-11-22 03:56: "my hand defies the laws of physics…
+    // I can just put my hand inside of the post"; nothing stopped it, it went wherever the controller
+    // was). A sphere swept from his shoulder to his palm on the Visibility channel, complex collision
+    // (the Yard fence is triangles only); creatures and weapons are looked through. `stop`: where the
+    // sphere's centre stops. False when nothing is in the way.
+    bool hand_world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, hsvr::Vec3& stop)
+    {
+        static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        if (!cdo || !gs || !g_pose.pawn) return false;
+        Call trace(cdo, STR("SphereTraceSingle"));
+        if (!trace.fn) return false;
+        trace.object(STR("WorldContextObject"), g_pose.pawn);
+        trace.three(STR("Start"), from.x, from.y, from.z);
+        trace.three(STR("End"), to.x, to.y, to.z);
+        trace.number(STR("Radius"), radius);
+        trace.flag(STR("bTraceComplex"), true);
+        trace.flag(STR("bIgnoreSelf"), true);
+        if (!trace.run()) return false;
+        FProperty* ret = trace.param(STR("ReturnValue"));
+        if (!ret || !(*(trace.buffer.data() + ret->GetOffset_Internal()) & 1)) return false;
+        FProperty* hit = trace.param(STR("OutHit"));
+        if (!hit) return false;
+        Call b(gs, STR("BreakHitResult"));
+        FProperty* hp = b.param(STR("Hit"));
+        if (!hp) return false;
+        std::memcpy(b.buffer.data() + hp->GetOffset_Internal(), trace.buffer.data() + hit->GetOffset_Internal(), (std::min)(hp->GetSize(), hit->GetSize()));
+        b.run();
+        UObject* actor = b.object_result(STR("HitActor"));
+        if (actor && (actor == g_pose.pawn || is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")))) return false;
+        FProperty* ip = b.param(STR("bInitialOverlap"));
+        if (ip && *(b.buffer.data() + ip->GetOffset_Internal()) != 0) return false; // his shoulder already in it: leave the hand be
+        stop = b.vec(STR("Location"));
+        return true;
+    }
+
     struct FootState
     {
         bool valid = false;
@@ -2028,6 +2064,9 @@ namespace
     bool hand_on_grab(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool hand_rides_grab(int side);
     bool hand_on_scenery(int side); // the hand is pinned on fixed scenery (a world grab)
+    bool hand_has_weapon(int side); // the game's hold has a weapon (or fist) in this hand
+    bool g_wrap_on_side(int side);
+    bool hand_world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, hsvr::Vec3& stop);
     bool stuck_is_thrust(UObject* weapon);
     bool two_hand_pose(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool hand_on_scabbard(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
@@ -2932,6 +2971,19 @@ namespace
         g_solved_on[side] = on_weapon ? 1 : 0;
         if (two_hand_pose(side, target, Wh)) on_weapon = true, g_solved_on[side] |= 2;
         if (!on_weapon && hand_on_scabbard(side, target, Wh)) on_weapon = true, g_solved_on[side] |= 4;
+        // A free hand stops at walls and scenery (the palm's middle, pose_hand_world_radius_cm round it).
+        bool stopped = false;
+        if (!on_weapon && cfg.pose_hand_world_stop && !hand_has_weapon(side) && !g_wrap_on_side(side))
+        {
+            Vec3 palm_mid = target + fingers_world * cfg.pose_hand_world_reach_cm;
+            Vec3 at;
+            if (hand_world_sweep(S, palm_mid, cfg.pose_hand_world_radius_cm, at))
+            {
+                target = target + (at - palm_mid);
+                stopped = true;
+                HSVR_LOG_EVERY(1.0, "Hand: %s hand stopped by the world %.1f cm short of your controller", side == 0 ? "left" : "right", length(at - palm_mid));
+            }
+        }
         if (!on_weapon && hand_on_grab(side, cfg, target, Wh))
         {
             on_weapon = true, g_solved_on[side] |= 8;
@@ -2944,7 +2996,7 @@ namespace
         // Where your real hand is, while his stays on a stopped weapon.
         ghost_hand(side, cfg, on_weapon && hand_on_weapon_amount(side) > 0.5 && length(controller_wrist - target) > cfg.pose_ghost_from_cm, controller_wrist,
                    controller_rot);
-        if (on_weapon)
+        if (on_weapon || stopped)
         {
             to = target - S;
             double d = length(to);
@@ -5635,6 +5687,7 @@ namespace
         double far_since = -1.0, far_logged = 0.0;
     };
     HoldState g_hold[2];
+    bool hand_has_weapon(int side) { return g_hold[side].weapon != nullptr; }
 
     // The game's off-hand search: with a two-handed weapon (longswords) in one hand and the other
     // free, about once a second the game drops "Block <other> OffHand Grab", and on the next tick
