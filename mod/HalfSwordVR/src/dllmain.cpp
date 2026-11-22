@@ -14868,12 +14868,45 @@ namespace
                  stab_var(wp, STR("Piercing")));
     }
 
+    // hold_blocker_log: what a weapon in his hands hit (his own parts too, and whose), by component.
+    void hold_blocker_hit(Unreal::UnrealScriptFunctionCallableContext& context, UFunction* fn)
+    {
+        UObject* weapon = context.Context;
+        uint8_t* locals = context.TheStack.Locals();
+        if (!weapon || !fn || !locals || !hit_is_his_item(weapon)) return;
+        UObject *other = nullptr, *other_comp = nullptr;
+        FProperty* hit_prop = nullptr;
+        double ni[3] = {0, 0, 0};
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            uint8_t* at = locals + p->GetOffset_Internal();
+            if (n == STR("OtherActor") || n == STR("Other Actor")) other = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("OtherComp") || n == STR("Other Comp")) other_comp = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("NormalImpulse") || n == STR("Normal Impulse")) read_three(at, p, ni);
+            else if (n == STR("Hit")) hit_prop = p;
+        }
+        if (!other && !other_comp) return;
+        // Once per component per 0.2 s.
+        static std::unordered_map<UObject*, double> last;
+        double now = hsvr::now_seconds();
+        UObject* key = other_comp ? other_comp : other;
+        if (auto it = last.find(key); it != last.end() && now - it->second < 0.2) return;
+        if (last.size() > 512) last.clear();
+        last[key] = now;
+        HitInfo hit = break_hit(context, hit_prop);
+        HSVR_LOG("Blocker: hit %s %ls.%ls (hit shape %ls, bone %ls) by %ls, impulse %.0f", other == g_hitf.pawn ? "OWN" : "other",
+                 other ? other->GetName().c_str() : STR("?"), other_comp ? other_comp->GetName().c_str() : STR("?"), hit.comp ? hit.comp->GetName().c_str() : STR("?"),
+                 hit.bone.ToString().c_str(), weapon->GetName().c_str(), length(hsvr::Vec3{ni[0], ni[1], ni[2]}));
+    }
+
     void stab_hit_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
         gc_sync();
         HSVR_PROF(PerfStabHit);
         // Only a weapon he holds, or something hitting one he holds (every weapon's hits come here).
         if (!g_hitf.pawn || (!hit_is_his_item(context.Context) && !hit_is_his_item(hit_other_actor(context, static_cast<UFunction*>(custom_data))))) return;
+        if (hsvr::config().hold_blocker_log) hold_blocker_hit(context, static_cast<UFunction*>(custom_data));
         // Hit vibration first: it reads the game's own impulse before the stab assist may raise it.
         hit_haptics_weapon(context, static_cast<UFunction*>(custom_data));
         {
@@ -18663,8 +18696,9 @@ namespace
                 if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
             }
             // Deferred: no collision is set before it is registered or has a mesh, so it never gets physics
-            // bodies (a primitive with collision off creates no physics state). Playtest 2026-11-21 11:21:
-            // the first version (collision turned off after the mesh) stopped his held weapons at "Head".
+            // bodies (a primitive with collision off creates no physics state). This is not what stopped his
+            // held weapons at the head (131f922 says it was): that also happens with no copy at all (run
+            // headcontact2, 2026-11-22); see pose_hold_ignore_own_helmet.
             add.flag(STR("bDeferredFinish"), true);
             if (!add.run() || !add.object_result())
             {
@@ -18785,6 +18819,229 @@ namespace
         }
         fade_set_params(cfg, true);
         return true;
+    }
+
+    // ---- A held weapon and his own helmet (pose_hold_ignore_own_helmet) ----------------------------
+    // Willie_BP "Set Up Proxy Collisions" welds the worn helmet's collision mesh onto CM_Helmet (a
+    // simulating 1 cm sphere on channel 20). ignore_arm_collision pairs the weapon only with his body
+    // mesh's bones. Here the same kind of pair (a free joint with collision disabled) joins every static
+    // mesh part of the held weapon to CM_Helmet and each part welded onto it. Only these pairs: the
+    // weapon still hits everyone else's helmet, and others still hit his.
+    struct HelmetIgnore
+    {
+        std::vector<UObject*> weapon_parts, helmet_parts; // what the joints were made for (compared only)
+        std::vector<UObject*> joints;
+    };
+    HelmetIgnore g_helmet_ignore[2];
+
+    // The component and the static meshes attached below it (reads AttachChildren: no engine allocation).
+    void attached_meshes(UObject* root, UObject* skip, std::vector<UObject*>& out, int depth = 0)
+    {
+        if (!root || root == skip || depth > 6 || gone(root)) return;
+        if (depth == 0 || root->GetClassPrivate()->GetName().find(STR("StaticMeshComponent")) != std::wstring::npos) out.push_back(root);
+        FProperty* p = prop_chain(root, STR("AttachChildren"));
+        if (!p) return;
+        const RawArray* kids = reinterpret_cast<const RawArray*>(reinterpret_cast<uint8_t*>(root) + p->GetOffset_Internal());
+        for (int32_t i = 0; kids->Data && i < kids->Num && i < 256; ++i)
+            attached_meshes(reinterpret_cast<UObject*>(kids->Data[i]), skip, out, depth + 1);
+    }
+
+    void clear_helmet_ignore(int side)
+    {
+        HelmetIgnore& g = g_helmet_ignore[side];
+        for (UObject* j : g.joints)
+            if (j && !gone(j) && object_alive(j))
+            {
+                Call d(j, STR("K2_DestroyComponent"));
+                d.object(STR("Object"), j);
+                d.run();
+            }
+        if (!g.joints.empty()) HSVR_LOG("Helmet pairs: %s hand: %zu removed", side == 0 ? "left" : "right", g.joints.size());
+        g = HelmetIgnore{};
+    }
+
+    UObject* no_collision_pair(UObject* pawn, UClass* cls, UObject* a, UObject* b)
+    {
+        Call add(pawn, STR("AddComponentByClass"));
+        add.object(STR("Class"), cls);
+        add.flag(STR("bManualAttachment"), false);
+        if (FProperty* t = add.param(STR("RelativeTransform")))
+        {
+            uint8_t* at = add.buffer.data() + t->GetOffset_Internal();
+            UScriptStruct* type = struct_type(t);
+            if (FProperty* r = struct_member(type, STR("Rotation")))
+                if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                {
+                    uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                    if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                    else *reinterpret_cast<float*>(wat) = 1.0f;
+                }
+            if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+        }
+        add.flag(STR("bDeferredFinish"), false);
+        if (!add.run()) return nullptr;
+        UObject* j = add.object_result();
+        if (!j) return nullptr;
+        // Free in every direction and no drives: it holds nothing, it only switches off the pair's collision.
+        for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
+        {
+            Call c(j, fn);
+            c.byte(STR("ConstraintType"), 0);
+            c.number(STR("LimitSize"), 0.0);
+            c.run();
+        }
+        for (const TCHAR* fn : {STR("SetAngularSwing1Limit"), STR("SetAngularSwing2Limit"), STR("SetAngularTwistLimit")})
+        {
+            Call c(j, fn);
+            c.byte(STR("MotionType"), 0);
+            c.run();
+        }
+        Call dc(j, STR("SetDisableCollision"));
+        dc.first_flag(true);
+        dc.run();
+        Call join(j, STR("SetConstrainedComponents"));
+        join.object(STR("Component1"), a);
+        join.name(STR("BoneName1"), FName());
+        join.object(STR("Component2"), b);
+        join.name(STR("BoneName2"), FName());
+        join.run();
+        return j;
+    }
+
+    std::wstring name_list(const std::vector<UObject*>& objects)
+    {
+        std::wstring s;
+        for (UObject* o : objects) s += (s.empty() ? STR("") : STR(", ")) + o->GetName();
+        return s;
+    }
+
+    void helmet_ignore_tick(const hsvr::Config& cfg)
+    {
+        static bool tracked = on_freed([] {
+            for (HelmetIgnore& g : g_helmet_ignore)
+            {
+                auto dead = [](UObject* o) { return gone(o); };
+                g.joints.erase(std::remove_if(g.joints.begin(), g.joints.end(), dead), g.joints.end());
+                // A freed part forgets what the joints were made for, so they are made again.
+                if (std::any_of(g.weapon_parts.begin(), g.weapon_parts.end(), dead) || std::any_of(g.helmet_parts.begin(), g.helmet_parts.end(), dead))
+                {
+                    g.weapon_parts.clear();
+                    g.helmet_parts.clear();
+                }
+            }
+        });
+        static double last = -1.0;
+        double now = hsvr::now_seconds();
+        bool on = cfg.pose_hold_ignore_own_helmet;
+        if (!on && g_helmet_ignore[0].joints.empty() && g_helmet_ignore[1].joints.empty()) return;
+        if (on && now - last < 0.1) return;
+        last = now;
+        UObject* pawn = on ? live_posed_pawn() : nullptr;
+        UObject* helmet = pawn ? object_property(pawn, STR("CM_Helmet")) : nullptr;
+        for (int side = 0; side < 2; ++side)
+        {
+            HelmetIgnore& g = g_helmet_ignore[side];
+            UObject* weapon = helmet ? g_arm_ignore[side].weapon : nullptr; // held by this hand, as ignore_arm_collision has it
+            if (weapon && (gone(weapon) || !object_alive(weapon))) weapon = nullptr;
+            UObject* base = weapon ? object_property(weapon, STR("BaseMesh")) : nullptr;
+            if (!base)
+            {
+                clear_helmet_ignore(side);
+                continue;
+            }
+            std::vector<UObject*> wp, hp;
+            attached_meshes(base, object_property(weapon, STR("Scabbard")), wp);
+            attached_meshes(helmet, nullptr, hp);
+            if (wp == g.weapon_parts && hp == g.helmet_parts) continue;
+            clear_helmet_ignore(side);
+            UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+            if (!cls) continue;
+            for (UObject* w : wp)
+                for (UObject* h : hp)
+                    if (UObject* j = no_collision_pair(pawn, cls, w, h)) g.joints.push_back(j);
+            g.weapon_parts = wp;
+            g.helmet_parts = hp;
+            HSVR_LOG("Helmet pairs: %s hand: %zu made, weapon [%ls] x his helmet [%ls]", side == 0 ? "left" : "right", g.joints.size(), name_list(wp).c_str(),
+                     name_list(hp).c_str());
+        }
+    }
+
+    // hold_blocker_log: while a hold is stopped short by more than 3 cm, everything within 6 cm of the
+    // weapon's line (whose, its collision, and its answer to each of the weapon's part channels).
+    void hold_blocker_tick(const hsvr::Config& cfg)
+    {
+        if (!cfg.hold_blocker_log) return;
+        static double last = -1.0;
+        double now = hsvr::now_seconds();
+        if (now - last < 0.5) return;
+        UObject* pawn = live_posed_pawn();
+        static UObject* ksl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        if (!pawn || !ksl) return;
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* weapon = g_hold[side].weapon;
+            if (!weapon || g_hold[side].blocked_cm <= 3.0 || gone(weapon) || !object_alive(weapon)) continue;
+            UObject* base = object_property(weapon, STR("BaseMesh"));
+            UObject* pommel = object_property(weapon, STR("PommelSk"));
+            UObject* tip = object_property(weapon, STR("TippyTipScene"));
+            if (!base || !pommel || !tip) continue;
+            last = now;
+            std::vector<UObject*> parts, found_all;
+            attached_meshes(base, object_property(weapon, STR("Scabbard")), parts);
+            std::vector<int> channels;
+            for (UObject* p : parts)
+            {
+                Call t(p, STR("GetCollisionObjectType"));
+                t.run();
+                int ch = byte_result(t);
+                if (ch >= 0 && std::find(channels.begin(), channels.end(), ch) == channels.end()) channels.push_back(ch);
+            }
+            hsvr::Vec3 a = component_location(pommel), b = component_location(tip);
+            static uint8_t types[32];
+            for (int i = 0; i < 32; ++i) types[i] = (uint8_t)i;
+            for (int i = 0; i <= 12; ++i)
+            {
+                hsvr::Vec3 at = a + (b - a) * (i / 12.0);
+                Call ov(ksl, STR("SphereOverlapComponents"));
+                FProperty* ot = ov.param(STR("ObjectTypes"));
+                FProperty* out = ov.param(STR("OutComponents"));
+                if (!ot || !out) break;
+                ov.object(STR("WorldContextObject"), pawn);
+                ov.three(STR("SpherePos"), at.x, at.y, at.z);
+                ov.number(STR("SphereRadius"), 6.0);
+                RawArray* list = reinterpret_cast<RawArray*>(ov.buffer.data() + ot->GetOffset_Internal());
+                list->Data = reinterpret_cast<void**>(types);
+                list->Num = list->Max = 32;
+                ov.run();
+                RawArray* found = reinterpret_cast<RawArray*>(ov.buffer.data() + out->GetOffset_Internal());
+                for (int32_t k = 0; found->Data && k < found->Num; ++k)
+                {
+                    UObject* o = reinterpret_cast<UObject*>(found->Data[k]);
+                    if (o && o->GetOuterPrivate() != weapon && std::find(found_all.begin(), found_all.end(), o) == found_all.end()) found_all.push_back(o);
+                }
+                found->Data = nullptr; // test only: the engine's small list is left
+                found->Num = found->Max = 0;
+                list->Data = nullptr;
+                list->Num = list->Max = 0;
+            }
+            std::wstring text;
+            for (UObject* o : found_all)
+            {
+                Call e(o, STR("GetCollisionEnabled"));
+                e.run();
+                text += (text.empty() ? STR("") : STR("; "));
+                text += o->GetOuterPrivate() == pawn ? std::wstring(STR("OWN")) : o->GetOuterPrivate() ? o->GetOuterPrivate()->GetName() : std::wstring(STR("?"));
+                text += STR(".") + o->GetName() + STR(" c") + std::to_wstring(byte_result(e));
+                for (int ch : channels)
+                {
+                    Call r(o, STR("GetCollisionResponseToChannel"));
+                    r.byte(STR("Channel"), (uint8_t)ch);
+                    r.run();
+                    text += STR(" r") + std::to_wstring(ch) + STR("=") + std::to_wstring(byte_result(r));
+                }
+            }
+            HSVR_LOG("Blocker: %s hold stopped %.1f cm; along the weapon: %ls", side == 0 ? "left" : "right", g_hold[side].blocked_cm, text.empty() ? STR("nothing") : text.c_str());
+        }
     }
 
     void hide_own_head(const hsvr::Config& cfg)
@@ -24268,6 +24525,7 @@ namespace
         // frames, menus, the switch off), so the pose still starts and releases.
         if (!cfg.pose_in_anim_update || hsvr::now_seconds() - g_pose_in_anim_at.load() > 0.25) { HSVR_SUB("tick:pose_body"); pose_body(cfg); }
         { HSVR_SUB("tick:hide_own_head"); hide_own_head(cfg); }
+        { HSVR_SUB("tick:helmet_ignore"); helmet_ignore_tick(cfg); hold_blocker_tick(cfg); }
         { HSVR_SUB("tick:grab_button"); grab_button(cfg, hsvr::controllers_state(), shared.menu_up.load()); }
         { HSVR_SUB("tick:watch_vars_tick"); watch_vars_tick(); }
         { HSVR_SUB("tick:whoosh_refresh"); whoosh_refresh(cfg); }
