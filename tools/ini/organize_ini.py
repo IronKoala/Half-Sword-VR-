@@ -375,6 +375,7 @@ LAYOUT = [
         ('pose_hold_contact_cm', 'A held weapon this far short of where the hold sent it counts as blocked (cm).'),
         ('pose_hold_ignore_hand', '1 = the held weapon never collides with the hand holding it.'),
         ('pose_hold_ignore_body', '1 = the held weapon never collides with his own body (B&S).'),
+        ('pose_hold_ignore_own_helmet', "1 = your held weapon also passes through your own worn helmet's collision. Others' helmets are still hit."),
         ('pose_hold_block_offhand_search', "1 = the game's off-hand search grip stays off while the mod holds a weapon (it shoved longswords)."),
     ]),
     ('Stamina and strength', '', [
@@ -563,6 +564,7 @@ LAYOUT = [
         ('log_controllers', '1 = log controller positions and buttons once a second.'),
         ('log_body', '1 = log his body, head and hands once a second.'),
         ('log_fingers', '1 = log finger bends once a second while posed.'),
+        ('hold_blocker_log', 'Test: log which component a held weapon hits or is held off by (writes a lot).'),
         ('log_wrap', '1 = log the grip wrap and grab pull.'),
         ('log_body_grab', '1 = log body grabs every 0.1 s.'),
         ('log_joint_strain', "Log a held Willie's joint bends, twists and dislocation state."),

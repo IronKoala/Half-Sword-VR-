@@ -432,6 +432,10 @@ namespace hsvr
         double pose_bs_two_rot_k = 2200.0, pose_bs_two_rot_c = 120.0, pose_bs_two_rot_max = 500.0;
         int pose_bs_iterations = 8;
         double pose_bs_two_let_go_cm = 45.0; // B&S gaps reach 18 cm (p95) on fast two-hand swings
+        // A worn helmet's collision is not part of his body mesh: the game welds it onto CM_Helmet, which
+        // pose_hold_ignore_body doesn't cover. On: the held weapon ignores that too (his own only).
+        bool pose_hold_ignore_own_helmet = true;
+        bool hold_blocker_log = false; // test: name what a held weapon hits, and what is along it while it is held off
         bool pose_hold_ignore_body = true;   // the held weapon never collides with his own body (B&S)
         double pose_bs_max_spin = 60.0; // rad/s
         // The weight's own swing never spins it faster than the turn wanted plus this (rad/s): one tick
