@@ -490,7 +490,7 @@ namespace hsvr
                     {
                         // Only the pattern: other buzzes and hits are dropped, so its gaps stay silent.
                         float v = envelope_at(g_sig[h], (std::max)(0.0, u)) * g_sig[h].volume;
-                        if (v > 0.01f) pulse(xr, session, h, v, 1.0 / 60.0);
+                        if (v > 0.01f) pulse(xr, session, h, v, 1.0 / 30.0); // as hits: holds down to 30 fps
                         continue;
                     }
                 }
