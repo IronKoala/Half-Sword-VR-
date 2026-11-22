@@ -1203,6 +1203,7 @@ namespace
         hsvr::Vec3 mesh_offset_local; // visible mesh relative to the actor, in the actor's heading frame
         hsvr::Quat mesh_rotation_local;
         hsvr::Quat head_offset;       // body frame -> head bone
+        bool calib_snap = false;      // calibrated against a facing other than the control yaw: the first placement teleports
         ArmCalibration arm[2];
         double last_check = 0.0;
         hsvr::Vec3 target[2]; // last hand targets (where the hand bone goes, from the controller)
@@ -1369,7 +1370,28 @@ namespace
         using namespace hsvr;
         UObject* d = g_pose.driver;
         double heading = actor_heading(g_pose.pawn);
-        Quat body = quat_from_yaw_deg(heading);
+        // The body needn't face the control yaw yet (restart 2026-11-22 10:04Z: mesh 90, control 77, and every
+        // frame stored below was 13 deg off for that life). The mesh component's forward is its +Y; unlike
+        // the bones it carries no animation twist, and it equals the control yaw to 0.00 deg in a good spawn.
+        auto flat_yaw = [](const Vec3& v) { return std::atan2(v.y, v.x) * kRadToDeg; };
+        auto yaw_between = [](double a, double b) {
+            double r = std::fmod(a - b, 360.0);
+            return r > 180.0 ? r - 360.0 : r < -180.0 ? r + 360.0 : r;
+        };
+        Vec3 mesh_forward = component_rotation(g_pose.mesh).rotate(Vec3{0, 1, 0});
+        bool facing_known = std::hypot(mesh_forward.x, mesh_forward.y) > 0.5; // not lying down
+        double facing = facing_known ? flat_yaw(mesh_forward) : heading;
+        double yaw_error = yaw_between(facing, heading);
+        bool by_facing = cfg.pose_calib_body_facing && facing_known;
+        auto line_yaw = [&](const char* left, const char* right) {
+            Vec3 across = socket_location(g_pose.mesh, bone_fname(right)) - socket_location(g_pose.mesh, bone_fname(left));
+            return yaw_between(flat_yaw(across) - 90.0, facing);
+        };
+        HSVR_LOG("Calibration: the body faces %.2f, control yaw %.2f: error %.2f deg (%s); against that facing hips %.2f, shoulders %.2f deg", facing, heading, yaw_error,
+                 by_facing ? "taken out" : cfg.pose_calib_body_facing ? "kept: the mesh lies flat" : "kept: pose_calib_body_facing=0",
+                 line_yaw("thigh_l", "thigh_r"), line_yaw("clavicle_l", "clavicle_r"));
+        g_pose.calib_snap = by_facing && std::fabs(yaw_error) > 1.0;
+        Quat body = quat_from_yaw_deg(by_facing ? facing : heading);
         Quat body_inv = body.inverse();
         Vec3 actor = actor_location(g_pose.pawn);
 
@@ -1380,6 +1402,14 @@ namespace
 
         Vec3 head = socket_location(d, bone_fname("Head"));
         g_pose.head_offset = (body_inv * socket_rotation(d, bone_fname("Head"))).normalized();
+        {
+            // The head bone's forward is its +Y. Whatever yaw the spawn animation had it at is taken out, so the
+            // helmet's front is straight ahead of the eyes. (Over 45 deg: not a neutral head, left as it is.)
+            double head_yaw = flat_yaw(g_pose.head_offset.rotate(Vec3{0, 1, 0}));
+            bool straighten = by_facing && std::fabs(head_yaw) <= 45.0;
+            if (straighten) g_pose.head_offset = (quat_from_yaw_deg(-head_yaw) * g_pose.head_offset).normalized();
+            HSVR_LOG("Calibration: head bone %.2f deg from straight ahead (%s)", head_yaw, straighten ? "taken out" : "kept");
+        }
         g_pose_anchor_local = body_inv.rotate(head - actor);
         g_pose_anchor_fixed = true;
         g_pose_room_moved_local = {};
@@ -3865,6 +3895,8 @@ namespace
             static Vec3 last_place;
             static bool have_last = false;
             bool jump = !have_last || length(place - last_place) > cfg.pose_teleport_above_cm;
+            if (g_pose.calib_snap) jump = true; // turned onto the control yaw: not a swing of the bodies
+            g_pose.calib_snap = false;
             set_component_transform(mesh, place, (body * g_pose.mesh_rotation_local).normalized(), jump || !cfg.pose_move_bodies);
             last_place = place;
             have_last = true;
@@ -4184,6 +4216,19 @@ namespace
             return a;
         };
         double now = now_seconds();
+        {
+            // This runs on the posed pawn's tick, and that can still be the last body's after the controller
+            // has moved on to a new one (pose_body hasn't seen the change yet). Playtest 2026-11-22 10:04Z: the
+            // control yaw read 90 at the new spawn and 77, the last body's, by its calibration. This is the
+            // mod's only write of that yaw; which tick did it wasn't logged.
+            UObject* now_pawn = object_property(controller, STR("Pawn"));
+            if (now_pawn != g_pose.pawn && hsvr::config().pose_turn_spawn_guard)
+            {
+                if (g_turn_valid) HSVR_LOG("Turn: a new body: its own facing (%.2f) is left alone (the last body's was %.2f)", (double)rotation->Yaw, g_last_written_yaw);
+                g_turn_valid = false;
+                return;
+            }
+        }
         if (!g_pose_cfg_turn)
         {
             if (g_turn_valid) HSVR_LOG("Turn: body turning off; the mouse turns the body again");

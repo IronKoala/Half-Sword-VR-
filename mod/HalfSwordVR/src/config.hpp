@@ -432,6 +432,9 @@ namespace hsvr
         double pose_bs_two_rot_k = 2200.0, pose_bs_two_rot_c = 120.0, pose_bs_two_rot_max = 500.0;
         int pose_bs_iterations = 8;
         double pose_bs_two_let_go_cm = 45.0; // B&S gaps reach 18 cm (p95) on fast two-hand swings
+        // Spawn yaw (playtest 2026-11-22 10:04Z: helmet, chest, hips and lean 13 deg off for a whole life).
+        bool pose_turn_spawn_guard = true;  // body turning never writes the last body's yaw onto a new one
+        bool pose_calib_body_facing = true; // calibrate against the way the body really faces, not the control yaw
         bool pose_hold_ignore_body = true;   // the held weapon never collides with his own body (B&S)
         double pose_bs_max_spin = 60.0; // rad/s
         // The weight's own swing never spins it faster than the turn wanted plus this (rad/s): one tick

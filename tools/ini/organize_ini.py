@@ -158,6 +158,8 @@ LAYOUT = [
     ("Body posing", "Your character posed from the headset and controllers.", [
         ("pose_body", "Master switch for the posed body."),
         ("pose_head", ""),
+        ("pose_turn_spawn_guard", "1 = after a respawn the new body keeps its own facing (0 = the last body's yaw can be written onto it: helmet and body off-centre)."),
+        ("pose_calib_body_facing", "1 = at spawn your head and body are measured against the way the body really faces."),
         ("pose_head_lock", "1 = head held at the headset so the helmet stays still in view."),
         ("pose_head_lock_max_cm", ""),
         ("pose_lean_pitch_dead_deg", ""),
