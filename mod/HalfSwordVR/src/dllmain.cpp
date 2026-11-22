@@ -16228,6 +16228,42 @@ namespace
     // Weapon Slot <S> 1/2 variables; 3 Back) and occupancy; Create Sheath Constraint <S> then puts its
     // BaseMesh on that socket and joins it to his mesh there; Set Up <S> Hand Weapon(None) lets go.
     // Drawing it again is the plain no-scabbard grab the draw already does.
+    // k_slots' index of a side's belt/back slot (Slot byte 0, 1, 2).
+    int slot_index(int ts, int slot) { return slot == 2 ? 4 : (ts == 1 ? 0 : 2) + slot; }
+
+    // The game's own Check Scabbard Unsheath State <T> on one slot's joint, once, with this blade length
+    // (its parameters, as ExecuteUbergraph @518007 / @518716 passes them; Sheath Enum 0 R1, 1 R2, 2 Back,
+    // 3 L1, 4 L2). False if it could not be called.
+    bool run_slot_check(UObject* pawn, int ts, int slot, double length)
+    {
+        UObject* joint = object_property(pawn, k_slots[slot_index(ts, slot)].constraint);
+        if (!object_alive(joint)) return false;
+        Call c(pawn, ts == 0 ? STR("Check Scabbard Unsheath State L") : STR("Check Scabbard Unsheath State R"));
+        if (!c.param(STR("Sheath Constraint")) || !c.param(STR("Sheath Enum")) || !c.param(STR("Length"))) return false;
+        c.object(STR("Sheath Constraint"), joint);
+        c.byte(STR("Sheath Enum"), (uint8_t)(slot == 2 ? 2 : (ts == 1 ? 0 : 3) + slot));
+        c.number(STR("Length"), length);
+        return c.run();
+    }
+
+    // Locks what was just hung without a scabbard on <T>'s slot. The game's Check does that only with hand
+    // <T> empty: such a joint's second body is his Mesh, so its Z is the hip's height and "Z <= 20" never
+    // holds (Check Scabbard Unsheath State L @1117-1751, R @1529-2330). So it runs once with <T>'s grip
+    // read as 0, not crossed, not blocked: that path only tags the joint "Sheathed", sets Sheath Slot <T>
+    // 3 and locks the limits (L @2022-2163 + @4949, R @2505-2646 + @5766), and lets go of nothing.
+    bool lock_hung(UObject* pawn, int ts, int slot)
+    {
+        const TCHAR* grip_var = ts == 0 ? STR("L_GripType_Current") : STR("R_GripType_Current");
+        double grip = read_number_variable(pawn, grip_var);
+        if (grip < 0.0 || !set_variable(pawn, grip_var, 0.0)) return false;
+        set_bool_property(pawn, STR("Cross Unsheath"), false);
+        set_bool_property(pawn, ts == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
+        bool ran = run_slot_check(pawn, ts, slot, 0.0);
+        set_variable(pawn, grip_var, grip);
+        UObject* joint = object_property(pawn, k_slots[slot_index(ts, slot)].constraint);
+        return ran && joint && has_tag(joint, STR("ComponentTags"), STR("Sheathed"));
+    }
+
     // Across the body, without a scabbard: the game's Assign <S> only fills its own hand's side, so the
     // mod does Assign's bookkeeping for the other side (Sheath Slot <T>, <T> Sheath Slot Name, Current
     // Scabbard <T> None) and calls Create Sheath Constraint <T>, which reads Weapon <T>: that is set to the
@@ -16256,6 +16292,7 @@ namespace
         bool made = make.run();
         set_variable(pawn, weapon_t, 0.0, other_held, nullptr);
         UObject* now_in = object_property(pawn, slot == 2 ? STR("Weapon Slot Back") : nm(slot == 0 ? L"Weapon Slot %ls 1" : L"Weapon Slot %ls 2").c_str());
+        if (!made || now_in != w) set_variable(pawn, nm(L"Sheath Slot %ls").c_str(), 3.0); // nothing for Check <T> to finish
         if (!made)
         {
             HSVR_LOG("Holster: no \"Create Sheath Constraint %ls\"; %s hand drops %ls", T, hand, w->GetName().c_str());
@@ -16267,10 +16304,14 @@ namespace
                      hand, w->GetName().c_str(), d, socket.c_str(), now_in ? "something else" : "nothing", T);
             return false;
         }
+        bool locked = lock_hung(pawn, ts, slot);
+        if (!locked)
+            HSVR_LOG("Holster: %ls is on %s, but the game's Check %ls did not lock it: it can slide until that hand is empty", w->GetName().c_str(), socket.c_str(), T);
         drop_weapon(side, pawn, false);
         controllers_buzz(side, 0.4f);
-        HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s at %.1f m/s: hung across the body (SheathSlot %.0f, slot %ls %d, other hand %s; concrete R %.0f L %.0f)%s",
-                 hand, w->GetName().c_str(), d, socket.c_str(), g_hand_world_v[side], kind, T, (int)slot + 1, other_held ? "holding something (put back)" : "empty",
+        HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s at %.1f m/s: hung across the body (SheathSlot %.0f, slot %ls %d, %s, other hand %s; concrete R %.0f L %.0f)%s",
+                 hand, w->GetName().c_str(), d, socket.c_str(), g_hand_world_v[side], kind, T, (int)slot + 1, locked ? "locked" : "NOT locked",
+                 other_held ? "holding something (put back)" : "empty",
                  read_number_variable(pawn, STR("R Sheath Slot Concrete")), read_number_variable(pawn, STR("L Sheath Slot Concrete")), ok ? "" : " (a game variable was NOT set)");
         return true;
     }
