@@ -8,13 +8,15 @@ Adds weapons made with WeaponConverter (`tools/weapon_converter_app.py`) to Half
 - **Carrier passports:** the game keeps every weapon as a passport (`Str_Passport_Weapon1`). A converted weapon is the passport of a game weapon of the same kind (arming, bastard or longsword by grip length, dagger, mace, great axe or spear), copied from the game's own free mode list, with a marker Name (`cw <hash>`, or `cw sword <hash>` for swords).
 - **Free mode:** after GI_Settings `Set Up Free Mode Inventory` builds the inventory list, the packs marked for free play are appended.
 - **Spawning:** after every ModularWeaponBP's BeginPlay, a weapon whose passport Name is a marker gets the converted model, its collision, mass, damage points, hand spots and display name.
+- **Progression:** after GI_Settings `Renew Merchant`, packs marked for progression are offered from their rank (pack.txt `tier`, `price`).
+- **Scabbards (swords):** pack.txt `scabbard=` `fit` (the shortest of the game's 8 scabbards that covers the blade; stretched if none is long enough), one of them by name (`SS25` `SS45` `AS60` `AS70` `LS75` `BS85` `BS100` `LS110`), `own` (`<model>_scabbard.obj` + `_scabbard_collision.obj` made by `tools/scabbard.py` at Install) or `none` (SheathSlot 1, belt).
 - **Saves:** the game saves the passport unchanged, so without this mod a saved converted weapon is simply the carrier weapon; reinstalling brings it back.
 
 The log is `CustomWeapon.log` in this folder; settings are in `CustomWeapon.ini`. Decompile notes: `HalfSwordDecomp\defaults\add_new_weapons.md` and `carrier_passport_impl.md` (not in the repo).
 
 ## Not yet
 
-Progression (merchant), scabbard choice, flails, shields in the game (the converter already makes them) and the crossbow are the next steps. Done: own damage points per weapon (edges, point, blunt, rigidity, hit boxes, Base), balance by part masses, mass/centre of mass/lengths measured again after the swap, double-ended weapons, .fbx import (tools/fbx_reader.py, no extra packages).
+Flails, shields in the game (the converter already makes them) and the crossbow are the next steps. Untested in the game so far: progression and scabbards. Done: own damage points per weapon (edges, point, blunt, rigidity, hit boxes, Base), balance by part masses, mass/centre of mass/lengths measured again after the swap, double-ended weapons, .fbx import (tools/fbx_reader.py, no extra packages).
 
 ## Install
 

@@ -2381,6 +2381,7 @@ namespace
         bool free_play = true, progression = false;
         int tier = 3;      // progression: the player's rank it needs (0 Beggar .. 7 Knight)
         int price = 0;     // progression: the merchant's asking price in crowns (0: by tier)
+        std::string scabbard = "fit"; // fit, a game scabbard's short name (SS25 .. LS110), own, none
         int kind = K_ARMING;
         FName marker;
         int32_t hash = 1;
@@ -2447,6 +2448,7 @@ namespace
             pk.progression = kv.count("progression") && kv["progression"] == "1";
             if (kv.count("tier")) pk.tier = (std::max)(0, (std::min)(7, atoi(kv["tier"].c_str())));
             if (kv.count("price")) pk.price = (std::max)(0, atoi(kv["price"].c_str()));
+            if (kv.count("scabbard")) pk.scabbard = kv["scabbard"];
             const ModelData* d = model_data(pk.dir + pk.model);
             if (!d)
             {
@@ -2877,6 +2879,169 @@ namespace
             bot_l.z, len > 1e-3 ? dist(B, com) / len : 0.0);
     }
 
+    // ---- the scabbard (step 4; decompile: add_new_weapons.md "Steps 3, 4, 7 facts" §4) ----------------
+    // A sword's scabbard is the weapon actor's StaticMeshComponent "Scabbard" (from the blade module), laid
+    // out in BaseMesh's frame (+Z to the tip, mouth at z 5.2). Sheathing needs SheathSlot 0 AND a valid
+    // Scabbard, or the weapon is dropped; with no scabbard the weapon goes on the belt (SheathSlot 1) and
+    // the variable must be None (the draw gate tests IsValid(Current Scabbard R)).
+    // pack.txt scabbard=: fit (the shortest game scabbard that covers the blade), SS25..LS110 (that one),
+    // own (<model>_scabbard.obj / _scabbard_collision.obj from the converter, already in the weapon's
+    // model frame), none.
+    struct GameScabbard
+    {
+        const char* name;
+        double end_z; // the scabbard's far end, BaseMesh z (cm)
+    };
+    const GameScabbard g_scabbards[] = {{"SS25", 42.7}, {"SS45", 63.9}, {"AS60", 78.0}, {"AS70", 88.5},
+                                        {"LS75", 94.7}, {"BS85", 104.4}, {"BS100", 115.8}, {"LS110", 127.8}};
+
+    void apply_scabbard(UObject* actor, const Pack& pk)
+    {
+        UObject* scab = object_property(actor, STR("Scabbard"));
+        UObject* base = object_property(actor, STR("BaseMesh"));
+        auto bi = g_built.find(actor);
+        uint8_t slot = 4;
+        byte_property(actor, STR("SheathSlot"), false, slot);
+        std::string want = pk.scabbard;
+        if (want != "none" && !scab)
+        {
+            log("  scabbard: the carrier has no Scabbard component; the weapon goes on the belt instead");
+            want = "none";
+        }
+        if (want != "none" && (bi == g_built.end() || !base)) want = "none";
+        auto belt = [&](const char* why) {
+            if (scab)
+            {
+                Call d(scab, STR("K2_DestroyComponent"));
+                d.object(STR("Object"), actor).run();
+                set_object_property(actor, STR("Scabbard"), nullptr);
+            }
+            uint8_t s = slot;
+            if (s == 0) s = 1; // never slot 0 without a scabbard
+            byte_property(actor, STR("SheathSlot"), true, s);
+            log("  scabbard: none (%s); SheathSlot %d -> %d", why, slot, s);
+        };
+        if (want == "none")
+        {
+            belt("as chosen");
+            return;
+        }
+        const Built& b = bi->second;
+        const ModelData* data = model_data(pk.dir + pk.model);
+        if (!data) return;
+        // Model cm -> BaseMesh local (the scabbard's own layout frame).
+        Xf head_xf = world_transform(b.head), base_xf = world_transform(base);
+        if (head_xf.bytes.empty() || base_xf.bytes.empty()) return;
+        Affine to_world = affine_of(head_xf, false), to_base = affine_of(base_xf, true);
+        auto base_of = [&](V3 p) {
+            p.z += b.shift;
+            return to_base.apply(to_world.apply(V3{p.x / b.hs.x, p.y / b.hs.y, p.z / b.hs.z}));
+        };
+        auto num = [&](const char* k) { auto i = data->numbers.find(k); return i == data->numbers.end() ? 0.0 : i->second; };
+        double tip_z = base_of(V3{0, 0, num("tip")}).z, blade_cm = num("tip") - num("guard_top");
+        float kg = (float)(0.005 * (std::max)(10.0, blade_cm));
+
+        if (want == "own")
+        {
+            std::wstring sb = pk.dir + pk.model + L"_scabbard";
+            Model m;
+            std::vector<Hull> hulls = load_hulls(sb + L"_collision.obj");
+            if (hulls.empty() || !load_obj(sb + L".obj", m))
+            {
+                log("  ! scabbard: %s_scabbard.obj / _collision.obj missing; using the best-fitting game scabbard", narrow(pk.model).c_str());
+                want = "fit";
+            }
+            else
+            {
+                V3 ss{1, 1, 1};
+                {
+                    Call sc(scab, STR("K2_GetComponentScale"));
+                    FProperty* r = sc.run() ? sc.param(STR("ReturnValue")) : nullptr;
+                    if (r) ss = read_three(sc.buffer.data() + r->GetOffset_Internal(), r);
+                    if (ss.x == 0 || ss.y == 0 || ss.z == 0) ss = {1, 1, 1};
+                }
+                auto local = [&](V3 p) {
+                    V3 l = base_of(p);
+                    return V3{l.x / ss.x, l.y / ss.y, l.z / ss.z};
+                };
+                std::vector<std::vector<V3>> pieces;
+                for (const Hull& h : hulls)
+                {
+                    std::vector<V3> pts;
+                    for (V3 p : h.points) pts.push_back(local(p));
+                    pieces.push_back(pts);
+                }
+                UObject* mesh = build_part_mesh(actor, scab, pieces);
+                Call get_mat(scab, STR("GetMaterial"));
+                get_mat.i32(STR("ElementIndex"), 0);
+                UObject* material = get_mat.run() ? get_mat.ret_object() : nullptr;
+                if (!mesh)
+                {
+                    log("  ! scabbard: own collision failed; using the best-fitting game scabbard");
+                    want = "fit";
+                }
+                else
+                {
+                    Call set(scab, STR("SetStaticMesh"));
+                    set.object(STR("NewMesh"), mesh).run();
+                    body_mass(scab, true, kg);
+                    hide(scab);
+                    // Normals: inverse transpose of the point map (rotation x 1/head scale, then 1/scabbard scale).
+                    for (V3& p : m.positions) p = local(p);
+                    V3 o = base_of(V3{0, 0, -b.shift});
+                    for (V3& n : m.normals)
+                    {
+                        V3 w = sub(base_of(V3{n.x * b.hs.x * b.hs.x, n.y * b.hs.y * b.hs.y, n.z * b.hs.z * b.hs.z - b.shift}), o);
+                        n = unit(V3{w.x * ss.x, w.y * ss.y, w.z * ss.z});
+                    }
+                    UObject* proc = build_visual(actor, scab, m, material);
+                    if (proc) apply_own_textures(actor, proc, material, sb);
+                    uint8_t zero = 0;
+                    byte_property(actor, STR("SheathSlot"), true, zero);
+                    log("  scabbard: own model (%zu collision pieces, %.2f kg), SheathSlot %d -> 0", pieces.size(), kg, slot);
+                    return;
+                }
+            }
+        }
+
+        // A game scabbard: the named one, or the shortest whose end is at least 4 cm past the blade's tip.
+        const GameScabbard* pick = nullptr;
+        for (const GameScabbard& g : g_scabbards)
+            if (want == g.name) pick = &g;
+        double zscale = 1.0;
+        if (!pick)
+        {
+            for (const GameScabbard& g : g_scabbards)
+                if (!pick && g.end_z >= tip_z + 4.0) pick = &g;
+            if (!pick)
+            {
+                pick = &g_scabbards[7]; // longer than any: the longest, stretched along its length
+                zscale = (tip_z + 6.0) / pick->end_z;
+            }
+        }
+        std::wstring nm = widen(pick->name);
+        std::wstring path = L"/Game/Assets/Weapons/Swords/Meshes/Scabbards/Meshes/Equipment_Scabbard_A_" + nm + L"_001.Equipment_Scabbard_A_" + nm + L"_001";
+        UObject* mesh = load_asset(path);
+        if (!mesh)
+        {
+            log("  ! scabbard mesh %s not found", narrow(path).c_str());
+            belt("game scabbard missing");
+            return;
+        }
+        Call set(scab, STR("SetStaticMesh"));
+        set.object(STR("NewMesh"), mesh).run();
+        if (zscale != 1.0)
+        {
+            Call rs(scab, STR("SetRelativeScale3D"));
+            rs.three(STR("NewScale3D"), 1.0, 1.0, zscale).run();
+        }
+        body_mass(scab, true, kg);
+        uint8_t zero = 0;
+        byte_property(actor, STR("SheathSlot"), true, zero);
+        log("  scabbard: game %s (end z %.1f, blade tip z %.1f%s), %.2f kg, SheathSlot %d -> 0", pick->name, pick->end_z * zscale, tip_z,
+            zscale != 1.0 ? ", stretched" : "", kg, slot);
+    }
+
     // Every ModularWeaponBP after its BeginPlay (which built the parts from the passport).
     void weapon_begin_play(UObject* actor)
     {
@@ -2916,6 +3081,7 @@ namespace
         if (FName* n = actor->GetValuePtrByPropertyNameInChain<FName>(STR("Name"))) *n = FName(pk->title.c_str(), FNAME_Add);
         // Values the game measured from the old parts in BeginPlay (carrier_passport_impl.md b2).
         measure_weapon(actor, pk->dir + pk->model);
+        if (pk->kind <= K_LONGSWORD) apply_scabbard(actor, *pk);
         // The damage tags are scaled by the weapon's Quality (0 good x1.25, 1 x1, 2 low x0.85): 1 keeps the
         // converter's numbers as they are (weapon_damage_points.md).
         uint8_t quality = 1;

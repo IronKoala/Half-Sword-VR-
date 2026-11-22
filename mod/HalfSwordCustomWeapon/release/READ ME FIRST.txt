@@ -24,8 +24,11 @@ Add a weapon
 4. Press Convert and look at the picture: handle on the left, blade or head on the right, and the
    coloured bar under it marks pommel, grip, guard and blade. If the blade is on the left, press
    "Blade is on the wrong end".
-5. Under "In the game", give it a name and tick Free play (and/or Progression; progression comes in
-   a later build).
+5. Under "In the game", give it a name and tick Free play and/or Progression (progression: the
+   merchant sells it from the rank you pick, at your price or one by rank). Swords: pick a scabbard,
+   one of the game's (best fit picks the shortest that covers the blade), your own model (any model
+   file; it is fitted to the blade's length at Install, mouth at the wider end unless you tick
+   "mouth is the narrow end"), or none (worn on the belt).
 6. Optional, under "Damage": which edges cut, the head type, edge and point sharpness, rigidity and the
    balance point. Left empty they come from the model's shape (the summary under the picture shows
    what was found).

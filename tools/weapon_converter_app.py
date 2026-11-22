@@ -54,6 +54,12 @@ PARTS = ("pommel", "grip", "guard", "blade")
 EDGES = [("Detect", None), ("Both edges", "double"), ("One edge (side from the model)", "single"),
          ("One edge (the other side)", "single_other"), ("No edge (blunt)", "none")]
 HEADS = [("Detect", None), ("Spear point", "spear"), ("Axe blade", "axe"), ("Blunt (mace, hammer)", "blunt")]
+# Swords' scabbards (pack.txt scabbard=): one of the game's 8 (by blade length: short sword 25 .. long sword 110),
+# the best-fitting of them, the user's own model (tools/scabbard.py), or none (worn on the belt).
+SCABBARDS = [("Game scabbard, best fit", "fit"), ("Game: short sword 25", "SS25"), ("Game: short sword 45", "SS45"),
+             ("Game: arming sword 60", "AS60"), ("Game: arming sword 70", "AS70"), ("Game: long sword 75", "LS75"),
+             ("Game: bastard sword 85", "BS85"), ("Game: bastard sword 100", "BS100"), ("Game: long sword 110", "LS110"),
+             ("Own model...", "own"), ("None (on the belt)", "none")]
 RANKS = ["Beggar", "Peasant", "Commoner", "Militia", "Soldier", "Veteran", "Man-at-arms", "Knight"]
 STAT_FIELDS = (("edge_sharp", "Edge sharpness"), ("tip_sharp", "Point sharpness"), ("rigidity", "Rigidity"))
 ZONE_COLOURS = {"Pommel": "#b07a3c", "Grip": "#7a4a2a", "Guard": "#c9a227", "Head": "#8fa3b8"}
@@ -122,8 +128,25 @@ def write_pack(mod_dir, it):
              "progression=" + ("1" if it["progression"] else "0"),
              "tier=" + str(it.get("tier", 3)),
              "price=" + str(it.get("price", 0))]
-    if it["result"][1].get("type") == "shield":
+    kind = it["result"][1].get("type")
+    if kind == "shield":
         lines.append("carrier=" + it.get("shield_grip", "shield_buckler"))
+    elif kind not in ("hafted", "double"):
+        scab = it.get("scabbard", "fit")
+        if scab == "own":
+            model = it.get("scabbard_model")
+            ok = False
+            if model and os.path.exists(model):
+                import scabbard
+                try:
+                    scabbard.main([model, folder, name] + (["--flip"] if it.get("scabbard_flip") else []))
+                    ok = True
+                except SystemExit as e:
+                    print(f"scabbard model not used: {e}")
+            if not ok:
+                print("no usable scabbard model: the best-fitting game scabbard is used")
+                scab = "fit"
+        lines.append("scabbard=" + scab)
     open(os.path.join(folder, "pack.txt"), "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
 
 
@@ -362,7 +385,15 @@ class App:
         ttk.Combobox(game2, textvariable=self.rank_var, values=RANKS, state="readonly", width=12).pack(side="left", padx=(0, 10))
         ttk.Label(game2, text="price (crowns)").pack(side="left", padx=(0, 3))
         self.price_var = tk.StringVar()
-        ttk.Entry(game2, textvariable=self.price_var, width=7).pack(side="left")
+        ttk.Entry(game2, textvariable=self.price_var, width=7).pack(side="left", padx=(0, 10))
+        ttk.Label(game2, text="Scabbard").pack(side="left", padx=(0, 3))
+        self.scab_var = tk.StringVar(value=SCABBARDS[0][0])
+        scab_box = ttk.Combobox(game2, textvariable=self.scab_var, values=[t for t, _ in SCABBARDS], state="readonly",
+                                width=24)
+        scab_box.pack(side="left", padx=(0, 4))
+        scab_box.bind("<<ComboboxSelected>>", self.scabbard_chosen)
+        self.scab_flip_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(game2, text="mouth is the narrow end", variable=self.scab_flip_var).pack(side="left")
         ttk.Label(form, text="Install adds the weapon to the game as a new weapon: in free play's weapon list, "
                              "and/or for sale at the merchant in progression once you reach that rank (price "
                              "empty: by rank).",
@@ -499,6 +530,18 @@ class App:
         self.select(self.items[first])
         self.run(self.measure_all, [it["path"] for it in self.items[first:]])
 
+    def scabbard_chosen(self, _event=None):
+        """Own model: pick its file (any model type the converter reads); cancelled = back to best fit."""
+        if dict(SCABBARDS).get(self.scab_var.get()) != "own" or self.cur is None:
+            return
+        path = filedialog.askopenfilename(title="Scabbard model", filetypes=[("3D models", MODEL_TYPES), ("All files", "*.*")])
+        if not path:
+            self.scab_var.set(SCABBARDS[0][0])
+            return
+        self.cur["scabbard_model"] = path
+        self.scab_var.set("Own model...")
+        self.status.config(text="Scabbard: " + os.path.basename(path) + " (fitted to the blade at Install)")
+
     def item_of(self, path):
         return next((it for it in self.items if it["path"] == path), None)
 
@@ -545,6 +588,8 @@ class App:
         it["free_play"], it["progression"] = self.free_var.get(), self.prog_var.get()
         it["shield_grip"] = dict(SHIELD_GRIPS).get(self.shield_var.get(), SHIELD_GRIPS[0][1])
         it["tier"] = RANKS.index(self.rank_var.get()) if self.rank_var.get() in RANKS else 3
+        it["scabbard"] = dict(SCABBARDS).get(self.scab_var.get(), "fit")
+        it["scabbard_flip"] = self.scab_flip_var.get()
         try:
             it["price"] = max(0, int(float(self.price_var.get().replace(",", "."))))
         except ValueError:
@@ -576,6 +621,8 @@ class App:
         self.prog_var.set(it["progression"])
         self.shield_var.set(next((t for t, v in SHIELD_GRIPS if v == it.get("shield_grip")), SHIELD_GRIPS[0][0]))
         self.rank_var.set(RANKS[it.get("tier", 3)])
+        self.scab_var.set(next((t for t, v in SCABBARDS if v == it.get("scabbard", "fit")), SCABBARDS[0][0]))
+        self.scab_flip_var.set(bool(it.get("scabbard_flip")))
         self.price_var.set(str(it["price"]) if it.get("price") else "")
         st = it.get("stats", {})
         self.edges_var.set(next(t for t, v in EDGES if v == st.get("edges")))
