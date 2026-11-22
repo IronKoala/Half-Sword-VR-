@@ -394,13 +394,19 @@ class App:
         self.shield_var = tk.StringVar(value=SHIELD_GRIPS[0][0])
         ttk.Combobox(game, textvariable=self.shield_var, values=[t for t, _ in SHIELD_GRIPS], state="readonly",
                      width=22).pack(side="left")
-        ttk.Label(game, text="Sword class").pack(side="left", padx=(10, 3))
+        # Rows 2 and 3 of the game settings share one grid cell (stacked), so the window's 760 px minimum
+        # width still shows every box.
+        game_rows = ttk.Frame(form)
+        game_rows.grid(row=11, column=1, columnspan=2, sticky="w", **pad)
+        game2 = ttk.Frame(game_rows)
+        game2.pack(anchor="w")
+        game3 = ttk.Frame(game_rows)
+        game3.pack(anchor="w", pady=(4, 0))
+        ttk.Label(game3, text="Sword class").pack(side="left", padx=(0, 3))
         self.class_var = tk.StringVar(value=SWORD_CLASSES[0][0])
-        ttk.Combobox(game, textvariable=self.class_var, values=[t for t, _ in SWORD_CLASSES], state="readonly",
-                     width=30).pack(side="left")
-        self.class_var.trace_add("write", lambda *_: getattr(self, "result", None) and self.redraw_result())
-        game2 = ttk.Frame(form)
-        game2.grid(row=11, column=1, columnspan=2, sticky="w", **pad)
+        ttk.Combobox(game3, textvariable=self.class_var, values=[t for t, _ in SWORD_CLASSES], state="readonly",
+                     width=34).pack(side="left")
+        self.class_var.trace_add("write", lambda *_: self.class_changed())
         ttk.Label(game2, text="Progression: sold from rank").pack(side="left", padx=(0, 3))
         self.rank_var = tk.StringVar(value=RANKS[3])
         ttk.Combobox(game2, textvariable=self.rank_var, values=RANKS, state="readonly", width=12).pack(side="left", padx=(0, 10))
@@ -434,7 +440,7 @@ class App:
         self.held_var = tk.StringVar(value=HELD[0][0])
         ttk.Combobox(dmg, textvariable=self.held_var, values=[t for t, _ in HELD], state="readonly",
                      width=26).pack(side="left", padx=(0, 6))
-        self.held_var.trace_add("write", lambda *_: getattr(self, "result", None) and self.redraw_result())
+        self.held_var.trace_add("write", lambda *_: self.class_changed())
         self.turn_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(dmg, text="head faces the other way", variable=self.turn_var).pack(side="left")
         dmg2 = ttk.Frame(form)
@@ -692,7 +698,7 @@ class App:
 
     def status_text(self, it):
         if it["status"] in ("converted", "installed") and it["result"] is not None:
-            return f"{it['status']}: {self.short_summary(it['result'][1])}"
+            return f"{it['status']}: {self.short_summary(it['result'][1], it)}"
         if it["status"] == "length out of range" and it["length_cm"] is not None:
             return f"the file says {self.fmt_len(it['length_cm'])}: type its real length"
         return it["status"]
@@ -1281,19 +1287,20 @@ class App:
         self.inputs_changed()
         self.status.config(text="Line moved. Move any others, then press Preview.")
 
-    def short_summary(self, info):
+    def short_summary(self, info, it=None):
         zn = info["zones_cm"]
         return (f"{info['type']}, {self.fmt_len(zn['tip'] - zn['pommel_end'])}, "
                 f"{self.fmt_mass(info['mass_kg'])}{' (estimated)' if info['mass_note'] != 'given' else ''}"
-                f"{self.sword_class_text(info)}")
+                f"{self.sword_class_text(info, it)}")
 
-    def sword_class_text(self, info):
+    def sword_class_text(self, info, it=None):
         """For a sword: which game sword carries it (the choice, or what the mod picks by itself: kind_for in
         mod/HalfSwordCustomWeapon/src/main.cpp, 55 cm overall and the 14 cm two_hand_grip_cm default)."""
         if info.get("type") in ("hafted", "double"):
             names = {"one": "held in one hand (mace carrier)", "two": "held in two hands (great axe carrier)",
                      "spear": "spear grip (spear carrier)"}
-            chosen = dict(HELD).get(self.held_var.get())
+            chosen = (dict(HELD).get(self.held_var.get()) if it is None or it is self.cur else
+                      (it.get("stats") or {}).get("held"))
             if chosen:
                 return f", {names[chosen]}"
             zn = info["zones_cm"]
@@ -1304,7 +1311,8 @@ class App:
             return ""
         names = {"dagger": "dagger", "arming": "one-handed sword", "bastard": "bastard sword",
                  "longsword": "longsword/greatsword"}
-        chosen = dict(SWORD_CLASSES).get(self.class_var.get())
+        chosen = (dict(SWORD_CLASSES).get(self.class_var.get()) if it is None or it is self.cur else
+                  it.get("sword_class"))
         if chosen:
             return f", game class {names[chosen]}"
         zn = info["zones_cm"]
@@ -1418,12 +1426,22 @@ class App:
             parts = (f"pommel {L(zn['handle_bottom'] - zn['pommel_end'])}, grip {L(-zn['handle_bottom'])}, "
                      f"guard {L(zn['guard_top'], 1)}, blade {L(zn['tip'] - zn['guard_top'])}")
         self.summary.config(text=f"{'Double-ended weapon' if zn.get('double') else 'Hafted weapon' if hafted else 'Sword'}, {L(zn['tip'] - zn['pommel_end'])}, "
-                                 f"{mass}.\nParts ({how}): {parts}."
+                                 f"{mass}{self.sword_class_text(info, self.cur)}.\nParts ({how}): {parts}."
                                  + (" Main hand slides down the handle in swings." if zn.get("hand_slide") else "")
                                  + self.damage_text(info) + "\n"
                                  "The handle is on the left and the " + ("head" if hafted else "blade") +
                                  " on the right. If the picture shows it the other way round, press "
                                  "\"Blade is on the wrong end\".")
+
+    def class_changed(self):
+        """The Sword class choice: kept on the weapon at once, its list row and summary say it."""
+        if getattr(self, "quiet", False):
+            return
+        if getattr(self, "cur", None) is not None:
+            self.cur["sword_class"] = dict(SWORD_CLASSES).get(self.class_var.get())
+            self.refresh_row(self.cur)
+        if getattr(self, "result", None):
+            self.redraw_result()
 
     def toggle_flip(self):
         self.flip = not self.flip

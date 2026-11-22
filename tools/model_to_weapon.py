@@ -995,6 +995,36 @@ def main(argv=None):
                 print(f"head turned round so its long side ({max(reach_pos, reach_neg):.1f} cm out) faces the front"
                       + (" (--turn)" if args.turn else ""))
 
+    # ---- which way a one-edged blade faces ----------------------------------------------------------------
+    # The game's swords and knives cut with their -x side (their Tip points' Up is -X: BP_Weapon_Tool_Knife_A,
+    # the arming sword's G_60 blade), and the hand holds them that way round. A one-edged blade whose edge is
+    # on +x is turned half round z so the edge faces where the game swings (Matthew's test 2026-11-22: a
+    # converted knife was held with its edge backwards). The edge side: the shape's (thin side), or the
+    # user's choice ("the other side" swaps it).
+    if not hafted and not shield and args.type not in ("flail", "crossbow", "double"):
+        ztop = float(z.max())
+        blade_len = ztop - guard_top
+        if blade_len > 2.0:
+            tv_ = frame_pos[tris]
+            ar_ = 0.5 * np.linalg.norm(np.cross(tv_[:, 1] - tv_[:, 0], tv_[:, 2] - tv_[:, 0]), axis=1)
+            rng_ = np.random.default_rng(1)
+            pk_ = rng_.choice(len(tris), size=30000, p=ar_ / ar_.sum()) if ar_.sum() > 0 else np.zeros(0, int)
+            ab_ = rng_.random((len(pk_), 2))
+            ab_[ab_.sum(axis=1) > 1] = 1 - ab_[ab_.sum(axis=1) > 1]
+            sm_ = tv_[pk_, 0] + ab_[:, :1] * (tv_[pk_, 1] - tv_[pk_, 0]) + ab_[:, 1:] * (tv_[pk_, 2] - tv_[pk_, 0])
+            secs_ = dp.blade_sections(np.vstack([frame_pos, sm_]), guard_top + 1.0, ztop - 1.0, max(2.0, blade_len / 30.0))
+            found_ = dp.edges_of(secs_) if secs_ else "double"
+            want_ = args.edges or found_
+            if want_ in ("single", "single_other"):
+                side_ = found_ if found_.startswith("single") else "single+"
+                want_ = side_ if want_ == "single" else ("single-" if side_ == "single+" else "single+")
+            if want_ == "single+":  # half a turn round z: x and y change sign, the winding stays
+                frame_pos[:, :2] *= -1
+                frame_nrm[:, :2] *= -1
+                print("one-edged blade turned round so its edge faces the front (-x, as the game's swords)")
+            if want_ in ("single+", "single-"):
+                args.edges = "single-"
+
     # ---- collision pieces -----------------------------------------------------------------------------
     if shield:
         pieces = wp.build_pieces_grid(frame_pos, tris, 3, 3)

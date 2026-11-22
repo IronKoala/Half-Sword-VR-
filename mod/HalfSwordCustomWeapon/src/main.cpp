@@ -1005,7 +1005,7 @@ namespace
     }
 
     void apply_test_blade(UObject* weapon);
-    bool apply_full_weapon(UObject* weapon, const std::wstring& base, bool held);
+    bool apply_full_weapon(UObject* weapon, const std::wstring& base, bool held, int hands = 0);
 
     bool vector_sizes_ok()
     {
@@ -1565,15 +1565,20 @@ namespace
 
         if (!hafted)
         {
-            uint8_t want = grip_len >= g_settings.two_hand_grip_cm ? 11 : 2, was = 0, l = 2;
+            // The carrier's hands (numbers "hands": 1 dagger/one-handed sword, 2 bastard/longsword; set from the
+            // pack's class at spawn) win over the handle length (Matthew's test 2026-11-22: a 35 cm knife with a
+            // 14.25 cm handle was held two-handed).
+            int hands = numbers.count("hands") ? (int)std::lround(numbers["hands"]) : 0;
+            bool two = hands == 2 || (hands != 1 && grip_len >= g_settings.two_hand_grip_cm);
+            uint8_t want = two ? 11 : 2, was = 0, l = 2;
             byte_property(weapon, STR("Grip R Hand Default"), false, was);
             byte_property(weapon, STR("Grip R Hand Default"), true, want);
             byte_property(weapon, STR("Grip L Hand Default"), true, l);
             uint8_t pawn_was = 0;
             byte_property(pawn, STR("R_GripType_Default"), false, pawn_was);
             bool pawn_ok = byte_property(pawn, STR("R_GripType_Default"), true, want);
-            log("  grip type %u -> %u (%s; handle %.1f cm, two hands from %.1f cm); pawn R_GripType_Default %u -> %u%s", was, want,
-                want == 11 ? "two-handed" : "one-handed", grip_len, g_settings.two_hand_grip_cm, pawn_was, want,
+            log("  grip type %u -> %u (%s%s; handle %.1f cm, two hands from %.1f cm); pawn R_GripType_Default %u -> %u%s", was, want,
+                want == 11 ? "two-handed" : "one-handed", hands ? ", by its class" : "", grip_len, g_settings.two_hand_grip_cm, pawn_was, want,
                 pawn_ok ? "" : " (NOT written)");
         }
         else
@@ -1601,18 +1606,63 @@ namespace
                 if (n == "Grip R Hand Default Pos Reverse") return "spot_reverse";
                 return nullptr;
             };
+            struct Spot
+            {
+                const TCHAR* n;
+                UObject* mark = nullptr;
+                V3 hl{};
+                double z = 0, want = 0;
+                const char* key = nullptr;
+                bool chosen = false;
+            };
+            std::vector<Spot> spots;
             for (const TCHAR* n : {STR("Grip R Hand Default Pos"), STR("Grip L Hand Default Pos"), STR("Grip L Hand Off Hand"),
                                    STR("Grip L Hand Alt Pos"), STR("Grip R Hand Alt Pos"), STR("Grip R Hand Default Pos Reverse")})
             {
-                UObject* mark = object_property(weapon, n);
-                if (!mark) continue;
-                V3 hl{};
-                double z = model_z(mark, hl);
-                const char* key = spot_for(narrow(n));
-                bool chosen = key && numbers.count(key);
-                if (!chosen && narrow(n) == "Grip R Hand Default Pos Reverse") continue; // the game's own place
-                double want = chosen ? numbers[key] : (std::min)((std::max)(z, lo), hi);
-                if (hi < lo && !chosen) want = 0.5 * (lo + hi);
+                Spot sp;
+                sp.n = n;
+                sp.mark = object_property(weapon, n);
+                if (!sp.mark) continue;
+                sp.z = model_z(sp.mark, sp.hl);
+                sp.key = spot_for(narrow(n));
+                sp.chosen = sp.key && numbers.count(sp.key);
+                if (!sp.chosen && narrow(n) == "Grip R Hand Default Pos Reverse") continue; // the game's own place
+                sp.want = sp.chosen ? numbers[sp.key] : (std::min)((std::max)(sp.z, lo), hi);
+                if (hi < lo && !sp.chosen) sp.want = 0.5 * (lo + hi);
+                spots.push_back(sp);
+            }
+            // Clamping can put two hands on one spot (Matthew's test 2026-11-22: a 55 cm flail staff had the
+            // main hand, the off hand and the half grip all at -4.5 cm). Each hand pair keeps a hand's width
+            // apart: the off hand on the side the game had it, or the other side when the haft ends there.
+            auto spot = [&](const char* name) -> Spot* {
+                for (Spot& sp : spots)
+                    if (narrow(sp.n) == name) return &sp;
+                return nullptr;
+            };
+            auto part = [&](Spot* main, Spot* other) {
+                if (!main || !other || other->chosen) return;
+                const double hand = 2.0 * half_hand;
+                if (std::fabs(other->want - main->want) >= hand - 0.01) return;
+                double up = main->want + hand, down = main->want - hand;
+                bool above = other->z >= main->z;
+                double first = above ? up : down, second = above ? down : up;
+                double was = other->want;
+                if (first >= lo - 0.01 && first <= hi + 0.01) other->want = first;
+                else if (second >= lo - 0.01 && second <= hi + 0.01) other->want = second;
+                else return; // a haft shorter than two hands
+                log("  %s kept a hand from %s: %.1f -> %.1f cm", narrow(other->n).c_str(), narrow(main->n).c_str(), was, other->want);
+            };
+            Spot* main_spot = spot(l_default == 3 ? "Grip L Hand Default Pos" : "Grip R Hand Default Pos");
+            part(main_spot, spot("Grip L Hand Off Hand"));
+            part(spot("Grip R Hand Alt Pos"), spot("Grip L Hand Alt Pos"));
+            for (Spot& sp : spots)
+            {
+                const TCHAR* n = sp.n;
+                UObject* mark = sp.mark;
+                V3 hl = sp.hl;
+                double z = sp.z, want = sp.want;
+                const char* key = sp.key;
+                bool chosen = sp.chosen;
                 if (std::fabs(want - z) < 0.5)
                 {
                     log("  %s at %.1f cm: %s", narrow(n).c_str(), z, chosen ? "already where it was placed" : "on the haft");
@@ -1687,8 +1737,16 @@ namespace
         else
         {
             if (g_settings.offhand == L"pommel") off_target = lo;
-            off_target = (std::min)((std::max)(off_target, lo), r_target - 5.0); // never on top of the main hand
-            if (off_target < lo) off_target = lo;
+            // Never on top of the main hand: at least 5 cm below it (the game's own knife: main 0, off hand -5),
+            // or, on a handle with no room below the main hand, a hand above it (the old clamp put a 35 cm
+            // knife's off hand 1 cm from the main hand: Matthew's test 2026-11-22).
+            if (r_target - 5.0 >= lo)
+                off_target = (std::min)((std::max)(off_target, lo), r_target - 5.0);
+            else
+            {
+                double above = (std::min)(r_target + hand, -half_hand);
+                off_target = above >= r_target + 5.0 ? above : lo;
+            }
             // Half-sword: the game puts the off hand at about half a game blade (+50 cm on 85-110 cm blades).
             // Same share of the model's blade, kept a hand away from the guard and the tip.
             double blade = tip - blade_from;
@@ -1946,11 +2004,12 @@ namespace
     // base = the model's path without extension (<pack folder>/<name>); its .obj, _collision.obj, .txt and
     // textures sit there. held: the player holds it now (F9 style); otherwise only the weapon is changed,
     // and the hands are fitted when the player takes it (held_tick).
-    bool apply_full_weapon(UObject* weapon, const std::wstring& base, bool held)
+    bool apply_full_weapon(UObject* weapon, const std::wstring& base, bool held, int hands)
     {
         const ModelData* data = model_data(base);
         if (!data) return false;
         auto numbers = data->numbers;
+        if (hands) numbers["hands"] = hands; // the carrier's class: 1 one hand, 2 two hands (fit_hands)
         const auto& hulls = data->hulls;
         Model model = data->model;
         std::wstring base_name = base.substr(base.find_last_of(L"\\/") + 1);
@@ -3154,10 +3213,26 @@ namespace
         };
         FPart parts[] = {{"Grip", grip, 0.75 / 7.85}, {"Link", link, 1.0}, {"Head", blade, 1.0}};
         double w[3] = {0, 0, 0}, wsum = 0;
+        // The weight shared as the game's flail shares it (Flail_A: staff 0.5, chain 0.5, head 2.1 kg with its
+        // connector), so the chain is not a feather between a staff and a heavy head (by volume it was 0.17 /
+        // 0.07 / 1.60 kg: Matthew's test 2026-11-22). By volume only when the carrier's parts have no mass.
+        {
+            float g[3] = {0, 0, 0}, hc = 0;
+            for (int i = 0; i < 3; ++i) body_mass(parts[i].comp, false, g[i]);
+            body_mass(headc, false, hc);
+            g[2] += hc;
+            if (g[0] > 0.05f && g[1] > 0.05f && g[2] > 0.05f)
+                for (int i = 0; i < 3; ++i) w[i] = g[i];
+            log("  part weights: %s (game %.2f / %.2f / %.2f kg)", w[0] > 0 ? "the game flail's spread" : "by volume", g[0], g[1], g[2]);
+        }
         for (int i = 0; i < 3; ++i)
         {
-            for (const Hull& h : data->hulls)
-                if (h.slot == parts[i].slot) w[i] += h.volume * parts[i].density;
+            if (w[0] <= 0 || w[1] <= 0 || w[2] <= 0)
+            {
+                w[i] = 0;
+                for (const Hull& h : data->hulls)
+                    if (h.slot == parts[i].slot) w[i] += h.volume * parts[i].density;
+            }
             wsum += w[i];
         }
         UObject* base_mesh = object_property(actor, STR("BaseMesh"));
@@ -3522,7 +3597,8 @@ namespace
         bool ok = pk->kind == K_CROSSBOW  ? apply_crossbow(actor, *pk)
                   : pk->kind == K_FLAIL   ? apply_flail(actor, *pk)
                   : pk->kind >= K_BUCKLER ? apply_shield(actor, *pk)
-                                          : apply_full_weapon(actor, pk->dir + pk->model, false);
+                                          : apply_full_weapon(actor, pk->dir + pk->model, false,
+                                                              pk->kind <= K_ARMING ? 1 : pk->kind <= K_LONGSWORD ? 2 : 0);
         g_settings.mass_kg = mass_was;
         if (!ok) return;
         // The name the trader and menus show (the passport keeps the marker).
