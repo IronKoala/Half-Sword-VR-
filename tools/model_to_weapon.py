@@ -75,6 +75,62 @@ def _rotation_to(a, b):
     return np.eye(3) + k + k @ k / (1 + c)
 
 
+def crossbow_layout(positions, normals, flip):
+    """A crossbow in its own frame: z = along the stock towards the front (the bow end), y = across (the
+    bow's span: the axis the model is mirror-symmetric across), x = up (the side the bow sits on, which is
+    the side the bolt lies on; flip turns it over). Origin: the middle of the bow (the widest slab across).
+    Returns (pos, nrm, info)."""
+    from scipy.spatial import cKDTree
+    c = positions.mean(axis=0)
+    _, _, vt = np.linalg.svd(positions - c, full_matrices=False)
+    q = (positions - c) @ vt.T
+    q -= 0.5 * (q.min(axis=0) + q.max(axis=0))
+    pick = q[:: max(1, len(q) // 4000)]
+    tree = cKDTree(pick)
+    sym = []
+    for k in range(3):
+        m = pick.copy()
+        m[:, k] *= -1
+        sym.append(float(np.mean(tree.query(m)[0])) / max(float(np.ptp(pick[:, k])), 1e-9))
+    span = int(np.argmin(sym))
+    others = [k for k in range(3) if k != span]
+    along = max(others, key=lambda k: np.ptp(q[:, k]))
+    up = [k for k in others if k != along][0]
+    sz, sy = vt[along], vt[span]
+    # Front: the end where the model is widest across (the bow).
+    t = (positions - c) @ sz
+    w = (positions - c) @ sy
+    lo, hi = t.min(), t.max()
+    band = 0.15 * (hi - lo)
+    front_w = np.ptp(w[t > hi - band]) if (t > hi - band).any() else 0
+    back_w = np.ptp(w[t < lo + band]) if (t < lo + band).any() else 0
+    if back_w > front_w:
+        sz = -sz
+    # The bow's slab: the 4 cm slab along z with the widest span.
+    t = (positions - c) @ sz
+    w = (positions - c) @ sy
+    best, bz = -1.0, 0.0
+    for z0 in np.arange(t.min(), t.max(), 1.0):
+        sel = (t >= z0) & (t < z0 + 4.0)
+        if sel.sum() > 2 and np.ptp(w[sel]) > best:
+            best, bz = float(np.ptp(w[sel])), z0 + 2.0
+    sx = np.cross(sy, sz)
+    bow = (np.abs(t - bz) < 2.0)
+    stock = ~bow
+    # Up: the bow sits above the stock's middle line.
+    if bow.any() and stock.any() and float(((positions[bow] - c) @ sx).mean()) < float(((positions[stock] - c) @ sx).mean()):
+        sx, sy = -sx, -sy  # turned over round z (det stays +1)
+    if flip:
+        sx, sy = -sx, -sy
+    basis = np.vstack([sx, sy, sz])
+    pos = (positions - c) @ basis.T
+    sel = np.abs(pos[:, 2] - bz) < 2.0
+    origin = np.array([0.5 * (pos[sel, 0].min() + pos[sel, 0].max()), 0.5 * (pos[sel, 1].min() + pos[sel, 1].max()), bz])
+    pos -= origin
+    nrm = normals @ basis.T
+    return pos, nrm, dict(span=best, symmetry=round(sym[span], 4))
+
+
 def flail_layout(positions, normals, tris, mesh_of_vertex, meshes):
     """A flail laid out straight in the weapon frame: the staff on z <= 0 (its top end at 0), the chain from 0
     to Lc, the head beyond. Each of the three is moved as one rigid piece (a chain drawn hanging stays the
@@ -519,7 +575,7 @@ def main(argv=None):
     ap.add_argument("--flip", action="store_true")
     ap.add_argument("--hand-slide", action="store_true",
                     help="long handle held by guard + pommel, the guard hand slides down it in swings (e.g. the Spit)")
-    ap.add_argument("--type", choices=["sword", "hafted", "double", "shield", "flail"],
+    ap.add_argument("--type", choices=["sword", "hafted", "double", "shield", "flail", "crossbow"],
                     help="sword: guard between grip and blade; hafted: head on the end of a haft (axe, mace, "
                          "hammer, spear); double: a blade or head on both ends of a haft. Default: detected "
                          "(sword or hafted)")
@@ -650,6 +706,15 @@ def main(argv=None):
         print(f"shield: {w_:.1f} cm wide, {h_:.1f} cm high, {t_:.1f} cm thick; front on the "
               f"{'+' if front > 0 else '-'} side, found by {cue or 'its curve/boss'}"
               f"{' (turned round by --flip)' if args.flip else ''}")
+    elif args.type == "crossbow":
+        frame_pos, frame_nrm, cb = crossbow_layout(positions, normals, args.flip)
+        frame_nrm /= np.maximum(np.linalg.norm(frame_nrm, axis=1, keepdims=True), 1e-12)
+        z = frame_pos[:, 2]
+        named, hafted, vertex_part = False, False, None
+        end = float(z.min())
+        handle_bottom = guard_bottom = guard_top = end  # one part ("Head")
+        print(f"crossbow: {float(np.ptp(z)):.1f} cm long, bow {cb['span']:.1f} cm across (mirror symmetry "
+              f"{cb['symmetry']}); front +z, bow on +x{' (turned over by --flip)' if args.flip else ''}")
     elif args.type == "flail":
         frame_pos, frame_nrm, flail_label, chain_len = flail_layout(positions, normals, tris, mesh_of_vertex, meshes)
         frame_nrm /= np.maximum(np.linalg.norm(frame_nrm, axis=1, keepdims=True), 1e-12)
@@ -901,6 +966,9 @@ def main(argv=None):
     # ---- collision pieces -----------------------------------------------------------------------------
     if shield:
         pieces = wp.build_pieces_grid(frame_pos, tris, 3, 3)
+    elif args.type == "crossbow":
+        pieces = [("Head", pts, hull) for pts, hull in
+                  wp._slices(frame_pos, tris, 2, np.linspace(z.min(), z.max(), max(2, int(np.ptp(z) / 15)) + 1))]
     elif args.type == "flail":
         # Staff and head in slabs of about 15 cm, the chain in slabs of about 5 cm (it bends only at the
         # game's joints, but stays slim).
@@ -1063,7 +1131,7 @@ def main(argv=None):
                "handle_top": 0.0, "guard_bottom": round(float(guard_bottom), 2), "guard_top": round(float(guard_top), 2),
                "tip": round(top, 2), "hafted": 1 if hafted else 0, "double": 1 if args.type == "double" else 0,
                "hand_slide": 1 if args.hand_slide else 0, "shield": 1 if shield else 0,
-               "flail": 1 if args.type == "flail" else 0}
+               "flail": 1 if args.type == "flail" else 0, "crossbow": 1 if args.type == "crossbow" else 0}
     if shield:
         w_, t_, h_ = np.ptp(frame_pos, axis=0)
         numbers.update(width=round(float(w_), 2), thickness=round(float(t_), 2), height=round(float(h_), 2))
@@ -1094,7 +1162,9 @@ def main(argv=None):
     ab[flipab] = 1 - ab[flipab]
     tv = tri_v[pick]
     samples = tv[:, 0] + ab[:, :1] * (tv[:, 1] - tv[:, 0]) + ab[:, 1:] * (tv[:, 2] - tv[:, 0])
-    if args.type == "flail":
+    if args.type == "crossbow":
+        dpts, dinfo = [], dict(kind="crossbow")  # like the game's: no Tip points, a bash is blunt
+    elif args.type == "flail":
         head_sel = np.concatenate([flail_label == "Head", flail_label[tris[pick, 0]] == "Head"])
         dpts, dinfo = dp.flail_points(np.vstack([frame_pos, samples])[head_sel], numbers, over)
     else:
@@ -1107,7 +1177,7 @@ def main(argv=None):
     json.dump({"source": os.path.basename(args.model), "scale": scale_note, "mass_kg": mass, "mass_note": mass_note,
                "zones_cm": numbers, "volumes_cm3": {s: round(v, 1) for s, v in volume.items()},
                "parts_by_name": named, "lengths_before_stretch_cm": lens_before,
-               "type": "shield" if shield else "flail" if args.type == "flail" else "hafted" if hafted else "sword", "damage": dinfo, "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
+               "type": "shield" if shield else args.type if args.type in ("flail", "crossbow") else "hafted" if hafted else "sword", "damage": dinfo, "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
               open(os.path.join(args.out, name + ".json"), "w"), indent=2)
     if shield:
         print(f"shield {numbers['width']:.1f} x {numbers['height']:.1f} cm; {len(pieces)} collision pieces")

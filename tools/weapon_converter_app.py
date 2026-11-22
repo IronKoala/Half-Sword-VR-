@@ -40,7 +40,7 @@ MODEL_TYPES = "*.glb *.gltf *.fbx *.obj *.nif *.stl *.ply *.dae *.off"
 MODEL_EXTS = tuple(e[1:] for e in MODEL_TYPES.split())
 TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or spear", "hafted"),
          ("Double-ended (head or blade at both ends)", "double"), ("Shield", "shield"),
-         ("Flail (staff, chain and head)", "flail")]
+         ("Flail (staff, chain and head)", "flail"), ("Crossbow", "crossbow")]
 # How a shield is held: which of the game's shields carries it (its grip is that shield's own).
 SHIELD_GRIPS = [("Fist grip (buckler)", "shield_buckler"), ("Arm straps (targe)", "shield_targe"),
                 ("Arm straps, big (pavise)", "shield_pavise")]
@@ -132,7 +132,7 @@ def write_pack(mod_dir, it):
     kind = it["result"][1].get("type")
     if kind == "shield":
         lines.append("carrier=" + it.get("shield_grip", "shield_buckler"))
-    elif kind not in ("hafted", "double", "flail"):
+    elif kind not in ("hafted", "double", "flail", "crossbow"):
         scab = it.get("scabbard", "fit")
         if scab == "own":
             model = it.get("scabbard_model")
@@ -1291,6 +1291,12 @@ class App:
                      " (estimated, and heavier than any real weapon: the model is probably much thicker than "
                      "the real thing. Type a weight, for example " +
                      ("1.5 for a sword or 2 for an axe)" if self.units()[2] == "kg" else "3.3 for a sword or 4.4 for an axe)"))
+        if info["type"] == "crossbow":
+            self.summary.config(text=f"Crossbow, {L(zn['tip'] - zn['pommel_end'])} long. In the game your model is "
+                                     "the look; the body, bow arms and string that shoot are the game's crossbow's "
+                                     "(its weight too).\nThe picture shows it from the side, front on the right, "
+                                     "bow on top. If it is upside down, press \"Blade is on the wrong end\".")
+            return
         if info["type"] == "flail":
             self.summary.config(text=f"Flail, {L(zn['tip'] - zn['pommel_end'])}, {mass}.\nStaff {L(-zn['pommel_end'])}, "
                                      f"chain {L(zn['guard_top'])}, head {L(zn['tip'] - zn['guard_top'])} (laid out "

@@ -2374,9 +2374,9 @@ namespace
     // loot, save), the converted model is put on it at the end of its BeginPlay, after the game built
     // the parts and before anyone reads them. The passport itself is never changed (the game saves and
     // compares it), so without this mod a saved converted weapon is simply the carrier: nothing is lost.
-    enum Kind { K_DAGGER, K_ARMING, K_BASTARD, K_LONGSWORD, K_MACE, K_AXE2H, K_SPEAR, K_BUCKLER, K_TARGE, K_PAVISE, K_FLAIL, K_COUNT };
+    enum Kind { K_DAGGER, K_ARMING, K_BASTARD, K_LONGSWORD, K_MACE, K_AXE2H, K_SPEAR, K_BUCKLER, K_TARGE, K_PAVISE, K_FLAIL, K_CROSSBOW, K_COUNT };
     const char* const kind_names[K_COUNT] = {"dagger", "arming", "bastard", "longsword", "mace", "axe2h", "spear",
-                                             "shield_buckler", "shield_targe", "shield_pavise", "flail"};
+                                             "shield_buckler", "shield_targe", "shield_pavise", "flail", "crossbow"};
 
     struct Pack
     {
@@ -2400,6 +2400,7 @@ namespace
         auto num = [&](const char* k) { auto i = nums.find(k); return i == nums.end() ? 0.0 : i->second; };
         if (num("shield") > 0.5) return K_BUCKLER;
         if (num("flail") > 0.5) return K_FLAIL;
+        if (num("crossbow") > 0.5) return K_CROSSBOW;
         bool hafted = num("hafted") > 0.5;
         double grip = -num("handle_bottom"), total = num("tip") - num("pommel_end");
         if (!hafted)
@@ -2579,6 +2580,12 @@ namespace
             g_tmpl[K_DAGGER].assign(g_pp.size, 0);
             *reinterpret_cast<UObject**>(g_tmpl[K_DAGGER].data() + g_pp.weapon_class) = knife;
         }
+        // The crossbow is in neither free mode list: a grip-less carrier, so a zero passport with its class.
+        if (UObject* xbow = load_asset(L"/Game/Assets/Weapons/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C"))
+        {
+            g_tmpl[K_CROSSBOW].assign(g_pp.size, 0);
+            *reinterpret_cast<UObject**>(g_tmpl[K_CROSSBOW].data() + g_pp.weapon_class) = xbow;
+        }
         // The targe has no passport in that list: a copy of a shield passport with its class (shields have
         // no part classes, add_new_weapons.md §7).
         const std::vector<uint8_t>& shield = !g_tmpl[K_PAVISE].empty() ? g_tmpl[K_PAVISE] : g_tmpl[K_BUCKLER];
@@ -2598,7 +2605,7 @@ namespace
     {
         if (!carrier_templates()) return false;
         int k = pk.kind;
-        if (g_tmpl[k].empty()) k = k <= K_LONGSWORD ? K_ARMING : k == K_FLAIL ? K_MACE : k >= K_BUCKLER ? (k == K_BUCKLER ? K_PAVISE : K_BUCKLER) : K_MACE; // nearest kind
+        if (g_tmpl[k].empty()) k = k <= K_LONGSWORD ? K_ARMING : k == K_FLAIL || k == K_CROSSBOW ? K_MACE : k >= K_BUCKLER ? (k == K_BUCKLER ? K_PAVISE : K_BUCKLER) : K_MACE; // nearest kind
         if (g_tmpl[k].empty()) return false;
         out = g_tmpl[k];
         passport_name(out.data()) = pk.marker;
@@ -3235,6 +3242,73 @@ namespace
         return true;
     }
 
+    // ---- the crossbow (step 9; decompile: add_new_weapons.md §8) -------------------------------------
+    // BP_Weapon_Ranged_Weapon_Crossbow_Light shows a SkeletalMesh (animated string) over hidden physics
+    // cubes that do the work: CM_Test_Stock (parent of the rest), the bow arms CM_Test_Shoulder_L/_R and the
+    // string nut CM_Test_Peg on joints; the bolt is loaded at Scene_0 and shot along the stock's Up. So the
+    // converted model is the look only: the skeletal mesh is hidden and the model rides on the stock; the
+    // cubes, joints, masses and bolt stay the game's. Its frame comes from the crossbow itself: forward =
+    // the stock's Up, across = left arm to right arm, up = towards the bolt seat; the model's bow middle
+    // (converter origin; model_to_weapon.py --type crossbow: z front, y across, x up) on the arms' middle.
+    bool apply_crossbow(UObject* actor, const Pack& pk)
+    {
+        UObject* stock = object_property(actor, STR("CM_Test_Stock"));
+        UObject* sl = object_property(actor, STR("CM_Test_Shoulder_L"));
+        UObject* sr = object_property(actor, STR("CM_Test_Shoulder_R"));
+        UObject* seat = object_property(actor, STR("Scene_0"));
+        UObject* skel = object_property(actor, STR("SkeletalMesh"));
+        if (!stock || !sl || !sr || !seat)
+        {
+            log("  ! crossbow carrier %s lacks CM_Test_Stock / CM_Test_Shoulder_L/_R / Scene_0", name_of(actor).c_str());
+            return false;
+        }
+        const ModelData* data = model_data(pk.dir + pk.model);
+        if (!data) return false;
+        auto dot = [](V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
+        Xf sxf = world_transform(stock);
+        Affine SW = affine_of(sxf, false), Sinv = affine_of(sxf, true);
+        V3 F = unit(SW.Z);
+        V3 L = world_location(sl), R = world_location(sr);
+        V3 P{0.5 * (L.x + R.x), 0.5 * (L.y + R.y), 0.5 * (L.z + R.z)};
+        V3 S = sub(R, L);
+        double sf = dot(S, F);
+        S = unit(V3{S.x - sf * F.x, S.y - sf * F.y, S.z - sf * F.z});
+        V3 U = cross(S, F); // with x = up, y = across, z = forward: x = y cross z
+        if (dot(sub(world_location(seat), world_location(stock)), U) < 0)
+        {
+            // The bolt seat is on the other side: keep the frame right-handed by turning it over round F.
+            S = V3{-S.x, -S.y, -S.z};
+            U = cross(S, F);
+        }
+        auto world = [&](V3 p) {
+            return V3{P.x + U.x * p.x + S.x * p.y + F.x * p.z, P.y + U.y * p.x + S.y * p.y + F.y * p.z, P.z + U.z * p.x + S.z * p.y + F.z * p.z};
+        };
+        log("Crossbow %s: bow middle at the arms' middle, arms %.1f cm apart", narrow(pk.id).c_str(), dist(L, R));
+        if (skel) hide(skel);
+        Model m = data->model;
+        V3 o = Sinv.apply(world(V3{0, 0, 0}));
+        for (V3& n : m.normals) n = unit(sub(Sinv.apply(world(n)), o));
+        for (V3& p : m.positions) p = Sinv.apply(world(p));
+        Call get_mat(stock, STR("GetMaterial"));
+        get_mat.i32(STR("ElementIndex"), 0);
+        UObject* material = get_mat.run() ? get_mat.ret_object() : nullptr;
+        if (skel)
+        {
+            Call gm(skel, STR("GetMaterial"));
+            gm.i32(STR("ElementIndex"), 0);
+            if (UObject* sm = gm.run() ? gm.ret_object() : nullptr) material = sm;
+        }
+        UObject* proc = build_visual(actor, stock, m, material);
+        if (proc)
+        {
+            Call vis(proc, STR("SetVisibility"));
+            vis.flag(STR("bNewVisibility"), true).flag(STR("bPropagateToChildren"), false).run();
+            apply_own_textures(actor, proc, material, pk.dir + pk.model);
+        }
+        log(proc ? "Done." : "  ! visual model failed");
+        return proc != nullptr;
+    }
+
     // ---- the scabbard (step 4; decompile: add_new_weapons.md "Steps 3, 4, 7 facts" §4) ----------------
     // A sword's scabbard is the weapon actor's StaticMeshComponent "Scabbard" (from the blade module), laid
     // out in BaseMesh's frame (+Z to the tip, mouth at z 5.2). Sheathing needs SheathSlot 0 AND a valid
@@ -3430,7 +3504,8 @@ namespace
         load_settings();
         double mass_was = g_settings.mass_kg;
         g_settings.mass_kg = 0; // the pack's own mass (from the converter)
-        bool ok = pk->kind == K_FLAIL     ? apply_flail(actor, *pk)
+        bool ok = pk->kind == K_CROSSBOW  ? apply_crossbow(actor, *pk)
+                  : pk->kind == K_FLAIL   ? apply_flail(actor, *pk)
                   : pk->kind >= K_BUCKLER ? apply_shield(actor, *pk)
                                           : apply_full_weapon(actor, pk->dir + pk->model, false);
         g_settings.mass_kg = mass_was;
