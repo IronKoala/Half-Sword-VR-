@@ -496,7 +496,32 @@ def main(argv=None):
         rad = np.sqrt((fp[:, 0] / half[0]) ** 2 + (fp[:, 2] / half[2]) ** 2)
         inner, rim = fp[rad < 0.3, 1], fp[rad > 0.8, 1]
         front = 1.0
-        if len(inner) and len(rim):
+        # Best cue: fittings. Straps, handles and their bars are small separate meshes behind the board;
+        # a boss is a small mesh too but round and in the middle (and on the front), so it does not vote.
+        cue = None
+        if len(meshes) > 1:
+            ext = {}
+            for k in range(len(meshes)):
+                sel = mesh_of_vertex == k
+                if sel.any():
+                    q = fp[sel]
+                    ext[k] = (np.ptp(q[:, 0]) * np.ptp(q[:, 2]), q.mean(axis=0), np.ptp(q[:, 0]), np.ptp(q[:, 2]), int(sel.sum()))
+            board = max(ext, key=lambda k: ext[k][0])
+            vote = 0.0
+            for k, (area, c, wx, wz, n) in ext.items():
+                if k == board or area > 0.2 * ext[board][0]:
+                    continue
+                r = np.sqrt((c[0] / half[0]) ** 2 + (c[2] / half[2]) ** 2)
+                aspect = wx / max(wz, 1e-6)
+                if r < 0.25 and 0.6 < aspect < 1.6:
+                    continue  # a boss
+                dy = c[1] - ext[board][1][1]
+                if abs(dy) > 0.3:
+                    vote += n * np.sign(dy)
+            if vote != 0:
+                front = -1.0 if vote > 0 else 1.0  # fittings on +y: +y is the back
+                cue = "straps/handles on the back"
+        if cue is None and len(inner) and len(rim):
             curve = float(inner.mean() - rim.mean())  # > 0: the middle stands out on +y
             if abs(curve) > 0.05 * half[1]:
                 front = 1.0 if curve > 0 else -1.0
@@ -517,7 +542,8 @@ def main(argv=None):
         handle_bottom = guard_bottom = guard_top = end  # the whole shield is one part ("Head")
         w_, t_, h_ = np.ptp(frame_pos, axis=0)
         print(f"shield: {w_:.1f} cm wide, {h_:.1f} cm high, {t_:.1f} cm thick; front on the "
-              f"{'+' if front > 0 else '-'} side{' (turned round by --flip)' if args.flip else ''}")
+              f"{'+' if front > 0 else '-'} side, found by {cue or 'its curve/boss'}"
+              f"{' (turned round by --flip)' if args.flip else ''}")
     else:
         # ---- named parts ----------------------------------------------------------------------------------
         mesh_part = [part_of(names) for names, _ in meshes]
