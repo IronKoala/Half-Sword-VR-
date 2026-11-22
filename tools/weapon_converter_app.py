@@ -57,6 +57,10 @@ EDGES = [("Detect", None), ("Both edges", "double"), ("One edge (side from the m
 HELD = [("Detect (by length)", None), ("One hand (like a mace)", "one"), ("Two hands (like a great axe)", "two"),
         ("Spear grip", "spear")]
 HEADS = [("Detect", None), ("Spear point", "spear"), ("Axe blade", "axe"), ("Blunt (mace, hammer)", "blunt")]
+# Which of the game's swords carries a sword (pack.txt carrier=): its grip, hand spots and how many hands the
+# game lets hold it come from that sword. "Detect" picks by length (under 55 cm a dagger) and grip length.
+SWORD_CLASSES = [("Detect (by length)", None), ("Dagger (one hand)", "dagger"), ("One-handed sword", "arming"),
+                 ("Bastard sword (hand and a half)", "bastard"), ("Longsword / greatsword (two hands)", "longsword")]
 # Swords' scabbards (pack.txt scabbard=): one of the game's 8 (by blade length: short sword 25 .. long sword 110),
 # the best-fitting of them, the user's own model (tools/scabbard.py), or none (worn on the belt).
 SCABBARDS = [("Game scabbard, best fit", "fit"), ("Game: short sword 25", "SS25"), ("Game: short sword 45", "SS45"),
@@ -137,6 +141,8 @@ def write_pack(mod_dir, it):
     if kind == "shield":
         lines.append("carrier=" + it.get("shield_grip", "shield_buckler"))
     elif kind not in ("hafted", "double", "flail", "crossbow"):
+        if it.get("sword_class"):
+            lines.append("carrier=" + it["sword_class"])
         scab = it.get("scabbard", "fit")
         if scab == "own":
             model = it.get("scabbard_model")
@@ -388,6 +394,11 @@ class App:
         self.shield_var = tk.StringVar(value=SHIELD_GRIPS[0][0])
         ttk.Combobox(game, textvariable=self.shield_var, values=[t for t, _ in SHIELD_GRIPS], state="readonly",
                      width=22).pack(side="left")
+        ttk.Label(game, text="Sword class").pack(side="left", padx=(10, 3))
+        self.class_var = tk.StringVar(value=SWORD_CLASSES[0][0])
+        ttk.Combobox(game, textvariable=self.class_var, values=[t for t, _ in SWORD_CLASSES], state="readonly",
+                     width=30).pack(side="left")
+        self.class_var.trace_add("write", lambda *_: getattr(self, "result", None) and self.redraw_result())
         game2 = ttk.Frame(form)
         game2.grid(row=11, column=1, columnspan=2, sticky="w", **pad)
         ttk.Label(game2, text="Progression: sold from rank").pack(side="left", padx=(0, 3))
@@ -606,6 +617,7 @@ class App:
         it["tier"] = RANKS.index(self.rank_var.get()) if self.rank_var.get() in RANKS else 3
         it["scabbard"] = dict(SCABBARDS).get(self.scab_var.get(), "fit")
         it["scabbard_flip"] = self.scab_flip_var.get()
+        it["sword_class"] = dict(SWORD_CLASSES).get(self.class_var.get())
         try:
             it["price"] = max(0, int(float(self.price_var.get().replace(",", "."))))
         except ValueError:
@@ -639,6 +651,7 @@ class App:
         self.rank_var.set(RANKS[it.get("tier", 3)])
         self.scab_var.set(next((t for t, v in SCABBARDS if v == it.get("scabbard", "fit")), SCABBARDS[0][0]))
         self.scab_flip_var.set(bool(it.get("scabbard_flip")))
+        self.class_var.set(next((t for t, v in SWORD_CLASSES if v == it.get("sword_class")), SWORD_CLASSES[0][0]))
         self.price_var.set(str(it["price"]) if it.get("price") else "")
         st = it.get("stats", {})
         self.edges_var.set(next(t for t, v in EDGES if v == st.get("edges")))
@@ -1270,7 +1283,23 @@ class App:
     def short_summary(self, info):
         zn = info["zones_cm"]
         return (f"{info['type']}, {self.fmt_len(zn['tip'] - zn['pommel_end'])}, "
-                f"{self.fmt_mass(info['mass_kg'])}{' (estimated)' if info['mass_note'] != 'given' else ''}")
+                f"{self.fmt_mass(info['mass_kg'])}{' (estimated)' if info['mass_note'] != 'given' else ''}"
+                f"{self.sword_class_text(info)}")
+
+    def sword_class_text(self, info):
+        """For a sword: which game sword carries it (the choice, or what the mod picks by itself: kind_for in
+        mod/HalfSwordCustomWeapon/src/main.cpp, 55 cm overall and the 14 cm two_hand_grip_cm default)."""
+        if info.get("type") != "sword":
+            return ""
+        names = {"dagger": "dagger", "arming": "one-handed sword", "bastard": "bastard sword",
+                 "longsword": "longsword/greatsword"}
+        chosen = dict(SWORD_CLASSES).get(self.class_var.get())
+        if chosen:
+            return f", game class {names[chosen]}"
+        zn = info["zones_cm"]
+        total, grip = zn["tip"] - zn["pommel_end"], -zn.get("handle_bottom", zn["pommel_end"])
+        k = "dagger" if total < 55 else "arming" if grip < 14 else "bastard" if grip < 20 else "longsword"
+        return f", game class {names[k]} (detected)"
 
     def damage_text(self, info):
         """What the converter found or was told for the damage, in words."""
