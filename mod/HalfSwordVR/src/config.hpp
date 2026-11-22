@@ -484,6 +484,8 @@ namespace hsvr
         // The shoulder's limit on each hand's pull (the arm-lag decision 2026-11-20: weight shows as the arm
         // being slow), as the old hold; it eases off to B&S's cap when the grip is far behind. 0 = B&S caps only.
         bool pose_hold_joint_shoulder = true;
+        // The arm carries the weapon's weight at the grip outside that cap (as the old hold). 0 = the cap pays it.
+        bool pose_hold_joint_carry_weight = true;
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).

@@ -12830,7 +12830,7 @@ namespace
     // The joint hold for this tick. Returns false if it doesn't apply (the old hold then runs).
     bool joint_hold(int side, UObject* pawn, UObject* base, UObject* weapon, double mass, double ig_kgm2, const hsvr::Vec3& pivot,
                     const hsvr::Vec3& target_pos, const hsvr::Quat& target_rot, const hsvr::Vec3& pos, const hsvr::Quat& rot, const BodyStrength& body,
-                    const hsvr::Config& cfg)
+                    const hsvr::Vec3& com, const hsvr::Config& cfg)
     {
         using namespace hsvr;
         bool two = g_two.active && g_two.main == side && g_two.weapon == weapon && g_two.bs_valid && g_pose.hand_valid[g_two.second];
@@ -12849,7 +12849,16 @@ namespace
         double st = (std::max)(0.0, cfg.pose_hold_strength) * (std::max)(0.0, cfg.pose_hold_joint_stiffness);
         double dst = (std::max)(0.0, cfg.pose_hold_strength) * (std::max)(0.0, cfg.pose_hold_joint_damping);
         double mx = (std::max)(0.0, cfg.pose_hold_joint_max);
-        double mm = (std::max)(0.05, two ? mass * 0.5 : mass); // each of two hands moves half of it
+        // Chaos's acceleration-mode drive multiplies stiffness, damping and the cap by the effective mass at
+        // the joint's point (SpringMassScale = 1 / HardIM, MaxLambda /= HardIM): crosswise that is
+        // 1 / (1/m + r^2/I) with r from the centre of mass (r4: dividing by half the mass gave up to 2x
+        // the meant pull along a staff). So B&S's N/m and N are divided by that, per point.
+        double Ic = (std::max)(1e-4, ig_kgm2 - mass * dot(pivot_world - com, pivot_world - com) * 1e-4); // kg m^2 about the centre
+        auto eff_mass = [&](const Vec3& at) {
+            double r2 = dot(at - com, at - com) * 1e-4; // m^2
+            return (std::max)(0.05, 1.0 / (1.0 / (std::max)(0.05, mass) + r2 / Ic));
+        };
+        double mm = eff_mass(pivot_world);
         double I = (std::max)(1e-4, ig_kgm2);
         double ang_scale = 1.5; // p.Chaos.JointConstraint.AngularDriveStiffnessScale / DampingScale default
         // Each hand's pull cap (N): B&S's, or the shoulder's (as the old hold) easing to B&S's when far behind.
@@ -12901,8 +12910,25 @@ namespace
                 // Its sphere carries the made-at point: keep that point where the palm wants the spot held now.
                 Vec3 want = g_two.bs_p2 + rot.rotate(o.made_at - g_two.bs_local);
                 set_component_transform(o.sphere, want, rot, false);
-                double fcap2 = hand_cap(pf * mx * (std::max)(0.0, s2b.total), length(at_world - g_two.bs_p2)) / mm * 100.0;
-                jh_drive(o, k, c, fcap2, 0.0, 0.0, 0.0);
+                double mm2 = eff_mass(at_world);
+                double fcap2 = hand_cap(pf * mx * (std::max)(0.0, s2b.total), length(at_world - g_two.bs_p2)) / mm2 * 100.0;
+                jh_drive(o, pk * st / mm2, pc * dst / mm2, fcap2, 0.0, 0.0, 0.0);
+            }
+        }
+        // The arm carries the weapon's weight at the grip outside the pull cap, as the old hold (its lever
+        // about the grip is still the turn's to hold): an upward push of m g at the point(s) held. Without it
+        // the weight ate 12 of a tired hand's 28 N and the staff sagged (r4).
+        if (cfg.pose_hold_joint_carry_weight)
+        {
+            int n = (two && g_jh[g_two.second][1].con) ? 2 : 1;
+            Vec3 at[2] = {pivot_world, pos + rot.rotate(g_two.bs_local)};
+            for (int i = 0; i < n; ++i)
+            {
+                Call f(base, STR("AddForceAtLocation"));
+                f.three(STR("Force"), 0.0, 0.0, mass * 980.0 / n); // kg cm/s^2
+                f.three(STR("Location"), at[i].x, at[i].y, at[i].z);
+                f.name(STR("BoneName"), FName());
+                f.run();
             }
         }
         HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls%s: grip %.1f cm / %.0f deg off; drive k %.0f c %.1f max %.0f cm/s^2, turn k %.0f c %.1f max %.0f rad/s^2 (%.2f kg, %.3f kg m^2)",
@@ -13917,7 +13943,7 @@ namespace
         {
             Vec3 rp = pivot_now - com;
             double ig = ((std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp)) / 1e4; // kg m^2 about the grip
-            by_joint = joint_hold(side, pawn, base, weapon, mass, ig, pivot, target_pos, target_rot, pos, rot, body, cfg);
+            by_joint = joint_hold(side, pawn, base, weapon, mass, ig, pivot, target_pos, target_rot, pos, rot, body, com, cfg);
         }
         if (!by_joint)
         {
