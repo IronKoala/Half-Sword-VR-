@@ -4908,7 +4908,12 @@ namespace
         if (g_pose_active.load() && g_wall_ok_have)
         {
             bool blocked = false;
-            hsvr::Vec3 ok = body_wall_sweep(context, g_wall_ok, g_hold_location, blocked);
+            // Swept at the height he was last kept: after a hitch the game has him dropped ~80 cm into the
+            // floor for a tick, and swept from there the floor stopped his whole catch-up move.
+            hsvr::Vec3 sweep_to = g_hold_location;
+            if (g_kept_have && g_hold_location.z < g_kept_z - 30.0) sweep_to.z = g_kept_z;
+            hsvr::Vec3 ok = body_wall_sweep(context, g_wall_ok, sweep_to, blocked);
+            ok.z = g_hold_location.z;
             if (blocked)
             {
                 Call put(context, STR("K2_SetActorLocation"));
