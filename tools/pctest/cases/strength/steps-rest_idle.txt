@@ -1,0 +1,8 @@
+# Rest while standing still in VR (strength thread). Rest Rate eases toward its target with FInterpTo 0.1/s,
+# so ~40 s gets most of the way. The 'Strength: rest:' log line every 10 s shows every input.
+1.0:hsvr.player_immortal
+1.5:hsvr.pawn_set Rest Rate 0
+2.0:hsvr.mark
+45.0:hsvr.expect var:Rest_Rate > 0.05 rest builds while he stands still
+45.1:hsvr.expect var:Get_Up_Rate < 0.1 a standing VR body is not counted as getting up
+45.2:hsvr.expect var:Asleep = 0 not asleep while standing

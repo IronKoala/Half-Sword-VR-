@@ -1,0 +1,26 @@
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.6:hsvr.book_click 0 1 1
+0.7:hsvr.book_click 0 2
+1.2:hsvr.book_click 0 3
+1.7:hsvr.book_click 0 4
+2.2:hsvr.book_click 0 5
+2.7:hsvr.book_click 0 6
+3.2:hsvr.book_click 0 7
+3.7:hsvr.book_click 0 8
+4.2:hsvr.book_click 0 9
+4.7:hsvr.book_click 0 10
+5.2:hsvr.book_click 0 1 -1
+5.3:hsvr.book_click 0 1 -1
+5.4:hsvr.book_click 0 2
+5.9:hsvr.book_click 0 4
+6.4:hsvr.book_click 0 6
+6.9:hsvr.book_click 0 8
+7.4:hsvr.book_click 0 10
+7.9:hsvr.book_click 0 3
+9.5:hsvr.expect room_lost = 0 no weapon fell out of the world
+9.6:hsvr.expect room_on_tables >= 10 tables filled
+9.7:hsvr.expect room_on_floor >= 1 the rest on the floor
+9.8:hsvr.expect room_mark > 0 marked the weapons
+12.8:hsvr.expect room_moved = 0 nothing moving 3 s later
+12.9:hsvr.expect room_won = 0 no win screen
+13.0:hsvr.test_room_report

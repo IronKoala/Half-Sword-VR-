@@ -126,6 +126,15 @@ namespace hsvr
         // headset, both controllers and their buttons, his drawn hands, head, pelvis and feet, each held
         // item and its hold, crouch and the game's own state; logs\frames-<time>.csv (Matthew 2026-11-19).
         bool log_frames = true;
+        // Bug-marker replay (Matthew 2026-11-22): the mod keeps the last seconds of his head, hands,
+        // controllers, body bones and held weapons in memory (no disk writes); holding the left Y button
+        // (left B on Index) for replay_hold_s saves replay_before_s before the press and replay_after_s
+        // after it to Mods\HalfSwordVR\replays\replay-<time>.csv, with the log lines of that window.
+        // The press plays three strong pulses on both controllers (no other buzz in the mod repeats).
+        bool replay_capture = true;
+        double replay_hold_s = 0.8;
+        double replay_before_s = 10.0;
+        double replay_after_s = 5.0;
         // Write "Input:" lines to the log: which window has the keyboard, Esc and menu clicks,
         // gamepad sticks, and how fast the view is turning.
         bool log_input = true;
@@ -161,7 +170,16 @@ namespace hsvr
         // 1 = in Free Mode the fencer's dialog (the tavern's "Train") gets a Train button that takes
         // you into the test room instead of the cellar (progression's Train is not changed).
         bool test_room_button = true;
-        std::string test_room_map = "/Game/Maps/Arenas/Map_Arena_Yard";
+        // The level the room opens: the game's cellar (Matthew 2026-11-22; the Yard before).
+        std::string test_room_map = "/Game/Maps/Arenas/Map_Arena_Cellar";
+        // The headset shows black while the room is put up and fades in once it is ready, so nothing
+        // is seen popping in. 0 = see the level as it loads.
+        bool test_room_blackout = true;
+        // Two Blade & Sorcery style spawn books on lecterns beside the tables (weapons left, Willies
+        // right): point at a line with an empty hand and pull the trigger.
+        bool test_room_books = true;
+        // The small light over each book's page (the engine's unitless light intensity; 0 = none).
+        double test_room_book_light = 40.0;
         int test_room_foes = 4;
         // The foes' tier (armour and weapons): -1 = a random tier each, 0 Beggar .. 8 Lord.
         int test_room_tier = -1;
@@ -659,6 +677,12 @@ namespace hsvr
         // forearm strap grip is kept (not moved into the hand) where the game has one for that hand
         // (light pavise both hands, heavy pavise left hand). Overrides pose_shield_in_hand for pavises.
         bool pose_pavise_forearm = true;
+        // Pavises by their rear strap (Matthew 2026-11-22), instead of pose_pavise_forearm: off the back
+        // only with the hand across from the strap and held by it, passed by it, mounted on the other
+        // forearm when let go within pose_pavise_mount_cm of that forearm's back (that hand stays free),
+        // taken off and hung back by it.
+        bool pose_pavise_strap = true;
+        double pose_pavise_mount_cm = 15.0;
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;
@@ -703,8 +727,9 @@ namespace hsvr
         bool pose_throw = true;
         // Holster snap (B&S Holder.cs:683-695), only for weapons with no scabbard of their own (Matthew
         // 2026-11-19; scabbard weapons keep the physical sheathe): let go of one while your hand is within
-        // pose_holster_zone_cm of the free belt slot it goes in (the one the game's Assign picks) and moving
-        // slower than pose_holster_max_speed m/s (faster is a throw), and the game hangs it there.
+        // pose_holster_zone_cm of a free slot of its kind on EITHER hip or the back, with either hand
+        // (2026-11-22; nearest wins), moving slower than pose_holster_max_speed m/s (faster is a throw),
+        // and the game hangs it there.
         bool pose_holster_snap = true;
         // A drawn weapon dropped, thrown or passed to the other hand leaves its scabbard on the belt (B&S);
         // the game's own release takes it off (Matthew 2026-11-19: "the scabbard despawns").
@@ -752,6 +777,9 @@ namespace hsvr
         bool pose_sheathe = true;
         double pose_sheathe_mouth_cm = 10.0;
         double pose_sheathe_angle_deg = 30.0;
+        // Sheathing takes two hands (Matthew 2026-11-22): the other hand holds the sword's own scabbard
+        // where it hangs; the blade never goes in by itself. 0 = the old one-hand sheathe at any free mouth.
+        bool pose_sheathe_two_hand = true;
         bool pose_sheathe_cross = true; // a weapon whose scabbard hangs on the other hip goes back across (the game's cross path)
         // The off hand on a belt scabbard: a squeeze within touch_cm of it takes it; it turns with the hand
         // up to angle_deg on the belt (the game's own loose limit is 30) and stays pinned there; let go and it
