@@ -295,7 +295,7 @@ function Make-Groups($list) {
     $cur += $c
   }
   if ($cur.Count) { $groups += , $cur }
-  return , $groups
+  return $groups   # one output object per group (a leading comma here would make them all one group)
 }
 
 $script:failed = @()
@@ -312,7 +312,7 @@ try {
   # Failed or stuck cases once more, each in a launch of its own (not with -Fresh: they already were).
   if (-not $Fresh -and -not $NoConfirm -and $script:failed.Count) {
     Say "confirming $($script:failed.Count) failed case(s) in launches of their own"
-    $again = @($script:failed | Select-Object -Unique)
+    $again = @($cases | Where-Object { @($script:failed | ForEach-Object Name) -contains $_.Name })   # by name: Select-Object -Unique takes all custom objects for equal
     foreach ($c in $again) { [void](Run-Launch @($c) "fresh") }
   }
 }

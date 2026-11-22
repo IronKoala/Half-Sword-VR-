@@ -24215,11 +24215,17 @@ namespace
             }
             if (entry.command.rfind("hsvr.case_here ", 0) == 0)
             {
-                // The first case of a launch: the room the launch opened is the case's room.
-                case_end_log();
-                g_case = CaseState{};
-                g_case.name = entry.command.substr(15);
-                g_case.number = ++g_case_count;
+                // The case's room is ready: the one the launch opened (first case), or the one hsvr.case
+                // opened for it. The latter case is already open: ending it here would log "Case: end"
+                // with no checks, which the runner takes for the case's result.
+                std::string name = entry.command.substr(15);
+                if (g_case.name != name)
+                {
+                    case_end_log();
+                    g_case = CaseState{};
+                    g_case.name = name;
+                    g_case.number = ++g_case_count;
+                }
                 HSVR_LOG("Case: begin %s (#%d) in the room as it is", g_case.name.c_str(), g_case.number);
                 continue;
             }
