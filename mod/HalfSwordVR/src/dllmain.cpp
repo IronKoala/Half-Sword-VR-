@@ -8172,7 +8172,8 @@ namespace
         UObject* base = nullptr;
         UObject* mesh = nullptr;
         UObject* pawn = nullptr;
-        UObject* joint = nullptr;
+        UObject* anchor = nullptr; // a kinematic sphere of the mod's, moved with the forearm's shield socket
+        UObject* joint = nullptr;  // anchor <-> shield, locked
         std::vector<UObject*> no_collide; // against his own bodies
         UObject* beside = nullptr;        // what that arm's hand holds, not colliding with it either
         UObject* beside_joint = nullptr;
@@ -8186,7 +8187,7 @@ namespace
         for (Mount& m : g_mount)
         {
             erase_gone(m.no_collide);
-            for (UObject** p : {&m.joint, &m.beside, &m.beside_joint})
+            for (UObject** p : {&m.anchor, &m.joint, &m.beside, &m.beside_joint})
                 if (gone(*p)) *p = nullptr;
             if (gone(m.weapon) || gone(m.base) || gone(m.mesh) || gone(m.pawn)) m = Mount{};
         }
@@ -8247,9 +8248,47 @@ namespace
         return j;
     }
 
+    UObject* jh_add(UObject* pawn, const TCHAR* cls);
+
+    // The anchor: as the joint hold's sphere (jh_make), it touches nothing. Its collision is switched to
+    // PhysicsOnly once, before anything is jointed to it: a body exists only so.
+    UObject* mount_anchor(UObject* pawn, const hsvr::Vec3& at, const hsvr::Quat& rot)
+    {
+        UObject* s = jh_add(pawn, STR("/Script/Engine.SphereComponent"));
+        if (!s) return nullptr;
+        Call ab(s, STR("SetAbsolute"));
+        ab.flag(STR("bNewAbsoluteLocation"), true);
+        ab.flag(STR("bNewAbsoluteRotation"), true);
+        ab.flag(STR("bNewAbsoluteScale"), true);
+        ab.run();
+        Call r(s, STR("SetSphereRadius"));
+        r.number(STR("InSphereRadius"), 1.0);
+        r.flag(STR("bUpdateOverlaps"), false);
+        r.run();
+        Call hid(s, STR("SetHiddenInGame"));
+        hid.first_flag(true);
+        hid.run();
+        Call ov(s, STR("SetGenerateOverlapEvents"));
+        ov.first_flag(false);
+        ov.run();
+        Call all(s, STR("SetCollisionResponseToAllChannels"));
+        all.byte(STR("NewResponse"), 0); // ignore everything
+        all.run();
+        Call sim(s, STR("SetSimulatePhysics"));
+        sim.first_flag(false);
+        sim.run();
+        if (FProperty* step = prop_chain(s, STR("CanCharacterStepUpOn"))) *(reinterpret_cast<uint8_t*>(s) + step->GetOffset_Internal()) = 0;
+        set_component_transform(s, at, rot, true); // a new component: placed once
+        Call ce(s, STR("SetCollisionEnabled"));
+        ce.byte(STR("NewType"), 2); // PhysicsOnly
+        ce.run();
+        return s;
+    }
+
     void unjoin_mount(Mount& m)
     {
         destroy_joint(m.joint);
+        destroy_joint(m.anchor);
         destroy_joint(m.beside_joint);
         m.beside = nullptr;
         for (UObject* j : m.no_collide) destroy_joint(j);
@@ -8272,21 +8311,27 @@ namespace
     {
         using namespace hsvr;
         static const FName sockets[2] = {bone_fname("shield_l_socket"), bone_fname("shield_r_socket")};
-        static const FName lower[2] = {bone_fname("lowerarm_l"), bone_fname("lowerarm_r")};
         Vec3 p;
         Quat q;
         mount_pose(arm, m, p, q);
         set_component_transform(m.base, p, q, true);
-        // Set Up Left Hand Weapon @14301: BaseMesh to Mesh:lowerarm_l.
-        m.joint = pair_joint(m.pawn, m.base, m.mesh, lower[arm], 2, m.mesh, &sockets[arm]);
-        if (!m.joint) return false;
+        // Not to Mesh:lowerarm, as the game's hand joint is (Set Up Left Hand Weapon @14301): his kinematic
+        // forearm body is not where the arm is drawn. It is moved to the drawn place afresh every step
+        // (120-360 cm/s standing still), and a shield on it hung 2.5-7 cm off (tests 2026-11-22 06:38Z).
+        m.anchor = mount_anchor(m.pawn, socket_location(m.mesh, sockets[arm]), socket_rotation(m.mesh, sockets[arm]));
+        if (!m.anchor) return false;
+        m.joint = pair_joint(m.pawn, m.base, m.anchor, FName(), 2, m.mesh, &sockets[arm]);
+        if (!m.joint)
+        {
+            destroy_joint(m.anchor);
+            return false;
+        }
         // As held: it touches none of his own bodies (the game's NewFunction_0 @537, UG @97167). What Set Up
         // <S> Hand Weapon switched off as it was taken (his armour's bodies @16370, his sheathed items
         // @17145-20157) stays off: only the next taker, or 3 m from Last Parent (ModularWeaponBP @144-302),
         // switches it back on.
         for (FName bone : physics_body_bones(m.mesh))
-            if (bone != lower[arm])
-                if (UObject* j = pair_joint(m.pawn, m.base, m.mesh, bone, 0)) m.no_collide.push_back(j);
+            if (UObject* j = pair_joint(m.pawn, m.base, m.mesh, bone, 0)) m.no_collide.push_back(j);
         return true;
     }
 
@@ -8462,6 +8507,11 @@ namespace
                     continue;
                 }
                 HSVR_LOG("Pavise: joints on the %s forearm made again after the game's unstick", arm == 0 ? "left" : "right");
+            }
+            {
+                // Each tick, moved and not teleported: the substeps carry the shield along with the arm.
+                static const FName sockets[2] = {bone_fname("shield_l_socket"), bone_fname("shield_r_socket")};
+                if (m.anchor) set_component_transform(m.anchor, socket_location(m.mesh, sockets[arm]), socket_rotation(m.mesh, sockets[arm]), false);
             }
             if (in_hand[arm] != m.beside)
             {
@@ -19444,6 +19494,7 @@ namespace
         if (!is_receive_tick(context, function)) return;
         scabbard_restore(context); // first, posed or not: it was hidden for his tick only
         for (auto& pin : g_pawn_pins) set_variable(context, pin.first.c_str(), pin.second, nullptr, nullptr);
+        if (!g_pose_active.load()) mount_tick(context); // its anchor follows the arm posed or not
         if (g_pose_active.load())
         {
             { HSVR_SUB("after:keep_player_off_knees"); keep_player_off_knees(context, true); }
