@@ -576,6 +576,8 @@ namespace hsvr
         num("pose_shield_rim_cm", c.pose_shield_rim_cm);
         flag("pose_shield_grab_face", c.pose_shield_grab_face);
         flag("pose_pavise_forearm", c.pose_pavise_forearm);
+        flag("pose_pavise_strap", c.pose_pavise_strap);
+        num("pose_pavise_mount_cm", c.pose_pavise_mount_cm);
         flag("pose_two_hand", c.pose_two_hand);
         num("pose_two_hand_strength", c.pose_two_hand_strength);
         num("pose_two_hand_blade_gap_cm", c.pose_two_hand_blade_gap_cm);
@@ -648,6 +650,7 @@ namespace hsvr
         flag("pose_sheathe", c.pose_sheathe);
         num("pose_sheathe_mouth_cm", c.pose_sheathe_mouth_cm);
         num("pose_sheathe_angle_deg", c.pose_sheathe_angle_deg);
+        flag("pose_sheathe_two_hand", c.pose_sheathe_two_hand);
         flag("pose_sheathe_cross", c.pose_sheathe_cross);
         flag("pose_scabbard_grab", c.pose_scabbard_grab);
         num("pose_scabbard_touch_cm", c.pose_scabbard_touch_cm);

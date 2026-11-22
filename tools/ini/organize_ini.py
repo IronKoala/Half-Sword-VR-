@@ -418,7 +418,9 @@ LAYOUT = [
         ('pose_shield_grab_rim', '1 = a shield can also be taken by its rim; 0 = straps and handles only.'),
         ('pose_shield_rim_cm', 'How near an outer edge the hand must be for a rim grab (cm).'),
         ('pose_shield_grab_face', '1 = a shield can be taken anywhere, flat faces too (old way).'),
-        ('pose_pavise_forearm', '1 = pavises strap onto the forearm (light: either arm; heavy: left arm), not held in the hand.'),
+        ('pose_pavise_forearm', '1 = pavises strap onto the forearm (light: either arm; heavy: left arm), not held in the hand. Only with pose_pavise_strap=0.'),
+        ('pose_pavise_strap', '1 = a pavise goes by its rear strap: the hand across from it takes it off your back and hangs it back; let go of the strap at the back of your other forearm to mount it there (that hand stays free); grab the strap to take it off or pass it.'),
+        ('pose_pavise_mount_cm', 'How near the back of the other forearm you let go of the strap to mount a pavise (cm).'),
     ]),
     ('Drawing, sheathing, belt', '', [
         ('pose_draw', "1 = squeeze near a sheathed weapon's grip to draw it."),
@@ -434,6 +436,7 @@ LAYOUT = [
         ('pose_sheathe', "1 = put a held weapon's tip into its belt scabbard's mouth to sheathe it."),
         ('pose_sheathe_mouth_cm', 'Tip within this of the scabbard mouth (cm).'),
         ('pose_sheathe_angle_deg', "Blade within this angle of the scabbard's line (degrees)."),
+        ('pose_sheathe_two_hand', "1 = sheathing takes two hands: hold the sword's scabbard on your belt with the other hand, then put the blade in. 0 = the blade goes into any free mouth by itself."),
         ('pose_sheathe_cross', '1 = a weapon whose scabbard is on the other hip goes back across.'),
         ('pose_scabbard_grab', '1 = the off hand can take a belt scabbard and angle it.'),
         ('pose_scabbard_handle', '1 = a belt scabbard is a handle (taken along its length, trigger slides).'),

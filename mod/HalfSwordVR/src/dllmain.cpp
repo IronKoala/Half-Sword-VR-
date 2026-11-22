@@ -29,6 +29,7 @@
 #include <Unreal/Property/FArrayProperty.hpp>
 #include <Unreal/Property/FBoolProperty.hpp>
 #include <Unreal/Property/FStructProperty.hpp>
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp> // FMapProperty, FScriptMap (the equipment passport's maps)
 #include <Unreal/UScriptStruct.hpp>
 #include <Unreal/FString.hpp>
 #include <Unreal/Hooks.hpp>
@@ -65,7 +66,7 @@ namespace
     // answer is kept per class (or per function, for parameters) and name. Classes and functions are
     // dropped when the game frees them (lookup_cache_prune, from gc_sync). A receiver that is itself a
     // class or struct is looked up the old way: UE4SS then searches that struct, not its class.
-    enum LookupKind : int { LkProp, LkFunc, LkIsA, LkParam, LkCount };
+    enum LookupKind : int { LkProp, LkPropNumbered, LkFunc, LkIsA, LkParam, LkCount };
     struct LookupKey
     {
         const void* owner;
@@ -150,6 +151,24 @@ namespace
         if (!o) return nullptr;
         if (receiver_is_struct(o)) return (*o).GetPropertyByNameInChain(name);
         return static_cast<FProperty*>(cached_lookup(LkProp, o->GetClassPrivate(), name, [&] { return static_cast<void*>((*o).GetPropertyByNameInChain(name)); }));
+    }
+    // A variable whose name ends in _<number> ("Scabbard_L_1", "Scabbard_L_2"). An FName keeps that number
+    // apart from the text, and UE4SS's GetPropertyByNameInChain compares the text alone (FName::Equals,
+    // NameTypes.hpp): prop_chain gives the same variable for both. This one compares the number too.
+    FProperty* prop_numbered(UObject* o, const TCHAR* name)
+    {
+        if (!o) return nullptr;
+        return static_cast<FProperty*>(cached_lookup(LkPropNumbered, o->GetClassPrivate(), name, [&]() -> void* {
+            const FName want(name, FNAME_Add);
+            for (FProperty* p : TFieldRange<FProperty>(o->GetClassPrivate(), EFieldIterationFlags::IncludeSuper))
+                if (p->GetFName().IsEqual(want)) return p;
+            return nullptr;
+        }));
+    }
+    UObject** numbered_object_ptr(UObject* o, const TCHAR* name)
+    {
+        FProperty* p = prop_numbered(o, name);
+        return p && p->GetClass().GetName() == STR("ObjectProperty") ? reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(o) + p->GetOffset_Internal()) : nullptr;
     }
     template <typename T> T* value_ptr(UObject* o, const TCHAR* name)
     {
@@ -4695,6 +4714,9 @@ namespace
         double last_log = -1e9;
         bool sheathing = false;      // going in rather than out
         const char* socket = "";     // the slot's socket (where the scabbard belongs)
+        int slot = 0;                // and its number on that side (Slot byte)
+        double z_in = 1e9;           // sheathing: the furthest in it has been (cm out)
+        bool pulling_back = false;   // and being pulled back out of it
         double length = 80.0;        // the blade's length (cm)
         bool block_cleared = false;
     };
@@ -4707,6 +4729,18 @@ namespace
     // A blade just drawn still has its tip at the mouth, lined up: no sheathe until it has been taken
     // well away first (playtest 02:44: every draw went straight back into a sheathe, 1 ms after it freed).
     bool g_sheathe_armed[2] = {true, true};
+    // While not armed: the hip the blade came out of (or could not go into), since when, and since when the
+    // tip has been clear of that hip.
+    int g_sheathe_from[2] = {1, 1};
+    double g_sheathe_out_at[2] = {-1e9, -1e9};
+    double g_sheathe_clear_since[2] = {-1.0, -1.0};
+    void sheathe_disarm(int side, int hip)
+    {
+        g_sheathe_armed[side] = false;
+        g_sheathe_from[side] = hip;
+        g_sheathe_out_at[side] = hsvr::now_seconds();
+        g_sheathe_clear_since[side] = -1.0;
+    }
     // Where each drawn weapon's own scabbard really opens, measured when it was drawn (it sat seated):
     // the blade's start (the guard end of its blade zone) and its line, in the scabbard's frame. The
     // belt socket is only where the scabbard hangs from, and moves with it when the off hand angles it.
@@ -4732,6 +4766,7 @@ namespace
     SlotTake g_slot_take[2];
     void slot_take_tick(UObject* pawn);
     bool try_scabbard_grab(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg);
+    UObject* held_scabbard(int side); // the belt scabbard that hand holds, else null
     void scabbard_let_go(int side, const char* why);
     bool scabbard_held(int side);
     void scabbard_before_tick(UObject* pawn);
@@ -5392,6 +5427,29 @@ namespace
         g_arm_ignore[side].weapon = nullptr;
     }
 
+    // A new constraint component of his, at his root, joining nothing yet.
+    UObject* new_constraint(UObject* pawn, UClass* cls)
+    {
+        Call add(pawn, STR("AddComponentByClass"));
+        add.object(STR("Class"), cls);
+        add.flag(STR("bManualAttachment"), false);
+        if (FProperty* t = add.param(STR("RelativeTransform")))
+        {
+            uint8_t* at = add.buffer.data() + t->GetOffset_Internal();
+            UScriptStruct* type = struct_type(t);
+            if (FProperty* r = struct_member(type, STR("Rotation")))
+                if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                {
+                    uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                    if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                    else *reinterpret_cast<float*>(wat) = 1.0f;
+                }
+            if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+        }
+        add.flag(STR("bDeferredFinish"), false);
+        return add.run() ? add.object_result() : nullptr;
+    }
+
     void ignore_arm_collision(UObject* pawn, UObject* mesh, UObject* weapon, UObject* base, int side)
     {
         if (g_arm_ignore[side].weapon == weapon) return;
@@ -5410,25 +5468,7 @@ namespace
             // the other hand's call (a second hand on it) adds only its own forearm.
             bool whole = hsvr::config().pose_hold_ignore_body && g_arm_ignore[1 - side].weapon != weapon;
             if ((!hsvr::config().pose_hold_ignore_hand && bone.ToString() == hand.ToString()) || (!whole && !in_forearm(mesh, bone, side))) continue;
-            Call add(pawn, STR("AddComponentByClass"));
-            add.object(STR("Class"), cls);
-            add.flag(STR("bManualAttachment"), false);
-            if (FProperty* t = add.param(STR("RelativeTransform")))
-            {
-                uint8_t* at = add.buffer.data() + t->GetOffset_Internal();
-                UScriptStruct* type = struct_type(t);
-                if (FProperty* r = struct_member(type, STR("Rotation")))
-                    if (FProperty* w = struct_member(struct_type(r), STR("W")))
-                    {
-                        uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
-                        if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
-                        else *reinterpret_cast<float*>(wat) = 1.0f;
-                    }
-                if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
-            }
-            add.flag(STR("bDeferredFinish"), false);
-            if (!add.run()) continue;
-            UObject* j = add.object_result();
+            UObject* j = new_constraint(pawn, cls);
             if (!j) continue;
             // Free in every direction and no drives: it holds nothing, it only switches off the pair's collision.
             for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
@@ -6290,6 +6330,8 @@ namespace
     bool is_fist(UObject* weapon);
     bool holster_snap(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg);
     UObject* scabbard_pin(UObject* scab);
+    void return_scabbard_pin(UObject* pawn, UObject* scab, bool free);
+    void pin_angular_limit(UObject* pin, const TCHAR* fn, uint8_t motion, double degrees);
     void remove_fist(int side, UObject* pawn, const char* why);
     // A throw (B&S: released faster than 2 m/s): the game counts an unheld weapon's hits only while its
     // "Just Thrown" is set and "Last Parent" is the thrower (ModularWeaponBP @67055; hs_throwing.md),
@@ -6679,10 +6721,11 @@ namespace
     WorldGrab g_world[2];
     bool g_wrap_on_side(int side); // (defined with the wrap)
     // The hand holds an object, a body or scenery, or has just asked the game to (its fist must wait).
+    bool mount_gripped(int side);
     bool xbow_string_in_hand(int side); // that hand holds a crossbow's string
     bool hand_holds_thing(int side, UObject* pawn)
     {
-        if (g_world[side].on || g_wrap_on_side(side) || xbow_string_in_hand(side)) return true;
+        if (g_world[side].on || g_wrap_on_side(side) || mount_gripped(side) || xbow_string_in_hand(side)) return true;
         if (bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R"))) return true;
         const ObjectGrab& g = g_object_grab[side];
         return g.component && !g.fallback_tried && g.since >= 0.0 && hsvr::now_seconds() - g.since < 0.5;
@@ -7426,6 +7469,7 @@ namespace
     // touching it (pose_grab_touch_cm): it holds the nearest handle (grip, blade, a strap) lined up
     // with its grip line, or the spot it touched. The weapon then lies along the line between the two
     // hands' points, the first hand sets its roll, and the hold is pose_two_hand_strength as strong.
+    bool held_by_strap(int side, UObject* w);
     bool try_second_hand(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -7437,6 +7481,8 @@ namespace
         // Not a blade on its way into or out of a scabbard (playtest 02:44: the off hand reaching for
         // the scabbard took the sheathing sword's blade, and the two holds froze it).
         if (g_draw[other].active && g_draw[other].weapon == weapon) return false;
+        // Held by its rear strap a pavise is held in one hand (its strap passes: pavise_pass).
+        if (cfg.pose_pavise_strap && held_by_strap(other, weapon)) return false;
         UObject* base = object_property(weapon, STR("BaseMesh"));
         if (!base) return false;
         Vec3 at = hand_grab_point(mesh, side);
@@ -8343,6 +8389,35 @@ namespace
         return axes[thin];
     }
 
+    // A pavise's rear strap (pose_pavise_strap), and where that pavise sits on each forearm: the point of
+    // its BaseMesh that lands on the game's shield_<s>_socket and the turn there, as Set Up <S> Hand Weapon
+    // places "Grip <S> Hand Default Pos" on it (@3701-4222). The heavy's left and the light's both are the
+    // game's own scenes. The game has none for the heavy on the right: that is the left's mirror image,
+    // still top up, the long strap round the arm by the wrist. Nor for the tower, which has no forearm
+    // strap: the middle of its crossed strap is used, placed as the heavy is.
+    struct PaviseSpec
+    {
+        const wchar_t* shield;
+        const char* strap;
+        struct
+        {
+            double x, y, z, pitch, yaw, roll;
+        } at[2]; // left, right
+    };
+    const PaviseSpec k_pavises[] = {
+        {L"Shield_Pavise_Heavy", "long strap", {{-7, 0, 16, 0, -5, -20}, {17, 0, 16, 0, 5, -20}}},
+        {L"Shield_Pavise_Light", "lower strap", {{0, 0, 6, -90, 0, 0}, {0, 0, 6, 90, 0, 0}}},
+        {L"Shield_Pavise_Tower", "crossed strap's middle", {{-7, 0, 0, 0, -5, -20}, {7, 0, 0, 0, 5, -20}}},
+    };
+    const PaviseSpec* pavise_spec(UObject* item)
+    {
+        if (!item || !class_name_starts(item, STR("Shield_Pavise"))) return nullptr;
+        std::wstring cls = shield_class(item);
+        for (const PaviseSpec& p : k_pavises)
+            if (cls == p.shield) return &p;
+        return nullptr;
+    }
+
     // Pavises start locked to the forearm, like a real pavise (Matthew 2026-11-20). The game already
     // straps a shield to the forearm for grip types 6 (Shield) and 7 (Shield_Heavy): its joint is to
     // lowerarm_x at shield_x_socket (shield_grips.md). Pavise_Light is 6 for both hands (forearm through
@@ -8352,9 +8427,555 @@ namespace
     // grip, kept (not moved into the hand), wherever the game has one for that hand.
     bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg)
     {
+        if (cfg.pose_pavise_strap && pavise_spec(shield)) return false; // held by the strap, mounted by the player
         if (!cfg.pose_pavise_forearm || !shield || !class_name_starts(shield, STR("Shield_Pavise"))) return false;
         double g = read_number_variable(shield, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default"));
         return g == 6.0 || g == 7.0;
+    }
+
+    // ---- Pavises by the rear strap (pose_pavise_strap, Matthew 2026-11-22) ---------------------------
+    // Off the back only the hand across the body from the strap takes one, and holds it in the hand by
+    // the strap. The other hand taking the strap gets it. Let go by the back of the other forearm, it is
+    // mounted there by a joint of the mod's, and that hand stays free: Weapon L/R is NOT the shield. The
+    // game needs it there for nothing a block or a hit reads (ModularWeaponBP tells its user by Last
+    // Parent @62285 / @67069, Sheathed @62363 and Is Held @42700 / @62991 / @65103); Set Weapon Damping
+    // Pick Up gives it Is Held (which also keeps the game's pickups off it, UG @217087 / @224880), its
+    // held mass and the boxes the AI reads a held shield by (My Box Collisions @1132-1544, AI_BP @30683).
+    const Handle* pavise_strap(UObject* w, UObject* base)
+    {
+        const PaviseSpec* spec = base ? pavise_spec(w) : nullptr;
+        if (!spec) return nullptr;
+        for (const Handle& hd : item_handles(w, base))
+            if (hd.name == spec->strap) return &hd;
+        return nullptr;
+    }
+
+    hsvr::Vec3 handle_middle(const Handle& hd) { return (hd.a + hd.b) * 0.5; }
+
+    double to_segment(const hsvr::Vec3& p, const hsvr::Vec3& a, const hsvr::Vec3& b, hsvr::Vec3* on = nullptr)
+    {
+        using namespace hsvr;
+        Vec3 ab = b - a;
+        double len2 = dot(ab, ab);
+        double u = len2 > 1e-6 ? (std::min)(1.0, (std::max)(0.0, dot(p - a, ab) / len2)) : 0.0;
+        Vec3 q = a + ab * u;
+        if (on) *on = q;
+        return length(p - q);
+    }
+
+    // The hand across the body from a strap at this point: spine_05's X is his left. -1: either (a strap
+    // on the spine, as the tower's).
+    int opposite_hand(UObject* mesh, const hsvr::Vec3& strap)
+    {
+        using namespace hsvr;
+        static const FName spine = bone_fname("spine_05");
+        double x = socket_rotation(mesh, spine).inverse().rotate(strap - socket_location(mesh, spine)).x;
+        if (std::fabs(x) < 4.0) return -1;
+        return x > 0.0 ? 1 : 0;
+    }
+
+    // The hand that may take or hang a pavise on his back (Matthew 2026-11-22: only the opposite-side
+    // hand). SheathSlot 2 hangs it on Sheath_Slot_Shoulder_L, on upperarm_l (back_slot_physics.md), so
+    // the right hand, whatever the strap's X: the light pavise's strap sits within 4 cm of the spine
+    // there and either hand got it (test slot 2026-11-22, 2 of 9). SheathSlot 3 (Sheath_Slot_Back, mid
+    // back): across from its strap; -1 = either (a strap on the spine, as the tower's).
+    int back_pavise_hand(UObject* mesh, UObject* w, const hsvr::Vec3& strap)
+    {
+        if (read_number_variable(w, STR("SheathSlot")) == 2.0) return 1;
+        return opposite_hand(mesh, strap);
+    }
+
+    const char* pavise_back_socket(UObject* w) { return read_number_variable(w, STR("SheathSlot")) == 2.0 ? "Sheath_Slot_Shoulder_L" : "Sheath_Slot_Back"; }
+
+    // Where a pavise sat when it hung, in its slot socket's frame (kept at each take off the back).
+    struct HungPose
+    {
+        hsvr::Vec3 pos;
+        hsvr::Quat rot;
+    };
+    std::unordered_map<UObject*, HungPose> g_hung;
+
+    void remember_hung(UObject* mesh, UObject* w, const hsvr::Vec3& p, const hsvr::Quat& q)
+    {
+        using namespace hsvr;
+        static bool tracked = on_freed([] { erase_gone_keys(g_hung); });
+        (void)tracked;
+        FName sock = bone_fname(pavise_back_socket(w));
+        Quat iq = socket_rotation(mesh, sock).inverse();
+        g_hung[w] = HungPose{iq.rotate(p - socket_location(mesh, sock)), (iq * q).normalized()};
+    }
+
+    // Where its strap would be, hung again. Never seen hung: the socket's pose, 7 cm down it on the back
+    // (where the heavy rests there, pavise_strap_and_scabbard_hold.md (a)).
+    void hung_strap(UObject* mesh, UObject* w, const Handle& strap, hsvr::Vec3& a, hsvr::Vec3& b)
+    {
+        using namespace hsvr;
+        FName sock = bone_fname(pavise_back_socket(w));
+        HungPose hp{Vec3{0, 0, read_number_variable(w, STR("SheathSlot")) == 3.0 ? -7.0 : 0.0}, Quat{}};
+        auto known = g_hung.find(w);
+        if (known != g_hung.end()) hp = known->second;
+        Vec3 sp = socket_location(mesh, sock);
+        Quat sq = socket_rotation(mesh, sock);
+        a = sp + sq.rotate(hp.pos + hp.rot.rotate(strap.a));
+        b = sp + sq.rotate(hp.pos + hp.rot.rotate(strap.b));
+    }
+
+    bool held_by_strap(int side, UObject* w)
+    {
+        const FreeGrip* g = nullptr;
+        if (g_pending_item[side] == w && g_pending_free[side].set) g = &g_pending_free[side];
+        else if (g_hold[side].weapon == w && g_hold[side].free.set) g = &g_hold[side].free;
+        if (!g) return false;
+        const PaviseSpec* spec = pavise_spec(w);
+        return spec && g->handle == spec->strap;
+    }
+
+    // Into that hand by its strap, from where it is.
+    bool take_by_strap(int side, UObject* pawn, UObject* mesh, UObject* w, UObject* base, const Handle& strap, const hsvr::Vec3& palm)
+    {
+        using namespace hsvr;
+        Vec3 p = component_location(base);
+        Quat q = component_rotation(base);
+        if (!give_hand_weapon(side, pawn, w) || object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != w) return false;
+        FreeGrip g = handle_grip(side, mesh, p, q, palm, strap, 0.5);
+        g.hold_at = hsvr::config().pose_grab_settle_s > 0.0;
+        g.at_pos = p;
+        g.at_rot = q;
+        g.place = !g.hold_at;
+        g_pending_free[side] = g;
+        g_pending_item[side] = w;
+        set_component_transform(base, p, q, true); // back from where the game's set-up snapped it
+        return true;
+    }
+
+    // The other hand on the rear strap of a pavise in a hand: it passes to that hand.
+    bool pavise_pass(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_pavise_strap || g_two.active) return false;
+        int from = 1 - side;
+        UObject* w = object_property(pawn, from == 0 ? STR("Weapon L") : STR("Weapon R"));
+        if (!w || g_hold[from].weapon != w || in_own_slot(pawn, w)) return false;
+        UObject* base = object_property(w, STR("BaseMesh"));
+        const Handle* strap = pavise_strap(w, base);
+        if (!strap) return false;
+        Vec3 palm = hand_grab_point(mesh, side);
+        double d = to_segment(component_rotation(base).inverse().rotate(palm - component_location(base)), strap->a, strap->b);
+        if (d > cfg.pose_grab_handle_cm) return false;
+        Vec3 p = component_location(base);
+        Quat q = component_rotation(base);
+        drop_weapon(from, pawn, false);
+        clear_arm_ignore(from); // else the new hand's hold would switch off only its forearm against it
+        g_pending_free[from] = FreeGrip{};
+        g_pending_item[from] = nullptr;
+        set_component_transform(base, p, q, true);
+        bool ok = take_by_strap(side, pawn, mesh, w, base, *strap, palm);
+        if (ok) controllers_buzz(side, 0.4f);
+        HSVR_LOG("Pavise: %s hand %s %ls by its %s from the %s hand (%.1f cm from it)", side == 0 ? "left" : "right", ok ? "takes" : "could NOT take",
+                 w->GetName().c_str(), strap->name.c_str(), from == 0 ? "left" : "right", d);
+        return true;
+    }
+
+    // One pavise on each forearm, by that arm's side.
+    struct Mount
+    {
+        UObject* weapon = nullptr;
+        UObject* base = nullptr;
+        UObject* mesh = nullptr;
+        UObject* pawn = nullptr;
+        UObject* anchor = nullptr; // a kinematic sphere of the mod's, moved with the forearm's shield socket
+        UObject* joint = nullptr;  // anchor <-> shield, locked
+        std::vector<UObject*> no_collide; // against his own bodies
+        UObject* beside = nullptr;        // what that arm's hand holds, not colliding with it either
+        UObject* beside_joint = nullptr;
+        const PaviseSpec* spec = nullptr;
+        bool gripped = false; // that arm's own hand is on its strap
+        bool unstuck = false; // its "Static Mesh Collision Disabled (Unstuck)" as last seen
+        double last_log = -1e9;
+    };
+    Mount g_mount[2];
+    bool g_mount_tracked = on_freed([] {
+        for (Mount& m : g_mount)
+        {
+            erase_gone(m.no_collide);
+            for (UObject** p : {&m.anchor, &m.joint, &m.beside, &m.beside_joint})
+                if (gone(*p)) *p = nullptr;
+            if (gone(m.weapon) || gone(m.base) || gone(m.mesh) || gone(m.pawn)) m = Mount{};
+        }
+    });
+
+    bool mount_gripped(int side) { return g_mount[side].gripped; }
+    bool is_mounted(UObject* w) { return w && (w == g_mount[0].weapon || w == g_mount[1].weapon); }
+
+    void destroy_joint(UObject*& j)
+    {
+        if (!j) return;
+        Call d(j, STR("K2_DestroyComponent"));
+        d.object(STR("Object"), j);
+        d.run();
+        j = nullptr;
+    }
+
+    // motion 0 free (it only switches the pair's collision off), 2 locked.
+    UObject* pair_joint(UObject* pawn, UObject* a, UObject* b, FName bone, uint8_t motion, UObject* attach_to = nullptr, const FName* socket = nullptr)
+    {
+        static UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+        if (!cls) return nullptr;
+        UObject* j = new_constraint(pawn, cls);
+        if (!j) return nullptr;
+        if (attach_to && socket)
+        {
+            // The game's hand joint sits on the socket too (Set Up Left Hand Weapon @6276).
+            Call at(j, STR("K2_AttachToComponent"));
+            at.object(STR("Parent"), attach_to);
+            at.name(STR("SocketName"), *socket);
+            at.byte(STR("LocationRule"), 2); // SnapToTarget
+            at.byte(STR("RotationRule"), 2);
+            at.byte(STR("ScaleRule"), 2);
+            at.flag(STR("bWeldSimulatedBodies"), false);
+            at.run();
+        }
+        for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
+        {
+            Call c(j, fn);
+            c.byte(STR("ConstraintType"), motion);
+            c.number(STR("LimitSize"), 0.0);
+            c.run();
+        }
+        // By type, not by name: the engine calls the twist's motion "ConstraintType" and the swings' "MotionType",
+        // and a missed name leaves the byte 0 = free (test 2026-11-22 06:27Z: ang 2 2 0, a mounted pavise
+        // swung up to 151 deg about the forearm).
+        for (const TCHAR* fn : {STR("SetAngularSwing1Limit"), STR("SetAngularSwing2Limit"), STR("SetAngularTwistLimit")})
+            pin_angular_limit(j, fn, motion, 0.0);
+        Call dc(j, STR("SetDisableCollision"));
+        dc.first_flag(true);
+        dc.run();
+        Call join(j, STR("SetConstrainedComponents"));
+        join.object(STR("Component1"), a);
+        join.name(STR("BoneName1"), FName());
+        join.object(STR("Component2"), b);
+        join.name(STR("BoneName2"), bone);
+        join.run();
+        return j;
+    }
+
+    UObject* jh_add(UObject* pawn, const TCHAR* cls);
+
+    // The anchor: as the joint hold's sphere (jh_make), it touches nothing. Its collision is switched to
+    // PhysicsOnly once, before anything is jointed to it: a body exists only so.
+    UObject* mount_anchor(UObject* pawn, const hsvr::Vec3& at, const hsvr::Quat& rot)
+    {
+        UObject* s = jh_add(pawn, STR("/Script/Engine.SphereComponent"));
+        if (!s) return nullptr;
+        Call ab(s, STR("SetAbsolute"));
+        ab.flag(STR("bNewAbsoluteLocation"), true);
+        ab.flag(STR("bNewAbsoluteRotation"), true);
+        ab.flag(STR("bNewAbsoluteScale"), true);
+        ab.run();
+        Call r(s, STR("SetSphereRadius"));
+        r.number(STR("InSphereRadius"), 1.0);
+        r.flag(STR("bUpdateOverlaps"), false);
+        r.run();
+        Call hid(s, STR("SetHiddenInGame"));
+        hid.first_flag(true);
+        hid.run();
+        Call ov(s, STR("SetGenerateOverlapEvents"));
+        ov.first_flag(false);
+        ov.run();
+        Call all(s, STR("SetCollisionResponseToAllChannels"));
+        all.byte(STR("NewResponse"), 0); // ignore everything
+        all.run();
+        Call sim(s, STR("SetSimulatePhysics"));
+        sim.first_flag(false);
+        sim.run();
+        if (FProperty* step = prop_chain(s, STR("CanCharacterStepUpOn"))) *(reinterpret_cast<uint8_t*>(s) + step->GetOffset_Internal()) = 0;
+        set_component_transform(s, at, rot, true); // a new component: placed once
+        Call ce(s, STR("SetCollisionEnabled"));
+        ce.byte(STR("NewType"), 2); // PhysicsOnly
+        ce.run();
+        return s;
+    }
+
+    void unjoin_mount(Mount& m)
+    {
+        destroy_joint(m.joint);
+        destroy_joint(m.anchor);
+        destroy_joint(m.beside_joint);
+        m.beside = nullptr;
+        for (UObject* j : m.no_collide) destroy_joint(j);
+        m.no_collide.clear();
+    }
+
+    // Where a mount belongs now.
+    void mount_pose(int arm, const Mount& m, hsvr::Vec3& p, hsvr::Quat& q)
+    {
+        using namespace hsvr;
+        static const FName sockets[2] = {bone_fname("shield_l_socket"), bone_fname("shield_r_socket")};
+        const auto& at = m.spec->at[arm];
+        q = (socket_rotation(m.mesh, sockets[arm]) * rot_to_quat(-at.pitch, -at.yaw, -at.roll)).normalized();
+        p = socket_location(m.mesh, sockets[arm]) - q.rotate(Vec3{at.x, at.y, at.z});
+    }
+
+    // Placed on the forearm (one teleport) and jointed to it: at the mount, and again only when the
+    // game's unstick has rebuilt its collision.
+    bool join_mount(int arm, Mount& m)
+    {
+        using namespace hsvr;
+        static const FName sockets[2] = {bone_fname("shield_l_socket"), bone_fname("shield_r_socket")};
+        Vec3 p;
+        Quat q;
+        mount_pose(arm, m, p, q);
+        set_component_transform(m.base, p, q, true);
+        // Not to Mesh:lowerarm, as the game's hand joint is (Set Up Left Hand Weapon @14301): his kinematic
+        // forearm body is not where the arm is drawn. It is moved to the drawn place afresh every step
+        // (120-360 cm/s standing still), and a shield on it hung 2.5-7 cm off (tests 2026-11-22 06:38Z).
+        m.anchor = mount_anchor(m.pawn, socket_location(m.mesh, sockets[arm]), socket_rotation(m.mesh, sockets[arm]));
+        if (!m.anchor) return false;
+        m.joint = pair_joint(m.pawn, m.base, m.anchor, FName(), 2, m.mesh, &sockets[arm]);
+        if (!m.joint)
+        {
+            destroy_joint(m.anchor);
+            return false;
+        }
+        // As held: it touches none of his own bodies (the game's NewFunction_0 @537, UG @97167). What Set Up
+        // <S> Hand Weapon switched off as it was taken (his armour's bodies @16370, his sheathed items
+        // @17145-20157) stays off: only the next taker, or 3 m from Last Parent (ModularWeaponBP @144-302),
+        // switches it back on.
+        for (FName bone : physics_body_bones(m.mesh))
+            if (UObject* j = pair_joint(m.pawn, m.base, m.mesh, bone, 0)) m.no_collide.push_back(j);
+        return true;
+    }
+
+    // Off the arm, and loose as a dropped weapon is.
+    void unmount_loose(int arm, const char* why)
+    {
+        Mount m = g_mount[arm];
+        g_mount[arm] = Mount{};
+        unjoin_mount(m);
+        Call(m.weapon, STR("Set Weapon Damping Drop")).run();
+        HSVR_LOG("Pavise: %ls comes off the %s forearm (%s)", m.weapon->GetName().c_str(), arm == 0 ? "left" : "right", why);
+    }
+
+    // Let go of the strap by the back of the other forearm: mounted on it.
+    bool pavise_mount(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_pavise_strap || g_two.active || !held_by_strap(side, w)) return false;
+        const int arm = 1 - side;
+        const char* hand = side == 0 ? "left" : "right";
+        UObject* base = object_property(w, STR("BaseMesh"));
+        const PaviseSpec* spec = pavise_spec(w);
+        if (!base || !spec) return false;
+        static const FName sockets[2] = {bone_fname("shield_l_socket"), bone_fname("shield_r_socket")};
+        static const FName lower[2] = {bone_fname("lowerarm_l"), bone_fname("lowerarm_r")};
+        static const FName wrist[2] = {bone_fname("hand_l"), bone_fname("hand_r")};
+        Vec3 palm = hand_grab_point(mesh, side), on;
+        double d = to_segment(palm, socket_location(mesh, lower[arm]), socket_location(mesh, wrist[arm]), &on);
+        // The socket's +Y is out of the back of the forearm (a shield's face there).
+        double behind = dot(palm - on, socket_rotation(mesh, sockets[arm]).rotate(Vec3{0, 1, 0}));
+        if (d > cfg.pose_pavise_mount_cm || behind < -3.0)
+        {
+            if (d < 40.0)
+                HSVR_LOG("Pavise: %s hand let go of the strap %.1f cm from the other forearm, %.1f cm to its back (needs %.0f cm, on the back): not mounted", hand, d, behind,
+                         cfg.pose_pavise_mount_cm);
+            return false;
+        }
+        // The shoulder's hung strap is a few cm from where the left forearm is held at the chest: with the
+        // palm on that strap it was mounted on the arm whenever the palm was just on the arm's back side
+        // (test b6_light_right 2026-11-22 19:24Z: strap 0.2 cm, arm 3.2 cm). The nearer wins.
+        const double kind = read_number_variable(w, STR("SheathSlot"));
+        const Handle* strap = pavise_strap(w, base);
+        if (cfg.pose_holster_snap && strap && (kind == 2.0 || kind == 3.0) && !object_property(pawn, STR("Weapon Slot Back")))
+        {
+            Vec3 a, b;
+            hung_strap(mesh, w, *strap, a, b);
+            const int only = back_pavise_hand(mesh, w, (a + b) * 0.5);
+            const double hang = to_segment(palm, a, b);
+            if ((only < 0 || only == side) && hang <= cfg.pose_holster_zone_cm && hang < d)
+            {
+                HSVR_LOG("Pavise: %s hand let go of the strap %.1f cm from where it hangs, nearer than the other forearm (%.1f cm): hung, not mounted", hand, hang, d);
+                return false;
+            }
+        }
+        const char* no = nullptr;
+        if (g_mount[arm].weapon) no = "that forearm has one";
+        else if (bool_property(pawn, arm == 0 ? STR("Hand L Torn Off") : STR("Hand R Torn Off"))) no = "that arm is cut off";
+        else if (in_own_slot(pawn, w)) no = "still leaving its slot";
+        else if (g_hand_world_v[side] > cfg.pose_holster_max_speed) no = "hand too fast: a throw";
+        if (no)
+        {
+            HSVR_LOG("Pavise: %s hand let go of the strap by the other forearm: not mounted (%s)", hand, no);
+            return false;
+        }
+        drop_weapon(side, pawn, false); // Set Up <S> Hand Weapon(None): that hand's joint goes
+        clear_arm_ignore(side);
+        g_pending_free[side] = FreeGrip{};
+        g_pending_item[side] = nullptr;
+        // What Set Up Left Hand Weapon gives a shield it straps on, bar Weapon L and the hand's grip
+        // (@4418 owner, @4537 Last Parent, @19081 pick-up damping). Its SearchBeacon stays on: the game's
+        // pickups pass over it on Is Held.
+        Call own(w, STR("SetOwner"));
+        own.object(STR("NewOwner"), pawn);
+        own.run();
+        set_variable(w, STR("Last Parent"), 0.0, pawn, nullptr);
+        Call(w, STR("Set Weapon Damping Pick Up")).run();
+        Mount& m = g_mount[arm];
+        m = Mount{};
+        m.weapon = w;
+        m.base = base;
+        m.mesh = mesh;
+        m.pawn = pawn;
+        m.spec = spec;
+        m.unstuck = bool_property(w, STR("Static Mesh Collision Disabled (Unstuck)"));
+        if (!join_mount(arm, m))
+        {
+            unmount_loose(arm, "no joint could be made");
+            return true;
+        }
+        controllers_buzz(side, 0.4f);
+        controllers_buzz(arm, 0.3f);
+        HSVR_LOG("Pavise: %s hand let go of the %s %.1f cm from the back of the %s forearm: %ls mounted there, that hand free", hand, spec->strap, d,
+                 arm == 0 ? "left" : "right", w->GetName().c_str());
+        return true;
+    }
+
+    // The free hand on the strap of the pavise on the other forearm: off the arm, into that hand.
+    bool pavise_unmount(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& palm, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        const int arm = 1 - side;
+        Mount& m = g_mount[arm];
+        if (!m.weapon || m.pawn != pawn || !object_alive(m.weapon)) return false;
+        const Handle* strap = pavise_strap(m.weapon, m.base);
+        if (!strap) return false;
+        double d = to_segment(component_rotation(m.base).inverse().rotate(palm - component_location(m.base)), strap->a, strap->b);
+        if (d > cfg.pose_grab_handle_cm) return false;
+        UObject* w = m.weapon;
+        UObject* base = m.base;
+        unjoin_mount(m);
+        m = Mount{};
+        bool ok = take_by_strap(side, pawn, mesh, w, base, *strap, palm);
+        if (ok) controllers_buzz(side, 0.4f);
+        else Call(w, STR("Set Weapon Damping Drop")).run();
+        HSVR_LOG("Pavise: %s hand %s %ls off the %s forearm by its %s (%.1f cm from it)", side == 0 ? "left" : "right", ok ? "takes" : "could NOT take",
+                 w->GetName().c_str(), arm == 0 ? "left" : "right", strap->name.c_str(), d);
+        return true;
+    }
+
+    // The mounted arm's own hand, with nothing else in reach.
+    bool mount_grip(int side, UObject* pawn)
+    {
+        Mount& m = g_mount[side];
+        if (!m.weapon || m.pawn != pawn) return false;
+        m.gripped = true;
+        hsvr::controllers_buzz(side, 0.3f);
+        HSVR_LOG("Pavise: %s hand grips the strap of the pavise on its own forearm (nothing else in reach)", side == 0 ? "left" : "right");
+        return true;
+    }
+
+    bool mount_let_go(int side)
+    {
+        if (!g_mount[side].gripped) return false;
+        g_mount[side].gripped = false;
+        set_anim_grip(side, -1);
+        HSVR_LOG("Pavise: %s hand lets go of the strap; it stays mounted", side == 0 ? "left" : "right");
+        return true;
+    }
+
+    // What that arm's hand holds or is taking never collides with the pavise on its forearm. The pair is
+    // made as soon as the hand starts taking it (its pending grip, before Weapon <S> is set and while the
+    // grab's settle pulls it in past the shield), not after his tick once Weapon <S> is set: a mace taken
+    // by the mounted arm's hand knocked the pavise 1.1-5.7 cm / 5-11 deg off its place for under a second
+    // (test 886981a, 3 of 3; Matthew 2026-11-22 chose to fix it before install).
+    void mount_beside(int arm, UObject* pawn, UObject* held)
+    {
+        Mount& m = g_mount[arm];
+        if (!m.weapon || m.pawn != pawn) return;
+        UObject* want = held ? held : g_pending_item[arm] ? g_pending_item[arm] : g_hold[arm].weapon;
+        if (want == m.weapon) want = nullptr;
+        if (want == m.beside) return;
+        destroy_joint(m.beside_joint);
+        m.beside = want;
+        if (UObject* other = want ? object_property(want, STR("BaseMesh")) : nullptr)
+        {
+            m.beside_joint = pair_joint(pawn, m.base, other, FName(), 0);
+            HSVR_LOG("Pavise: the %s forearm's pavise and %ls in that hand no longer collide", arm == 0 ? "left" : "right", want->GetName().c_str());
+        }
+    }
+
+    // After his tick.
+    void mount_tick(UObject* pawn)
+    {
+        if (!g_mount[0].weapon && !g_mount[1].weapon) return;
+        UObject* in_hand[2] = {object_property(pawn, STR("Weapon L")), object_property(pawn, STR("Weapon R"))};
+        for (int arm = 0; arm < 2; ++arm)
+        {
+            Mount& m = g_mount[arm];
+            if (!m.weapon) continue;
+            if (m.pawn != pawn)
+            {
+                m = Mount{}; // an old pawn's: its joints end with it
+                continue;
+            }
+            if (!object_alive(m.weapon))
+            {
+                unjoin_mount(m);
+                m = Mount{};
+                continue;
+            }
+            // Someone's set-up took it (Last Parent is whoever took it last, @4537), or the game has given
+            // up on him as its user: 3 m away from him (ModularWeaponBP @144-1155, checked each 0.2 s).
+            UObject* user = object_property(m.weapon, STR("Last Parent"));
+            if (!user)
+            {
+                unmount_loose(arm, "it was 3 m from him");
+                continue;
+            }
+            if (m.weapon == in_hand[0] || m.weapon == in_hand[1] || user != pawn)
+            {
+                unjoin_mount(m);
+                HSVR_LOG("Pavise: the pavise on the %s forearm was taken; its joints removed", arm == 0 ? "left" : "right");
+                m = Mount{};
+                continue;
+            }
+            if (bool_property(pawn, arm == 0 ? STR("Hand L Torn Off") : STR("Hand R Torn Off")))
+            {
+                unmount_loose(arm, "the arm was cut off");
+                continue;
+            }
+            // The game's unstick (ModularWeaponBP @77374-79251) switches its parts' collision off and on,
+            // which makes their shapes again: the joints and the no-collide pairs are made again after it.
+            bool unstuck = bool_property(m.weapon, STR("Static Mesh Collision Disabled (Unstuck)"));
+            if (unstuck != m.unstuck)
+            {
+                m.unstuck = unstuck;
+                unjoin_mount(m);
+                if (!join_mount(arm, m))
+                {
+                    unmount_loose(arm, "its joint could not be made again");
+                    continue;
+                }
+                HSVR_LOG("Pavise: joints on the %s forearm made again after the game's unstick", arm == 0 ? "left" : "right");
+            }
+            {
+                // Each tick, moved and not teleported: the substeps carry the shield along with the arm.
+                static const FName sockets[2] = {bone_fname("shield_l_socket"), bone_fname("shield_r_socket")};
+                if (m.anchor) set_component_transform(m.anchor, socket_location(m.mesh, sockets[arm]), socket_rotation(m.mesh, sockets[arm]), false);
+            }
+            mount_beside(arm, pawn, in_hand[arm]);
+            if (m.gripped) set_anim_grip(arm, (int)(std::max)(0.0, hsvr::config().pose_shield_hand_grip_type));
+            const double now = hsvr::now_seconds();
+            if (now - m.last_log >= 1.0)
+            {
+                // Once a second: how far the joint lets it off the forearm.
+                m.last_log = now;
+                hsvr::Vec3 p;
+                hsvr::Quat q;
+                mount_pose(arm, m, p, q);
+                HSVR_LOG("Pavise: on the %s forearm: %.1f cm, %.1f deg off its place%s", arm == 0 ? "left" : "right", hsvr::length(component_location(m.base) - p),
+                         hsvr::length(scaled_axis((component_rotation(m.base) * q.inverse()).normalized())) * 57.2958, m.gripped ? " (gripped)" : "");
+            }
+        }
     }
 
     // Away from its straps and handles a shield is taken only by its rim: the point the hand touched
@@ -8451,7 +9072,17 @@ namespace
         Quat w0_rot = component_rotation(base);
         Vec3 local = w0_rot.inverse().rotate(palm - w0_pos), on;
         double d = 0.0;
-        const ShieldFitting* f = nearest_fitting(cls, local, 15.0, side, true, on, d);
+        const ShieldFitting* f = nullptr;
+        if (hsvr::config().pose_pavise_strap)
+            if (const PaviseSpec* spec = pavise_spec(shield))
+                for (const ShieldFitting& sf : k_shield_fittings)
+                    if (cls == sf.shield && std::string(sf.name) == spec->strap)
+                    {
+                        f = &sf;
+                        on = Vec3{sf.cx, sf.cy, sf.cz};
+                        d = length(local - on);
+                    }
+        if (!f) f = nearest_fitting(cls, local, 15.0, side, true, on, d);
         if (!f) f = nearest_fitting(cls, local, 1e9, side, false, on, d);
         if (!f)
         {
@@ -8461,6 +9092,7 @@ namespace
         Vec3 axis = w0_rot.rotate(normalized(Vec3{f->ax, f->ay, f->az}));
         out = make_free_grip(side, mesh, w0_pos, w0_rot, palm, w0_pos + w0_rot.rotate(on), &axis, f->name);
         out.fingers = true;
+        out.handle = f->name;
         HSVR_LOG("Shield: %s hand holds %ls in the hand by its %s (was on the forearm; the hand was %.1f cm from it)", side == 0 ? "left" : "right",
                  shield->GetName().c_str(), f->name, d);
         return true;
@@ -13207,6 +13839,7 @@ namespace
                 continue;
             }
             if (g_xstring.on && g_xstring.side == side) continue; // the hand on the string (by its trigger): its grip does nothing
+            if (!now_held && mount_let_go(side)) continue;
             if (!now_held)
             {
                 if (g_two.active && side == g_two.second)
@@ -13219,6 +13852,7 @@ namespace
                     if (cfg.pose_grab_release_drops && hand_over(pawn)) continue;
                     end_two_hand("the other hand let go");
                 }
+                if (mine && cfg.pose_grab_release_drops && !hurt && pavise_mount(side, pawn, mesh, mine, cfg)) continue;
                 if (mine && cfg.pose_grab_release_drops && !hurt && holster_snap(side, pawn, mesh, mine, cfg)) continue;
                 if (mine && (cfg.pose_grab_release_drops || hurt))
                 {
@@ -13233,6 +13867,7 @@ namespace
             }
             if (!mine && (g_world[side].on || bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")))) continue; // already holds an object
             if (mine || menu_up) continue;
+            if (pavise_pass(side, pawn, mesh, cfg)) continue;
             if (cfg.pose_grab_handles ? try_second_hand(side, pawn, mesh, cfg) : try_two_hand(side, pawn, mesh, cfg)) continue;
             Vec3 at = hand_grab_point(mesh, side);
             // His arm can be too short for where your hand is (reaching to the floor: his crouch stops at
@@ -13251,6 +13886,7 @@ namespace
                              at.y, at.z);
                 }
             }
+            if (pavise_unmount(side, pawn, mesh, palm_drawn, cfg)) continue;
             if (cfg.pose_draw && try_draw(side, pawn, mesh, at, palm_drawn, cfg)) continue;
             if (try_scabbard_grab(side, pawn, mesh, palm_drawn, cfg)) continue;
             if (xbow_quiver_grab(side, pawn, palm_drawn, cfg)) continue;
@@ -13269,7 +13905,7 @@ namespace
             for (UObject* w : weapons)
             {
                 if (!w || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
-                if (bool_property(w, STR("Is Sheathed")) || is_fist(w) || in_own_slot(pawn, w)) continue;
+                if (bool_property(w, STR("Is Sheathed")) || is_fist(w) || in_own_slot(pawn, w) || is_mounted(w)) continue;
                 bool taken = false;
                 UObject* holder = nullptr;
                 int holder_side = 1;
@@ -13331,6 +13967,7 @@ namespace
             }
             if (!best && his_weapon && disarm_start(side, pawn, his_weapon, his_holder, his_side, his_part, his_point)) continue;
             if (!best && cfg.pose_grab_objects && grab_object(side, pawn, mesh, cfg, at)) continue;
+            if (!best && mount_grip(side, pawn)) continue; // the strap on its own forearm, after everything else
             if (!best)
             {
                 // Nothing to take: the hand closes into a fist (pose_fist_from_fingers: only when the
@@ -13426,6 +14063,9 @@ namespace
             HSVR_LOG("Grab: %s grip took %ls (%.1f cm from the hand): %s, hand now holds %ls", hand, best->GetName().c_str(), best_d,
                      ok ? "set up" : "set-up call missing", now ? now->GetName().c_str() : STR("nothing"));
         }
+        // A grab this tick: its item and a forearm's pavise stop colliding before the physics step.
+        for (int arm = 0; arm < 2; ++arm)
+            if (g_mount[arm].weapon) mount_beside(arm, pawn, object_property(pawn, arm == 0 ? STR("Weapon L") : STR("Weapon R")));
         crossbow_tick(cfg, state, pawn, mesh);
         fists_from_fingers(cfg, state, pawn, menu_up);
     }
@@ -16366,7 +17006,7 @@ namespace
     }
     bool hit_is_his_item(UObject* x)
     {
-        return x && (x == g_hitf.weapon[0] || x == g_hitf.weapon[1] || x == g_hold[0].weapon || x == g_hold[1].weapon || (g_two.active && x == g_two.weapon));
+        return x && (x == g_hitf.weapon[0] || x == g_hitf.weapon[1] || x == g_hold[0].weapon || x == g_hold[1].weapon || (g_two.active && x == g_two.weapon) || is_mounted(x));
     }
     // The hooked function's OtherActor, from its locals (offset found once per function).
     UObject* hit_other_actor(Unreal::UnrealScriptFunctionCallableContext& context, UFunction* fn)
@@ -18087,8 +18727,75 @@ namespace
         return ok;
     }
 
+    // ---- His equipment as the game saves it ---------------------------------------------------------
+    // Nothing rebuilds the passport's two maps at a save: GI_Settings "Override Player Character Equipment"
+    // copies them as they stand (@390), so what the mod moves it must write there as the game does.
+    // Their keys: WeaponinHands 0 right, 1 left (Set Up Right Hand Weapon @7905 / @8025, Left @7462 / @7582);
+    // WeaponsinSlots R1 0, R2 1, L1 3, L2 4, back 5 (Set Up Right Hand Weapon @10773 / @14329 / @14614,
+    // Left @10041 / @13655 / @13940).
+    const uint8_t k_slot_keys[5] = {0, 1, 3, 4, 5}; // by k_slots index
+    const TCHAR* const k_slots_map = STR("WeaponsinSlots_11_B42349384F5EF74DE78A7F870D89656A");
+    const TCHAR* const k_hands_map = STR("WeaponinHands_23_B3FE643741AF91A6DFE51888205C0F05");
+
+    struct EquipMap
+    {
+        FMapProperty* prop = nullptr;
+        uint8_t* at = nullptr;
+    };
+
+    // pawn.[Character Passport].Equipment.<that map>
+    EquipMap equipment_map(UObject* pawn, const TCHAR* name)
+    {
+        EquipMap m;
+        FProperty* passport = pawn ? prop_chain(pawn, STR("Character Passport")) : nullptr;
+        FProperty* equipment = struct_member(struct_type(passport), STR("Equipment_26_741A2FC641801842FE691295645C604F"));
+        FProperty* map = struct_member(struct_type(equipment), name);
+        if (!map || map->GetClass().GetName() != STR("MapProperty")) return m;
+        m.prop = static_cast<FMapProperty*>(map);
+        m.at = reinterpret_cast<uint8_t*>(pawn) + passport->GetOffset_Internal() + equipment->GetOffset_Internal() + map->GetOffset_Internal();
+        return m;
+    }
+
+    // Blueprint Map_Add(map, key, value), which cannot be called from here (a custom thunk: it takes the
+    // map's type off the script stack). No value = the empty passport: the struct's defaults, which is what
+    // the game's breaks add from a fresh local (Check Scabbard Unsheath State R @6381, L @5528). Refuses
+    // (false) unless the map is laid out as expected.
+    bool equipment_set(const EquipMap& m, uint8_t key, const void* value)
+    {
+        if (!m.prop) return false;
+        FProperty* kp = m.prop->GetKeyProp();
+        FProperty* vp = m.prop->GetValueProp();
+        if (!kp || !vp || kp->GetSize() != 1) return false;
+        const Unreal::FScriptMapLayout layout = Unreal::FScriptMap::GetScriptLayout(kp->GetSize(), kp->GetMinAlignment(), vp->GetSize(), vp->GetMinAlignment());
+        const Unreal::FScriptMapLayout& engine = m.prop->GetMapLayout();
+        if (layout.ValueOffset != engine.ValueOffset || layout.SetLayout.Size != engine.SetLayout.Size)
+        {
+            HSVR_LOG("Save: the passport map's layout is not as expected (value at %d, engine %d); not written", (int)layout.ValueOffset, (int)engine.ValueOffset);
+            return false;
+        }
+        auto* map = reinterpret_cast<Unreal::FScriptMap*>(m.at);
+        void* slot = map->FindOrAdd(
+            &key, layout, [&](const void* k) -> Unreal::uint32 { return kp->GetValueTypeHash(k); },
+            [](const void* a, const void* b) -> bool { return *static_cast<const uint8_t*>(a) == *static_cast<const uint8_t*>(b); },
+            [&](void* new_key, void* new_value) {
+                *static_cast<uint8_t*>(new_key) = key;
+                vp->InitializeValue(new_value);
+            });
+        if (!slot) return false;
+        if (value)
+            vp->CopyCompleteValue(slot, value);
+        else
+        {
+            vp->DestroyValue(slot);
+            vp->InitializeValue(slot);
+        }
+        return true;
+    }
+
     // The game's draw-off-a-slot bookkeeping, done by the mod (Check Scabbard Unsheath State's break,
-    // Enum 2 @6020-6458, back_slot_physics.md step 1-2; WeaponsinSlots is left to the game's next save).
+    // Enum 2 @6020-6458, back_slot_physics.md step 1-2), the saved slot included. The game's own clears
+    // can't be used: Set Up <S> Hand Weapon's runs only as that hand lets go of an item still named by its
+    // slot (@10552-10793, @14431-14634), and the break's needs a live joint and runs the rest of a draw.
     void free_slot(UObject* pawn, int slot, UObject* w, const char* why)
     {
         const SlotDef& sd = k_slots[slot];
@@ -18120,14 +18827,135 @@ namespace
             wt = weights.run(); // its bool (add) left false: remove
         }
         set_variable(pawn, sd.var, 0.0, nullptr, nullptr);
+        // The break's WeaponsinSlots[slot] = empty (R @6381 back, @7271, @7714; L @5528). Without it a save
+        // kept the item in the slot too: saved twice while held, back again after a drop (since 41ea92c).
+        const bool saved = equipment_set(equipment_map(pawn, k_slots_map), k_slot_keys[slot], nullptr);
         set_variable(pawn, (std::wstring(L"Sheath Slot ") + S).c_str(), 3.0);
         set_variable(pawn, (std::wstring(S) + L" Sheath Slot Concrete").c_str(), 11.0);
         set_bool_property(pawn, (std::wstring(L"Weapon UnSheathing ") + S).c_str(), false);
         set_bool_property(pawn, (std::wstring(S) + L" Weapon Sheathing").c_str(), false);
         set_bool_property(pawn, (std::wstring(L"Block ") + S + L" Weapon From Sheathing").c_str(), false);
         set_bool_property(pawn, STR("Cross Unsheath"), false);
-        HSVR_LOG("Draw: the mod freed %ls from %ls (%s): joint %s, Unsheathed Mode %s, weights %s", w->GetName().c_str(), sd.var, why, joint ? "broken" : "missing",
-                 um ? "run" : "missing", wt ? "removed" : "call missing");
+        HSVR_LOG("Draw: the mod freed %ls from %ls (%s): joint %s, Unsheathed Mode %s, weights %s, saved slot %s", w->GetName().c_str(), sd.var, why,
+                 joint ? "broken" : "missing", um ? "run" : "missing", wt ? "removed" : "call missing", saved ? "emptied" : "NOT emptied");
+    }
+
+    // ---- A mounted pavise at the save --------------------------------------------------------------
+    // It is no hand's weapon, so the game would save him without it. For the length of GI_Settings
+    // "Override Player Character Equipment" (his death, UI_NextFIght, UI_Lose, UI_DeathDoor, quitting from
+    // pause) the saved equipment has it on his back, or in a hand when the back is taken; the copy is made
+    // inside (@390), and afterwards both maps are put back exactly, as play can go on (the next round
+    // spawns in the same level, UI_NextFIght @7250). Only the passport is touched, not the shield: Create
+    // Sheath Constraint would hang it for real, and could not be undone exactly (it runs Event Reenable
+    // Last Parent Collision @4202, which turns his armour's collision with it back on, and Sheathed Mode @4161).
+    struct SavedMap
+    {
+        EquipMap map;
+        std::vector<uint64_t> copy; // an FScriptMap
+    };
+    struct SaveSwap
+    {
+        UObject* pawn = nullptr;
+        SavedMap maps[2]; // slots, hands
+    };
+    SaveSwap g_save_swap;
+    bool g_save_swap_tracked = track_freed(&g_save_swap.pawn);
+
+    void mount_save_post(Unreal::UnrealScriptFunctionCallableContext&, void*)
+    {
+        if (!g_save_swap.maps[0].map.prop) return; // nothing was written
+        gc_sync();
+        for (SavedMap& s : g_save_swap.maps)
+        {
+            if (!s.map.prop) continue;
+            if (g_save_swap.pawn) s.map.prop->CopyCompleteValue(s.map.at, s.copy.data());
+            s.map.prop->DestroyValue(s.copy.data());
+            s.map = EquipMap{};
+        }
+        if (g_save_swap.pawn) HSVR_LOG("Save: the game has its copy; his equipment is put back as it was, the mount untouched");
+        g_save_swap.pawn = nullptr;
+    }
+
+    void mount_save_pre(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        if (!g_mount[0].weapon && !g_mount[1].weapon) return;
+        gc_sync();
+        mount_save_post(context, custom_data); // (only if a post was missed)
+        UObject* gi = context.Context;
+        // Saved from his passport only in play mode 0 (@15-46) and outside combat modes 10 and 0, where the
+        // game first puts his equipment back from the save (@181-291).
+        if (read_number_variable(gi, STR("Current Play Mode")) != 0.0) return;
+        double combat = read_number_variable(gi, STR("Current Combat Mode"));
+        if (combat == 10.0 || combat == 0.0) return;
+        UObject* pc = find_player_controller();
+        UObject* pawn = pc ? object_property(pc, STR("Pawn")) : nullptr;
+        if (!pawn) return;
+        EquipMap maps[2] = {equipment_map(pawn, k_slots_map), equipment_map(pawn, k_hands_map)};
+        if (!maps[0].prop || !maps[1].prop)
+        {
+            HSVR_LOG("Save: his passport's equipment maps were not found: a mounted pavise is NOT saved");
+            return;
+        }
+        for (int i = 0; i < 2; ++i)
+        {
+            SavedMap& s = g_save_swap.maps[i];
+            s.map = maps[i];
+            s.copy.assign((size_t)maps[i].prop->GetSize() / 8 + 1, 0);
+            maps[i].prop->InitializeValue(s.copy.data());
+            maps[i].prop->CopyCompleteValue(s.copy.data(), maps[i].at);
+        }
+        g_save_swap.pawn = pawn;
+        UObject* on_back = object_property(pawn, STR("Weapon Slot Back"));
+        bool back_free = !object_alive(on_back);
+        bool hand_free[2];
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            hand_free[side] = !object_alive(held) || is_fist(held);
+        }
+        for (int arm = 0; arm < 2; ++arm)
+        {
+            const Mount& m = g_mount[arm];
+            if (!m.weapon || m.pawn != pawn || !object_alive(m.weapon)) continue;
+            FProperty* passport = prop_chain(m.weapon, STR("Weapon Passport"));
+            if (!passport || struct_type(passport) != struct_type(maps[0].prop->GetValueProp()))
+            {
+                HSVR_LOG("Save: %ls has no weapon passport of the maps' kind: NOT saved", m.weapon->GetName().c_str());
+                continue;
+            }
+            const void* value = reinterpret_cast<const uint8_t*>(m.weapon) + passport->GetOffset_Internal();
+            const char* where = "NOWHERE: his back and both hands are full, it is not saved";
+            if (back_free && equipment_set(maps[0], k_slot_keys[4], value)) // Create Sheath Constraint R @5591
+            {
+                back_free = false;
+                where = "on his back";
+            }
+            else
+                for (int side : {arm, 1 - arm}) // that arm's hand, else the other
+                    if (hand_free[side] && equipment_set(maps[1], side == 1 ? 0 : 1, value))
+                    {
+                        hand_free[side] = false;
+                        where = side == 0 ? "in his left hand" : "in his right hand";
+                        break;
+                    }
+            HSVR_LOG("Save: %ls, mounted on the %s forearm, is saved %s", m.weapon->GetName().c_str(), arm == 0 ? "left" : "right", where);
+        }
+    }
+
+    void install_mount_save()
+    {
+        static bool installed = false;
+        static double last_try = -10.0;
+        if (installed) return;
+        double now = hsvr::now_seconds();
+        if (now - last_try < 2.0) return;
+        last_try = now;
+        UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
+            nullptr, nullptr, STR("/Game/Blueprints/GameInstances/GI_Settings.GI_Settings_C:Override Player Character Equipment"));
+        if (!fn) return;
+        installed = true;
+        UObjectGlobals::RegisterHook(fn, &mount_save_pre, &mount_save_post, nullptr);
+        HSVR_LOG("Save: watching Override Player Character Equipment for mounted pavises");
     }
 
     void slot_take_tick(UObject* pawn)
@@ -18214,6 +19042,19 @@ namespace
                 misses += buf;
             }
             if (d > need || (scab && !h_best)) continue;
+            if (i == 4 && cfg.pose_pavise_strap)
+                if (const Handle* strap = pavise_strap(w, base))
+                {
+                    int only = back_pavise_hand(mesh, w, bp + bq.rotate(handle_middle(*strap)));
+                    if (only >= 0 && only != side)
+                    {
+                        HSVR_LOG_EVERY(1.0, "Pavise: %s hand squeezed on the pavise on his back: its strap is on that side, so only the %s hand takes it",
+                                       side == 0 ? "left" : "right", only == 0 ? "left" : "right");
+                        continue;
+                    }
+                    h_best = strap; // held in the hand by the strap, wherever it was touched
+                    t_best = 0.5;
+                }
             if (d - need < best_d - best_need)
             {
                 best_d = d;
@@ -18272,6 +19113,7 @@ namespace
             UObject* base0 = object_property(w, STR("BaseMesh"));
             Vec3 p0 = component_location(base0);
             Quat q0 = component_rotation(base0);
+            if (best == 4 && cfg.pose_pavise_strap && pavise_spec(w)) remember_hung(mesh, w, p0, q0);
             bool freed = false;
             if (!body_live(base0))
             {
@@ -18385,7 +19227,7 @@ namespace
             set_variable(pawn, name(L"Current Scabbard %ls").c_str(), 0.0, scab, nullptr);
             // Locked to the belt (2 cm / 5 deg), not the game's Free (15 cm / 30 deg, for its off hand to
             // take it): draw-test3 dragged a free scabbard 34-71 cm off the belt.
-            call_one_object(pawn, cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+            return_scabbard_pin(pawn, scab, cfg_scabbard_free());
         }
         set_bool_property(pawn, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
         FreeGrip g = handle_grip(side, mesh, w0_pos, w0_rot, palm, *best_h, best_t);
@@ -18419,6 +19261,7 @@ namespace
         ds.t0 = now_seconds();
         ds.length = blade_length(w);
         ds.socket = sd.socket;
+        ds.slot = sd.slot;
         g_draw[side] = ds;
         controllers_buzz(side, 0.3f);
         HSVR_LOG("Draw: %s hand draws %ls from %ls (grip at %.0f%%, %.1f cm from the hand; scabbard %s; sheath slot %s %.0f)", side == 0 ? "left" : "right",
@@ -18468,6 +19311,101 @@ namespace
     // Weapon Slot <S> 1/2 variables; 3 Back) and occupancy; Create Sheath Constraint <S> then puts its
     // BaseMesh on that socket and joins it to his mesh there; Set Up <S> Hand Weapon(None) lets go.
     // Drawing it again is the plain no-scabbard grab the draw already does.
+    // k_slots' index of a side's belt/back slot (Slot byte 0, 1, 2).
+    int slot_index(int ts, int slot) { return slot == 2 ? 4 : (ts == 1 ? 0 : 2) + slot; }
+
+    // The tag Check puts on a seated slot joint. A shipping FName keeps one spelling for all cases, and the
+    // game uses both "Sheathed" (the joint, L @2022) and "sheathed" (the weapon's Tags, Create L @3674).
+    bool joint_locked(UObject* joint)
+    {
+        return joint && (has_tag(joint, STR("ComponentTags"), STR("Sheathed")) || has_tag(joint, STR("ComponentTags"), STR("sheathed")));
+    }
+
+    // The game's own Check Scabbard Unsheath State <T> on one slot's joint, once, with this blade length
+    // (its parameters, as ExecuteUbergraph @518007 / @518716 passes them; Sheath Enum 0 R1, 1 R2, 2 Back,
+    // 3 L1, 4 L2). False if it could not be called.
+    bool run_slot_check(UObject* pawn, int ts, int slot, double length)
+    {
+        UObject* joint = object_property(pawn, k_slots[slot_index(ts, slot)].constraint);
+        if (!object_alive(joint)) return false;
+        Call c(pawn, ts == 0 ? STR("Check Scabbard Unsheath State L") : STR("Check Scabbard Unsheath State R"));
+        if (!c.param(STR("Sheath Constraint")) || !c.param(STR("Sheath Enum")) || !c.param(STR("Length"))) return false;
+        c.object(STR("Sheath Constraint"), joint);
+        c.byte(STR("Sheath Enum"), (uint8_t)(slot == 2 ? 2 : (ts == 1 ? 0 : 3) + slot));
+        c.number(STR("Length"), length);
+        return c.run();
+    }
+
+    // Locks what was just hung without a scabbard on <T>'s slot. The game's Check does that only with hand
+    // <T> empty: such a joint's second body is his Mesh, so its Z is the hip's height and "Z <= 20" never
+    // holds (Check Scabbard Unsheath State L @1117-1751, R @1529-2330). So it runs once with <T>'s grip
+    // read as 0, not crossed, not blocked: that path only tags the joint "Sheathed", sets Sheath Slot <T>
+    // 3 and locks the limits (L @2022-2163 + @4949, R @2505-2646 + @5766), and lets go of nothing.
+    bool lock_hung(UObject* pawn, int ts, int slot)
+    {
+        const TCHAR* grip_var = ts == 0 ? STR("L_GripType_Current") : STR("R_GripType_Current");
+        double grip = read_number_variable(pawn, grip_var);
+        if (grip < 0.0 || !set_variable(pawn, grip_var, 0.0)) return false;
+        set_bool_property(pawn, STR("Cross Unsheath"), false);
+        set_bool_property(pawn, ts == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
+        bool ran = run_slot_check(pawn, ts, slot, 0.0);
+        set_variable(pawn, grip_var, grip);
+        UObject* joint = object_property(pawn, k_slots[slot_index(ts, slot)].constraint);
+        return ran && joint_locked(joint);
+    }
+
+    // Across the body, without a scabbard: the game's Assign <S> only fills its own hand's side, so the
+    // mod does Assign's bookkeeping for the other side (Sheath Slot <T>, <T> Sheath Slot Name, Current
+    // Scabbard <T> None) and calls Create Sheath Constraint <T>, which reads Weapon <T>: that is set to the
+    // weapon for that one call and put back as it was (cross_sheathe.md §2-3; hs_draw_sheathe_calls.md
+    // Addendum 2). Create Sheath Constraint writes Weapon Slot <T> x, the constraint, the weights and runs
+    // Sheathed Mode; then the holding hand lets go, as the game's no-scabbard sheathe does (SURHW None).
+    bool holster_across(int side, int ts, UObject* pawn, UObject* w, const std::string& socket, uint8_t slot, double d, double kind)
+    {
+        using namespace hsvr;
+        const char* hand = side == 0 ? "left" : "right";
+        const wchar_t* T = ts == 0 ? L"L" : L"R";
+        auto nm = [&](const wchar_t* fmt) {
+            wchar_t buf[96];
+            std::swprintf(buf, 96, fmt, T);
+            return std::wstring(buf);
+        };
+        const TCHAR* weapon_t = ts == 0 ? STR("Weapon L") : STR("Weapon R");
+        UObject* other_held = object_property(pawn, weapon_t);
+        FName sock = bone_fname(socket.c_str());
+        bool ok = set_variable(pawn, nm(L"Sheath Slot %ls").c_str(), slot);
+        ok &= set_variable(pawn, nm(L"%ls Sheath Slot Name").c_str(), 0.0, nullptr, &sock);
+        set_variable(pawn, nm(L"Current Scabbard %ls").c_str(), 0.0, nullptr, nullptr);
+        set_variable(pawn, weapon_t, 0.0, w, nullptr);
+        Call make(pawn, nm(L"Create Sheath Constraint %ls").c_str());
+        make.byte(STR("Slot"), slot);
+        bool made = make.run();
+        set_variable(pawn, weapon_t, 0.0, other_held, nullptr);
+        UObject* now_in = object_property(pawn, slot == 2 ? STR("Weapon Slot Back") : nm(slot == 0 ? L"Weapon Slot %ls 1" : L"Weapon Slot %ls 2").c_str());
+        if (!made || now_in != w) set_variable(pawn, nm(L"Sheath Slot %ls").c_str(), 3.0); // nothing for Check <T> to finish
+        if (!made)
+        {
+            HSVR_LOG("Holster: no \"Create Sheath Constraint %ls\"; %s hand drops %ls", T, hand, w->GetName().c_str());
+            return false;
+        }
+        if (now_in != w)
+        {
+            HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s across the body, but its slot variable holds %s after Create Sheath Constraint %ls: NOT hung, dropped",
+                     hand, w->GetName().c_str(), d, socket.c_str(), now_in ? "something else" : "nothing", T);
+            return false;
+        }
+        bool locked = lock_hung(pawn, ts, slot);
+        if (!locked)
+            HSVR_LOG("Holster: %ls is on %s, but the game's Check %ls did not lock it: it can slide until that hand is empty", w->GetName().c_str(), socket.c_str(), T);
+        drop_weapon(side, pawn, false);
+        controllers_buzz(side, 0.4f);
+        HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s at %.1f m/s: hung across the body (SheathSlot %.0f, slot %ls %d, %s, other hand %s; concrete R %.0f L %.0f)%s",
+                 hand, w->GetName().c_str(), d, socket.c_str(), g_hand_world_v[side], kind, T, (int)slot + 1, locked ? "locked" : "NOT locked",
+                 other_held ? "holding something (put back)" : "empty",
+                 read_number_variable(pawn, STR("R Sheath Slot Concrete")), read_number_variable(pawn, STR("L Sheath Slot Concrete")), ok ? "" : " (a game variable was NOT set)");
+        return true;
+    }
+
     bool holster_snap(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -18488,24 +19426,71 @@ namespace
             return std::wstring(buf);
         };
         double kind = read_number_variable(w, STR("SheathSlot"));
-        std::string socket;
-        std::string sx = side == 0 ? "L" : "R";
-        if (kind == 0.0 || kind == 1.0)
+        // Every free slot of its kind on either side (Matthew 2026-11-22: "I can only put my things in my
+        // right hand on my right hip"; B&S holders take either hand). On the hand's own side it is the one
+        // the game's Assign <S> picks (1, else 2); across the body the nearer free one. The back (SheathSlot
+        // 2 Shoulder_L, 3 Back) is the R side's in the game's Assign R (cross_sheathe.md §1).
+        struct Cand
         {
-            int first = kind == 0.0 ? 1 : 3;
-            if (!object_property(pawn, nm(L"Weapon Slot %ls 1").c_str())) socket = "Sheath_Slot_" + sx + "_" + std::to_string(first);
-            else if (!object_property(pawn, nm(L"Weapon Slot %ls 2").c_str())) socket = "Sheath_Slot_" + sx + "_" + std::to_string(first + 1);
+            int ts;           // the slot's side
+            std::string socket;
+            uint8_t slot;     // Sheath Slot <S> / Create Sheath Constraint's Slot byte
+            double d;
+        };
+        Vec3 palm = hand_grab_point(mesh, side);
+        std::vector<Cand> cands;
+        auto add = [&](int ts, const std::string& sock, uint8_t slot) {
+            cands.push_back({ts, sock, slot, length(palm - socket_location(mesh, bone_fname(sock)))});
+        };
+        for (int ts = 0; ts < 2; ++ts)
+        {
+            std::string tx = ts == 0 ? "L" : "R";
+            const wchar_t* T = ts == 0 ? L"L" : L"R";
+            wchar_t v1[48], v2[48];
+            std::swprintf(v1, 48, L"Weapon Slot %ls 1", T);
+            std::swprintf(v2, 48, L"Weapon Slot %ls 2", T);
+            if (kind == 0.0 || kind == 1.0)
+            {
+                int first = kind == 0.0 ? 1 : 3;
+                bool f1 = !object_property(pawn, v1), f2 = !object_property(pawn, v2);
+                if (ts == side)
+                {
+                    if (f1) add(ts, "Sheath_Slot_" + tx + "_" + std::to_string(first), 0);
+                    else if (f2) add(ts, "Sheath_Slot_" + tx + "_" + std::to_string(first + 1), 1);
+                }
+                else
+                {
+                    if (f1) add(ts, "Sheath_Slot_" + tx + "_" + std::to_string(first), 0);
+                    if (f2) add(ts, "Sheath_Slot_" + tx + "_" + std::to_string(first + 1), 1);
+                }
+            }
         }
-        else if (kind == 3.0 && side == 1 && !object_property(pawn, STR("Weapon Slot Back")))
-            socket = "Sheath_Slot_Back";
-        if (socket.empty())
+        if ((kind == 2.0 || kind == 3.0) && !object_property(pawn, STR("Weapon Slot Back")))
         {
-            HSVR_LOG("Holster: %s hand let go of %ls: no holster (SheathSlot %.0f: no free slot of that kind on this side)", hand, w->GetName().c_str(), kind);
+            const Handle* strap = cfg.pose_pavise_strap ? pavise_strap(w, object_property(w, STR("BaseMesh"))) : nullptr;
+            if (!strap)
+                add(1, kind == 2.0 ? "Sheath_Slot_Shoulder_L" : "Sheath_Slot_Back", 2);
+            else
+            {
+                // A pavise: let go of its strap where the strap sits when hung, with the hand across from it.
+                if (!held_by_strap(side, w)) return no("a pavise hangs back by its rear strap");
+                Vec3 a, b;
+                hung_strap(mesh, w, *strap, a, b);
+                int only = back_pavise_hand(mesh, w, (a + b) * 0.5);
+                if (only >= 0 && only != side) return no("a pavise's strap hangs on that side: only the other hand puts it back");
+                cands.push_back({1, pavise_back_socket(w), 2, to_segment(palm, a, b)});
+            }
+        }
+        if (cands.empty())
+        {
+            HSVR_LOG("Holster: %s hand let go of %ls: no holster (SheathSlot %.0f: no free slot of that kind)", hand, w->GetName().c_str(), kind);
             return false;
         }
-        Vec3 slot_at = socket_location(mesh, bone_fname(socket));
-        Vec3 palm = hand_grab_point(mesh, side);
-        double d = length(palm - slot_at);
+        const Cand* best = nullptr;
+        for (const Cand& c : cands)
+            if (!best || c.d < best->d) best = &c;
+        std::string socket = best->socket;
+        double d = best->d;
         if (d > cfg.pose_holster_zone_cm)
         {
             HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s (needs %.0f): dropped", hand, w->GetName().c_str(), d, socket.c_str(), cfg.pose_holster_zone_cm);
@@ -18519,6 +19504,7 @@ namespace
                      socket.c_str(), conc_r, conc_l);
             return false;
         }
+        if (best->ts != side) return holster_across(side, best->ts, pawn, w, socket, best->slot, d, kind);
         Call assign(pawn, nm(L"Assign %ls Weapon Slot").c_str());
         if (!assign.run())
         {
@@ -18546,6 +19532,127 @@ namespace
         return true;
     }
 
+    // Assign <T> Weapon Slot for a weapon with its own scabbard (both sheathes use it), made safe:
+    // - It is only called where it cannot reach its failure paths, Set Up <T> Hand Weapon(None) (Assign L
+    //   @255 / @3043, R @255 / @3889): across, with Weapon <T> swapped, those would release the other hand's
+    //   joint.
+    // - When Scabbard_<T>_<slot> still names another weapon's scabbard (nothing clears it at a draw) it
+    //   destroys the pins of BOTH that side's scabbards, dropping a sheathed sword off the belt (L @1355,
+    //   @3518-3944; R @1355, @4364-4790). When it names this weapon's, unpinned, it returns having set only
+    //   the name and the concrete (@1445). With it None, @1202 skips both. So it is None for the call, and
+    //   afterwards only that stale scabbard's own pin goes, and only if no sheathed weapon is in it.
+    // - Current Scabbard <T> and Sheath Slot <T> are cleared first, so what is read back is this call's.
+    // Returns the slot (0, 1), or -1: nothing sheathed, <T>'s concrete back at 11.
+    int assign_scabbard_slot(int side, int ts, UObject* pawn, UObject* w)
+    {
+        using namespace hsvr;
+        const wchar_t* T = ts == 0 ? L"L" : L"R";
+        auto nm = [&](const wchar_t* fmt) {
+            wchar_t buf[96];
+            std::swprintf(buf, 96, fmt, T);
+            return std::wstring(buf);
+        };
+        const char* hand = side == 0 ? "left" : "right";
+        const char* hip = ts == 0 ? "left" : "right";
+        double kind = read_number_variable(w, STR("SheathSlot"));
+        UObject* own = object_property(w, STR("Scabbard"));
+        if (kind != 0.0 || !object_alive(own) || bool_property(w, STR("Is Ammo")))
+        {
+            HSVR_LOG_EVERY(2.0, "Sheathe: %ls has sheath slot type %.0f, scabbard %s: not one that goes in a belt scabbard; not sheathed", w->GetName().c_str(), kind,
+                           own ? "yes" : "none");
+            return -1;
+        }
+        // The slot it will pick (Assign L @881-962 / @3325-3406; R the same): 1 if empty, else 2.
+        int slot = -1;
+        for (int i = 0; i < 2 && slot < 0; ++i)
+        {
+            UObject* in = object_property(pawn, k_belt[ts][i].var);
+            if (in == w || !object_alive(in)) slot = i;
+        }
+        if (slot < 0) return -1;
+
+        std::wstring scab_var = nm(slot == 0 ? L"Scabbard_%ls_1" : L"Scabbard_%ls_2");
+        std::wstring current_var = nm(L"Current Scabbard %ls"), slot_var = nm(L"Sheath Slot %ls");
+        std::wstring wrist_var = nm(L"Wrist %ls Direct Control"), found_var = nm(L"Grab %ls Target Found");
+        const TCHAR* weapon_t = ts == 0 ? STR("Weapon L") : STR("Weapon R");
+        const bool across = ts != side;
+        // Sheath <T> (Assign L @5171, R @5071) moves GrabPoint <T> to the socket and takes over <T>'s wrist
+        // and grab (Sheath L @63-137). Across, that is the other hand: put back as it was.
+        UObject* other_held = object_property(pawn, weapon_t);
+        bool wrist = bool_property(pawn, wrist_var.c_str()), found = bool_property(pawn, found_var.c_str());
+        UObject* grab_point = across ? object_property(pawn, ts == 0 ? STR("GrabPoint L") : STR("GrabPoint R")) : nullptr;
+        Vec3 gp_at;
+        Quat gp_rot{0, 0, 0, 1};
+        if (grab_point) gp_at = component_location(grab_point), gp_rot = component_rotation(grab_point);
+
+        UObject** scab_at = numbered_object_ptr(pawn, scab_var.c_str());
+        if (!scab_at)
+        {
+            HSVR_LOG_EVERY(5.0, "Sheathe: the character has no %ls; not sheathed", scab_var.c_str());
+            return -1;
+        }
+        UObject* stale = *scab_at;
+        *scab_at = nullptr;
+        set_variable(pawn, current_var.c_str(), 0.0, nullptr, nullptr);
+        set_variable(pawn, slot_var.c_str(), 3.0);
+        if (across) set_variable(pawn, weapon_t, 0.0, w, nullptr);
+        Call assign(pawn, nm(L"Assign %ls Weapon Slot").c_str());
+        bool ran = assign.run();
+        if (across) set_variable(pawn, weapon_t, 0.0, other_held, nullptr);
+        // Sheath <T>'s reach is undone (the mod does the going in).
+        set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), false);
+        set_bool_property(pawn, wrist_var.c_str(), across && wrist);
+        set_bool_property(pawn, found_var.c_str(), across && found);
+        if (grab_point) set_component_transform(grab_point, gp_at, gp_rot, true);
+
+        UObject* got = object_property(pawn, current_var.c_str());
+        double picked = read_number_variable(pawn, slot_var.c_str());
+        bool good = ran && got == own && picked == slot;
+        // Across, Check <T> reads the hand's concrete, not <T>'s (Check Scabbard Unsheath State L @2875-2944).
+        if (across || !good) set_variable(pawn, nm(L"%ls Sheath Slot Concrete").c_str(), 11.0);
+        if (!good)
+        {
+            if (!*scab_at) *scab_at = stale;
+            set_variable(pawn, slot_var.c_str(), 3.0);
+            sheathe_disarm(side, ts); // not again every tick: once the tip has been clear of that hip
+            HSVR_LOG("Sheathe: %s hand to the %s hip: Assign %ls %s (slot %.0f of %d, scabbard %s); not sheathed there until the tip has been clear", hand, hip, T,
+                     ran ? "ran" : "was not found", picked, slot, !got ? "none" : got == own ? "its own" : "another's");
+            return -1;
+        }
+        if (stale != own && object_alive(stale))
+        {
+            bool in_use = false;
+            for (const SlotDef& sd : k_slots)
+                if (UObject* in = object_property(pawn, sd.var); in && object_property(in, STR("Scabbard")) == stale) in_use = true;
+            if (UObject* pin = in_use ? nullptr : scabbard_pin(stale))
+            {
+                // As Assign removes a pin (@4086): K2_DestroyComponent takes the pin's owner, the character.
+                Call(pin, STR("BreakConstraint")).run();
+                Call unpin(pin, STR("K2_DestroyComponent"));
+                unpin.object(STR("Object"), pawn);
+                unpin.run();
+                HSVR_LOG("Sheathe: the empty scabbard left in the %s hip's slot %d came off the belt to make room for %ls's", hip, slot + 1, w->GetName().c_str());
+            }
+        }
+        // Where it opens now: the measured mouth holds in the scabbard's own frame; without one, the socket's.
+        auto known = g_sheath_fit.find(w);
+        SheathFit fit;
+        if (known != g_sheath_fit.end() && known->second.scab == own) fit = known->second;
+        else if (UObject* mesh = object_property(pawn, STR("Mesh")))
+        {
+            FName sock = bone_fname(k_belt[ts][slot].socket);
+            Quat sq = component_rotation(own);
+            fit.mouth_local = sq.inverse().rotate(socket_location(mesh, sock) - component_location(own));
+            fit.axis_local = sq.inverse().rotate(socket_rotation(mesh, sock).rotate(Vec3{0, 0, 1}));
+        }
+        fit.scab = own;
+        fit.slot_side = ts;
+        fit.slot = slot;
+        fit.socket = k_belt[ts][slot].socket;
+        g_sheath_fit[w] = fit;
+        return slot;
+    }
+
     bool sheathe_begin(int side, UObject* pawn, UObject* w)
     {
         using namespace hsvr;
@@ -18564,31 +19671,28 @@ namespace
         if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
             bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
             return false;
-        Call assign(pawn, nm(L"Assign %ls Weapon Slot").c_str());
-        if (!assign.run())
-        {
-            HSVR_LOG("Sheathe: no \"Assign %ls Weapon Slot\"", S);
-            return false;
-        }
-        // Undo Sheath R's reach for the socket (the mod does the going in).
-        set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), false);
-        set_bool_property(pawn, nm(L"Wrist %ls Direct Control").c_str(), false);
-        set_bool_property(pawn, nm(L"Grab %ls Target Found").c_str(), false);
-        UObject* scab = object_property(pawn, nm(L"Current Scabbard %ls").c_str());
-        double slot = read_number_variable(pawn, nm(L"Sheath Slot %ls").c_str());
-        if (!scab || slot < 0.0 || slot > 1.0)
-        {
-            HSVR_LOG("Sheathe: the game picked slot %.0f, scabbard %s: not one the mod sheathes into; left to the game", slot, scab ? "yes" : "none");
-            return false;
-        }
+        int slot = assign_scabbard_slot(side, side, pawn, w);
+        if (slot < 0) return false;
+        UObject* scab = object_property(w, STR("Scabbard"));
         set_bool_property(pawn, nm(L"Block %ls Weapon From Sheathing").c_str(), true);
         set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), true);
         Call make(pawn, nm(L"Create Sheath Constraint %ls").c_str());
         make.byte(STR("Slot"), (uint8_t)slot);
         bool made = make.run();
+        if (!made || object_property(pawn, k_belt[side][slot].var) != w)
+        {
+            set_bool_property(pawn, nm(L"Block %ls Weapon From Sheathing").c_str(), false);
+            set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), false);
+            set_variable(pawn, nm(L"%ls Sheath Slot Concrete").c_str(), 11.0);
+            set_variable(pawn, nm(L"Sheath Slot %ls").c_str(), 3.0);
+            sheathe_disarm(side, side);
+            HSVR_LOG("Sheathe: %ls's slot %ls %d does not hold it after Create Sheath Constraint %ls%s; not sheathed", w->GetName().c_str(), S, slot + 1, S,
+                     made ? "" : " (not found)");
+            return false;
+        }
         // Locked to the belt (2 cm / 5 deg), not the game's Free (15 cm / 30 deg, for its off hand to
             // take it): draw-test3 dragged a free scabbard 34-71 cm off the belt.
-            call_one_object(pawn, cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+            return_scabbard_pin(pawn, scab, cfg_scabbard_free());
         set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), true);
         DrawState d;
         d.active = true;
@@ -18598,13 +19702,52 @@ namespace
         d.t0 = now_seconds();
         d.sheathing = true;
         d.length = blade_length(w);
-        d.socket = slot < 0.5 ? (side == 0 ? "Sheath_Slot_L_1" : "Sheath_Slot_R_1") : (side == 0 ? "Sheath_Slot_L_2" : "Sheath_Slot_R_2");
+        d.socket = k_belt[side][slot].socket;
+        d.slot = slot;
         g_draw[side] = d;
         controllers_buzz(side, 0.3f);
-        HSVR_LOG("Sheathe: %s hand puts %ls into slot %ls %.0f%s", side == 0 ? "left" : "right", w->GetName().c_str(), S, slot + 1.0, made ? "" : " (Create Sheath Constraint NOT found)");
+        HSVR_LOG("Sheathe: %s hand puts %ls into slot %ls %d", side == 0 ? "left" : "right", w->GetName().c_str(), S, slot + 1);
         return true;
     }
 
+    // The game's stuck-hand rule (ExecuteUbergraph_Willie_BP @474346-474446, then left @475366-476198, right
+    // @474461-475313): with a two-handed grip in the right hand (R_GripType_Current 10 or 11) and a hand
+    // in this zone of spine_02 (|X| <= 10, Y < 0, Z <= 50), "Weapon UnSheathing <that hand>" makes it Set
+    // Up that Hand Weapon(None). Across the body that flag is the slot side's, so the OTHER hand's item
+    // would be dropped. True when it would, 5 cm early (the game reads the hand a little later in the tick).
+    bool stuck_rule_would_drop(UObject* pawn, int ts)
+    {
+        using namespace hsvr;
+        double grip = read_number_variable(pawn, STR("R_GripType_Current"));
+        if (grip != 10.0 && grip != 11.0) return false;
+        UObject* held = object_property(pawn, ts == 0 ? STR("Weapon L") : STR("Weapon R"));
+        if (!held || is_fist(held)) return false;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        if (!mesh) return false;
+        static const FName spine = bone_fname("spine_02"), hand_l = bone_fname("hand_l"), hand_r = bone_fname("hand_r");
+        Vec3 p = socket_rotation(mesh, spine).inverse().rotate(socket_location(mesh, ts == 0 ? hand_l : hand_r) - socket_location(mesh, spine));
+        double scale = component_scale_z(mesh); // the game's InverseTransformLocation divides by it
+        if (scale > 0.01) p = p * (1.0 / scale);
+        const double early = 5.0;
+        return std::fabs(p.x) <= 10.0 + early && p.y < early && p.z <= 50.0 + early;
+    }
+
+    // The stuck rule is about to take the other hand's item mid sheathe: the game's Check <T> ends the
+    // sheathe first, with the blade length read below 0 and Block off, Sheathing left on: at most 20 cm
+    // out it seats it (L @485-681, R @730-926), else its break runs (L @3449-3727, R @4099-4377: the slot,
+    // weights, tags, save entry, concretes and flags). Either way "Weapon UnSheathing <T>" is off.
+    bool end_cross_sheathe(UObject* pawn, int ts, int slot, bool block_cleared)
+    {
+        const TCHAR* block = ts == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing");
+        set_bool_property(pawn, block, false);
+        run_slot_check(pawn, ts, slot, -10000.0);
+        if (!bool_property(pawn, ts == 0 ? STR("Weapon UnSheathing L") : STR("Weapon UnSheathing R"))) return true;
+        set_bool_property(pawn, block, !block_cleared);
+        return false;
+    }
+
+    // Into the scabbard where it hangs (no Assign, which teleports it to its socket and pins it again:
+    // the other hand may be holding it at an angle). On the hand's own side too, with Cross Unsheath false.
     // Across the body (Matthew's playtest 11:25: the rondel drawn by the right hand from the left hip
     // could not go back): the game's own cross path (cross_sheathe.md). Check Scabbard Unsheath State
     // <slot side> already handles "Cross Unsheath": it reads the HAND's concrete and grip, and seats
@@ -18624,11 +19767,10 @@ namespace
         const char* hand = side == 0 ? "left" : "right";
         std::wstring slot_var = nm(L"Weapon Slot %ls ", S) + (fit.slot == 0 ? L"1" : L"2");
         if (fit.slot < 0 || fit.slot > 1 || object_property(pawn, slot_var.c_str())) return false;
-        if (object_property(pawn, ss == 0 ? STR("Weapon L") : STR("Weapon R")))
-        {
-            HSVR_LOG_EVERY(2.0, "Sheathe: %s hand can't sheathe across: the other hand holds something", hand);
-            return false;
-        }
+        // The other hand may hold something (Matthew 2026-11-22, a shield in the left while the right
+        // sheathes on the left hip): Weapon <slot side> is set to this weapon for the one Create call
+        // and put back as it was.
+        UObject* other_held = object_property(pawn, ss == 0 ? STR("Weapon L") : STR("Weapon R"));
         double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
         if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
             bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
@@ -18639,13 +19781,19 @@ namespace
             HSVR_LOG_EVERY(2.0, "Sheathe: %ls has sheath slot type %.0f; only belt slots sheathe across", w->GetName().c_str(), hafted);
             return false;
         }
+        const bool across = ss != side;
+        if (across && stuck_rule_would_drop(pawn, ss))
+        {
+            HSVR_LOG_EVERY(2.0, "Sheathe: %s hand waits to sheathe across: the game's stuck-hand rule would drop the other hand's item (that hand is by his body and the right hand has a two-handed grip)", hand);
+            return false;
+        }
         UObject* scab = fit.scab;
         // The value Draw Weapon writes for that physical slot (L1 5, L2 6, L1/L2 hafted 7/8; R1 0, R2 1, hafted 2/3).
         double concrete = ss == 0 ? (hafted == 0.0 ? 5.0 : 7.0) + fit.slot : (hafted == 0.0 ? 0.0 : 2.0) + fit.slot;
         Vec3 sp = component_location(scab);
         Quat sq = component_rotation(scab);
         FName sock = bone_fname(fit.socket);
-        bool ok = set_bool_property(pawn, STR("Cross Unsheath"), true);
+        bool ok = set_bool_property(pawn, STR("Cross Unsheath"), across);
         ok &= set_variable(pawn, nm(L"Sheath Slot %ls", S).c_str(), fit.slot);
         ok &= set_variable(pawn, nm(L"%ls Sheath Slot Name", S).c_str(), 0.0, nullptr, &sock);
         ok &= set_variable(pawn, nm(L"%ls Sheath Slot Concrete", H).c_str(), concrete);
@@ -18655,9 +19803,19 @@ namespace
         Call make(pawn, nm(L"Create Sheath Constraint %ls", S).c_str());
         make.byte(STR("Slot"), (uint8_t)fit.slot);
         bool made = make.run();
-        set_variable(pawn, ss == 0 ? STR("Weapon L") : STR("Weapon R"), 0.0, nullptr, nullptr);
+        set_variable(pawn, ss == 0 ? STR("Weapon L") : STR("Weapon R"), 0.0, other_held, nullptr);
         set_component_transform(scab, sp, sq, true);
-        call_one_object(pawn, cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+        if (!made || object_property(pawn, slot_var.c_str()) != w)
+        {
+            set_bool_property(pawn, STR("Cross Unsheath"), false);
+            set_variable(pawn, nm(L"%ls Sheath Slot Concrete", H).c_str(), 11.0);
+            set_variable(pawn, nm(L"Sheath Slot %ls", S).c_str(), 3.0);
+            sheathe_disarm(side, ss);
+            HSVR_LOG("Sheathe: %ls's slot %ls %d does not hold it after Create Sheath Constraint %ls%s; not sheathed across", w->GetName().c_str(), S, fit.slot + 1, S,
+                     made ? "" : " (not found)");
+            return false;
+        }
+        return_scabbard_pin(pawn, scab, cfg_scabbard_free());
         set_bool_property(pawn, nm(L"%ls Weapon Sheathing", S).c_str(), true);
         set_bool_property(pawn, nm(L"Block %ls Weapon From Sheathing", S).c_str(), true);
         set_bool_property(pawn, nm(L"Weapon UnSheathing %ls", S).c_str(), true);
@@ -18670,84 +19828,236 @@ namespace
         d.sheathing = true;
         d.length = blade_length(w);
         d.socket = fit.socket;
+        d.slot = fit.slot;
         g_draw[side] = d;
         controllers_buzz(side, 0.3f);
-        HSVR_LOG("Sheathe: %s hand puts %ls across into slot %ls %d (concrete %.0f)%s%s", hand, w->GetName().c_str(), S, fit.slot + 1, concrete,
-                 made ? "" : " (Create Sheath Constraint NOT found)", ok ? "" : " (a game variable was NOT set)");
+        if (across)
+            HSVR_LOG("Sheathe: %s hand puts %ls across into slot %ls %d (concrete %.0f; other hand %s)%s", hand, w->GetName().c_str(), S, fit.slot + 1, concrete,
+                     other_held ? "holding something, put back" : "empty", ok ? "" : " (a game variable was NOT set)");
+        else
+            HSVR_LOG("Sheathe: %s hand puts %ls into slot %ls %d, the scabbard left where it is held (concrete %.0f)%s", hand, w->GetName().c_str(), S,
+                     fit.slot + 1, concrete, ok ? "" : " (a game variable was NOT set)");
         return true;
     }
 
-    // Each tick, for a hand holding a weapon: its tip at its side's empty belt scabbard mouth, lined up.
+    // Across the body into the other hip's free belt slot when its scabbard is NOT already there (a
+    // sword picked up, or drawn from this side): Assign <T> Weapon Slot (with Weapon <T> set to this
+    // weapon for that call) picks T's free slot, teleports the weapon's own scabbard onto the socket and
+    // pins it to the pelvis, and sets Current Scabbard <T> / <T> Sheath Slot Name / Sheath Slot <T>
+    // (cross_sheathe.md §3 "Scabbard placement"; hs_draw_sheathe_calls.md §3). Sheath <T>'s reach and
+    // the <T> concrete it set are undone, then the game's cross path takes over (sheathe_cross_begin).
+    bool sheathe_cross_fresh(int side, UObject* pawn, UObject* w)
+    {
+        using namespace hsvr;
+        int ts = 1 - side;
+        const char* hand = side == 0 ? "left" : "right";
+        const wchar_t* T = ts == 0 ? L"L" : L"R";
+        double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
+        if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
+            bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
+            return false;
+        // Sheath <T> moves that hand's grab point (Sheath L @63): not while it holds on to someone or something.
+        if (bool_property(pawn, ts == 0 ? STR("Grabbed L") : STR("Grabbed R")))
+        {
+            HSVR_LOG_EVERY(2.0, "Sheathe: %s hand waits to sheathe across: the other hand is holding on to someone or something", hand);
+            return false;
+        }
+        if (stuck_rule_would_drop(pawn, ts)) // before Assign moves the scabbard
+        {
+            HSVR_LOG_EVERY(2.0, "Sheathe: %s hand waits to sheathe across: the game's stuck-hand rule would drop the other hand's item (that hand is by his body and the right hand has a two-handed grip)", hand);
+            return false;
+        }
+        UObject* other_held = object_property(pawn, ts == 0 ? STR("Weapon L") : STR("Weapon R"));
+        if (assign_scabbard_slot(side, ts, pawn, w) < 0) return false;
+        auto known = g_sheath_fit.find(w);
+        if (known == g_sheath_fit.end()) return false;
+        const SheathFit f = known->second;
+        HSVR_LOG("Sheathe: %s hand across to the %s hip: the game's Assign %ls pinned %ls's scabbard on %s (other hand %s)", hand, ts == 0 ? "left" : "right", T,
+                 w->GetName().c_str(), f.socket, other_held ? "holding something, put back" : "empty");
+        return sheathe_cross_begin(side, pawn, w, f);
+    }
+
+    // Each tick, for a hand holding a weapon: its tip at a belt scabbard mouth on either hip, lined up. On
+    // each hip that is the weapon's own scabbard's real mouth (measured at the draw) while it is pinned
+    // there and its slot is empty, else that hip's free socket; the nearer one it fits in is taken. A
+    // weapon drawn across may so go into the hand's own hip, or back when that hip is full.
     void sheathe_check(int side, UObject* pawn, const hsvr::Config& cfg)
     {
         using namespace hsvr;
         if (!cfg.pose_sheathe || g_draw[side].active || g_two.active) return;
         UObject* w = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
-        if (!w || is_fist(w) || g_hold[side].weapon != w || !object_property(w, STR("Scabbard"))) return;
+        if (!w || is_fist(w) || g_hold[side].weapon != w) return;
+        UObject* scab = object_property(w, STR("Scabbard"));
+        if (!scab) return;
         UObject* base = object_property(w, STR("BaseMesh"));
         if (!base) return;
-        Vec3 sock_mouth, sock_ax;
-        bool have_sock = belt_mouth(side, pawn, sock_mouth, sock_ax);
-        // Its own scabbard's real mouth (measured at the draw), when that scabbard hangs on this hand's
-        // side (the game's Assign for this hand only sheathes into this side's slots).
-        Vec3 mouth = sock_mouth, ax = sock_ax;
-        bool real = false, other_side = false;
+        const char* hand = side == 0 ? "left" : "right";
+
+        const SheathFit* pinned = nullptr;
         auto fit = g_sheath_fit.find(w);
-        bool pinned = fit != g_sheath_fit.end() && fit->second.scab && scabbard_pin(fit->second.scab) != nullptr;
-        if (fit != g_sheath_fit.end() && fit->second.scab == object_property(w, STR("Scabbard")) && !pinned)
-            HSVR_LOG_EVERY(2.0, "Sheathe: %ls's scabbard is no longer on the belt (the game takes it off when its weapon is dropped); not sheathed",
-                           w->GetName().c_str());
-        if (fit != g_sheath_fit.end() && fit->second.scab == object_property(w, STR("Scabbard")) && pinned)
+        if (fit != g_sheath_fit.end() && fit->second.scab == scab)
         {
-            Vec3 sp = component_location(fit->second.scab);
-            Quat sq = component_rotation(fit->second.scab);
-            if (fit->second.slot_side == side)
+            if (!scabbard_pin(scab))
+                HSVR_LOG_EVERY(2.0, "Sheathe: %ls's scabbard is no longer on the belt (the game takes it off when its weapon is dropped); a free belt slot takes both",
+                               w->GetName().c_str());
+            else if (fit->second.slot == 0 || fit->second.slot == 1) // (one drawn off the back goes to the hip)
+                pinned = &fit->second;
+        }
+        struct Mouth
+        {
+            bool ok = false, real = false;
+            Vec3 at, ax;
+            double d = 1e9, c = -1.0;
+        };
+        Mouth mouths[2];
+        for (int hip = 0; hip < 2; ++hip)
+        {
+            Mouth& m = mouths[hip];
+            if (pinned && pinned->slot_side == hip && !object_property(pawn, k_belt[hip][pinned->slot].var))
             {
-                mouth = sp + sq.rotate(fit->second.mouth_local);
-                ax = sq.rotate(fit->second.axis_local);
-                real = true;
+                Quat sq = component_rotation(scab);
+                m.at = component_location(scab) + sq.rotate(pinned->mouth_local);
+                m.ax = sq.rotate(pinned->axis_local);
+                m.ok = m.real = true;
             }
             else
-                other_side = true;
+                m.ok = belt_mouth(hip, pawn, m.at, m.ax);
         }
-        if (!real && !have_sock) return;
-        Vec3 bp = component_location(base);
-        Quat bq = component_rotation(base);
-        Vec3 blade = bq.rotate(Vec3{0, 0, 1});
-        Vec3 tip = bp + blade * blade_length(w);
-        double d = length(tip - mouth), c = dot(blade, ax);
-        double off_deg = std::acos((std::max)(-1.0, (std::min)(1.0, c))) * 57.2958;
+        // Two hands (Matthew 2026-11-22: "it needs to be a 2 hand job. One holding the scabbard, one
+        // holstering the sword. In the past, I've had the sword get into position to sheath itself whilst
+        // I was fighting"): only into its own scabbard, on the belt where it hangs, while the other hand
+        // holds that scabbard (try_scabbard_grab: it can be angled). No free-slot or across-fresh sheathe.
+        if (cfg.pose_sheathe_two_hand)
+        {
+            UObject* held = held_scabbard(1 - side);
+            if (!held) return;
+            if (held != scab)
+            {
+                HSVR_LOG_EVERY(2.0, "Sheathe: %s hand's sword: the other hand holds a scabbard that is not this sword's; not sheathed", hand);
+                return;
+            }
+            if (!pinned)
+            {
+                HSVR_LOG_EVERY(2.0, "Sheathe: %s hand's sword: its scabbard is held but the mod has no mouth for it (not drawn from it this life); not sheathed", hand);
+                return;
+            }
+            for (Mouth& m : mouths)
+                if (!m.real) m.ok = false;
+        }
+        if (!mouths[0].ok && !mouths[1].ok) return;
+        Vec3 blade = component_rotation(base).rotate(Vec3{0, 0, 1});
+        Vec3 tip = component_location(base) + blade * blade_length(w);
+        for (Mouth& m : mouths)
+            if (m.ok) m.d = length(tip - m.at), m.c = dot(blade, m.ax);
+
+        int only = -1; // not armed: the one hip it may go into
         if (!g_sheathe_armed[side])
         {
-            if (d > 2.0 * cfg.pose_sheathe_mouth_cm + 10.0)
+            // The hip the blade came out of takes it again once the tip has been over 30 cm from that hip's
+            // mouths for 0.35 s without a break: as the slide joint breaks the blade flicks and a pulled
+            // scabbard springs back, so for a tick or two the tip reads 30-50 cm clear (test j3 2026-11-22
+            // 02:58Z: back into the sheathe 0.15 s after a draw across, then Block set, and Check refuses the
+            // break until pushed in, Check Scabbard Unsheath State L @2808). The other hip takes it once it
+            // has been out 0.35 s and the tip is nearer that mouth: between the hips the tip is 20-23 cm
+            // from both, so "clear of every mouth" kept a drawn sword out of the other hip for 6 s (test
+            // g_reach 03:18Z).
+            const double clear_cm = 2.0 * cfg.pose_sheathe_mouth_cm + 10.0, clear_s = 0.35;
+            const double now = now_seconds();
+            const int from = g_sheathe_from[side], other = 1 - from;
+            double from_d = mouths[from].d;
+            if (UObject* mesh = object_property(pawn, STR("Mesh")))
+                for (const BeltSlot& b : k_belt[from])
+                    if (!object_property(pawn, b.var)) from_d = (std::min)(from_d, length(tip - socket_location(mesh, bone_fname(b.socket))));
+            double& since = g_sheathe_clear_since[side];
+            if (from_d <= clear_cm)
+                since = -1.0;
+            else if (since < 0.0)
+                since = now;
+            if (since >= 0.0 && now - since >= clear_s)
             {
+                since = -1.0;
                 g_sheathe_armed[side] = true;
-                HSVR_LOG("Sheathe: %s hand's blade is clear of the scabbard (tip %.0f cm from the mouth); it can be sheathed again", side == 0 ? "left" : "right", d);
+                HSVR_LOG("Sheathe: %s hand's blade is clear of the %s hip it came from (tip %.0f cm); it can be sheathed on either", hand,
+                         from == 0 ? "left" : "right", from_d);
             }
-            return;
+            else
+            {
+                if (now - g_sheathe_out_at[side] < clear_s || !mouths[other].ok || mouths[other].d >= from_d) return;
+                only = other;
+            }
+        }
+        const double min_cos = std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0);
+        int into = -1, closest = mouths[0].d <= mouths[1].d ? 0 : 1;
+        for (int hip = 0; hip < 2; ++hip)
+        {
+            const Mouth& m = mouths[hip];
+            if (only >= 0 && hip != only) continue;
+            if (!m.ok || m.d > cfg.pose_sheathe_mouth_cm || m.c < min_cos || (hip != side && !cfg.pose_sheathe_cross)) continue;
+            if (into < 0 || m.d < mouths[into].d) into = hip;
         }
         // Playtest 09:38: no sheathe ever began and nothing said how close the tip came. Near a mouth,
-        // twice a second: how far and how lined up (and where the belt socket's mouth is, for comparison).
-        if (d < 40.0 || other_side)
-            HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's tip %.1f cm from the %s mouth, %.0f deg off its line (needs %.0f cm, %.0f deg)%s%s",
-                           side == 0 ? "left" : "right", d, real ? "scabbard's" : "belt socket's", off_deg, cfg.pose_sheathe_mouth_cm, cfg.pose_sheathe_angle_deg,
-                           real && have_sock ? "; the belt socket's is " : "", real && have_sock ? (std::to_string((int)std::lround(length(tip - sock_mouth))) + " cm").c_str() : "");
-        if (other_side)
+        // twice a second: how far and how lined up.
+        if (mouths[closest].d < 40.0)
+            HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's tip %.1f cm from the %s hip's %s mouth, %.0f deg off its line (needs %.0f cm, %.0f deg)", hand, mouths[closest].d,
+                           closest == 0 ? "left" : "right", mouths[closest].real ? "scabbard's" : "belt socket's",
+                           std::acos((std::max)(-1.0, (std::min)(1.0, mouths[closest].c))) * 57.2958, cfg.pose_sheathe_mouth_cm, cfg.pose_sheathe_angle_deg);
+        if (into < 0) return;
+        if (only >= 0)
+            HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's blade may go into the %s hip: %.2f s out of the other, the tip nearer this one", hand, into == 0 ? "left" : "right",
+                           now_seconds() - g_sheathe_out_at[side]);
+        if (into == side && mouths[into].real && held_scabbard(1 - side) == scab)
+            sheathe_cross_begin(side, pawn, w, *pinned); // held: not moved by Assign
+        else if (into == side)
+            sheathe_begin(side, pawn, w);
+        else if (mouths[into].real)
+            sheathe_cross_begin(side, pawn, w, *pinned); // its scabbard already hangs there
+        else
+            sheathe_cross_fresh(side, pawn, w);
+    }
+
+    // A sheathe whose hand has let go. "Sheathed" is no sign of a seat (Create Sheath Constraint sets it as
+    // the sheathe starts, L @3869): it is seated when its slot holds it, the game has locked that joint
+    // (Check Scabbard Unsheath State L @2022, R @2505), the blade is at most 20 cm out (the game's seat,
+    // L @485) and the scabbard is on its socket.
+    struct SeatWatch
+    {
+        UObject* weapon = nullptr;
+        int index = 0; // k_slots
+        double t0 = 0.0;
+    };
+    SeatWatch g_seat[2];
+
+    void seat_watch_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        static bool tracked0 = track_freed(&g_seat[0].weapon), tracked1 = track_freed(&g_seat[1].weapon);
+        (void)tracked0;
+        (void)tracked1;
+        for (int side = 0; side < 2; ++side)
         {
-            // Its own scabbard on the other hip: its real mouth, and the game's cross path.
-            Vec3 sp = component_location(fit->second.scab);
-            Quat sq = component_rotation(fit->second.scab);
-            Vec3 m2 = sp + sq.rotate(fit->second.mouth_local), a2 = sq.rotate(fit->second.axis_local);
-            double d2 = length(tip - m2), c2 = dot(blade, a2);
-            if (d2 < 40.0)
-                HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's tip %.1f cm from the mouth on the other hip, %.0f deg off its line (needs %.0f cm, %.0f deg)",
-                               side == 0 ? "left" : "right", d2, std::acos((std::max)(-1.0, (std::min)(1.0, c2))) * 57.2958, cfg.pose_sheathe_mouth_cm,
-                               cfg.pose_sheathe_angle_deg);
-            if (cfg.pose_sheathe_cross && d2 <= cfg.pose_sheathe_mouth_cm && c2 >= std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0))
-                sheathe_cross_begin(side, pawn, w, fit->second);
-            return;
+            SeatWatch& sw = g_seat[side];
+            if (!sw.weapon) continue;
+            const SlotDef& sd = k_slots[sw.index];
+            bool in_slot = object_property(pawn, sd.var) == sw.weapon;
+            bool locked = in_slot && joint_locked(object_property(pawn, sd.constraint));
+            bool late = now_seconds() - sw.t0 > 1.0;
+            if (!locked && !late) continue;
+            double out = 999.0, off = 999.0;
+            UObject* base = object_property(sw.weapon, STR("BaseMesh"));
+            UObject* scab = object_property(sw.weapon, STR("Scabbard"));
+            UObject* mesh = object_property(pawn, STR("Mesh"));
+            if (base && scab && mesh)
+            {
+                Vec3 sp = component_location(scab);
+                out = component_rotation(base).inverse().rotate(sp - component_location(base)).z;
+                off = length(sp - socket_location(mesh, bone_fname(sd.socket)));
+            }
+            bool seated = locked && out <= 20.0 && off <= 5.0;
+            if (!seated && !late) continue;
+            HSVR_LOG("Sheathe: %ls %s (%ls %s it, joint %s, blade %.1f cm out, scabbard %.1f cm from %s)", sw.weapon->GetName().c_str(),
+                     seated ? "is seated and locked" : "is NOT seated", sd.var, in_slot ? "holds" : "does not hold", locked ? "locked" : "not locked", out, off, sd.socket);
+            sw = SeatWatch{};
         }
-        if (d <= cfg.pose_sheathe_mouth_cm && c >= std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0)) sheathe_begin(side, pawn, w);
     }
 
     void draw_tick(UObject* pawn)
@@ -18764,12 +20074,25 @@ namespace
             if (object_property(pawn, hand) != d.weapon || !base)
             {
                 if (d.sheathing)
-                    HSVR_LOG("Sheathe: %s hand's weapon %s after %.2f s", side == 0 ? "left" : "right",
-                             base && bool_property(d.weapon, STR("Sheathed")) ? "is sheathed" : "was let go (the game seats it)", now - d.t0);
+                {
+                    HSVR_LOG("Sheathe: %s hand let go of its weapon after %.2f s; checking its seat", side == 0 ? "left" : "right", now - d.t0);
+                    if (base) g_seat[side] = SeatWatch{d.weapon, slot_index(d.slot_side, d.slot), now};
+                }
                 else
                     HSVR_LOG("Draw: %s hand let go mid-draw after %.2f s (the game seats it again)", side == 0 ? "left" : "right", now - d.t0);
                 d = DrawState{};
                 continue;
+            }
+            if (d.sheathing && d.slot_side != side && stuck_rule_would_drop(pawn, d.slot_side))
+            {
+                if (end_cross_sheathe(pawn, d.slot_side, d.slot, d.block_cleared))
+                {
+                    HSVR_LOG("Sheathe: %s hand's sheathe across ended by the game's Check: the other hand came by his body, where the game's stuck-hand rule would have dropped what it holds",
+                             side == 0 ? "left" : "right");
+                    if (object_property(pawn, hand) != d.weapon) continue; // seated: noticed next tick
+                }
+                else
+                    HSVR_LOG_EVERY(2.0, "Sheathe: the game's Check would not end the sheathe across; its stuck-hand rule may drop the other hand's item");
             }
             const TCHAR* S = d.slot_side == 0 ? STR("L") : STR("R");
             bool unsheathing = bool_property(pawn, d.slot_side == 0 ? STR("Weapon UnSheathing L") : STR("Weapon UnSheathing R"));
@@ -18785,6 +20108,37 @@ namespace
                 d.block_cleared = true;
                 HSVR_LOG("Sheathe: in past the mouth (%.1f cm out)", z);
             }
+            if (d.sheathing && !d.block_cleared)
+            {
+                // Pulled back out before it was in past the mouth: the block holds off the game's whole-blade
+                // abort too, so it stayed sheathing for good (test j2 2026-11-22 18:27Z: 59.0 cm in of 65.2,
+                // then 102 cm out and never free). 8 cm back and the whole blade out: the block goes, and
+                // below it is a draw.
+                d.z_in = (std::min)(d.z_in, z);
+                if (z > d.z_in + 8.0 && z > d.length)
+                {
+                    set_bool_property(pawn, d.slot_side == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
+                    d.block_cleared = true;
+                    HSVR_LOG("Sheathe: back out before the mouth (%.1f cm out, was %.1f of %.1f): the game may free it", z, d.z_in, d.length);
+                }
+            }
+            if (d.sheathing && d.block_cleared)
+            {
+                // Pulled back out: with "<S> Weapon Sheathing" set the game frees it only a whole blade's
+                // length out along the line (Check Scabbard Unsheath State L @3110-3449, R @3657-4099), which
+                // from the other hip the arm cannot reach, though it could start tilted (test j2 2026-11-22
+                // 02:57Z: stuck 33-47 cm out of 57). So once pulled back 8 cm it is a draw (0.85 of the
+                // length, less when swung); pushed in again, a sheathe.
+                d.z_in = (std::min)(d.z_in, z);
+                bool back = d.pulling_back ? z > d.z_in + 2.0 : z > d.z_in + 8.0;
+                if (back != d.pulling_back)
+                {
+                    d.pulling_back = back;
+                    set_bool_property(pawn, d.slot_side == 0 ? STR("L Weapon Sheathing") : STR("R Weapon Sheathing"), !back);
+                    HSVR_LOG("Sheathe: %s hand %s (%.1f cm out)", side == 0 ? "left" : "right",
+                             back ? "pulls it back out: the game frees it as in a draw" : "pushes it in again", z);
+                }
+            }
             if (!unsheathing && conc == 11.0)
             {
                 HSVR_LOG("Draw: %s hand drew %ls free after %.2f s (out %.1f cm)%s", side == 0 ? "left" : "right", d.weapon->GetName().c_str(), now - d.t0, z,
@@ -18794,8 +20148,21 @@ namespace
                 h.settle_from_rot = bq;
                 h.settle_s = (std::max)(0.02, cfg.pose_draw_settle_s);
                 h.settle_until = now + h.settle_s;
+                if (d.sheathing)
+                {
+                    // Create put it in Sheathed Mode as the sheathe began. The game's break takes that off
+                    // only on the right (Check Scabbard Unsheath State R @7623 / @7180; L @6464 / @6057 has
+                    // no such call). Either rebuilds its bodies, so the no-collide joints against his own
+                    // are made again (as after a late rebuild off the back).
+                    bool undo = bool_property(d.weapon, STR("Sheathed"));
+                    if (undo) undo = Call(d.weapon, STR("Unsheathed Mode")).run();
+                    clear_arm_ignore(side);
+                    ignore_arm_collision(pawn, object_property(pawn, STR("Mesh")), d.weapon, base, side);
+                    HSVR_LOG("Sheathe: %ls, pulled back out, is a held weapon again (%s; its no-collide joints made again)", d.weapon->GetName().c_str(),
+                             undo ? "Unsheathed Mode run" : "the game had unsheathed it");
+                }
+                sheathe_disarm(side, d.slot_side);
                 d = DrawState{};
-                g_sheathe_armed[side] = false;
                 continue;
             }
             if (now - d.last_log > 0.5)
@@ -18819,6 +20186,7 @@ namespace
                 d = DrawState{};
             }
         }
+        seat_watch_tick(pawn);
         for (int side = 0; side < 2; ++side) sheathe_check(side, pawn, cfg);
     }
 
@@ -18859,6 +20227,7 @@ namespace
         double last_slide_t = -1.0;
     };
     ScabHold g_scab[2];
+    UObject* held_scabbard(int side) { return g_scab[side].active ? g_scab[side].scab : nullptr; }
 
     // A scabbard's length along its own Z, from its collision: the stretch of its axis within 3.5 cm of it.
     bool scabbard_segment(UObject* scab, double len, double& z0, double& z1)
@@ -18912,14 +20281,33 @@ namespace
         return true;
     }
 
+    UObject* child_component(UObject* parent, int index)
+    {
+        Call c(parent, STR("GetChildComponent"));
+        if (!c.fn) return nullptr;
+        if (FProperty* p = c.param(STR("ChildIndex"))) *reinterpret_cast<int32_t*>(c.buffer.data() + p->GetOffset_Internal()) = index;
+        c.run();
+        return c.object_result();
+    }
+
+    // The pin to the pelvis: the scabbard's constraint child. The game takes child 0 to be it (Return
+    // Scabbard Constraint To Locked @43), but an attach appends: a pin the game remade (Release Scabbard L
+    // Hand @1410-1531) comes after whatever was attached before it, e.g. the sound of Create Sheath
+    // Constraint R @3680.
     UObject* scabbard_pin(UObject* scab)
     {
-        Call c(scab, STR("GetChildComponent"));
-        if (!c.fn) return nullptr;
-        if (FProperty* p = c.param(STR("ChildIndex"))) *reinterpret_cast<int32_t*>(c.buffer.data() + p->GetOffset_Internal()) = 0;
-        c.run();
-        UObject* pin = c.object_result();
-        return pin && is_a(pin, STR("PhysicsConstraintComponent")) ? pin : nullptr;
+        if (!scab) return nullptr;
+        static UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+        UObject* child = child_component(scab, 0);
+        if (!child) return nullptr;
+        if (child->GetClassPrivate() == cls) return child;
+        Call n(scab, STR("GetNumChildrenComponents"));
+        FProperty* r = n.param(STR("ReturnValue"));
+        if (!r || !n.run()) return nullptr;
+        const int32_t count = *reinterpret_cast<int32_t*>(n.buffer.data() + r->GetOffset_Internal());
+        for (int32_t i = 1; i < count; ++i)
+            if (UObject* other = child_component(scab, i); other && other->GetClassPrivate() == cls) return other;
+        return nullptr;
     }
 
     // SetAngularSwing1Limit / Swing2 / Twist: (motion byte, angle) whatever the parameters are called.
@@ -18949,6 +20337,21 @@ namespace
             }
         }
         c.run();
+    }
+
+    // The game's lock (5 deg / 2 cm, Return Scabbard Constraint To Locked @293-488) or its draw's freedom
+    // (30 deg / 15 cm, Set Scabbard Constraint Free @293-488). Both act on child 0 only (@43), so a pin
+    // further down gets the same limits here.
+    void return_scabbard_pin(UObject* pawn, UObject* scab, bool free)
+    {
+        call_one_object(pawn, free ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+        UObject* pin = scabbard_pin(scab);
+        if (!pin || child_component(scab, 0) == pin) return;
+        for (const TCHAR* fn : {STR("SetAngularSwing1Limit"), STR("SetAngularSwing2Limit"), STR("SetAngularTwistLimit")})
+            pin_angular_limit(pin, fn, 1, free ? 30.0 : 5.0);
+        // (the same two parameters: motion byte, then size)
+        for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
+            pin_angular_limit(pin, fn, 1, free ? 15.0 : 2.0);
     }
 
     // The pin's limits as they are now (scabbard tests).
@@ -19143,16 +20546,60 @@ namespace
 
     bool scabbard_held(int side) { return g_scab[side].active; }
 
-    // Before his tick: keep the game's automatic off-hand scabbard grab (UG @451824-452352) from firing
-    // for the player. Its gate needs "L Hand Occupied by R Unsheath" false and its release fires when it
-    // is true while the rest of the gate (C) fails, so it is set to exactly C && a scabbard: neither runs.
+    // Current Scabbard R, taken from the game for one tick of his (scabbard_before_tick).
+    struct HiddenScabbard
+    {
+        UObject* pawn = nullptr;
+        UObject* scab = nullptr;
+    };
+    HiddenScabbard g_hidden_scab;
+
+    // After his tick, before anything else of the mod's reads it.
+    void scabbard_restore(UObject* pawn)
+    {
+        static bool tracked0 = track_freed(&g_hidden_scab.scab), tracked1 = track_freed(&g_hidden_scab.pawn);
+        (void)tracked0;
+        (void)tracked1;
+        if (!g_hidden_scab.scab || g_hidden_scab.pawn != pawn) return;
+        UObject* scab = g_hidden_scab.scab;
+        g_hidden_scab = HiddenScabbard{};
+        UObject** slot = value_ptr<UObject*>(pawn, STR("Current Scabbard R"));
+        if (!slot || *slot) return; // the game has written one since (UG @524207, @536841)
+        *slot = scab;
+        if (bool_property(pawn, STR("Weapon UnSheathing R"))) return;
+        // The draw or sheathe ended in that tick, and its Check then locks Current Scabbard L instead
+        // (Check Scabbard Unsheath State R @1413-1461, @3091-3139, @5327-5375). A held one stays wide.
+        if (held_scabbard(0) == scab || held_scabbard(1) == scab) return;
+        return_scabbard_pin(pawn, scab, false);
+    }
+
+    // Before his tick: neither the game's automatic off-hand scabbard grab (UG @451824-452352) nor its
+    // release (@452367-452895) may run for the player. The release teleports the scabbard onto its socket
+    // and remakes the pin (Release Scabbard L Hand @431, @1410-1531). It runs when "L Hand Occupied by R
+    // Unsheath" is true and the gate (C) is not. Check Scabbard Unsheath State R clears "Weapon
+    // UnSheathing R" earlier in the same tick as it seats or breaks, so Occupied held true for C cost the
+    // holding hand its scabbard at the seat (6 of 8 test grabs). So while the right side draws or sheathes
+    // Occupied stays false and Current Scabbard R is None for the tick: Grab Scabbard L Hand returns on
+    // that (@5-34). In Check R None only changes which scabbard it locks (put right in scabbard_restore)
+    // and runs Event Unsheathe Hafted at a break (@5284-7839), an empty event. "R Weapon Sheathing" alone
+    // is the game's approach gate (UG @508938-509305), which None would turn into a no-scabbard seat
+    // (@511061): there Occupied is C as before.
     void scabbard_before_tick(UObject* pawn)
     {
+        scabbard_restore(pawn); // (only if a tick's after hook was missed)
         if (!hsvr::config().pose_scabbard_block_auto) return;
-        bool c = !bool_property(pawn, STR("Hand L Torn Off")) && !bool_property(pawn, STR("Grabbed L")) && !bool_property(pawn, STR("Grab L Target Found")) &&
-                 !bool_property(pawn, STR("Fallen")) && read_number_variable(pawn, STR("Arm_L Health")) > 25.0 && read_number_variable(pawn, STR("L_GripType_Current")) == 0.0 &&
-                 (bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("R Weapon Sheathing")));
-        bool occupied = c && object_property(pawn, STR("Current Scabbard R")) != nullptr;
+        UObject** slot = value_ptr<UObject*>(pawn, STR("Current Scabbard R"));
+        UObject* scab = slot ? *slot : nullptr;
+        bool occupied = false;
+        if (scab && bool_property(pawn, STR("Weapon UnSheathing R")))
+        {
+            g_hidden_scab = HiddenScabbard{pawn, scab};
+            *slot = nullptr;
+        }
+        else if (scab && bool_property(pawn, STR("R Weapon Sheathing")))
+            occupied = !bool_property(pawn, STR("Hand L Torn Off")) && !bool_property(pawn, STR("Grabbed L")) && !bool_property(pawn, STR("Grab L Target Found")) &&
+                       !bool_property(pawn, STR("Fallen")) && read_number_variable(pawn, STR("Arm_L Health")) > 25.0 &&
+                       read_number_variable(pawn, STR("L_GripType_Current")) == 0.0;
         if (bool_property(pawn, STR("L Hand Occupied by R Unsheath")) != occupied)
         {
             set_bool_property(pawn, STR("L Hand Occupied by R Unsheath"), occupied);
@@ -19269,7 +20716,7 @@ namespace
                     s = ScabHold{};
                     bool drawing = false;
                     for (int k = 0; k < 2; ++k) drawing = drawing || g_draw[k].active;
-                    call_one_object(pawn, drawing && cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
+                    return_scabbard_pin(pawn, scab, drawing && cfg_scabbard_free());
                     HSVR_LOG("Scabbard: back on the belt (%.1f deg, %.1f cm off), the game's lock put back", left, off_belt);
                     continue;
                 }
@@ -19346,6 +20793,7 @@ namespace
         keep_pending_in_hand(pawn);
         draw_tick(pawn);
         scabbard_tick(pawn, cfg);
+        mount_tick(pawn);
         for (int side = 0; side < 2; ++side)
         {
             GripLog& log = g_grip_log[side];
@@ -20641,6 +22089,11 @@ namespace
         }
         g_two = TwoHand{};
         g_anim_grip_two_side = -1;
+        g_hidden_scab = HiddenScabbard{};
+        // Mounts stay known through a moment without his pawn (an end screen: the save still needs them);
+        // freed ones go with the GC, another pawn's at that pawn's first tick (mount_tick).
+        for (Mount& m : g_mount) m.gripped = false;
+        g_hung.clear();
         g_thrown.clear();
         g_item_track.clear();
         g_sheath_fit.clear();
@@ -20655,7 +22108,9 @@ namespace
         // except by his own Get Damage pre/post, which pairs it).
         if (!g_pose_active.load()) install_player_damage(false);
         if (!is_receive_tick(context, function)) return;
+        scabbard_restore(context); // first, posed or not: it was hidden for his tick only
         for (auto& pin : g_pawn_pins) set_variable(context, pin.first.c_str(), pin.second, nullptr, nullptr);
+        if (!g_pose_active.load()) mount_tick(context); // its anchor follows the arm posed or not
         if (g_pose_active.load())
         {
             { HSVR_SUB("after:keep_player_off_knees"); keep_player_off_knees(context, true); }
@@ -20688,6 +22143,7 @@ namespace
         { HSVR_SUB("after:stab_log_tick"); stab_log_tick(context); }
         { HSVR_SUB("after:install_hit_haptics"); install_hit_haptics(); }
         { HSVR_SUB("after:install_body_contact"); install_body_contact(); }
+        { HSVR_SUB("after:install_mount_save"); install_mount_save(); }
         { HSVR_SUB("after:grip_flip_tick"); grip_flip_tick(context); }
         if (!g_hold_have || !g_hold_capsule.load())
         {

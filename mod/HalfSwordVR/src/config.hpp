@@ -677,6 +677,12 @@ namespace hsvr
         // forearm strap grip is kept (not moved into the hand) where the game has one for that hand
         // (light pavise both hands, heavy pavise left hand). Overrides pose_shield_in_hand for pavises.
         bool pose_pavise_forearm = true;
+        // Pavises by their rear strap (Matthew 2026-11-22), instead of pose_pavise_forearm: off the back
+        // only with the hand across from the strap and held by it, passed by it, mounted on the other
+        // forearm when let go within pose_pavise_mount_cm of that forearm's back (that hand stays free),
+        // taken off and hung back by it.
+        bool pose_pavise_strap = true;
+        double pose_pavise_mount_cm = 15.0;
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;
@@ -721,8 +727,9 @@ namespace hsvr
         bool pose_throw = true;
         // Holster snap (B&S Holder.cs:683-695), only for weapons with no scabbard of their own (Matthew
         // 2026-11-19; scabbard weapons keep the physical sheathe): let go of one while your hand is within
-        // pose_holster_zone_cm of the free belt slot it goes in (the one the game's Assign picks) and moving
-        // slower than pose_holster_max_speed m/s (faster is a throw), and the game hangs it there.
+        // pose_holster_zone_cm of a free slot of its kind on EITHER hip or the back, with either hand
+        // (2026-11-22; nearest wins), moving slower than pose_holster_max_speed m/s (faster is a throw),
+        // and the game hangs it there.
         bool pose_holster_snap = true;
         // A drawn weapon dropped, thrown or passed to the other hand leaves its scabbard on the belt (B&S);
         // the game's own release takes it off (Matthew 2026-11-19: "the scabbard despawns").
@@ -770,6 +777,9 @@ namespace hsvr
         bool pose_sheathe = true;
         double pose_sheathe_mouth_cm = 10.0;
         double pose_sheathe_angle_deg = 30.0;
+        // Sheathing takes two hands (Matthew 2026-11-22): the other hand holds the sword's own scabbard
+        // where it hangs; the blade never goes in by itself. 0 = the old one-hand sheathe at any free mouth.
+        bool pose_sheathe_two_hand = true;
         bool pose_sheathe_cross = true; // a weapon whose scabbard hangs on the other hip goes back across (the game's cross path)
         // The off hand on a belt scabbard: a squeeze within touch_cm of it takes it; it turns with the hand
         // up to angle_deg on the belt (the game's own loose limit is 30) and stays pinned there; let go and it
