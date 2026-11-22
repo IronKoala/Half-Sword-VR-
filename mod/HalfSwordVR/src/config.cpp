@@ -505,6 +505,12 @@ namespace hsvr
         flag("pose_hold_joint_shoulder", c.pose_hold_joint_shoulder);
         flag("pose_hold_joint_carry_weight", c.pose_hold_joint_carry_weight);
         num("pose_hold_joint_fade_min_speed", c.pose_hold_joint_fade_min_speed);
+        num("pose_hold_joint_fade_keep_s", c.pose_hold_joint_fade_keep_s);
+        num("pose_hold_joint_fade_after_s", c.pose_hold_joint_fade_after_s);
+        flag("pose_hold_joint_slerp", c.pose_hold_joint_slerp);
+        flag("pose_hold_joint_mod_turn", c.pose_hold_joint_mod_turn);
+        flag("pose_hold_joint_turn_by_grip", c.pose_hold_joint_turn_by_grip);
+        flag("pose_hold_joint_speed_limit", c.pose_hold_joint_speed_limit);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
         flag("pose_hold_ignore_hand", c.pose_hold_ignore_hand);
         flag("pose_hold_block_offhand_search", c.pose_hold_block_offhand_search);
@@ -685,6 +691,12 @@ namespace hsvr
         flag("pose_hand_world_stop", c.pose_hand_world_stop);
         num("pose_hand_world_radius_cm", c.pose_hand_world_radius_cm);
         num("pose_hand_world_reach_cm", c.pose_hand_world_reach_cm);
+        flag("pose_arm_fresh_shoulder", c.pose_arm_fresh_shoulder);
+        flag("pose_arm_fresh_shoulder_held", c.pose_arm_fresh_shoulder_held);
+        flag("pose_no_fall_arms", c.pose_no_fall_arms);
+        flag("pose_body_wall_stop", c.pose_body_wall_stop);
+        num("pose_body_wall_step_cm", c.pose_body_wall_step_cm);
+        num("pose_body_wall_radius_share", c.pose_body_wall_radius_share);
         num("pose_finger_mcp_lag", c.pose_finger_mcp_lag);
         num("pose_finger_pip_full", c.pose_finger_pip_full);
         flag("pose_wrap", c.pose_wrap);

@@ -497,7 +497,15 @@ namespace hsvr
         bool pose_hold_joint_shoulder = true;
         // The arm carries the weapon's weight at the grip outside that cap (as the old hold). 0 = the cap pays it.
         bool pose_hold_joint_carry_weight = true;
+        // One hand: the joint's turn no stronger than the hand's pull can hold the grip still against.
+        bool pose_hold_joint_turn_by_grip = true;
+        // A joint-held weapon never goes faster than the old hold sets (2000 cm/s, pose_bs_max_spin).
+        bool pose_hold_joint_speed_limit = true;
         double pose_hold_joint_fade_min_speed = 50.0; // cm/s: below it a grip far behind is stopped by something, no ease to B&S's cap
+        double pose_hold_joint_fade_keep_s = 0.4; // s: once allowed, the ease to B&S's cap stays allowed this long (so it brakes what it started)
+        double pose_hold_joint_fade_after_s = 0.0;  // s: no ease to B&S's cap this soon after a joint is made (was 0.3 before the grab's speed was zeroed)
+        bool pose_hold_joint_slerp = true; // 1 = the joint turns the weapon by one SLERP drive (0 = twist and swing drives)
+        bool pose_hold_joint_mod_turn = true; // one hand: 1 = the old hold's turn (spin set each tick), the joint only pulls; 0 = the joint's turn drive
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
@@ -833,6 +841,17 @@ namespace hsvr
         bool pose_hand_world_stop = true;
         double pose_hand_world_radius_cm = 3.5;
         double pose_hand_world_reach_cm = 6.0;
+        // 1 = an empty hand's arm is corrected after his body is evaluated, from this frame's shoulder
+        // (the solve only has last frame's, so the hand bobbed with each step while walking).
+        bool pose_arm_fresh_shoulder = true;
+        // 1 = walking fast doesn't swap his arms into the game's falling-backwards swing (it opened the weapon hand).
+        bool pose_no_fall_arms = true;
+        bool pose_arm_fresh_shoulder_held = false; // test 2026-11-22: with the joint off it shook held weapons 1.4-2.6x more // ... and a hand holding a weapon, two-handing or on a scabbard
+        // He stops at walls and scenery when walking (stick or room): his capsule, from this far above his
+        // feet (so steps and the floor don't stop him) to his head, radius = his capsule's x share.
+        bool pose_body_wall_stop = true;
+        double pose_body_wall_step_cm = 35.0;
+        double pose_body_wall_radius_share = 1.0;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
