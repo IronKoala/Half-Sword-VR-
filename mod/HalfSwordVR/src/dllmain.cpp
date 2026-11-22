@@ -25,6 +25,7 @@
 #include <Unreal/Property/FArrayProperty.hpp>
 #include <Unreal/Property/FBoolProperty.hpp>
 #include <Unreal/Property/FStructProperty.hpp>
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp> // FMapProperty, FScriptMap (the equipment passport's maps)
 #include <Unreal/UScriptStruct.hpp>
 #include <Unreal/FString.hpp>
 #include <Unreal/Hooks.hpp>
@@ -16384,8 +16385,75 @@ namespace
         return ok;
     }
 
+    // ---- His equipment as the game saves it ---------------------------------------------------------
+    // Nothing rebuilds the passport's two maps at a save: GI_Settings "Override Player Character Equipment"
+    // copies them as they stand (@390), so what the mod moves it must write there as the game does.
+    // Their keys: WeaponinHands 0 right, 1 left (Set Up Right Hand Weapon @7905 / @8025, Left @7462 / @7582);
+    // WeaponsinSlots R1 0, R2 1, L1 3, L2 4, back 5 (Set Up Right Hand Weapon @10773 / @14329 / @14614,
+    // Left @10041 / @13655 / @13940).
+    const uint8_t k_slot_keys[5] = {0, 1, 3, 4, 5}; // by k_slots index
+    const TCHAR* const k_slots_map = STR("WeaponsinSlots_11_B42349384F5EF74DE78A7F870D89656A");
+    const TCHAR* const k_hands_map = STR("WeaponinHands_23_B3FE643741AF91A6DFE51888205C0F05");
+
+    struct EquipMap
+    {
+        FMapProperty* prop = nullptr;
+        uint8_t* at = nullptr;
+    };
+
+    // pawn.[Character Passport].Equipment.<that map>
+    EquipMap equipment_map(UObject* pawn, const TCHAR* name)
+    {
+        EquipMap m;
+        FProperty* passport = pawn ? prop_chain(pawn, STR("Character Passport")) : nullptr;
+        FProperty* equipment = struct_member(struct_type(passport), STR("Equipment_26_741A2FC641801842FE691295645C604F"));
+        FProperty* map = struct_member(struct_type(equipment), name);
+        if (!map || map->GetClass().GetName() != STR("MapProperty")) return m;
+        m.prop = static_cast<FMapProperty*>(map);
+        m.at = reinterpret_cast<uint8_t*>(pawn) + passport->GetOffset_Internal() + equipment->GetOffset_Internal() + map->GetOffset_Internal();
+        return m;
+    }
+
+    // Blueprint Map_Add(map, key, value), which cannot be called from here (a custom thunk: it takes the
+    // map's type off the script stack). No value = the empty passport: the struct's defaults, which is what
+    // the game's breaks add from a fresh local (Check Scabbard Unsheath State R @6381, L @5528). Refuses
+    // (false) unless the map is laid out as expected.
+    bool equipment_set(const EquipMap& m, uint8_t key, const void* value)
+    {
+        if (!m.prop) return false;
+        FProperty* kp = m.prop->GetKeyProp();
+        FProperty* vp = m.prop->GetValueProp();
+        if (!kp || !vp || kp->GetSize() != 1) return false;
+        const Unreal::FScriptMapLayout layout = Unreal::FScriptMap::GetScriptLayout(kp->GetSize(), kp->GetMinAlignment(), vp->GetSize(), vp->GetMinAlignment());
+        const Unreal::FScriptMapLayout& engine = m.prop->GetMapLayout();
+        if (layout.ValueOffset != engine.ValueOffset || layout.SetLayout.Size != engine.SetLayout.Size)
+        {
+            HSVR_LOG("Save: the passport map's layout is not as expected (value at %d, engine %d); not written", (int)layout.ValueOffset, (int)engine.ValueOffset);
+            return false;
+        }
+        auto* map = reinterpret_cast<Unreal::FScriptMap*>(m.at);
+        void* slot = map->FindOrAdd(
+            &key, layout, [&](const void* k) -> Unreal::uint32 { return kp->GetValueTypeHash(k); },
+            [](const void* a, const void* b) -> bool { return *static_cast<const uint8_t*>(a) == *static_cast<const uint8_t*>(b); },
+            [&](void* new_key, void* new_value) {
+                *static_cast<uint8_t*>(new_key) = key;
+                vp->InitializeValue(new_value);
+            });
+        if (!slot) return false;
+        if (value)
+            vp->CopyCompleteValue(slot, value);
+        else
+        {
+            vp->DestroyValue(slot);
+            vp->InitializeValue(slot);
+        }
+        return true;
+    }
+
     // The game's draw-off-a-slot bookkeeping, done by the mod (Check Scabbard Unsheath State's break,
-    // Enum 2 @6020-6458, back_slot_physics.md step 1-2; WeaponsinSlots is left to the game's next save).
+    // Enum 2 @6020-6458, back_slot_physics.md step 1-2), the saved slot included. The game's own clears
+    // can't be used: Set Up <S> Hand Weapon's runs only as that hand lets go of an item still named by its
+    // slot (@10552-10793, @14431-14634), and the break's needs a live joint and runs the rest of a draw.
     void free_slot(UObject* pawn, int slot, UObject* w, const char* why)
     {
         const SlotDef& sd = k_slots[slot];
@@ -16417,14 +16485,17 @@ namespace
             wt = weights.run(); // its bool (add) left false: remove
         }
         set_variable(pawn, sd.var, 0.0, nullptr, nullptr);
+        // The break's WeaponsinSlots[slot] = empty (R @6381 back, @7271, @7714; L @5528). Without it a save
+        // kept the item in the slot too: saved twice while held, back again after a drop (since 41ea92c).
+        const bool saved = equipment_set(equipment_map(pawn, k_slots_map), k_slot_keys[slot], nullptr);
         set_variable(pawn, (std::wstring(L"Sheath Slot ") + S).c_str(), 3.0);
         set_variable(pawn, (std::wstring(S) + L" Sheath Slot Concrete").c_str(), 11.0);
         set_bool_property(pawn, (std::wstring(L"Weapon UnSheathing ") + S).c_str(), false);
         set_bool_property(pawn, (std::wstring(S) + L" Weapon Sheathing").c_str(), false);
         set_bool_property(pawn, (std::wstring(L"Block ") + S + L" Weapon From Sheathing").c_str(), false);
         set_bool_property(pawn, STR("Cross Unsheath"), false);
-        HSVR_LOG("Draw: the mod freed %ls from %ls (%s): joint %s, Unsheathed Mode %s, weights %s", w->GetName().c_str(), sd.var, why, joint ? "broken" : "missing",
-                 um ? "run" : "missing", wt ? "removed" : "call missing");
+        HSVR_LOG("Draw: the mod freed %ls from %ls (%s): joint %s, Unsheathed Mode %s, weights %s, saved slot %s", w->GetName().c_str(), sd.var, why,
+                 joint ? "broken" : "missing", um ? "run" : "missing", wt ? "removed" : "call missing", saved ? "emptied" : "NOT emptied");
     }
 
     void slot_take_tick(UObject* pawn)
