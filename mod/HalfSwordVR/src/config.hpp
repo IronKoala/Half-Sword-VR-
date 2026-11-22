@@ -805,6 +805,9 @@ namespace hsvr
         double pose_finger_scale_mcp = 1.0;
         double pose_finger_scale_pip = 1.0;
         double pose_finger_scale_dip = 1.0;
+        // 1 = finger joints turn about the finger's middle, not about Willie's bones (they sit on the
+        // palm-side skin, so closing the hand rolled the fingers into loops).
+        bool pose_finger_pivot_fix = true;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or

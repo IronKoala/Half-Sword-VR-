@@ -231,6 +231,7 @@ LAYOUT = [
         ("pose_finger_scale_mcp", "Finger full bend x this at the knuckle."),
         ("pose_finger_scale_pip", "... at the middle joint."),
         ("pose_finger_scale_dip", "... at the end joint."),
+        ("pose_finger_pivot_fix", "1 = finger joints bend at the finger's middle (0 = about the game's bones: fingers roll into circles)."),
         ("pose_finger_schedule", "1 = finger joints close in a natural order (no round 'circle' fingers)."),
         ("pose_finger_mcp_lag", ""),
         ("pose_finger_pip_full", ""),

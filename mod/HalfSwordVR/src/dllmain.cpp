@@ -9586,6 +9586,36 @@ namespace
     // Scales on the four fingers' full bend at the knuckle / middle / end joint (pose_finger_scale_*):
     // the gauntlet's skin rolls a PIP-heavy finger into a tube (Matthew's 14:10 screenshots).
     std::atomic<double> g_finger_joint_scale[3] = {1.0, 1.0, 1.0};
+    // Where each finger joint really turns, in its bone's own frame (cm): Willie's finger bones sit on
+    // or outside the palm-side skin, not through the finger's middle (willie-skeleton finger-analysis:
+    // pivots at 59/23/-40% of the index's depth from the palm skin, middle 54/-25/-80%), so bending
+    // about the bone dragged the skin round a loop: a fist made the middle finger 29% longer, the
+    // "circles" Matthew saw (2026-11-21 20:12Z). About these points it is 2%, and the knuckles crease.
+    // After the joints have turned, each finger bone is moved so its pivot (v, in its own frame)
+    // sits where it belongs on its parent (c, in the parent's frame), both from the reference pose
+    // (SK_Body_Man LOD0: midpoint of back- and palm-most skin at each joint, carried back through the
+    // skin weights; PIP/DIP cross-checked within 0.02-0.13 cm). At rest nothing moves. Index..pinky
+    // (the thumb's pivots are in the palm's flesh, unmeasured; thumb_03 is already within 0.17 cm).
+    // [side][index..pinky][_01.._03], snapshot cm.
+    const hsvr::Vec3 kPivotV[2][4][3] = {
+        {{{0.076, -0.231, -0.005}, {-0.153, 0.695, 0.023}, {-0.278, 1.389, 0.047}},
+         {{0.027, -0.052, 0.007}, {-0.234, 1.378, -0.174}, {-0.178, 1.860, -0.235}},
+         {{-0.031, 0.071, -0.016}, {-0.199, 1.422, -0.325}, {-0.158, 1.714, -0.393}},
+         {{-0.312, 0.662, -0.228}, {-0.227, 1.520, -0.589}, {-0.097, 1.658, -0.645}}},
+        {{{-0.087, 0.257, 0.005}, {0.113, -0.522, -0.018}, {0.248, -1.253, -0.042}},
+         {{-0.049, 0.103, -0.014}, {0.232, -1.356, 0.171}, {0.172, -1.763, 0.223}},
+         {{0.031, -0.071, 0.016}, {0.220, -1.442, 0.330}, {0.162, -1.732, 0.397}},
+         {{0.256, -0.540, 0.186}, {0.208, -1.344, 0.521}, {0.096, -1.650, 0.642}}}};
+    const hsvr::Vec3 kPivotC[2][4][3] = {
+        {{{5.8554, -0.2855, 0.2359}, {4.1105, 0.7110, 0.0230}, {2.6245, 1.4163, 0.0470}},
+         {{6.0940, -0.0587, 0.0072}, {5.4388, 1.3716, -0.1740}, {2.6218, 1.8627, -0.2350}},
+         {{5.6525, 0.1166, -0.0445}, {5.2507, 1.4093, -0.3250}, {2.3822, 1.7174, -0.3929}},
+         {{4.8085, 0.8129, -0.5403}, {4.1563, 1.4987, -0.5891}, {2.0853, 1.6603, -0.6451}}},
+        {{{-5.8552, 0.3133, -0.2359}, {-4.1048, -0.5340, -0.0180}, {-2.6246, -1.2764, -0.0419}},
+         {{-6.0861, 0.1133, -0.0140}, {-5.4330, -1.3496, 0.1709}, {-2.6100, -1.7666, 0.2231}},
+         {{-5.6523, -0.1168, 0.0444}, {-5.2377, -1.4348, 0.3300}, {-2.3807, -1.7362, 0.3971}},
+         {{-4.8346, -0.6900, 0.4773}, {-4.1104, -1.3272, 0.5208}, {-2.0856, -1.6524, 0.6421}}}};
+    std::atomic<bool> g_finger_pivot_on{true};
     const double g_finger_spread[5] = {0.35, 0.21, 0.03, -0.14, -0.31};
     const char* kFingerNames[5] = {"thumb", "index", "middle", "ring", "pinky"};
 
@@ -10029,12 +10059,15 @@ namespace
             bool thumb = f == 0;
             int b0 = ch[f][0], b1 = ch[f][1], b2 = ch[f][2];
             Vec3 seg1 = P(b2) - P(b1);
-            if (length(seg1) < 0.05) continue;
+            if (length(seg1) < 0.05 || length(P(b1) - P(b0)) < 0.05) continue;
             // The last segment has no child bone: it points as the one before it does, in its own bone's frame.
             Vec3 u = xf_rot(B[b1]).inverse().rotate(normalized(seg1));
-            auto seg = [&](int j) {
-                return normalized(j < 2 ? P(ch[f][j + 1]) - P(ch[f][j]) : xf_rot(B[ch[f][j]]).rotate(u));
-            };
+            // Each segment's direction in its own bone's frame, taken before anything turns, so it
+            // still holds when a joint turns about its pivot point (the bone then moves, and the
+            // line from one bone to the next no longer follows the phalanx).
+            Vec3 ul[3] = {xf_rot(B[b0]).inverse().rotate(normalized(P(b1) - P(b0))), u, u};
+            auto seg = [&](int j) { return normalized(xf_rot(B[ch[f][j]]).rotate(ul[j])); };
+
             Vec3 tip_before = P(b2) + xf_rot(B[b2]).rotate(u) * 2.5;
             // Per-joint curls (the wrap's, joint_curl) or one curl for the whole finger.
             const double* jc = joint_curl ? joint_curl[f] : nullptr;
@@ -10066,6 +10099,16 @@ namespace
                 turn_subtree(B, R.subtree[side][f][j], P(ch[f][j]), quat_axis_angle(axis, turn));
                 after[j] = bend_about(prev, seg(j), axis);
             }
+            // Joints at the finger's middle: each bone (and what it carries) moved so its pivot
+            // meets its parent's (bends and directions above are all read before this).
+            if (!thumb && g_finger_pivot_on.load() && (int)R.parent.size() > b2)
+                for (int j = 0; j < 3; ++j)
+                {
+                    int b = ch[f][j], pa = R.parent[b];
+                    if (pa < 0) break;
+                    Vec3 d = (P(pa) + xf_rot(B[pa]).rotate(kPivotC[side][f - 1][j])) - (P(b) + xf_rot(B[b]).rotate(kPivotV[side][f - 1][j]));
+                    for (int i : R.subtree[side][f][j]) B[i].tx += d.x, B[i].ty += d.y, B[i].tz += d.z;
+                }
             if (log && at < (int)sizeof(line) - 160)
             {
                 Vec3 tip = P(b2) + xf_rot(B[b2]).rotate(u) * 2.5;
@@ -10170,17 +10213,24 @@ namespace
 
     // A finger's three segments (component space of the snapshot): knuckle to middle, middle to last,
     // last to the tip.
-    void finger_segments(const XForm96* B, int side, int f, hsvr::Vec3 seg[3][2])
+    // (ref: the pose before the fingers were turned. Each segment runs from its bone along that bone's
+    // own direction and length, so it stays on the phalanx when the joints turn about their pivots.)
+    void finger_segments(const XForm96* B, int side, int f, hsvr::Vec3 seg[3][2], const XForm96* ref = nullptr)
     {
         using namespace hsvr;
         const int(*ch)[3] = g_frig.chain[side];
+        if (!ref) ref = B;
+        Vec3 r0 = xf_pos(ref[ch[f][0]]), r1 = xf_pos(ref[ch[f][1]]), r2 = xf_pos(ref[ch[f][2]]);
+        Vec3 u0 = r2 - r1;
+        Vec3 u = length(u0) > 0.05 ? xf_rot(ref[ch[f][1]]).inverse().rotate(normalized(u0)) : Vec3{1, 0, 0};
+        Vec3 d0 = r1 - r0;
+        Vec3 l0 = length(d0) > 0.05 ? xf_rot(ref[ch[f][0]]).inverse().rotate(d0) : Vec3{0, 0, 0};
+        Vec3 l1 = xf_rot(ref[ch[f][1]]).inverse().rotate(u0);
+        Vec3 l2 = u * kFingerTip;
         Vec3 p0 = xf_pos(B[ch[f][0]]), p1 = xf_pos(B[ch[f][1]]), p2 = xf_pos(B[ch[f][2]]);
-        Vec3 u0 = p2 - p1;
-        Vec3 u = length(u0) > 0.05 ? xf_rot(B[ch[f][1]]).inverse().rotate(normalized(u0)) : Vec3{1, 0, 0};
-        Vec3 tip = p2 + xf_rot(B[ch[f][2]]).rotate(u) * kFingerTip;
-        seg[0][0] = p0, seg[0][1] = p1;
-        seg[1][0] = p1, seg[1][1] = p2;
-        seg[2][0] = p2, seg[2][1] = tip;
+        seg[0][0] = p0, seg[0][1] = p0 + xf_rot(B[ch[f][0]]).rotate(l0);
+        seg[1][0] = p1, seg[1][1] = p1 + xf_rot(B[ch[f][1]]).rotate(l1);
+        seg[2][0] = p2, seg[2][1] = p2 + xf_rot(B[ch[f][2]]).rotate(l2);
     }
 
     struct WrapSolve
@@ -10252,7 +10302,7 @@ namespace
             double jc[5][3] = {};
             for (int k = 0; k < 3; ++k) jc[f][k] = c[k];
             pose_hand_fingers(tmp.data(), side, curl5, kWrapSplay, false, jc, f);
-            finger_segments(tmp.data(), side, f, seg);
+            finger_segments(tmp.data(), side, f, seg, B0);
         }
         // Sample i (kWrapSamples) of segment k: where the finger's middle is and how thick it is there.
         void sample(const hsvr::Vec3 seg[3][2], int k, int i, hsvr::Vec3& p, double& r) const
@@ -11446,6 +11496,7 @@ namespace
         g_finger_joint_scale[0].store(cfg.pose_finger_scale_mcp);
         g_finger_joint_scale[1].store(cfg.pose_finger_scale_pip);
         g_finger_joint_scale[2].store(cfg.pose_finger_scale_dip);
+        g_finger_pivot_on.store(cfg.pose_finger_pivot_fix);
         if (pawn && g_pose_active.load()) wrap_tick(cfg, pawn);
         if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
