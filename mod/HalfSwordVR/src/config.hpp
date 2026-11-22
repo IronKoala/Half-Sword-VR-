@@ -174,6 +174,9 @@ namespace hsvr
         // His body is removed this many seconds after he was out (never while you hold or grab him,
         // or a weapon in your hand is stuck in him). 0 = bodies stay.
         double test_room_despawn_seconds = 7.0;
+        // A crossbow on the second table and a quiver of 20 bolts on your hip: 1 = when you come in by
+        // the Train button, 2 = always (also test_room=1 boots), 0 = never.
+        int test_room_crossbow = 1;
         int stereo_slot_offset = 0; // 0 = find automatically
 
         // ---- Phase 2: controllers (read only) and the player physics test ----
@@ -681,6 +684,20 @@ namespace hsvr
         // A drawn weapon dropped, thrown or passed to the other hand leaves its scabbard on the belt (B&S);
         // the game's own release takes it off (Matthew 2026-11-19: "the scabbard despawns").
         bool pose_keep_scabbard_on_drop = true;
+        // ---- Crossbow (Matthew 2026-11-22: two grips, pull the string to cock, a bolt into the
+        // cradle, trigger fires). The game's own string joint, bolt loading and Event Shoot do the work.
+        bool crossbow = true;
+        // A free hand closing this near the string's nut (cm) takes the string (when nearer it than a grip).
+        double crossbow_string_reach_cm = 10.0;
+        // A hand closing this near the quiver at his hip (cm, from its collision) takes a bolt out.
+        double crossbow_quiver_reach_cm = 12.0;
+        // A held bolt this near the cradle's loaded spot (cm) is loaded (the game's own rule is 10).
+        double crossbow_bolt_seat_cm = 10.0;
+        // The trigger fires at this pull (0-1) and must come back under crossbow_trigger_release first.
+        double crossbow_trigger_fire = 0.75;
+        double crossbow_trigger_release = 0.3;
+        // The hand on the rear grip (by the trigger) is the one that fires: within this of it (cm).
+        double crossbow_trigger_grip_cm = 8.0;
         double pose_holster_zone_cm = 15.0;
         double pose_holster_max_speed = 3.0;
         double pose_throw_speed = 2.0;

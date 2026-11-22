@@ -391,6 +391,7 @@ namespace hsvr
         flag("test_room_respawn", c.test_room_respawn);
         num("test_room_respawn_seconds", c.test_room_respawn_seconds);
         num("test_room_despawn_seconds", c.test_room_despawn_seconds);
+        integer("test_room_crossbow", c.test_room_crossbow);
         flag("log_controllers", c.log_controllers);
         text("hand_bone_left", c.hand_bone_left);
         text("hand_bone_right", c.hand_bone_right);
@@ -575,6 +576,13 @@ namespace hsvr
         flag("pose_holster_snap", c.pose_holster_snap);
         flag("log_frames", c.log_frames);
         flag("pose_keep_scabbard_on_drop", c.pose_keep_scabbard_on_drop);
+        flag("crossbow", c.crossbow);
+        num("crossbow_string_reach_cm", c.crossbow_string_reach_cm);
+        num("crossbow_quiver_reach_cm", c.crossbow_quiver_reach_cm);
+        num("crossbow_bolt_seat_cm", c.crossbow_bolt_seat_cm);
+        num("crossbow_trigger_fire", c.crossbow_trigger_fire);
+        num("crossbow_trigger_release", c.crossbow_trigger_release);
+        num("crossbow_trigger_grip_cm", c.crossbow_trigger_grip_cm);
         num("pose_holster_zone_cm", c.pose_holster_zone_cm);
         num("pose_holster_max_speed", c.pose_holster_max_speed);
         num("pose_throw_multiplier", c.pose_throw_multiplier);

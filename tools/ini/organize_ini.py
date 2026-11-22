@@ -100,6 +100,7 @@ LAYOUT = [
         ("test_room_respawn", "1 = a foe out of the fight is replaced."),
         ("test_room_respawn_seconds", ""),
         ("test_room_despawn_seconds", "His body is removed this long after he is out (0 = bodies stay)."),
+        ("test_room_crossbow", "A crossbow on the table and 20 bolts on your hip: 1 = via the Train button, 2 = always, 0 = never."),
     ]),
     ("Picture and view", "Where your eyes sit and how the picture is made.", [
         ("world_scale", "1 = life size."),
@@ -407,6 +408,15 @@ LAYOUT = [
         ("pose_holster_zone_cm", ""),
         ("pose_holster_max_speed", ""),
         ("pose_keep_scabbard_on_drop", ""),
+    ]),
+    ("Crossbow", "Two grips; a free hand pulls the string back to cock it; a bolt from the hip quiver goes into the cradle; the trigger fires.", [
+        ("crossbow", "1 = crossbow handling on."),
+        ("crossbow_string_reach_cm", "How near the string your hand must close to take it (cm)."),
+        ("crossbow_quiver_reach_cm", "How near the quiver your hand must close to take a bolt (cm)."),
+        ("crossbow_bolt_seat_cm", "A bolt this near the cradle is loaded (cm; the game's own is 10)."),
+        ("crossbow_trigger_fire", "Trigger pull that fires (0-1)."),
+        ("crossbow_trigger_release", "Trigger must come back under this before it fires again."),
+        ("crossbow_trigger_grip_cm", "Only the hand on the rear grip fires: within this of it (cm)."),
     ]),
     ("Swinging and throwing", "", [
         ("pose_feed_swing_speed", ""),

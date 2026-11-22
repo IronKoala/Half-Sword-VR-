@@ -2475,6 +2475,7 @@ namespace
         return p;
     }
 
+    bool xbow_test_grip(int side, hsvr::Vec3& grip);
     void pose_arm(int side, const hsvr::Config& cfg, const hsvr::ControllerState& state, const hsvr::Quat& body, const hsvr::Quat& component_inv)
     {
         using namespace hsvr;
@@ -2860,6 +2861,7 @@ namespace
             if (mode == 9) grip_rot = (body * quat_axis_angle(Vec3{0, 1, 0}, std::fmod(now, 6.0) / 6.0 * 2.0 * 3.14159265358979) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
             if (double roll = g_fake_roll_deg[side].load(); roll != 0.0)
                 grip_rot = (body * quat_axis_angle(Vec3{1, 0, 0}, roll / 57.29578) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
+            xbow_test_grip(side, grip); // test: hsvr.xbow_hand
         }
         if (cfg.dev_pose_fake_tracking && g_fake_jitter_cm.load() > 0.0)
         {
@@ -6283,9 +6285,10 @@ namespace
     WorldGrab g_world[2];
     bool g_wrap_on_side(int side); // (defined with the wrap)
     // The hand holds an object, a body or scenery, or has just asked the game to (its fist must wait).
+    bool xbow_string_in_hand(int side); // that hand holds a crossbow's string
     bool hand_holds_thing(int side, UObject* pawn)
     {
-        if (g_world[side].on || g_wrap_on_side(side)) return true;
+        if (g_world[side].on || g_wrap_on_side(side) || xbow_string_in_hand(side)) return true;
         if (bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R"))) return true;
         const ObjectGrab& g = g_object_grab[side];
         return g.component && !g.fallback_tried && g.since >= 0.0 && hsvr::now_seconds() - g.since < 0.5;
@@ -11458,6 +11461,617 @@ namespace
         }
     }
 
+    // ---- Crossbow (Matthew 2026-11-22) --------------------------------------------------------
+    // The game has one crossbow, BP_Weapon_Ranged_Weapon_Crossbow_Light (the custom weapons carry it
+    // too). Its mechanism is physical and the mod uses it as it is (add_new_weapons.md Part 3 §2):
+    //  - the string's nut CM_Test_Peg (0.2 kg, simulating) slides along the stock on
+    //    PhysicsConstraint_Peg_Stock, held forward by the bow arms' drives. The game cocks it with
+    //    "Event Load String": that joint's reference goes to (0,0,19) with its Z limit shut (1, 0),
+    //    "String Loaded" and a click. Its tick does that by itself once "Can Load String" (0.5 s after
+    //    "Event String Grabbed") and the nut is within 5 cm of Scene_Location_Peg_Loaded; before that it
+    //    keeps the joint's reference at (0,0,"String Stretch Pointer Position Z").
+    //  - "Event Load Bolt(bolt)" seats a bolt (BP_Weapon_Ranged_Projectle_*) at Scene_0 on a holder joint;
+    //    the player's own rule (Willie UG @440410) loads a left-hand bolt within 10 cm of the loaded spot.
+    //  - "Event Shoot" (needs String Loaded) frees the bolt and pushes it CM_Test_Stock up x 400.
+    // In VR: two fixed grips (the game's trigger-hand point and its off-hand point); a free hand that
+    // closes on the nut holds the string, and the joint's reference follows that hand back along the
+    // stock (shut Z limit, so the nut goes exactly where the hand has pulled it, with no joint to the
+    // hand to fight the hold); a hand at the quiver takes a bolt; a bolt brought to the cradle loads;
+    // the trigger of the hand on the rear grip fires.
+    bool is_crossbow(UObject* w) { return w && is_a(w, STR("BP_Weapon_Ranged_Weapon_Crossbow_Light_C")); }
+    bool is_bolt(UObject* w) { return w && is_a(w, STR("BP_Weapon_Ranged_Projectle_Master_C")); }
+    FProperty* struct_member_prefix(UScriptStruct* type, const TCHAR* prefix);
+    UObject* load_asset_object(const std::wstring& object_path);
+
+    // The crossbow's two grips in its BaseMesh frame: the game's right-hand point (the trigger hand)
+    // and its off-hand point (the front), and the stock's line.
+    bool xbow_grip_points(UObject* xb, UObject* base, hsvr::Vec3& rear, hsvr::Vec3& front, hsvr::Vec3& axis)
+    {
+        using namespace hsvr;
+        if (!xb || !base) return false;
+        Vec3 bp = component_location(base);
+        Quat binv = component_rotation(base).inverse();
+        UObject* r = object_property(xb, STR("Grip R Hand Default Pos"));
+        UObject* f = object_property(xb, STR("Grip L Hand Off Hand"));
+        if (!f) return false;
+        rear = r ? binv.rotate(component_location(r) - bp) : Vec3{0, 0, 0};
+        front = binv.rotate(component_location(f) - bp);
+        axis = Vec3{0, 0, 1};
+        if (UObject* stock = object_property(xb, STR("CM_Test_Stock")))
+        {
+            Call up(stock, STR("GetUpVector"));
+            if (up.run()) axis = normalized(binv.rotate(up.vec()));
+        }
+        return true;
+    }
+
+    // A crossbow's handles: its two grips, fixed (no slide), along the stock.
+    bool xbow_handles(UObject* xb, UObject* base, std::vector<Handle>& hs)
+    {
+        using namespace hsvr;
+        Vec3 rear, front, axis;
+        if (!xbow_grip_points(xb, base, rear, front, axis)) return false;
+        hs.push_back(Handle{rear - axis, rear + axis, "grip", -1, 2});
+        hs.back().fixed = true;
+        hs.back().fixed_t = 0.5;
+        hs.push_back(Handle{front - axis, front + axis, "grip", -1, 2});
+        hs.back().fixed = true;
+        hs.back().fixed_t = 0.5;
+        HSVR_LOG("Crossbow: %ls grips: rear (trigger) (%.1f, %.1f, %.1f), front (%.1f, %.1f, %.1f), stock line (%.2f, %.2f, %.2f) in its BaseMesh frame",
+                 xb->GetName().c_str(), rear.x, rear.y, rear.z, front.x, front.y, front.z, axis.x, axis.y, axis.z);
+        return true;
+    }
+
+    // Sets the crossbow string joint's reference (frame 1, the nut's) and its Z limit.
+    void xbow_string_joint(UObject* joint, double ref_z, int z_motion)
+    {
+        if (!joint) return;
+        Call rp(joint, STR("SetConstraintReferencePosition"));
+        rp.byte_any({STR("frame"), STR("Frame")}, 0);
+        rp.three_any({STR("RefPosition"), STR("RefPos")}, 0.0, 0.0, ref_z);
+        rp.run();
+        Call zl(joint, STR("SetLinearZLimit"));
+        zl.byte(STR("ConstraintType"), (uint8_t)z_motion);
+        zl.number(STR("LimitSize"), 0.0);
+        zl.run();
+    }
+
+    struct XbowString
+    {
+        bool on = false;
+        int side = -1;
+        UObject* xbow = nullptr;
+        UObject* peg = nullptr;
+        UObject* joint = nullptr;
+        hsvr::Vec3 rest_local, dir_local; // the nut at rest and the way to its loaded spot (BaseMesh frame)
+        double travel = 0.0;              // cm from rest to the loaded spot
+        double s0 = 0.0;                  // the hand's place along that line when it closed
+        double pull = 0.0;
+        double since = 0.0, full_since = -1.0;
+        bool loaded_seen = false;
+    };
+    XbowString g_xstring;
+    bool xbow_string_in_hand(int side) { return g_xstring.on && g_xstring.side == side; }
+    bool g_xstring_tracked = on_freed([] {
+        if (gone(g_xstring.xbow) || gone(g_xstring.peg) || gone(g_xstring.joint)) g_xstring = XbowString{};
+    });
+
+    struct XbowShot
+    {
+        UObject* bolt = nullptr;
+        UObject* base = nullptr;
+        UObject* xbow = nullptr;
+        hsvr::Vec3 from;
+        double t0 = -1.0;
+        int logged = 0;
+    };
+    XbowShot g_xshot;
+    bool g_xshot_tracked = on_freed([] {
+        if (gone(g_xshot.bolt) || gone(g_xshot.base) || gone(g_xshot.xbow)) g_xshot = XbowShot{};
+    });
+
+    const TCHAR* hand_weapon_name(int side) { return side == 0 ? STR("Weapon L") : STR("Weapon R"); }
+
+    void xbow_string_let_go(UObject* pawn, const char* why)
+    {
+        XbowString& s = g_xstring;
+        if (!s.on) return;
+        bool alive = object_alive(s.xbow);
+        bool loaded = alive && bool_property(s.xbow, STR("String Loaded"));
+        if (alive && !loaded)
+        {
+            // Not cocked: the string goes back as the game leaves it (Unload String: Z free).
+            set_variable(s.xbow, STR("String Stretch Pointer Position Z"), 0.0);
+            xbow_string_joint(s.joint, 0.0, 0);
+        }
+        if (alive)
+        {
+            Call rel(s.xbow, STR("Event String Released"));
+            rel.run();
+        }
+        if (pawn && g_arm_ignore[s.side].weapon == s.xbow && object_property(pawn, hand_weapon_name(s.side)) != s.xbow && !(g_two.active && g_two.second == s.side))
+            clear_arm_ignore(s.side);
+        set_anim_grip(s.side, -1);
+        HSVR_LOG("Crossbow: %s hand lets go of the string (%s) after %.1f s at %.1f of %.1f cm: %s", s.side == 0 ? "left" : "right", why, hsvr::now_seconds() - s.since,
+                 s.pull, s.travel, loaded ? "cocked" : "not cocked, it goes back");
+        g_xstring = XbowString{};
+    }
+
+    // A free hand closing on the string of the crossbow the other hand holds (not cocked yet).
+    bool xbow_string_grab(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.crossbow || !pawn || !mesh) return false;
+        UObject* xb = object_property(pawn, hand_weapon_name(1 - side));
+        if (!is_crossbow(xb) || bool_property(xb, STR("String Loaded"))) return false;
+        UObject* base = object_property(xb, STR("BaseMesh"));
+        UObject* peg = object_property(xb, STR("CM_Test_Peg"));
+        UObject* spot = object_property(xb, STR("Scene_Location_Peg_Loaded"));
+        UObject* joint = object_property(xb, STR("PhysicsConstraint_Peg_Stock"));
+        if (!base || !peg || !spot || !joint)
+        {
+            HSVR_LOG_EVERY(5.0, "Crossbow: %ls lacks its string parts (base %d, nut %d, loaded spot %d, joint %d)", xb->GetName().c_str(), base != nullptr, peg != nullptr,
+                           spot != nullptr, joint != nullptr);
+            return false;
+        }
+        Vec3 at = hand_grab_point(mesh, side);
+        Vec3 pp = component_location(peg);
+        double d = length(at - pp);
+        if (d > cfg.crossbow_string_reach_cm) return false;
+        Vec3 bp = component_location(base);
+        Quat binv = component_rotation(base).inverse();
+        Vec3 hand_local = binv.rotate(at - bp);
+        // Nearer a grip than the string: the grip (two hands).
+        double t = 0.0, hd = 1e9;
+        const std::vector<Handle>& hs = item_handles(xb, base);
+        nearest_handle(hs, hand_local, t, hd);
+        if (hd < d)
+        {
+            HSVR_LOG("Crossbow: %s hand closed %.1f cm from the string but %.1f cm from a grip: the grip", side == 0 ? "left" : "right", d, hd);
+            return false;
+        }
+        Vec3 rest = binv.rotate(pp - bp), loaded = binv.rotate(component_location(spot) - bp);
+        double travel = length(loaded - rest);
+        if (travel < 3.0)
+        {
+            HSVR_LOG("Crossbow: %ls string already %.1f cm from its loaded spot, not taken", xb->GetName().c_str(), travel);
+            return false;
+        }
+        XbowString& s = g_xstring;
+        s = XbowString{};
+        s.on = true;
+        s.side = side;
+        s.xbow = xb;
+        s.peg = peg;
+        s.joint = joint;
+        s.rest_local = rest;
+        s.dir_local = (loaded - rest) * (1.0 / travel);
+        s.travel = travel;
+        s.s0 = dot(hand_local - rest, s.dir_local);
+        s.since = now_seconds();
+        Call grabbed(xb, STR("Event String Grabbed"));
+        bool ok = grabbed.run();
+        set_variable(xb, STR("String Stretch Pointer Position Z"), 0.0);
+        xbow_string_joint(joint, 0.0, 1); // the nut held where the hand has it
+        if (UObject* m = object_property(pawn, STR("Mesh"))) ignore_arm_collision(pawn, m, xb, base, side);
+        if (is_fist(object_property(pawn, hand_weapon_name(side)))) remove_fist(side, pawn, "the hand takes the crossbow string");
+        controllers_buzz(side, 0.3f);
+        HSVR_LOG("Crossbow: %s hand takes the string of %ls (%.1f cm from the nut; %.1f cm to pull to cock; Event String Grabbed %s)", side == 0 ? "left" : "right",
+                 xb->GetName().c_str(), d, travel, ok ? "called" : "NOT FOUND");
+        return true;
+    }
+
+    void xbow_string_tick(UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        XbowString& s = g_xstring;
+        if (!s.on) return;
+        if (!object_alive(s.xbow) || object_property(pawn, hand_weapon_name(1 - s.side)) != s.xbow)
+        {
+            xbow_string_let_go(pawn, "the crossbow left the other hand");
+            return;
+        }
+        set_anim_grip(s.side, (int)cfg.pose_scabbard_grip_type);
+        double now = now_seconds();
+        if (bool_property(s.xbow, STR("String Loaded")))
+        {
+            if (!s.loaded_seen)
+            {
+                s.loaded_seen = true;
+                controllers_buzz(s.side, 0.6f);
+                controllers_buzz(1 - s.side, 0.3f);
+                HSVR_LOG("Crossbow: cocked (String Loaded) %.2f s after the hand took the string, pulled %.1f of %.1f cm", now - s.since, s.pull, s.travel);
+            }
+            return;
+        }
+        UObject* base = object_property(s.xbow, STR("BaseMesh"));
+        if (!base || !mesh) return;
+        Vec3 bp = component_location(base);
+        Quat bq = component_rotation(base);
+        Vec3 hand_local = bq.inverse().rotate(hand_grab_point(mesh, s.side) - bp);
+        double along = dot(hand_local - s.rest_local, s.dir_local) - s.s0;
+        s.pull = (std::min)(s.travel, (std::max)(0.0, along));
+        double ref = 19.0 * s.pull / s.travel; // the game's own cocked reference is 19
+        set_variable(s.xbow, STR("String Stretch Pointer Position Z"), ref);
+        xbow_string_joint(s.joint, ref, 1);
+        // The game cocks it itself near the end (its tick); if it has not, 0.6 s at full pull does.
+        if (s.pull >= 0.97 * s.travel)
+        {
+            if (s.full_since < 0.0) s.full_since = now;
+            else if (now - s.full_since > 0.6 && now - s.since > 0.6)
+            {
+                Call load(s.xbow, STR("Event Load String"));
+                load.run();
+                HSVR_LOG("Crossbow: held at full pull for 0.6 s and the game had not cocked it: Event Load String called (String Loaded now %d)",
+                         (int)bool_property(s.xbow, STR("String Loaded")));
+                s.full_since = now + 5.0;
+            }
+        }
+        else
+            s.full_since = -1.0;
+        Vec3 nut = bq.inverse().rotate(component_location(s.peg) - bp);
+        HSVR_LOG_EVERY(0.25, "Crossbow: string pulled %.1f of %.1f cm (hand %.1f along, joint reference %.1f); the nut %.1f cm back from rest, %.1f cm off the stock line, Can Load String %d",
+                       s.pull, s.travel, along, ref, dot(nut - s.rest_local, s.dir_local), length((nut - s.rest_local) - s.dir_local * dot(nut - s.rest_local, s.dir_local)),
+                       (int)bool_property(s.xbow, STR("Can Load String")));
+    }
+
+    // The game's "Set Up <side> Hand Weapon" with a weapon class (as its own Grab Bolt From Quiver does),
+    // the new weapon at that hand.
+    bool give_hand_weapon_class(int side, UObject* pawn, UClass* cls)
+    {
+        const TCHAR* name = side == 0 ? STR("Set Up Left Hand Weapon") : STR("Set Up Right Hand Weapon");
+        UFunction* fn = pawn ? func_chain(pawn, name) : nullptr;
+        if (!fn || !cls) return false;
+        std::vector<uint8_t> block = param_block(fn);
+        uint8_t* parameters = block.data();
+        bool set = false;
+        hsvr::Vec3 hand{0, 0, 0};
+        if (UObject* mesh = object_property(pawn, STR("Mesh"))) hand = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring kind = p->GetClass().GetName();
+            if (kind == STR("ClassProperty") && !set)
+            {
+                *reinterpret_cast<UClass**>(parameters + p->GetOffset_Internal()) = cls;
+                set = true;
+            }
+            if (kind == STR("StructProperty"))
+                if (UScriptStruct* type = struct_type(p))
+                {
+                    uint8_t* at = parameters + p->GetOffset_Internal();
+                    if (FProperty* r = struct_member(type, STR("Rotation")))
+                        if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                        {
+                            uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                            if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                            else *reinterpret_cast<float*>(wat) = 1.0f;
+                        }
+                    if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+                    if (FProperty* tr = struct_member(type, STR("Translation"))) write_three(at + tr->GetOffset_Internal(), tr, hand.x, hand.y, hand.z);
+                }
+        }
+        if (!set) return false;
+        pawn->ProcessEvent(fn, parameters);
+        g_hold[side] = HoldState{};
+        return true;
+    }
+
+    // A hand closing at the quiver on his hip takes a bolt. The left hand: the game's own "Grab Bolt
+    // From Quiver" (it always fills the left hand). The right: the same steps, into the right hand.
+    bool xbow_quiver_grab(int side, UObject* pawn, const hsvr::Vec3& at, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.crossbow || !pawn) return false;
+        UObject* q = object_property(pawn, STR("Attached Bolt Quiver"));
+        UObject* qb = q ? object_property(q, STR("BaseMesh")) : nullptr;
+        if (!qb) return false;
+        Call cp(qb, STR("GetClosestPointOnCollision"));
+        cp.three(STR("Point"), at.x, at.y, at.z);
+        cp.run();
+        double d = cp.number();
+        if (d < 0.0) d = length(at - component_location(qb));
+        if (d > cfg.crossbow_quiver_reach_cm) return false;
+        int32_t* count = value_ptr<int32_t>(q, STR("Projectile Count"));
+        if (!count || *count <= 0)
+        {
+            HSVR_LOG("Crossbow: %s hand at the quiver (%.1f cm): it is empty", side == 0 ? "left" : "right", d);
+            return false;
+        }
+        int before = *count;
+        bool ok = false;
+        if (side == 0)
+        {
+            Call grab(pawn, STR("Grab Bolt From Quiver"));
+            ok = grab.run();
+        }
+        else
+        {
+            static UClass* bolt_cls = nullptr;
+            static const wchar_t* path = L"/Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Projectile/BP_Weapon_Ranged_Projectle_Bolt_1.BP_Weapon_Ranged_Projectle_Bolt_1_C";
+            if (!bolt_cls) bolt_cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path);
+            if (!bolt_cls)
+            {
+                load_asset_object(L"/Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Projectile/BP_Weapon_Ranged_Projectle_Bolt_1.BP_Weapon_Ranged_Projectle_Bolt_1");
+                bolt_cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path);
+            }
+            if (!bolt_cls)
+            {
+                HSVR_LOG("Crossbow: the bolt class is not loaded; no bolt for the right hand");
+                return false;
+            }
+            // Grab Bolt From Quiver @113-694: one fewer, Bolts in Quiver, the passport's hair alpha
+            // (1 - count / 20, where the game saves it) and the bolts shown.
+            *count -= 1;
+            set_variable(pawn, STR("Bolts in Quiver"), (double)*count);
+            if (FProperty* cpp = prop_chain(pawn, STR("Character Passport")))
+                if (FProperty* hc = struct_member_prefix(struct_type(cpp), STR("HairColor")))
+                    if (FProperty* a = struct_member(struct_type(hc), STR("A")))
+                        *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(pawn) + cpp->GetOffset_Internal() + hc->GetOffset_Internal() + a->GetOffset_Internal()) =
+                            (float)(1.0 - *count / 20.0);
+            Call re(q, STR("Rearrange Projectiles"));
+            re.run();
+            ok = give_hand_weapon_class(1, pawn, bolt_cls);
+        }
+        UObject* now = object_property(pawn, hand_weapon_name(side));
+        if (side == 0) g_hold[0] = HoldState{};
+        if (is_bolt(now)) controllers_buzz(side, 0.3f);
+        HSVR_LOG("Crossbow: %s hand takes a bolt from the quiver (%.1f cm from it): %s, quiver %d -> %d, hand now holds %ls", side == 0 ? "left" : "right", d,
+                 ok ? "done" : "call NOT FOUND", before, count ? *count : -1, now ? now->GetName().c_str() : STR("nothing"));
+        return true;
+    }
+
+    // A bolt held in one hand brought to the cradle of the crossbow in the other loads it (the game's
+    // Event Load Bolt), once the string is cocked.
+    void xbow_cradle_tick(UObject* pawn, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* bolt = object_property(pawn, hand_weapon_name(side));
+            if (!is_bolt(bolt)) continue;
+            UObject* xb = object_property(pawn, hand_weapon_name(1 - side));
+            if (!is_crossbow(xb)) continue;
+            UObject* bb = object_property(bolt, STR("BaseMesh"));
+            UObject* spot = object_property(xb, STR("Scene_Location_Peg_Loaded"));
+            if (!bb || !spot) continue;
+            double d = length(component_location(bb) - component_location(spot));
+            bool cocked = bool_property(xb, STR("String Loaded")), has_bolt = bool_property(xb, STR("Bolt Loaded"));
+            if (d < 30.0)
+                HSVR_LOG_EVERY(0.5, "Crossbow: %s hand's bolt %.1f cm from the cradle (cocked %d, a bolt in it %d)", side == 0 ? "left" : "right", d, (int)cocked, (int)has_bolt);
+            if (d > cfg.crossbow_bolt_seat_cm || !cocked || has_bolt) continue;
+            // Out of the hand first; its Last Parent cleared, so Event Load Bolt does not empty his LEFT
+            // hand for it (@5178-5239: Last Parent.Set Up Left Hand Weapon(None)).
+            drop_weapon(side, pawn, false);
+            set_variable(bolt, STR("Last Parent"), 0.0, nullptr, nullptr);
+            Call lb(xb, STR("Event Load Bolt"));
+            if (lb.fn)
+                for (FProperty* p : lb.fn->ForEachProperty())
+                    if (p->GetClass().GetName() == STR("ObjectProperty"))
+                    {
+                        *reinterpret_cast<UObject**>(lb.buffer.data() + p->GetOffset_Internal()) = bolt;
+                        break;
+                    }
+            bool ok = lb.run();
+            bool loaded = bool_property(xb, STR("Bolt Loaded"));
+            controllers_buzz(side, 0.3f);
+            controllers_buzz(1 - side, 0.3f);
+            HSVR_LOG("Crossbow: %s hand puts its bolt in the cradle (%.1f cm from the loaded spot): Event Load Bolt %s, Bolt Loaded %d, %s hand now holds %ls",
+                     side == 0 ? "left" : "right", d, ok ? "called" : "NOT FOUND", (int)loaded, side == 0 ? "left" : "right",
+                     object_property(pawn, hand_weapon_name(side)) ? object_property(pawn, hand_weapon_name(side))->GetName().c_str() : STR("nothing"));
+        }
+    }
+
+    // Is that hand on the crossbow's rear grip (by the trigger)?
+    bool xbow_on_trigger_grip(int side, UObject* pawn, UObject* xb, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        UObject* base = object_property(xb, STR("BaseMesh"));
+        Vec3 rear, front, axis;
+        if (!xbow_grip_points(xb, base, rear, front, axis)) return false;
+        Vec3 spot;
+        if (object_property(pawn, hand_weapon_name(side)) == xb && !(g_two.active && g_two.second == side))
+        {
+            const HoldState& h = g_hold[side];
+            spot = h.free.set ? h.free.pivot : h.pivot;
+        }
+        else if (g_two.active && g_two.second == side && g_two.weapon == xb && g_two.have_local)
+            spot = g_two.local;
+        else
+            return false;
+        return length(spot - rear) <= cfg.crossbow_trigger_grip_cm && length(spot - rear) < length(spot - front);
+    }
+
+    void xbow_fire_tick(UObject* pawn, const hsvr::ControllerState& state, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        static bool armed[2] = {false, false};
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* xb = object_property(pawn, hand_weapon_name(side));
+            if (!is_crossbow(xb) && g_two.active && g_two.second == side && is_crossbow(g_two.weapon)) xb = g_two.weapon;
+            float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : state.hand[side].trigger;
+            if (!is_crossbow(xb))
+            {
+                armed[side] = false;
+                continue;
+            }
+            if (trig < cfg.crossbow_trigger_release) armed[side] = true;
+            if (!armed[side] || trig < cfg.crossbow_trigger_fire) continue;
+            armed[side] = false;
+            if (!xbow_on_trigger_grip(side, pawn, xb, cfg))
+            {
+                HSVR_LOG("Crossbow: %s trigger pulled, but that hand is not on the rear grip: no shot", side == 0 ? "left" : "right");
+                continue;
+            }
+            if (!bool_property(xb, STR("String Loaded")))
+            {
+                controllers_buzz(side, 0.1f);
+                HSVR_LOG("Crossbow: %s trigger pulled, the string is not cocked: nothing", side == 0 ? "left" : "right");
+                continue;
+            }
+            UObject* bolt = object_property(xb, STR("Loaded Ammo"));
+            UObject* bb = bolt ? object_property(bolt, STR("BaseMesh")) : nullptr;
+            Call shoot(xb, STR("Event Shoot"));
+            bool ok = shoot.run();
+            controllers_buzz(side, 1.0f);
+            if (g_two.active && g_two.weapon == xb) controllers_buzz(g_two.second == side ? g_two.main : g_two.second, 0.6f);
+            g_xshot = XbowShot{};
+            if (bb)
+            {
+                g_xshot.bolt = bolt;
+                g_xshot.base = bb;
+                g_xshot.xbow = xb;
+                g_xshot.from = component_location(bb);
+                g_xshot.t0 = now_seconds();
+            }
+            HSVR_LOG("Crossbow: %s trigger fires %ls (Event Shoot %s): %s; String Loaded now %d, Bolt Loaded %d", side == 0 ? "left" : "right", xb->GetName().c_str(),
+                     ok ? "called" : "NOT FOUND", bolt ? "a bolt flies" : "no bolt in it (dry shot)", (int)bool_property(xb, STR("String Loaded")),
+                     (int)bool_property(xb, STR("Bolt Loaded")));
+        }
+        // The shot's bolt: its speed and how far it went (logs at 0.05, 0.3 and 1 s).
+        if (g_xshot.t0 > 0.0 && g_xshot.base)
+        {
+            double t = now_seconds() - g_xshot.t0;
+            static const double marks[3] = {0.05, 0.3, 1.0};
+            if (g_xshot.logged < 3 && t >= marks[g_xshot.logged])
+            {
+                Call lv(g_xshot.base, STR("GetPhysicsLinearVelocity"));
+                lv.run();
+                Vec3 p = component_location(g_xshot.base);
+                HSVR_LOG("Crossbow: shot +%.2f s: bolt at %.1f m/s, %.0f cm from where it sat%s", t, length(lv.vec()) / 100.0, length(p - g_xshot.from),
+                         bool_property(g_xshot.bolt, STR("Stuck In Body")) ? ", stuck in a body" : "");
+                ++g_xshot.logged;
+            }
+            if (g_xshot.logged >= 3) g_xshot = XbowShot{};
+        }
+    }
+
+    void crossbow_tick(const hsvr::Config& cfg, const hsvr::ControllerState& state, UObject* pawn, UObject* mesh)
+    {
+        if (!cfg.crossbow || !pawn) return;
+        xbow_string_tick(pawn, mesh, cfg);
+        xbow_cradle_tick(pawn, cfg);
+        xbow_fire_tick(pawn, state, cfg);
+    }
+
+    // Test (hsvr.xbow_report): the crossbow in his hands, its parts in its BaseMesh frame and state.
+    void xbow_report(UObject* pawn)
+    {
+        using namespace hsvr;
+        UObject* q = object_property(pawn, STR("Attached Bolt Quiver"));
+        int32_t* count = q ? value_ptr<int32_t>(q, STR("Projectile Count")) : nullptr;
+        HSVR_LOG("Crossbow: report: quiver %ls (%d bolts; Bolts in Quiver %.0f); string held by %s", q ? q->GetName().c_str() : STR("none"), count ? *count : -1,
+                 read_number_variable(pawn, STR("Bolts in Quiver")), g_xstring.on ? (g_xstring.side == 0 ? "the left hand" : "the right hand") : "no hand");
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* w = object_property(pawn, hand_weapon_name(side));
+            HSVR_LOG("Crossbow: report: %s hand holds %ls%s", side == 0 ? "left" : "right", w ? w->GetName().c_str() : STR("nothing"), is_bolt(w) ? " (a bolt)" : "");
+            if (!is_crossbow(w)) continue;
+            UObject* base = object_property(w, STR("BaseMesh"));
+            if (!base) continue;
+            Vec3 bp = component_location(base);
+            Quat binv = component_rotation(base).inverse();
+            for (const TCHAR* n : {STR("CM_Test_Peg"), STR("Scene_Location_Peg_Loaded"), STR("Scene_0"), STR("CM_Test_Stock"), STR("Grip R Hand Default Pos"), STR("Grip L Hand Default Pos"),
+                                   STR("Grip L Hand Off Hand"), STR("CM_Test_Shoulder_L"), STR("CM_Test_Shoulder_R")})
+            {
+                UObject* c = object_property(w, n);
+                Vec3 l = c ? binv.rotate(component_location(c) - bp) : Vec3{};
+                HSVR_LOG("Crossbow: report:   %ls %s (%.1f, %.1f, %.1f)", n, c ? "at" : "MISSING", l.x, l.y, l.z);
+            }
+            const HoldState& h = g_hold[side];
+            HSVR_LOG("Crossbow: report:   String Loaded %d, Bolt Loaded %d, Can Load String %d, Block String Loading %d, String Z Position %.1f; hand's spot (%.1f, %.1f, %.1f)%s, on the rear grip %d",
+                     (int)bool_property(w, STR("String Loaded")), (int)bool_property(w, STR("Bolt Loaded")), (int)bool_property(w, STR("Can Load String")),
+                     (int)bool_property(w, STR("Block String Loading")), read_number_variable(w, STR("String Z Position")), (h.free.set ? h.free.pivot : h.pivot).x,
+                     (h.free.set ? h.free.pivot : h.pivot).y, (h.free.set ? h.free.pivot : h.pivot).z, h.free.set ? " (handle)" : " (the game's grip point)",
+                     (int)xbow_on_trigger_grip(side, pawn, w, hsvr::config()));
+        }
+    }
+
+    // Test (hsvr.xbow_hand <hand> <target> [cm]): that fake hand goes to a crossbow spot, the grab point
+    // steered onto it. Targets: off, rear, front, string, pull <cm> (from the nut back along the
+    // stock at 30 cm/s), quiver, cradle.
+    struct XbowTestHand
+    {
+        int target = 0; // 0 off, 1 rear, 2 front, 3 string, 4 pull, 5 quiver, 6 cradle
+        double arg = 0.0;
+        double t0 = 0.0;
+        bool have_start = false;
+        hsvr::Vec3 start_local, dir_local;
+        hsvr::Vec3 corr{0, 0, 0};
+    };
+    XbowTestHand g_xtest[2];
+
+    bool xbow_test_grip(int side, hsvr::Vec3& grip)
+    {
+        using namespace hsvr;
+        XbowTestHand& x = g_xtest[side];
+        if (x.target == 0 || !g_pose.pawn) return false;
+        UObject* pawn = g_pose.pawn;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        if (!mesh) return false;
+        UObject* xb = object_property(pawn, hand_weapon_name(1 - side));
+        if (!is_crossbow(xb)) xb = object_property(pawn, hand_weapon_name(side));
+        if (!is_crossbow(xb)) xb = nullptr;
+        UObject* base = xb ? object_property(xb, STR("BaseMesh")) : nullptr;
+        Vec3 target;
+        bool have = false;
+        if (x.target == 5)
+        {
+            UObject* q = object_property(pawn, STR("Attached Bolt Quiver"));
+            if (UObject* qb = q ? object_property(q, STR("BaseMesh")) : nullptr)
+            {
+                target = component_location(qb);
+                have = true;
+            }
+        }
+        else if (base)
+        {
+            Vec3 bp = component_location(base);
+            Quat bq = component_rotation(base);
+            Vec3 rear, front, axis;
+            bool pts = xbow_grip_points(xb, base, rear, front, axis);
+            if (x.target == 1 && pts) target = bp + bq.rotate(rear), have = true;
+            else if (x.target == 2 && pts) target = bp + bq.rotate(front), have = true;
+            else if (x.target == 3 || x.target == 4)
+            {
+                UObject* peg = object_property(xb, STR("CM_Test_Peg"));
+                UObject* spot = object_property(xb, STR("Scene_Location_Peg_Loaded"));
+                if (peg && spot)
+                {
+                    if (x.target == 3 || !x.have_start)
+                    {
+                        x.start_local = bq.inverse().rotate(component_location(peg) - bp);
+                        Vec3 to = bq.inverse().rotate(component_location(spot) - bp) - x.start_local;
+                        x.dir_local = length(to) > 1e-3 ? normalized(to) : Vec3{0, 0, -1};
+                        x.have_start = x.target == 4;
+                    }
+                    double along = x.target == 4 ? (std::min)(x.arg, 30.0 * (now_seconds() - x.t0)) : 0.0;
+                    target = bp + bq.rotate(x.start_local + x.dir_local * along);
+                    have = true;
+                }
+            }
+            else if (x.target == 6)
+            {
+                if (UObject* spot = object_property(xb, STR("Scene_Location_Peg_Loaded"))) target = component_location(spot), have = true;
+            }
+        }
+        if (!have)
+        {
+            HSVR_LOG_EVERY(2.0, "Test: xbow_hand %s: target %d not found", side == 0 ? "left" : "right", x.target);
+            return false;
+        }
+        // Steer the grab point (not the controller) onto the target: what is left over each tick is added.
+        Vec3 now_at = hand_grab_point(mesh, side);
+        Vec3 last = grip;
+        x.corr = x.corr + (target - now_at) * 0.25;
+        double cl = length(x.corr);
+        if (cl > 40.0) x.corr = x.corr * (40.0 / cl);
+        grip = target + x.corr;
+        (void)last;
+        HSVR_LOG_EVERY(0.5, "Test: xbow_hand %s: target %d, grab point %.1f cm from it", side == 0 ? "left" : "right", x.target, length(target - now_at));
+        return true;
+    }
+
     void grab_button(const hsvr::Config& cfg, const hsvr::ControllerState& state, bool menu_up)
     {
         using namespace hsvr;
@@ -11561,6 +12175,11 @@ namespace
                 scabbard_let_go(side, "grip released");
                 continue;
             }
+            if (!now_held && g_xstring.on && g_xstring.side == side)
+            {
+                xbow_string_let_go(pawn, "grip released");
+                continue;
+            }
             if (!now_held)
             {
                 if (g_two.active && side == g_two.second)
@@ -11587,6 +12206,7 @@ namespace
             }
             if (!mine && (g_world[side].on || bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")))) continue; // already holds an object
             if (mine || menu_up) continue;
+            if (xbow_string_grab(side, pawn, mesh, cfg)) continue;
             if (cfg.pose_grab_handles ? try_second_hand(side, pawn, mesh, cfg) : try_two_hand(side, pawn, mesh, cfg)) continue;
             Vec3 at = hand_grab_point(mesh, side);
             // His arm can be too short for where your hand is (reaching to the floor: his crouch stops at
@@ -11607,6 +12227,7 @@ namespace
             }
             if (cfg.pose_draw && try_draw(side, pawn, mesh, at, palm_drawn, cfg)) continue;
             if (try_scabbard_grab(side, pawn, mesh, palm_drawn, cfg)) continue;
+            if (xbow_quiver_grab(side, pawn, palm_drawn, cfg)) continue;
             std::vector<UObject*> weapons, willies;
             UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
@@ -11738,6 +12359,7 @@ namespace
             HSVR_LOG("Grab: %s grip took %ls (%.1f cm from the hand): %s, hand now holds %ls", hand, best->GetName().c_str(), best_d,
                      ok ? "set up" : "set-up call missing", now ? now->GetName().c_str() : STR("nothing"));
         }
+        crossbow_tick(cfg, state, pawn, mesh);
         fists_from_fingers(cfg, state, pawn, menu_up);
     }
 
@@ -12150,7 +12772,9 @@ namespace
         std::vector<Handle> hs;
         double half = cfg.pose_slide_hand_half_cm;
         bool measured = true; // false: the weapon's parts were not found (yet)
-        if (class_name_starts(item, STR("Shield")))
+        if (cfg.crossbow && is_crossbow(item))
+            measured = xbow_handles(item, base, hs);
+        else if (class_name_starts(item, STR("Shield")))
         {
             std::wstring cls = shield_class(item);
             for (const ShieldFitting& f : k_shield_fittings)
@@ -19893,6 +20517,7 @@ namespace
         std::vector<std::string> values;                              // "Name=value" set at boot
         std::vector<std::pair<std::string, std::string>> before;      // name, value before
         bool entered = false;
+        bool via_button = false; // came in by the Train button (test_room_crossbow 1)
         UObject* pawn = nullptr; // the pawn the room was furnished for
         double pawn_at = -1.0;
         int stage = 0;           // per pawn: 0 waiting, 1 foes and tables placed, 2 weapons spawned
@@ -20695,6 +21320,28 @@ namespace
             }
             if (!got) HSVR_LOG("TestRoom: %s NOT spawned at any tier", kinds[i].label);
         }
+        // The crossbow (test_room_crossbow; it is in no Free Mode list): on the second table along its
+        // depth, string side up, and 20 bolts in his quiver.
+        int xbow_mode = hsvr::config().test_room_crossbow;
+        if ((xbow_mode == 1 && g_room.via_button) || xbow_mode == 2)
+        {
+            Vec3 base = g_room.table_at[g_room.table_at.size() > 1 ? 1 : 0];
+            Vec3 at = base - g_room.forward * 25.0 + right * 8.0;
+            at.z = base.z + 112.0;
+            hsvr::Quat flat = hsvr::quat_from_axes(Vec3{0, 0, 1}, hsvr::cross(g_room.forward, Vec3{0, 0, 1}), g_room.forward);
+            UObject* xb = room_spawn(STR("/Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C"),
+                                     player, at, flat, [](UObject*) {});
+            int added = 0;
+            for (int i = 0; i < 20 && player; ++i)
+            {
+                Call add(player, STR("Add Bolt to Quiver"));
+                if (add.run()) ++added;
+            }
+            UObject* q = player ? object_property(player, STR("Attached Bolt Quiver")) : nullptr;
+            int32_t* c = q ? value_ptr<int32_t>(q, STR("Projectile Count")) : nullptr;
+            HSVR_LOG("TestRoom: crossbow %s at (%.0f, %.0f, %.0f); quiver %ls with %d bolts (Add Bolt to Quiver x%d)", xb ? "spawned" : "NOT spawned", at.x, at.y, at.z,
+                     q ? q->GetName().c_str() : STR("none"), c ? *c : -1, added);
+        }
     }
 
     // ---- The Train button in Free Mode (ini test_room_button) ------------------------------------
@@ -20913,6 +21560,7 @@ namespace
             return;
         }
         g_room = TestRoom{};
+        g_room.via_button = true;
         close_widgets_of(STR("UI_Dialog_Widget_Fencer_FreeMode_C"));
         close_widgets_of(STR("UI_Tavern_Dialog_C"));
         close_widgets_of(STR("UI_Hub_Tavern_C"));
@@ -21515,6 +22163,22 @@ namespace
                 else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
                 else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
                 else if (w == "actor_z") value = pawn ? actor_location(pawn).z : 0.0;
+                else if (w == "xbow_string" || w == "xbow_bolt")
+                {
+                    // the crossbow in either hand: String Loaded / Bolt Loaded
+                    UObject* xb = object_property(pawn, STR("Weapon R"));
+                    if (!is_crossbow(xb)) xb = object_property(pawn, STR("Weapon L"));
+                    value = is_crossbow(xb) && bool_property(xb, w == "xbow_string" ? STR("String Loaded") : STR("Bolt Loaded")) ? 1.0 : 0.0;
+                }
+                else if (w == "xbow_quiver")
+                {
+                    UObject* q = object_property(pawn, STR("Attached Bolt Quiver"));
+                    int32_t* c = q ? value_ptr<int32_t>(q, STR("Projectile Count")) : nullptr;
+                    value = c ? *c : -1.0;
+                }
+                else if (w == "bolt_r") value = is_bolt(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
+                else if (w == "bolt_l") value = is_bolt(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
+                else if (w == "xstring") value = g_xstring.on ? g_xstring.side + 1.0 : 0.0;
                 else if (w.rfind("var:", 0) == 0 && pawn)
                 {
                     // var:<pawn variable>, '_' for spaces (var:Leg_R_Tonus); a variable named with '_' is tried as written first
@@ -23077,6 +23741,49 @@ namespace
             if (entry.command.rfind("hsvr.weapon_gravity ", 0) == 0)
             {
                 g_weapon_gravity.store(atoi(entry.command.c_str() + 20));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.xbow_hand ", 0) == 0)
+            {
+                // Test: hsvr.xbow_hand <0|1> <off|rear|front|string|pull <cm>|quiver|cradle>: that fake
+                // hand's grab point goes to that crossbow spot (hsvr.arm_move 1 for the rest of it).
+                int side = -1;
+                char what[16] = {0};
+                double arg = 0.0;
+                if (sscanf(entry.command.c_str() + 15, "%d %15s %lf", &side, what, &arg) >= 2 && (side == 0 || side == 1))
+                {
+                    std::string t = what;
+                    XbowTestHand& x = g_xtest[side];
+                    x = XbowTestHand{};
+                    x.target = t == "rear" ? 1 : t == "front" ? 2 : t == "string" ? 3 : t == "pull" ? 4 : t == "quiver" ? 5 : t == "cradle" ? 6 : 0;
+                    x.arg = arg;
+                    x.t0 = hsvr::now_seconds();
+                    HSVR_LOG("Script: hsvr.xbow_hand %s -> %s (%d) %.1f", side == 0 ? "left" : "right", what, x.target, arg);
+                }
+                continue;
+            }
+            if (entry.command == "hsvr.xbow_report")
+            {
+                UObject* pawn = nullptr;
+                find_pawn_mesh(&pawn);
+                if (pawn) xbow_report(pawn);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.xbow_quiver ", 0) == 0)
+            {
+                // Test: his own "Add Bolt to Quiver" n times (it hangs an empty quiver on him if he has none).
+                int n = atoi(entry.command.c_str() + 17);
+                UObject* pawn = nullptr;
+                find_pawn_mesh(&pawn);
+                int done = 0;
+                for (int i = 0; pawn && i < n; ++i)
+                {
+                    Call add(pawn, STR("Add Bolt to Quiver"));
+                    if (add.run()) ++done;
+                }
+                UObject* q = pawn ? object_property(pawn, STR("Attached Bolt Quiver")) : nullptr;
+                int32_t* c = q ? value_ptr<int32_t>(q, STR("Projectile Count")) : nullptr;
+                HSVR_LOG("Script: hsvr.xbow_quiver %d: Add Bolt to Quiver called %d times, quiver %ls holds %d", n, done, q ? q->GetName().c_str() : STR("none"), c ? *c : -1);
                 continue;
             }
             if (entry.command.rfind("hsvr.give_weapon ", 0) == 0)
