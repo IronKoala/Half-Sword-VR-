@@ -437,6 +437,8 @@ namespace hsvr
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);
+        flag("pose_turn_spawn_guard", c.pose_turn_spawn_guard);
+        flag("pose_calib_body_facing", c.pose_calib_body_facing);
         flag("pose_stick_walk", c.pose_stick_walk);
         text("pose_move_relative", c.pose_move_relative);
         text("pose_stick_turn", c.pose_stick_turn);

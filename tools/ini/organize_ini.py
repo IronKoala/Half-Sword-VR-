@@ -113,6 +113,8 @@ LAYOUT = [
         ('pose_turn_dead_zone_deg', '...once you look this far away.'),
         ('pose_turn_speed_dps', 'How fast his body turns to catch up with your head (degrees per second).'),
         ('pose_turn_max_deg', 'Past this the hips come round at once.'),
+        ('pose_turn_spawn_guard', '1 = after a respawn the new body keeps its own facing (0 = the yaw of the last body can be written onto it: helmet and body off-centre).'),
+        ('pose_calib_body_facing', '1 = at spawn your head and body are measured against the way the body really faces.'),
     ]),
     ('Crouch, kick, jump, slow motion', '', [
         ('pose_crouch_button_cm', 'Left stick click toggles a crouch this deep (cm; 0 = off).'),
