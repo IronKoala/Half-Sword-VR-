@@ -12348,11 +12348,17 @@ namespace
         g_xstring = XbowString{};
     }
 
-    // A free hand closing on the string of the crossbow the other hand holds (not cocked yet).
+    // A free hand pulling its TRIGGER at the string of the crossbow the other hand holds (not cocked
+    // yet) takes the string (Matthew 2026-11-22 23:04Z: grip takes the fore end, trigger the string, so
+    // neither is grabbed by mistake; the front grip is only 6 cm from the resting nut).
     bool xbow_string_grab(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
     {
         using namespace hsvr;
         if (!cfg.crossbow || !pawn || !mesh) return false;
+        UObject* own = object_property(pawn, hand_weapon_name(side));
+        if ((own && !is_fist(own)) || g_world[side].on || bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")) || scabbard_held(side) ||
+            (g_two.active && g_two.second == side))
+            return false; // that hand holds something
         UObject* xb = object_property(pawn, hand_weapon_name(1 - side));
         if (!is_crossbow(xb) || bool_property(xb, STR("String Loaded"))) return false;
         UObject* base = object_property(xb, STR("BaseMesh"));
@@ -12372,16 +12378,6 @@ namespace
         Vec3 bp = component_location(base);
         Quat binv = component_rotation(base).inverse();
         Vec3 hand_local = binv.rotate(at - bp);
-        // Nearer a grip than the string: the grip (two hands). The front grip is only 6 cm from the
-        // resting nut (test 2026-11-22), so the string needs the hand clearly nearer it.
-        double t = 0.0, hd = 1e9;
-        const std::vector<Handle>& hs = item_handles(xb, base);
-        nearest_handle(hs, hand_local, t, hd);
-        if (hd < d + cfg.crossbow_string_margin_cm)
-        {
-            HSVR_LOG("Crossbow: %s hand closed %.1f cm from the string but %.1f cm from a grip: the grip", side == 0 ? "left" : "right", d, hd);
-            return false;
-        }
         Vec3 rest = binv.rotate(pp - bp), loaded = binv.rotate(component_location(spot) - bp);
         double travel = length(loaded - rest);
         if (travel < 3.0)
@@ -12703,9 +12699,29 @@ namespace
         }
     }
 
+    // The string is taken and held with the free hand's trigger: pulled past crossbow_trigger_fire at
+    // the string takes it, let back under crossbow_trigger_release lets go.
+    void xbow_string_trigger(const hsvr::Config& cfg, const hsvr::ControllerState& state, UObject* pawn, UObject* mesh)
+    {
+        static bool down[2] = {false, false};
+        for (int side = 0; side < 2; ++side)
+        {
+            float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : state.hand[side].trigger;
+            bool was = down[side];
+            down[side] = was ? trig >= cfg.crossbow_trigger_release : trig >= cfg.crossbow_trigger_fire;
+            if (g_xstring.on && g_xstring.side == side)
+            {
+                if (!down[side]) xbow_string_let_go(pawn, "trigger released");
+                continue;
+            }
+            if (down[side] && !was && !g_xstring.on && xbow_string_grab(side, pawn, mesh, cfg)) continue;
+        }
+    }
+
     void crossbow_tick(const hsvr::Config& cfg, const hsvr::ControllerState& state, UObject* pawn, UObject* mesh)
     {
         if (!cfg.crossbow || !pawn) return;
+        xbow_string_trigger(cfg, state, pawn, mesh);
         xbow_string_tick(pawn, mesh, cfg);
         xbow_cradle_tick(pawn, cfg);
         xbow_fire_tick(pawn, state, cfg);
@@ -13186,11 +13202,7 @@ namespace
                 scabbard_let_go(side, "grip released");
                 continue;
             }
-            if (!now_held && g_xstring.on && g_xstring.side == side)
-            {
-                xbow_string_let_go(pawn, "grip released");
-                continue;
-            }
+            if (g_xstring.on && g_xstring.side == side) continue; // the hand on the string (by its trigger): its grip does nothing
             if (!now_held)
             {
                 if (g_two.active && side == g_two.second)
@@ -13217,7 +13229,6 @@ namespace
             }
             if (!mine && (g_world[side].on || bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")))) continue; // already holds an object
             if (mine || menu_up) continue;
-            if (xbow_string_grab(side, pawn, mesh, cfg)) continue;
             if (cfg.pose_grab_handles ? try_second_hand(side, pawn, mesh, cfg) : try_two_hand(side, pawn, mesh, cfg)) continue;
             Vec3 at = hand_grab_point(mesh, side);
             // His arm can be too short for where your hand is (reaching to the floor: his crouch stops at
