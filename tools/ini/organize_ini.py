@@ -313,6 +313,7 @@ LAYOUT = [
         ('pose_slide_fixed_1h_sword', '1 = one-handed swords are held at one fixed spot on the grip (no slide).'),
         ('pose_grip_two_zones_2h_sword', 'Two fixed grip zones (under guard, above pommel): 0 off, 1 bastard swords only, 2 all two-handed swords.'),
         ('pose_grip_pommel_top_cm', 'The lower hand on a two-zone sword stays this far above the centre of the pommel (cm), so it never grabs the pommel.'),
+        ('pose_grip_hands_overlap_cm', 'Short hand-and-a-half grips with room for one hand above the pommel: your two hands squeeze together, overlapping up to this much (cm), so the lower one stays off the pommel.'),
         ('pose_grip_dagger_fixed', '1 = daggers have one fixed grip spot (no slide).'),
     ]),
     ('Two hands on one weapon', '', [

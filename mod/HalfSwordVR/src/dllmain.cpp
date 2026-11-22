@@ -14579,11 +14579,15 @@ namespace
                         double pz = component_rotation(base).inverse().rotate(component_location(pom) - component_location(base)).z;
                         low = (std::max)(g0, pz + cfg.pose_grip_pommel_top_cm + half);
                         double want = low;
-                        low = (std::min)(low, g1 - 2.0 * half); // hands side by side at least
+                        // Hands side by side at least; on a grip too short for that above the pommel (short
+                        // hand-and-a-half swords: one hand's room), the hands squeeze together over each other by up to
+                        // pose_grip_hands_overlap_cm rather than the lower one wrapping the pommel (Matthew 2026-11-22).
+                        low = (std::min)(low, g1 - 2.0 * half + (std::max)(0.0, cfg.pose_grip_hands_overlap_cm));
                         HSVR_LOG("Handles: %ls: pommel at %.1f cm, lower hand zone at %.1f (clear of the pommel at %.1f; grip %.1f..%.1f)%s", item->GetName().c_str(), pz,
-                                 low, want, g0, g1, low < want ? ": no room for two hands above the pommel" : "");
+                                 low, want, g0, g1, low > g1 - 2.0 * half ? ": short grip, hands squeezed together" : low < want ? ": no room for two hands above the pommel" : "");
                     }
-                    low = (std::min)(low, g1 - 2.0 * half); // hands side by side at least
+                    else
+                        low = (std::min)(low, g1 - 2.0 * half); // hands side by side at least
                     double mid = (std::max)(0.5 * (g0 + g1), low);
                     hs.back() = Handle{Vec3{0, 0, mid}, Vec3{0, 0, g1}, "grip", -1, 2};
                     hs.back().fixed = true;

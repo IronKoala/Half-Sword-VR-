@@ -615,6 +615,7 @@ namespace hsvr
         // The lower zone sits just above the pommel (Matthew 2026-11-22: "you grab just above the pommel"): the
         // pommel's top is this far above its origin (measured 4.7 on a Grip_15 pommel, 8 cm long).
         double pose_grip_pommel_top_cm = 4.7;
+        double pose_grip_hands_overlap_cm = 3.5; // short two-zone grips: the hands may overlap each other this much to stay off the pommel
         // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
         bool pose_grip_dagger_fixed = true;
         double pose_slide_rate_min = 3.0;
