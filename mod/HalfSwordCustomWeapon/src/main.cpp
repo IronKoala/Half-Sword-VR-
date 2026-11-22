@@ -92,6 +92,15 @@ namespace
         fflush(g_log);
     }
 
+    std::wstring widen(const std::string& s)
+    {
+        if (s.empty()) return {};
+        int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+        std::wstring w(n, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
+        return w;
+    }
+
     std::string narrow(const std::wstring& w)
     {
         std::string s;
@@ -1284,10 +1293,53 @@ namespace
     // ---- converted weapons: loaded model files, cached --------------------------------------------
     // The game spawns a weapon for every trader list row and loot point, so the files are read once and
     // kept until they change on disk.
+    // A converted weapon's own damage point (tools/damage_points.py, <name>_points.txt): model cm, the
+    // frame of the model (z along the weapon, 0 at the top of the grip); f = thrust direction (the scene's
+    // +X), u = the way the edge faces (+Z); the five values and the flags become the scene's tags.
+    struct DPoint
+    {
+        std::string slot;
+        V3 p{}, f{}, u{};
+        int sTip = 0, sEdge = 0, dSharp = 0, dBlunt = 0, rig = 100;
+        std::vector<std::string> flags;
+    };
+
+    std::vector<DPoint> load_points(const std::wstring& path)
+    {
+        std::vector<DPoint> out;
+        FILE* f = _wfopen(path.c_str(), L"r");
+        if (!f) return out;
+        char line[512];
+        while (fgets(line, sizeof line, f))
+        {
+            if (line[0] == ';' || line[0] == '#') continue;
+            char slot[32] = {};
+            DPoint d;
+            int used = 0;
+            if (sscanf(line, "%31s %lf %lf %lf %lf %lf %lf %lf %lf %lf %d %d %d %d %d%n", slot, &d.p.x, &d.p.y, &d.p.z,
+                       &d.f.x, &d.f.y, &d.f.z, &d.u.x, &d.u.y, &d.u.z, &d.sTip, &d.sEdge, &d.dSharp, &d.dBlunt, &d.rig,
+                       &used) < 15)
+                continue;
+            d.slot = slot;
+            const char* rest = line + used;
+            char flag[32];
+            int n = 0;
+            while (sscanf(rest, "%31s%n", flag, &n) == 1)
+            {
+                d.flags.push_back(flag);
+                rest += n;
+            }
+            out.push_back(d);
+        }
+        fclose(f);
+        return out;
+    }
+
     struct ModelData
     {
         Model model;
         std::vector<Hull> hulls;
+        std::vector<DPoint> points;
         std::map<std::string, double> numbers;
         uint64_t stamp = 0;
     };
@@ -1302,13 +1354,15 @@ namespace
 
     const ModelData* model_data(const std::wstring& base)
     {
-        uint64_t stamp = file_stamp(base + L".obj") ^ (file_stamp(base + L"_collision.obj") * 3) ^ (file_stamp(base + L".txt") * 7);
+        uint64_t stamp = file_stamp(base + L".obj") ^ (file_stamp(base + L"_collision.obj") * 3) ^ (file_stamp(base + L".txt") * 7) ^
+                         (file_stamp(base + L"_points.txt") * 13);
         auto it = g_models.find(base);
         if (it != g_models.end() && it->second.stamp == stamp) return &it->second;
         ModelData d;
         d.stamp = stamp;
         d.numbers = read_numbers(base + L".txt");
         d.hulls = load_hulls(base + L"_collision.obj");
+        d.points = load_points(base + L"_points.txt");
         if (!load_obj(base + L".obj", d.model))
         {
             log("  ! could not read %s.obj", narrow(base).c_str());
@@ -1774,6 +1828,98 @@ namespace
         c.run();
     }
 
+    // ---- the converted weapon's own damage points ----------------------------------------------------
+    // Half Sword reads cut/stab/blunt from "Tip"-tagged scene components under the part that was hit, at
+    // every hit (decompile: defaults\weapon_damage_points.md): the nearest one wins, its +X is the thrust
+    // direction, its +Z the way the edge faces, its tags carry sTipNNN sEdgeNNN dSharpN dBluntN rigNNN and
+    // the flags. The carrier's own points are untagged ("Tip" -> "CW_Tip_Off") and ours are added.
+    void descendants(UObject* comp, std::vector<UObject*>& out)
+    {
+        for (UObject* c : children_of(comp))
+        {
+            out.push_back(c);
+            descendants(c, out);
+        }
+    }
+
+    // Replaces tag `from` with `to` in a component's ComponentTags; how many were replaced.
+    int retag(UObject* comp, const FName& from, const FName& to)
+    {
+        auto* arr = comp ? comp->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")) : nullptr;
+        if (!arr || !arr->Data) return 0;
+        auto* names = static_cast<FName*>(const_cast<void*>(arr->Data));
+        int n = 0;
+        for (int32_t i = 0; i < arr->Num; ++i)
+            if (names[i] == from)
+            {
+                names[i] = to;
+                ++n;
+            }
+        return n;
+    }
+
+    bool write_identity_transform(uint8_t* field, FProperty* property)
+    {
+        UScriptStruct* type = struct_type(property);
+        if (!type) return false;
+        bool rot = false, scale = false;
+        for (FProperty* m : type->ForEachProperty())
+        {
+            uint8_t* at = field + m->GetOffset_Internal();
+            if (same_name(m, STR("Rotation")))
+            {
+                // FQuat X, Y, Z, W: W = 1
+                if (FProperty* w = member(struct_type(m), STR("W")))
+                {
+                    uint8_t* wa = at + w->GetOffset_Internal();
+                    if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wa) = 1.0;
+                    else *reinterpret_cast<float*>(wa) = 1.0f;
+                    rot = true;
+                }
+            }
+            else if (same_name(m, STR("Scale3D")))
+                scale = write_three(at, m, 1, 1, 1);
+        }
+        return rot && scale;
+    }
+
+    UObject* add_damage_point(UObject* weapon, UObject* parent, V3 world, V3 fwd, V3 up, const std::vector<FName>& tags)
+    {
+        static UObject* scene_class = find(STR("/Script/Engine.SceneComponent"));
+        static UObject* math = find(STR("/Script/Engine.Default__KismetMathLibrary"));
+        Call add(weapon, STR("AddComponentByClass"));
+        add.object(STR("Class"), scene_class).flag(STR("bManualAttachment"), true).flag(STR("bDeferredFinish"), false);
+        FProperty* t = add.param(STR("RelativeTransform"));
+        if (!t || !write_identity_transform(add.buffer.data() + t->GetOffset_Internal(), t))
+        {
+            log("  ! AddComponentByClass: could not write RelativeTransform");
+            return nullptr;
+        }
+        if (!add.run()) return nullptr;
+        UObject* c = add.ret_object();
+        if (!c) return nullptr;
+        if (auto* arr = c->GetValuePtrByPropertyNameInChain<RawArray>(STR("ComponentTags")))
+        {
+            auto* mem = static_cast<FName*>(FMemory::Malloc(sizeof(FName) * tags.size()));
+            for (size_t i = 0; i < tags.size(); ++i) new (&mem[i]) FName(tags[i]);
+            if (arr->Data) FMemory::Free(const_cast<void*>(arr->Data));
+            *arr = RawArray{mem, (int32_t)tags.size(), (int32_t)tags.size()};
+        }
+        Call at(c, STR("K2_AttachToComponent"));
+        at.object(STR("Parent"), parent); // rules 0 = KeepRelative, socket None, no welding (all zero)
+        at.run();
+        Call rot(math, STR("MakeRotFromXZ"));
+        rot.three(STR("X"), fwd.x, fwd.y, fwd.z).three(STR("Z"), up.x, up.y, up.z);
+        Call place(c, STR("K2_SetWorldLocationAndRotation"));
+        place.three(STR("NewLocation"), world.x, world.y, world.z).flag(STR("bTeleport"), true);
+        FProperty* r = rot.run() ? rot.param(STR("ReturnValue")) : nullptr;
+        FProperty* nr = place.param(STR("NewRotation"));
+        if (r && nr && r->GetSize() == nr->GetSize())
+            memcpy(place.buffer.data() + nr->GetOffset_Internal(), rot.buffer.data() + r->GetOffset_Internal(), r->GetSize());
+        place.run();
+        return c;
+    }
+
     // base = the model's path without extension (<pack folder>/<name>); its .obj, _collision.obj, .txt and
     // textures sit there. held: the player holds it now (F9 style); otherwise only the weapon is changed,
     // and the hands are fitted when the player takes it (held_tick).
@@ -2042,6 +2188,54 @@ namespace
             }
         }
 
+        // The model's own damage points, when the converter wrote them.
+        if (!data->points.empty())
+        {
+            static FName tip_tag(STR("Tip"), FNAME_Add);
+            static FName off_tag(STR("CW_Tip_Off"), FNAME_Add);
+            std::map<std::string, UObject*> parent_of;
+            int untagged = 0;
+            for (Part& pt : parts)
+            {
+                if (!has_mesh(pt.comp)) continue;
+                for (auto& ms : pt.model_slots)
+                    if (!parent_of.count(ms)) parent_of[ms] = pt.comp;
+                std::vector<UObject*> all;
+                descendants(pt.comp, all);
+                for (UObject* c : all) untagged += retag(c, tip_tag, off_tag);
+            }
+            // Model cm -> world: the model's frame in the head's local units (as the visible model).
+            auto world_of = [&](V3 p) {
+                p.z += shift;
+                return transform_point(head_xf, to_head_local(p), false);
+            };
+            int added = 0;
+            for (const DPoint& d : data->points)
+            {
+                auto it = parent_of.find(d.slot);
+                if (it == parent_of.end()) it = parent_of.find("Head");
+                if (it == parent_of.end()) continue;
+                V3 w = world_of(d.p);
+                V3 wf = sub(world_of(V3{d.p.x + d.f.x, d.p.y + d.f.y, d.p.z + d.f.z}), w);
+                V3 wu = sub(world_of(V3{d.p.x + d.u.x, d.p.y + d.u.y, d.p.z + d.u.z}), w);
+                wchar_t buf[32];
+                std::vector<FName> tags{tip_tag};
+                swprintf(buf, 32, L"sTip%03d", d.sTip);
+                tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"sEdge%03d", d.sEdge);
+                tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"dSharp%d", d.dSharp);
+                tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"dBlunt%d", d.dBlunt);
+                tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"rig%03d", d.rig);
+                tags.emplace_back(buf, FNAME_Add);
+                for (auto& fl : d.flags) tags.emplace_back(widen(fl).c_str(), FNAME_Add);
+                if (add_damage_point(weapon, it->second, w, unit(wf), unit(wu), tags)) ++added;
+            }
+            log("  damage points: %d of the carrier's untagged, %d of the model's added", untagged, added);
+        }
+
         // The visible model in the head's local units; normals and tangents adjusted so that, after the
         // engine applies the head's scale, they are right in the world.
         for (V3& p : model.positions)
@@ -2080,15 +2274,6 @@ namespace
         int32_t hash = 1;
     };
     std::vector<Pack> g_packs;
-
-    std::wstring widen(const std::string& s)
-    {
-        if (s.empty()) return {};
-        int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
-        std::wstring w(n, L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
-        return w;
-    }
 
     int kind_for(const std::map<std::string, std::string>& kv, const std::map<std::string, double>& nums)
     {

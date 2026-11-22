@@ -46,6 +46,11 @@ TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or 
 SPOTS = [("main", "Main hand", "#e74c3c"), ("off", "Off hand", "#3498db"), ("half_main", "Half-sword main", "#e67e22"),
          ("half_off", "Half-sword off", "#1abc9c"), ("reverse", "Reverse grip", "#9b59b6")]
 PARTS = ("pommel", "grip", "guard", "blade")
+# Damage stats (tools/damage_points.py): "Detect" lets the converter read them from the model's shape.
+EDGES = [("Detect", None), ("Both edges", "double"), ("One edge (side from the model)", "single"),
+         ("One edge (the other side)", "single_other"), ("No edge (blunt)", "none")]
+HEADS = [("Detect", None), ("Spear point", "spear"), ("Axe blade", "axe"), ("Blunt (mace, hammer)", "blunt")]
+STAT_FIELDS = (("edge_sharp", "Edge sharpness"), ("tip_sharp", "Point sharpness"), ("rigidity", "Rigidity"))
 ZONE_COLOURS = {"Pommel": "#b07a3c", "Grip": "#7a4a2a", "Guard": "#c9a227", "Head": "#8fa3b8"}
 # Display units. Everything inside stays centimetres and kilograms; only what is shown and typed changes.
 UNIT_SYSTEMS = {"Metric (cm, kg)": ("cm", 1.0, "kg", 1.0), "Imperial (inches, pounds)": ("in", 2.54, "lb", 0.45359237)}
@@ -339,6 +344,35 @@ class App:
         ttk.Label(form, text="Install adds the weapon to the game as a new weapon: in free play's weapon list, "
                              "and/or for sale at the merchant in progression.",
                   foreground="#777", wraplength=640).grid(row=11, column=1, columnspan=2, sticky="w", padx=8)
+        ttk.Label(form, text="Damage").grid(row=12, column=0, sticky="w", **pad)
+        dmg = ttk.Frame(form)
+        dmg.grid(row=12, column=1, columnspan=2, sticky="w", **pad)
+        ttk.Label(dmg, text="Edges").pack(side="left", padx=(0, 3))
+        self.edges_var = tk.StringVar(value=EDGES[0][0])
+        ttk.Combobox(dmg, textvariable=self.edges_var, values=[t for t, _ in EDGES], state="readonly",
+                     width=27).pack(side="left", padx=(0, 10))
+        ttk.Label(dmg, text="Head").pack(side="left", padx=(0, 3))
+        self.head_var = tk.StringVar(value=HEADS[0][0])
+        ttk.Combobox(dmg, textvariable=self.head_var, values=[t for t, _ in HEADS], state="readonly",
+                     width=20).pack(side="left")
+        dmg2 = ttk.Frame(form)
+        dmg2.grid(row=13, column=1, columnspan=2, sticky="w", **pad)
+        self.stat_vars = {}
+        for key, label in STAT_FIELDS:
+            ttk.Label(dmg2, text=label).pack(side="left", padx=(0, 3))
+            v = tk.StringVar()
+            ttk.Entry(dmg2, textvariable=v, width=6).pack(side="left", padx=(0, 10))
+            self.stat_vars[key] = v
+        self.balance_label = ttk.Label(dmg2, text="Balance point (cm above the grip)")
+        self.balance_label.pack(side="left", padx=(0, 3))
+        self.balance_var = tk.StringVar()
+        ttk.Entry(dmg2, textvariable=self.balance_var, width=7).pack(side="left")
+        self.stats_hint = ttk.Label(form, text="leave empty to take them from the model's shape. Sharpness 0-100 "
+                                                "(the game's arming sword: edge 90, point 98); rigidity: arming sword "
+                                                "80, axe 105, mace 125. Edges = which edge cuts (Edges is for "
+                                                "blades, Head for axes, maces and spears).",
+                                    foreground="#777", wraplength=640)
+        self.stats_hint.grid(row=14, column=1, columnspan=2, sticky="w", padx=8)
         ttk.Label(form, text="Units").grid(row=3, column=0, sticky="w", **pad)
         unit_name = self.settings.get("units")
         self.units_var = tk.StringVar(value=unit_name if unit_name in UNIT_SYSTEMS else next(iter(UNIT_SYSTEMS)))
@@ -347,7 +381,8 @@ class App:
                      width=28).grid(row=3, column=1, columnspan=2, sticky="w", **pad)
         self.units_var.trace_add("write", lambda *_: self.units_changed())
         self.show_unit_labels()
-        for var in (self.length_var, self.mass_var, self.type_var, self.slide_var):
+        for var in (self.length_var, self.mass_var, self.type_var, self.slide_var, self.edges_var, self.head_var,
+                    self.balance_var, *self.stat_vars.values()):
             var.trace_add("write", lambda *_: self.inputs_changed())
 
         ttk.Label(main, text="Mod folder").grid(row=4, column=0, sticky="w", **pad)
@@ -431,7 +466,7 @@ class App:
             names.add(name.lower())
             item = {"path": f, "name": name, "raw": None, "length_cm": None, "mass_kg": None,
                     "type": TYPES[0][0], "flip": False, "slide": False, "spots": {}, "splits": None, "part_len": {},
-                    "title": base.replace("_", " ").strip() or "Weapon", "free_play": True, "progression": False, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
+                    "title": base.replace("_", " ").strip() or "Weapon", "stats": {}, "free_play": True, "progression": False, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
                     "result": None, "result_inputs": None, "views": None, "status": "reading the model...",
                     "iid": f"item{id(f)}_{len(self.items)}"}
             self.items.append(item)
@@ -485,6 +520,7 @@ class App:
         it["slide"] = self.slide_var.get()
         it["title"] = self.title_var.get().strip() or it["title"]
         it["free_play"], it["progression"] = self.free_var.get(), self.prog_var.get()
+        it["stats"] = self.read_stats()[0] or it.get("stats", {})
         it.update(flip=self.flip, raw=self.raw_length, result=self.result, result_inputs=self.result_inputs,
                   views=self.result_views)
         self.refresh_row(it)
@@ -509,6 +545,13 @@ class App:
         self.title_var.set(it["title"])
         self.free_var.set(it["free_play"])
         self.prog_var.set(it["progression"])
+        st = it.get("stats", {})
+        self.edges_var.set(next(t for t, v in EDGES if v == st.get("edges")))
+        self.head_var.set(next(t for t, v in HEADS if v == st.get("head")))
+        for key, v in self.stat_vars.items():
+            v.set("" if st.get(key) is None else f"{st[key]:g}")
+        self.balance_var.set("" if st.get("balance_cm") is None else
+                             f"{st['balance_cm'] / lk:.2f}".rstrip("0").rstrip("."))
         self.quiet = False
         self.show_model_info()
         self.show_part_lengths()
@@ -560,6 +603,7 @@ class App:
         lu, _, mu, _ = self.units()
         self.length_label.config(text=f"Real length ({lu})")
         self.mass_label.config(text=f"Weight ({mu})")
+        self.balance_label.config(text=f"Balance point ({lu} above the grip)")
         self.length_hint.config(text="arming sword ~90, longsword 110-125, greatsword 140-180, spear 200+" if lu == "cm"
                                 else "arming sword ~35, longsword 43-49, greatsword 55-71, spear 79+")
 
@@ -571,7 +615,8 @@ class App:
         # Convert what is already typed, then relabel everything. Half-converted fields must not count as
         # a change, so the check runs once at the end.
         self.converting_units = True
-        for var, k_old, k_new, digits in ((self.length_var, old[1], new[1], 2), (self.mass_var, old[3], new[3], 3)):
+        for var, k_old, k_new, digits in ((self.length_var, old[1], new[1], 2), (self.mass_var, old[3], new[3], 3),
+                                         (self.balance_var, old[1], new[1], 3)):
             try:
                 v = float(var.get().replace(",", ".")) * k_old / k_new
                 var.set(f"{v:.{digits}f}".rstrip("0").rstrip("."))
@@ -658,6 +703,36 @@ class App:
         else:
             self.mod_info.config(text="", foreground="")
 
+    def read_stats(self):
+        """The damage settings typed in the editor: ({key: value or None}, problem)."""
+        lu, lk, _, _ = self.units()
+        st = {"edges": dict(EDGES)[self.edges_var.get()], "head": dict(HEADS)[self.head_var.get()]}
+        for key, label in STAT_FIELDS:
+            t = self.stat_vars[key].get().strip().replace(",", ".")
+            if not t:
+                st[key] = None
+                continue
+            try:
+                st[key] = float(t)
+            except ValueError:
+                return None, f"{label}: type a number or leave it empty."
+            top = 200 if key == "rigidity" else 100
+            if not 0 <= st[key] <= top:
+                return None, f"{label} should be between 0 and {top}."
+        t = self.balance_var.get().strip().replace(",", ".")
+        st["balance_cm"] = None
+        if t:
+            try:
+                st["balance_cm"] = round(float(t) * lk, 1)
+            except ValueError:
+                return None, f"Balance point: type how far above the top of the grip it is ({lu}), or leave it empty."
+        return st, None
+
+    @staticmethod
+    def stats_key(st):
+        st = st or {}
+        return tuple(st.get(k) for k in ("edges", "head", "edge_sharp", "tip_sharp", "rigidity", "balance_cm"))
+
     def inputs(self):
         """(length cm, mass kg text or "", type, flip): always metric inside, whatever is shown."""
         lu, lk, mu, mk = self.units()
@@ -679,8 +754,11 @@ class App:
                 return None, f"The weight should be between {self.fmt_mass(0.05)} and {self.fmt_mass(50)}."
             mass = f"{kg:.4f}"
         it = self.cur
+        st, problem = self.read_stats()
+        if problem:
+            return None, problem
         return (length, mass, dict(TYPES)[self.type_var.get()], self.flip, self.slide_var.get(),
-                it["splits"] if it else None, self.lens_tuple(it)), None
+                it["splits"] if it else None, self.lens_tuple(it), self.stats_key(st)), None
 
     def same_inputs(self, a, b):
         """Equal apart from unit-conversion rounding (switching units must not ask for a new Convert)."""
@@ -721,7 +799,7 @@ class App:
         self.run(self.convert_worker, self.argv_for(it, values), values, it)
 
     def argv_for(self, it, values):
-        length, mass, kind, flip, slide, splits, lens = values
+        length, mass, kind, flip, slide, splits, lens, stats = values
         argv = [it["path"], it["work"], "--length-cm", f"{length:g}", "--name", it["name"]]
         if mass:
             argv += ["--mass-kg", mass]
@@ -735,6 +813,14 @@ class App:
             argv += ["--splits", ",".join(f"{v * length:.2f}" for v in splits)]  # shares of the length -> cm
         if any(lens):
             argv += ["--part-lengths", ",".join(f"{v:.2f}" if v else "" for v in lens)]
+        edges, head, edge_sharp, tip_sharp, rig, balance = stats
+        for flag, v in (("--edges", edges), ("--head-kind", head)):
+            if v:
+                argv += [flag, v]
+        for flag, v in (("--edge-sharp", edge_sharp), ("--tip-sharp", tip_sharp), ("--rigidity", rig),
+                        ("--balance-cm", balance)):
+            if v is not None:
+                argv += [flag, f"{v:g}"]
         return argv
 
     def item_values(self, it):
@@ -747,7 +833,7 @@ class App:
         if mass and not 0.05 <= it["mass_kg"] <= 50:
             return None, "weight out of range"
         return (round(it["length_cm"], 2), mass, dict(TYPES)[it["type"]], it["flip"], it["slide"],
-                it["splits"], self.lens_tuple(it)), None
+                it["splits"], self.lens_tuple(it), self.stats_key(it.get("stats"))), None
 
     def convert_all(self):
         if self.busy:
@@ -1046,6 +1132,32 @@ class App:
         return (f"{'hafted' if info['type'] == 'hafted' else 'sword'}, {self.fmt_len(zn['tip'] - zn['pommel_end'])}, "
                 f"{self.fmt_mass(info['mass_kg'])}{' (estimated)' if info['mass_note'] != 'given' else ''}")
 
+    def damage_text(self, info):
+        """What the converter found or was told for the damage, in words."""
+        dm = info.get("damage") or {}
+        zn = info["zones_cm"]
+        if not dm:
+            return ""
+        kind = dm.get("kind")
+        if kind == "sword":
+            edges = {"double": "both edges cut", "single+": "one edge cuts", "single-": "one edge cuts",
+                     "none": "no edge (blunt)"}.get(dm.get("edges"), "")
+            what = (edges if dm.get("edges") == "none" else f"{edges}, edge sharpness {dm.get('sEdge')}") + \
+                f", point {dm.get('sTip')}"
+            if dm.get("tip_angle") is not None:
+                what += f" (point angle {dm['tip_angle']:.0f} degrees)"
+        elif kind == "spear":
+            what = f"spear point {dm.get('sTip')}, edges {dm.get('sEdge')}"
+        elif kind == "axe":
+            what = f"axe blade, edge sharpness {dm.get('sEdge')}"
+        else:
+            what = "blunt head"
+        what += f", rigidity {dm.get('rig')}"
+        bal = zn.get("balance")
+        if bal is not None:
+            what += f"; balance point {self.fmt_len(abs(bal), 1)} {'above' if bal >= 0 else 'below'} the top of the grip"
+        return "\nDamage: " + what + "."
+
     def redraw_result(self):
         """Picture bar and summary text in the units shown (the conversion itself is unit-free)."""
         from PIL import Image, ImageTk
@@ -1099,7 +1211,8 @@ class App:
                      f"guard {L(zn['guard_top'], 1)}, blade {L(zn['tip'] - zn['guard_top'])}")
         self.summary.config(text=f"{'Hafted weapon' if hafted else 'Sword'}, {L(zn['tip'] - zn['pommel_end'])}, "
                                  f"{mass}.\nParts ({how}): {parts}."
-                                 + (" Main hand slides down the handle in swings." if zn.get("hand_slide") else "") + "\n"
+                                 + (" Main hand slides down the handle in swings." if zn.get("hand_slide") else "")
+                                 + self.damage_text(info) + "\n"
                                  "The handle is on the left and the " + ("head" if hafted else "blade") +
                                  " on the right. If the picture shows it the other way round, press "
                                  "\"Blade is on the wrong end\".")

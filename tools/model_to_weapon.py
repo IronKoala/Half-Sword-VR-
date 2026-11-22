@@ -46,6 +46,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # python -I leaves the script folder out
 import weapon_parts as wp  # noqa: E402
+import damage_points as dp  # noqa: E402
 
 UNITS_CM = {"m": 100.0, "cm": 1.0, "mm": 0.1, "in": 2.54,
             "skyrim": 1.42875}  # Creation Kit wiki "Unit": 1 unit = 0.5625 in
@@ -356,6 +357,13 @@ def main(argv=None):
                                      "the grip's start, the guard's start and the blade's start (A<=B<=C)")
     ap.add_argument("--part-lengths", help="'pommel,grip,guard,blade' new lengths in cm; empty or 0 keeps that part "
                                            "(each part is stretched or shrunk along the weapon on its own)")
+    ap.add_argument("--edges", choices=["double", "single", "single_other", "single+", "single-", "none"],
+                    help="blade edges: both sides, one side (+x or -x of the frame), or none (blunt); default from the shape")
+    ap.add_argument("--head-kind", choices=["spear", "axe", "blunt"], help="hafted head; default from the shape")
+    ap.add_argument("--edge-sharp", type=float, help="edge sharpness 0-100 (game's arming sword 90)")
+    ap.add_argument("--tip-sharp", type=float, help="thrust sharpness 0-100 (default from the point's angle)")
+    ap.add_argument("--rigidity", type=float, help="rigidity x100 (arming sword 80, mace 125)")
+    ap.add_argument("--balance-cm", type=float, help="balance point, cm above the top of the grip (default from the model)")
     ap.add_argument("--metallic", type=float, default=1.0)
     ap.add_argument("--roughness", type=float, default=0.35)
     args = ap.parse_args(argv)
@@ -769,11 +777,31 @@ def main(argv=None):
                "handle_top": 0.0, "guard_bottom": round(float(guard_bottom), 2), "guard_top": round(float(guard_top), 2),
                "tip": round(top, 2), "hafted": 1 if hafted else 0,
                "hand_slide": 1 if args.hand_slide else 0}
+    # ---- balance and damage points --------------------------------------------------------------------
+    dens = {s: ((HAFT if hafted else GRIP) if s == "Grip" else STEEL) for s in volume}
+    wsum = sum(hull.volume * dens[s] for s, _, hull in pieces)
+    def hull_cz(h):  # centroid height of a convex hull: tetrahedra from an inside point to each face
+        P = h.points
+        a = P[h.vertices].mean(axis=0)
+        tri = P[h.simplices]
+        v = np.abs(np.einsum("ij,ij->i", tri[:, 0] - a, np.cross(tri[:, 1] - a, tri[:, 2] - a))) / 6.0
+        cz = (tri[:, :, 2].sum(axis=1) + a[2]) / 4.0
+        return float((v * cz).sum() / max(v.sum(), 1e-12))
+    com = sum(hull_cz(hull) * hull.volume * dens[s] for s, _, hull in pieces) / max(wsum, 1e-9)
+    numbers["balance_model"] = round(com, 2)
+    numbers["balance"] = round(args.balance_cm if args.balance_cm is not None else com, 2)
+    over = {"edges": args.edges, "head": args.head_kind, "sEdge": args.edge_sharp, "sTip": args.tip_sharp,
+            "rig": args.rigidity}
+    over = {k: (int(round(v)) if isinstance(v, float) else v) for k, v in over.items() if v is not None}
+    dpts, dinfo = dp.compute(frame_pos, numbers, hafted, over)
+    dp.write(os.path.join(args.out, name + "_points.txt"), dpts)
+    print(f"balance {numbers['balance']:.1f} cm above the grip (model {com:.1f}); damage points: {len(dpts)} "
+          f"({', '.join(f'{k} {v}' for k, v in dinfo.items())})")
     wp.write_numbers(os.path.join(args.out, name + ".txt"), f"{name}: written by tools/model_to_weapon.py", numbers)
     json.dump({"source": os.path.basename(args.model), "scale": scale_note, "mass_kg": mass, "mass_note": mass_note,
                "zones_cm": numbers, "volumes_cm3": {s: round(v, 1) for s, v in volume.items()},
                "parts_by_name": named, "lengths_before_stretch_cm": lens_before,
-               "type": "hafted" if hafted else "sword", "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
+               "type": "hafted" if hafted else "sword", "damage": dinfo, "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
               open(os.path.join(args.out, name + ".json"), "w"), indent=2)
     if hafted:
         print(f"length {top - end:.1f} cm: butt end {end:.1f}, haft {handle_bottom:.1f}..0, head 0..{top:.1f} cm; "
