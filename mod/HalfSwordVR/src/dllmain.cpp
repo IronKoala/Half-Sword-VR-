@@ -16465,11 +16465,10 @@ namespace
         const char* hand = side == 0 ? "left" : "right";
         std::wstring slot_var = nm(L"Weapon Slot %ls ", S) + (fit.slot == 0 ? L"1" : L"2");
         if (fit.slot < 0 || fit.slot > 1 || object_property(pawn, slot_var.c_str())) return false;
-        if (object_property(pawn, ss == 0 ? STR("Weapon L") : STR("Weapon R")))
-        {
-            HSVR_LOG_EVERY(2.0, "Sheathe: %s hand can't sheathe across: the other hand holds something", hand);
-            return false;
-        }
+        // The other hand may hold something (Matthew 2026-11-22, a shield in the left while the right
+        // sheathes on the left hip): Weapon <slot side> is set to this weapon for the one Create call
+        // and put back as it was.
+        UObject* other_held = object_property(pawn, ss == 0 ? STR("Weapon L") : STR("Weapon R"));
         double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
         if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
             bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
@@ -16496,7 +16495,7 @@ namespace
         Call make(pawn, nm(L"Create Sheath Constraint %ls", S).c_str());
         make.byte(STR("Slot"), (uint8_t)fit.slot);
         bool made = make.run();
-        set_variable(pawn, ss == 0 ? STR("Weapon L") : STR("Weapon R"), 0.0, nullptr, nullptr);
+        set_variable(pawn, ss == 0 ? STR("Weapon L") : STR("Weapon R"), 0.0, other_held, nullptr);
         set_component_transform(scab, sp, sq, true);
         call_one_object(pawn, cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
         set_bool_property(pawn, nm(L"%ls Weapon Sheathing", S).c_str(), true);
@@ -16513,9 +16512,64 @@ namespace
         d.socket = fit.socket;
         g_draw[side] = d;
         controllers_buzz(side, 0.3f);
-        HSVR_LOG("Sheathe: %s hand puts %ls across into slot %ls %d (concrete %.0f)%s%s", hand, w->GetName().c_str(), S, fit.slot + 1, concrete,
-                 made ? "" : " (Create Sheath Constraint NOT found)", ok ? "" : " (a game variable was NOT set)");
+        HSVR_LOG("Sheathe: %s hand puts %ls across into slot %ls %d (concrete %.0f; other hand %s)%s%s", hand, w->GetName().c_str(), S, fit.slot + 1, concrete,
+                 other_held ? "holding something, put back" : "empty", made ? "" : " (Create Sheath Constraint NOT found)", ok ? "" : " (a game variable was NOT set)");
         return true;
+    }
+
+    // Across the body into the other hip's free belt slot when its scabbard is NOT already there (a
+    // sword picked up, or drawn from this side): Assign <T> Weapon Slot (with Weapon <T> set to this
+    // weapon for that call) picks T's free slot, teleports the weapon's own scabbard onto the socket and
+    // pins it to the pelvis, and sets Current Scabbard <T> / <T> Sheath Slot Name / Sheath Slot <T>
+    // (cross_sheathe.md §3 "Scabbard placement"; hs_draw_sheathe_calls.md §3). Sheath <T>'s reach and
+    // the <T> concrete it set are undone, then the game's cross path takes over (sheathe_cross_begin).
+    bool sheathe_cross_fresh(int side, UObject* pawn, UObject* w)
+    {
+        using namespace hsvr;
+        int ts = 1 - side;
+        const wchar_t* T = ts == 0 ? L"L" : L"R";
+        auto nm = [&](const wchar_t* fmt) {
+            wchar_t buf[96];
+            std::swprintf(buf, 96, fmt, T);
+            return std::wstring(buf);
+        };
+        const char* hand = side == 0 ? "left" : "right";
+        if (read_number_variable(w, STR("SheathSlot")) != 0.0) return false;
+        double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
+        if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
+            bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
+            return false;
+        // Assign falls through to Set Up <T> Hand Weapon(None) when its slot is taken: only call it with
+        // a free belt slot on that side (the one it picks, 1 else 2, is belt_mouth's).
+        const char* sock = nullptr;
+        hsvr::Vec3 m, a;
+        if (!belt_mouth(ts, pawn, m, a, &sock)) return false;
+        const TCHAR* weapon_t = ts == 0 ? STR("Weapon L") : STR("Weapon R");
+        UObject* other_held = object_property(pawn, weapon_t);
+        set_variable(pawn, weapon_t, 0.0, w, nullptr);
+        Call assign(pawn, nm(L"Assign %ls Weapon Slot").c_str());
+        bool ran = assign.run();
+        set_variable(pawn, weapon_t, 0.0, other_held, nullptr);
+        set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), false);
+        set_bool_property(pawn, nm(L"Wrist %ls Direct Control").c_str(), false);
+        set_bool_property(pawn, nm(L"Grab %ls Target Found").c_str(), false);
+        set_variable(pawn, nm(L"%ls Sheath Slot Concrete").c_str(), 11.0);
+        UObject* scab = object_property(pawn, nm(L"Current Scabbard %ls").c_str());
+        double slot = read_number_variable(pawn, nm(L"Sheath Slot %ls").c_str());
+        if (!ran || !scab || slot < 0.0 || slot > 1.0)
+        {
+            HSVR_LOG("Sheathe: %s hand across to the %s hip: Assign %ls %s (slot %.0f, scabbard %s); not sheathed", hand, ts == 0 ? "left" : "right", T,
+                     ran ? "ran" : "NOT found", slot, scab ? "yes" : "none");
+            return false;
+        }
+        SheathFit f;
+        f.scab = scab;
+        f.slot_side = ts;
+        f.slot = (int)slot;
+        f.socket = k_belt[ts][f.slot].socket;
+        HSVR_LOG("Sheathe: %s hand across to the %s hip: the game's Assign %ls pinned %ls's scabbard on %s (other hand %s)", hand, ts == 0 ? "left" : "right", T,
+                 w->GetName().c_str(), f.socket, other_held ? "holding something, put back" : "empty");
+        return sheathe_cross_begin(side, pawn, w, f);
     }
 
     // Each tick, for a hand holding a weapon: its tip at its side's empty belt scabbard mouth, lined up.
@@ -16551,11 +16605,30 @@ namespace
             else
                 other_side = true;
         }
-        if (!real && !have_sock) return;
+        // The other hip's free belt mouth, for a sheathe across when its scabbard isn't already there.
+        Vec3 far_mouth, far_ax;
+        bool have_far = cfg.pose_sheathe_cross && !other_side && belt_mouth(1 - side, pawn, far_mouth, far_ax);
+        if (!real && !have_sock && !have_far) return;
         Vec3 bp = component_location(base);
         Quat bq = component_rotation(base);
         Vec3 blade = bq.rotate(Vec3{0, 0, 1});
         Vec3 tip = bp + blade * blade_length(w);
+        if (have_far && g_sheathe_armed[side])
+        {
+            double d3 = length(tip - far_mouth), c3 = dot(blade, far_ax);
+            if (d3 < 40.0)
+                HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's tip %.1f cm from the other hip's belt mouth, %.0f deg off its line (needs %.0f cm, %.0f deg)",
+                               side == 0 ? "left" : "right", d3, std::acos((std::max)(-1.0, (std::min)(1.0, c3))) * 57.2958, cfg.pose_sheathe_mouth_cm,
+                               cfg.pose_sheathe_angle_deg);
+            if (d3 <= cfg.pose_sheathe_mouth_cm && c3 >= std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0) &&
+                (!(real || have_sock) || d3 < length(tip - mouth)) && sheathe_cross_fresh(side, pawn, w))
+                return;
+        }
+        if (!real && !have_sock)
+        {
+            if (!g_sheathe_armed[side] && have_far && length(tip - far_mouth) > 2.0 * cfg.pose_sheathe_mouth_cm + 10.0) g_sheathe_armed[side] = true;
+            return;
+        }
         double d = length(tip - mouth), c = dot(blade, ax);
         double off_deg = std::acos((std::max)(-1.0, (std::min)(1.0, c))) * 57.2958;
         if (!g_sheathe_armed[side])
