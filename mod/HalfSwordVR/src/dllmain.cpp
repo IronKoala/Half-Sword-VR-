@@ -8418,6 +8418,17 @@ namespace
         return x > 0.0 ? 1 : 0;
     }
 
+    // The hand that may take or hang a pavise on his back (Matthew 2026-11-22: only the opposite-side
+    // hand). SheathSlot 2 hangs it on Sheath_Slot_Shoulder_L, on upperarm_l (back_slot_physics.md), so
+    // the right hand, whatever the strap's X: the light pavise's strap sits within 4 cm of the spine
+    // there and either hand got it (test slot 2026-11-22, 2 of 9). SheathSlot 3 (Sheath_Slot_Back, mid
+    // back): across from its strap; -1 = either (a strap on the spine, as the tower's).
+    int back_pavise_hand(UObject* mesh, UObject* w, const hsvr::Vec3& strap)
+    {
+        if (read_number_variable(w, STR("SheathSlot")) == 2.0) return 1;
+        return opposite_hand(mesh, strap);
+    }
+
     const char* pavise_back_socket(UObject* w) { return read_number_variable(w, STR("SheathSlot")) == 2.0 ? "Sheath_Slot_Shoulder_L" : "Sheath_Slot_Back"; }
 
     // Where a pavise sat when it hung, in its slot socket's frame (kept at each take off the back).
@@ -17927,7 +17938,7 @@ namespace
             if (i == 4 && cfg.pose_pavise_strap)
                 if (const Handle* strap = pavise_strap(w, base))
                 {
-                    int only = opposite_hand(mesh, bp + bq.rotate(handle_middle(*strap)));
+                    int only = back_pavise_hand(mesh, w, bp + bq.rotate(handle_middle(*strap)));
                     if (only >= 0 && only != side)
                     {
                         HSVR_LOG_EVERY(1.0, "Pavise: %s hand squeezed on the pavise on his back: its strap is on that side, so only the %s hand takes it",
@@ -18358,7 +18369,7 @@ namespace
                 if (!held_by_strap(side, w)) return no("a pavise hangs back by its rear strap");
                 Vec3 a, b;
                 hung_strap(mesh, w, *strap, a, b);
-                int only = opposite_hand(mesh, (a + b) * 0.5);
+                int only = back_pavise_hand(mesh, w, (a + b) * 0.5);
                 if (only >= 0 && only != side) return no("a pavise's strap hangs on that side: only the other hand puts it back");
                 cands.push_back({1, pavise_back_socket(w), 2, to_segment(palm, a, b)});
             }
