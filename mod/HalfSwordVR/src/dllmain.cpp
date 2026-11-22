@@ -1670,7 +1670,7 @@ namespace
         const Config cfg = config();
         Vec3 move{to.x - from.x, to.y - from.y, 0.0};
         double len = length(move);
-        if (!cfg.pose_body_wall_stop || len < 1e-4 || len > 100.0) return to; // over 1 m in a tick: a teleport
+        if (!cfg.pose_body_wall_stop || len < 1e-4 || len > 500.0) return to; // over 5 m in a tick: a teleport (a hitch's catch-up tick moves 1-2 m)
         UObject* cyl = object_property(pawn, STR("CapsuleComponent"));
         if (!cyl) return to;
         double r = 34.0, h = 90.0;
