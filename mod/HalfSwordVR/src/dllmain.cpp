@@ -23934,6 +23934,77 @@ namespace
     }
 
     bool g_script_player_immortal = false;
+
+    // ---- Cases in one launch (tools/pctest) ------------------------------------------------------
+    // "hsvr.case <name>" starts one test case without a relaunch: the steps still waiting from the
+    // case before are dropped, the made-up inputs go back to how a launch starts them, and the test
+    // room is opened again (a fresh level: his Willie, the foes, the weapons all new). The runner
+    // then waits for the room, as it does after a launch, and writes the case's steps.
+    // "hsvr.case_end" logs how its checks went. Any check that fails marks a replay (replay_capture),
+    // so the 10 s before it are saved next to the log.
+    struct CaseState
+    {
+        std::string name;
+        int number = 0;
+        int pass = 0, fail = 0;
+        bool replay_marked = false;
+    };
+    CaseState g_case;
+    int g_case_count = 0;
+
+    // What every made-up input and test aid is at launch (each initialiser above). A test aid that
+    // is not listed here stays set into the next case: put a case that uses one in its own launch
+    // ("# fresh" in its steps file) or add it here.
+    void case_reset_inputs()
+    {
+        g_fake_tilt_pitch.store(0.0);
+        g_fake_tilt_roll.store(0.0);
+        g_fake_tilt_drop.store(0.0);
+        g_fake_head_pose.store(false);
+        g_fake_wobble_deg.store(0.0);
+        g_fake_wobble_hz.store(1.0);
+        g_fake_shift_fwd.store(0.0);
+        g_fake_shift_right.store(0.0);
+        g_fake_head_drop.store(-1.0);
+        g_fake_arm_mode.store(0);
+        g_fake_arm_epoch.fetch_add(1);
+        g_fake_two_up.store(20.0);
+        g_fake_thrust_pitch.store(60.0);
+        g_fake_thrust_up.store(-5.0);
+        for (int i = 0; i < 2; ++i)
+        {
+            g_fake_roll_deg[i].store(0.0);
+            g_fake_trigger[i].store(-1.0f);
+            g_fake_squeeze[i].store(-1.0f);
+            g_fake_thumb[i].store(-1.0f);
+            g_worst_lag[i].store(0.0);
+        }
+        g_carry_log_until.store(0.0);
+        g_count_letgo.store(0);
+        g_count_kicks.store(0);
+        g_fake_continue.store(false);
+        g_fake_x.store(false);
+        g_fake_rstick.store(false);
+        g_fake_stick_click.store(false);
+        g_fake_stick[0].store(-9.0);
+        g_fake_stick[1].store(0.0);
+        g_park_socket.clear();
+        g_arm_floor[0] = 45.0;
+        g_arm_floor[1] = 15.0;
+        g_arm_floor[2] = 5.0;
+        const double slot_test[5] = {1.0, 4.0, 0.0, 0.0, 0.0};
+        for (int i = 0; i < 5; ++i) g_slot_test[i] = slot_test[i];
+        g_fake_jitter_cm.store(0.0);
+        g_script_player_immortal = false;
+    }
+
+    void case_end_log()
+    {
+        if (g_case.name.empty()) return;
+        HSVR_LOG("Case: end %s (#%d): %d check(s) passed, %d failed%s", g_case.name.c_str(), g_case.number, g_case.pass, g_case.fail,
+                 g_case.replay_marked ? "; replay marked at the first failure" : "");
+        g_case.name.clear();
+    }
     void script_immortal_tick()
     {
         static double last = -10.0;
@@ -24137,6 +24208,47 @@ namespace
                 room_report();
                 continue;
             }
+            if (entry.command.rfind("hsvr.case_end", 0) == 0)
+            {
+                case_end_log();
+                continue;
+            }
+            if (entry.command.rfind("hsvr.case_here ", 0) == 0)
+            {
+                // The first case of a launch: the room the launch opened is the case's room.
+                case_end_log();
+                g_case = CaseState{};
+                g_case.name = entry.command.substr(15);
+                g_case.number = ++g_case_count;
+                HSVR_LOG("Case: begin %s (#%d) in the room as it is", g_case.name.c_str(), g_case.number);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.case ", 0) == 0)
+            {
+                case_end_log(); // a case that never reached its end (timed out)
+                // Steps of the case before that never ran are dropped (this entry is the one running).
+                int dropped = 0;
+                for (ScriptEntry& other : entries)
+                    if (&other != &entry && !other.done)
+                    {
+                        other.done = true;
+                        ++dropped;
+                    }
+                case_reset_inputs();
+                g_case = CaseState{};
+                g_case.name = entry.command.substr(10);
+                g_case.number = ++g_case_count;
+                HSVR_LOG("Case: begin %s (#%d)%s; inputs as at launch, the test room opens again", g_case.name.c_str(), g_case.number,
+                         dropped ? " (steps left from the case before dropped)" : "");
+                if (g_room.booted && !g_room.failed && !g_room.done)
+                {
+                    room_apply_values(); // a case may have changed the game instance's mode values
+                    input_to_game();
+                    run_console_command(std::string("open ") + cfg.test_room_map);
+                }
+                else HSVR_LOG("Case: no test room this launch (test_room=1 is needed); not reopened");
+                return;
+            }
             if (entry.command == "hsvr.test_room_open")
             {
                 if (g_room.booted && !g_room.failed)
@@ -24275,6 +24387,19 @@ namespace
                 else known = false;
                 if (got_n < 3 || !known) HSVR_LOG("EXPECT FAIL: could not read \"%s\"", entry.command.c_str());
                 else HSVR_LOG("EXPECT %s: %s %s %g (is %g)%s%s", pass ? "PASS" : "FAIL", what, op, want, value, label[0] ? " - " : "", label);
+                bool ok = got_n >= 3 && known && pass;
+                if (ok) ++g_case.pass;
+                else
+                {
+                    ++g_case.fail;
+                    // The first failed check of a case (or of a launch without cases) saves a replay.
+                    if (!g_case.replay_marked && cfg.replay_capture)
+                    {
+                        g_case.replay_marked = true;
+                        replay::g_fake_mark.store(true);
+                        HSVR_LOG("Script: failed check: replay marked");
+                    }
+                }
                 continue;
             }
             if (entry.command.rfind("hsvr.pawn_set ", 0) == 0)
