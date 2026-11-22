@@ -436,6 +436,8 @@ namespace hsvr
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);
+        flag("pose_turn_spawn_guard", c.pose_turn_spawn_guard);
+        flag("pose_calib_body_facing", c.pose_calib_body_facing);
         flag("pose_stick_walk", c.pose_stick_walk);
         text("pose_move_relative", c.pose_move_relative);
         text("pose_stick_turn", c.pose_stick_turn);
@@ -478,8 +480,6 @@ namespace hsvr
         integer("pose_bs_iterations", c.pose_bs_iterations);
         num("pose_bs_two_let_go_cm", c.pose_bs_two_let_go_cm);
         flag("pose_hold_ignore_body", c.pose_hold_ignore_body);
-        flag("pose_turn_spawn_guard", c.pose_turn_spawn_guard);
-        flag("pose_calib_body_facing", c.pose_calib_body_facing);
         num("pose_hold_weight_spin_extra", c.pose_hold_weight_spin_extra);
         flag("pose_hold_hand_on_weapon", c.pose_hold_hand_on_weapon);
         flag("pose_arm_solve_drawn_hand", c.pose_arm_solve_drawn_hand);
