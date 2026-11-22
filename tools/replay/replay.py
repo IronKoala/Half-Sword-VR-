@@ -16,7 +16,7 @@ Only the standard library. Positions are cm in Unreal world axes (X forward, Y r
 rotations quaternions (x y z w). Column groups: head_*, l_*/r_* (left/right hand: ctl_* controller,
 target_* where the mod sends the hand, hand_* his posed hand bone, item_* the held item's BaseMesh,
 slot_item/hold_item name indexes, lag/turn/force/torque of the hold), actor_*, then one group per
-body bone (<bone>_x .. <bone>_qw).
+body bone (bone_<bone>_x .. bone_<bone>_qw; files from build 2b1647a have no bone_ prefix).
 """
 import csv
 import math
@@ -36,7 +36,7 @@ def load(path):
     with open(path, newline="", encoding="utf-8", errors="replace") as f:
         for line in f:
             if line.startswith("#log "):
-                logs.append(line[5:].rstrip("\n"))
+                logs.append(line[5:].rstrip("\r\n"))
             elif line.startswith("# "):
                 k, _, v = line[2:].partition(": ")
                 meta.setdefault(k.strip(), []).append(v.strip())

@@ -20235,7 +20235,7 @@ namespace
             }
             h += ",actor_x,actor_y,actor_z,actor_qx,actor_qy,actor_qz,actor_qw,crouch_cm,button_crouch_cm,stamina,consciousness";
             for (const std::string& b : bones)
-                for (const char* c : {"_x", "_y", "_z", "_qx", "_qy", "_qz", "_qw"}) h += "," + b + c;
+                for (const char* c : {"_x", "_y", "_z", "_qx", "_qy", "_qz", "_qw"}) h += ",bone_" + b + c; // bone_ so "Head" never meets head_ (case-insensitive readers)
             return h + "\n";
         }
 
