@@ -226,9 +226,36 @@ def hafted_points(pos, numbers, over):
     return pts, info
 
 
+def lower_end_points(pos, numbers, hafted, over):
+    """A double-ended weapon's bottom head or blade (the "Pommel" part, pommel_end..handle_bottom): the same
+    rules on the model turned end over end (z' = handle_bottom - z), then turned back."""
+    hb = numbers["handle_bottom"]
+    m = pos.copy()
+    m[:, 2] = hb - pos[:, 2]
+    top = float(pos[:, 2].max())
+    nm = dict(numbers, tip=hb - numbers["pommel_end"], pommel_end=hb - top, handle_bottom=hb,
+              guard_bottom=0.0, guard_top=0.0)
+    pts, info = (hafted_points if hafted else sword_points)(m, nm, over)
+    out = []
+    for q in pts:
+        if q["slot"] != "Head":
+            continue  # the haft and the other end's points come from the top end
+        q = dict(q, slot="Pommel")
+        q["p"] = [q["p"][0], q["p"][1], hb - q["p"][2]]
+        q["f"] = [q["f"][0], q["f"][1], -q["f"][2]]
+        q["u"] = [q["u"][0], q["u"][1], -q["u"][2]]
+        out.append(q)
+    return out, info
+
+
 def compute(pos, numbers, hafted, over=None):
     over = {k: v for k, v in (over or {}).items() if v is not None}
-    return hafted_points(pos, numbers, over) if hafted else sword_points(pos, numbers, over)
+    pts, info = hafted_points(pos, numbers, over) if hafted else sword_points(pos, numbers, over)
+    if numbers.get("double") and numbers["handle_bottom"] - numbers["pommel_end"] > 2.0:
+        low, low_info = lower_end_points(pos, numbers, hafted, over)
+        pts = pts + low
+        info = dict(info, lower=low_info.get("kind"))
+    return pts, info
 
 
 def write(path, pts):

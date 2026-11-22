@@ -2400,6 +2400,7 @@ namespace
             if (grip < g_settings.two_hand_grip_cm) return K_ARMING;
             return grip < 20 ? K_BASTARD : K_LONGSWORD;
         }
+        if (num("double") > 0.5) return total < 90 ? K_MACE : K_SPEAR; // the lower head rides on the haft part
         if (total < 90) return K_MACE;
         return total < 160 ? K_AXE2H : K_SPEAR;
     }

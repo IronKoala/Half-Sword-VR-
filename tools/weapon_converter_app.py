@@ -38,7 +38,8 @@ except Exception:
 UNITS = [("metres", 100.0), ("centimetres", 1.0), ("millimetres", 0.1), ("inches", 2.54)]
 MODEL_TYPES = "*.glb *.gltf *.fbx *.obj *.nif *.stl *.ply *.dae *.off"
 MODEL_EXTS = tuple(e[1:] for e in MODEL_TYPES.split())
-TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or spear", "hafted")]
+TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or spear", "hafted"),
+         ("Double-ended (head or blade at both ends)", "double")]
 # Hand spots the user can place on the picture (written as spot_<key>= in the model's .txt, cm along the
 # weapon; the mod uses them instead of its own placement). The mod's names for the game's markers:
 # main = Grip R Hand Default Pos, off = Grip L Hand Off Hand, half_main/half_off = Grip R/L Hand Alt Pos
@@ -201,11 +202,11 @@ def render_view(pos, nrm, uv, tris, colour_img, zones, view, width, height, s):
     return img
 
 
-def zone_bar(zones, zmin, s, width, hafted, fmt_len=lambda cm: f"{cm:.0f} cm"):
+def zone_bar(zones, zmin, s, width, hafted, fmt_len=lambda cm: f"{cm:.0f} cm", double=False):
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (width, 26), (34, 36, 40))
     d = ImageDraw.Draw(img)
-    names = {"Pommel": "butt" if hafted else "pommel", "Grip": "haft" if hafted else "grip", "Guard": "guard",
+    names = {"Pommel": "lower head" if double else "butt" if hafted else "pommel", "Grip": "haft" if hafted else "grip", "Guard": "guard",
              "Head": "head" if hafted else "blade"}
     for slot, lo, hi in zones:
         x0, x1 = 10 + (lo - zmin) * s, 10 + (hi - zmin) * s
@@ -1164,7 +1165,7 @@ class App:
         name, info = self.result
         flat, edge, zones, zmin, s, width = self.result_views
         L = self.fmt_len
-        bar = zone_bar(zones, zmin, s, width, info["type"] == "hafted", L)
+        bar = zone_bar(zones, zmin, s, width, info["type"] == "hafted", L, bool(info["zones_cm"].get("double")))
         pic = Image.new("RGB", (width, flat.height + edge.height + bar.height), (34, 36, 40))
         pic.paste(flat, (0, 0))
         pic.paste(edge, (0, flat.height))
@@ -1203,13 +1204,16 @@ class App:
                      " (estimated, and heavier than any real weapon: the model is probably much thicker than "
                      "the real thing. Type a weight, for example " +
                      ("1.5 for a sword or 2 for an axe)" if self.units()[2] == "kg" else "3.3 for a sword or 4.4 for an axe)"))
-        if hafted:
+        if zn.get("double"):
+            parts = (f"lower head {L(zn['handle_bottom'] - zn['pommel_end'])}, haft {L(-zn['handle_bottom'])}, "
+                     f"upper head {L(zn['tip'])}")
+        elif hafted:
             parts = (f"haft {L(-zn['handle_bottom'])}, head {L(zn['tip'])}"
                      + (f", butt cap {L(zn['handle_bottom'] - zn['pommel_end'])}" if zn['handle_bottom'] > zn['pommel_end'] + 0.5 else ""))
         else:
             parts = (f"pommel {L(zn['handle_bottom'] - zn['pommel_end'])}, grip {L(-zn['handle_bottom'])}, "
                      f"guard {L(zn['guard_top'], 1)}, blade {L(zn['tip'] - zn['guard_top'])}")
-        self.summary.config(text=f"{'Hafted weapon' if hafted else 'Sword'}, {L(zn['tip'] - zn['pommel_end'])}, "
+        self.summary.config(text=f"{'Double-ended weapon' if zn.get('double') else 'Hafted weapon' if hafted else 'Sword'}, {L(zn['tip'] - zn['pommel_end'])}, "
                                  f"{mass}.\nParts ({how}): {parts}."
                                  + (" Main hand slides down the handle in swings." if zn.get("hand_slide") else "")
                                  + self.damage_text(info) + "\n"

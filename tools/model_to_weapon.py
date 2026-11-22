@@ -524,9 +524,10 @@ def main(argv=None):
     ap.add_argument("--flip", action="store_true")
     ap.add_argument("--hand-slide", action="store_true",
                     help="long handle held by guard + pommel, the guard hand slides down it in swings (e.g. the Spit)")
-    ap.add_argument("--type", choices=["sword", "hafted"],
+    ap.add_argument("--type", choices=["sword", "hafted", "double"],
                     help="sword: guard between grip and blade; hafted: head on the end of a haft (axe, mace, "
-                         "hammer, spear). Default: detected")
+                         "hammer, spear); double: a blade or head on both ends of a haft. Default: detected "
+                         "(sword or hafted)")
     ap.add_argument("--handle-bottom-cm", type=float)
     ap.add_argument("--splits", help="where the parts meet, chosen by hand: 'A,B,C' = cm up from the pommel end to "
                                      "the grip's start, the guard's start and the blade's start (A<=B<=C)")
@@ -610,7 +611,7 @@ def main(argv=None):
         blade_t = t[vertex_part == "Head"]
         hilt = vertex_part != "Head"
         blade_up = blade_t.mean() > t[hilt].mean() if hilt.any() else True
-        hafted = args.type == "hafted" or (args.type is None and "Guard" not in mesh_part)
+        hafted = args.type in ("hafted", "double") or (args.type is None and "Guard" not in mesh_part)
     else:
         # ---- the guard from the shape --------------------------------------------------------------
         # Widths of cross-sections (where the mesh's edges cross each plane), so models whose vertices
@@ -642,7 +643,7 @@ def main(argv=None):
         says_blade = any(re.search(r"blade|sword|knife|machete|sabre|saber|katana|dagger", " ".join(n), re.I)
                          for n, _ in meshes)
         end_peak = at < 0.15 or at > 0.85
-        hafted = args.type == "hafted" or (args.type is None and (end_peak or long_run) and not (says_blade and long_run))
+        hafted = args.type in ("hafted", "double") or (args.type is None and (end_peak or long_run) and not (says_blade and long_run))
         guardless = not hafted and long_run  # a sword chosen by the user, but no short wide guard in it
         if hafted or guardless:
             blade_up = at > 0.5
@@ -775,6 +776,18 @@ def main(argv=None):
                             break
         print(f"grip width {grip_w:.1f} cm; handle bottom {handle_bottom:.1f} cm, pommel end {end:.1f} cm"
               + ("" if handle_bottom > end else " (no wider pommel found: whole handle is grip)"))
+        if args.type == "double" and grip_w > 0:
+            # The second head or blade at the bottom end: from the widest section in the lower half of the
+            # handle, up to where the width is back to the haft's (as the top head is found).
+            low = [(s, w) for s, w in prof if s <= end + 0.5 * span and w > 0]
+            if low:
+                s_peak, _ = max(low, key=lambda p: p[1])
+                handle_bottom = s_peak
+                for s_, w_ in prof:
+                    if s_ > s_peak and 0 < w_ <= 1.3 * grip_w:
+                        handle_bottom = s_
+                        break
+            print(f"double-ended: the lower head or blade is {end:.1f}..{handle_bottom:.1f} cm")
 
     # ---- part boundaries chosen by hand ----------------------------------------------------------------
     if args.splits:
@@ -950,7 +963,7 @@ def main(argv=None):
     top = float(z.max())
     numbers = {"mass_kg": float(mass), "pommel_end": round(end, 2), "handle_bottom": round(float(handle_bottom), 2),
                "handle_top": 0.0, "guard_bottom": round(float(guard_bottom), 2), "guard_top": round(float(guard_top), 2),
-               "tip": round(top, 2), "hafted": 1 if hafted else 0,
+               "tip": round(top, 2), "hafted": 1 if hafted else 0, "double": 1 if args.type == "double" else 0,
                "hand_slide": 1 if args.hand_slide else 0}
     # ---- balance and damage points --------------------------------------------------------------------
     dens = {s: ((HAFT if hafted else GRIP) if s == "Grip" else STEEL) for s in volume}
@@ -968,7 +981,18 @@ def main(argv=None):
     over = {"edges": args.edges, "head": args.head_kind, "sEdge": args.edge_sharp, "sTip": args.tip_sharp,
             "rig": args.rigidity}
     over = {k: (int(round(v)) if isinstance(v, float) else v) for k, v in over.items() if v is not None}
-    dpts, dinfo = dp.compute(frame_pos, numbers, hafted, over)
+    # The shape as vertices plus points spread over the surface (area-weighted, fixed seed), so a
+    # low-poly model with big flat faces is measured as well as a dense one.
+    tri_v = frame_pos[tris]
+    area = 0.5 * np.linalg.norm(np.cross(tri_v[:, 1] - tri_v[:, 0], tri_v[:, 2] - tri_v[:, 0]), axis=1)
+    rng = np.random.default_rng(1)
+    pick = rng.choice(len(tris), size=30000, p=area / area.sum()) if area.sum() > 0 else np.zeros(0, int)
+    ab = rng.random((len(pick), 2))
+    flipab = ab.sum(axis=1) > 1
+    ab[flipab] = 1 - ab[flipab]
+    tv = tri_v[pick]
+    samples = tv[:, 0] + ab[:, :1] * (tv[:, 1] - tv[:, 0]) + ab[:, 1:] * (tv[:, 2] - tv[:, 0])
+    dpts, dinfo = dp.compute(np.vstack([frame_pos, samples]), numbers, hafted, over)
     dp.write(os.path.join(args.out, name + "_points.txt"), dpts)
     print(f"balance {numbers['balance']:.1f} cm above the grip (model {com:.1f}); damage points: {len(dpts)} "
           f"({', '.join(f'{k} {v}' for k, v in dinfo.items())})")
