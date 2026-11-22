@@ -14462,7 +14462,11 @@ namespace
                 s_pos = p - s_rot.rotate(pivot);
             }
         }
-        if (two && cfg.pose_two_hand_twist_only)
+        // Both hands on fixed grips (a crossbow's two grips, a sword's two grip zones): both wrists hold its turn,
+        // each toward where its own hand has it, so neither the turning hand alone nor two short-levered pulls
+        // steer it (crossbow 2026-11-22: 15 cm / 42 deg off on the joint, 177 deg on the old hold). Off: as before.
+        bool both_turn = two && cfg.pose_two_hand_joint_both_turn && g_two.use_rel && !g_two.has_handle;
+        if (two && cfg.pose_two_hand_twist_only && !both_turn)
         {
             Vec3 ax = (pos + rot.rotate(g_two.bs_local)) - pivot_world;
             if (length(ax) > 5.0)
@@ -14491,16 +14495,24 @@ namespace
             JointHand& o = g_jh[g_two.second][1];
             Vec3 at_world = pos + rot.rotate(g_two.bs_local);
             if (!o.con || o.weapon != weapon)
-                jh_make(o, pawn, base, weapon, at_world, g_two.bs_local, at_world, rot, false, g_two.second);
+                jh_make(o, pawn, base, weapon, at_world, g_two.bs_local, at_world, rot, both_turn, g_two.second);
+            else if (o.turns != both_turn)
+                jh_make(o, pawn, base, weapon, at_world, g_two.bs_local, at_world, rot, both_turn, g_two.second);
             if (o.con)
             {
                 o.touched = true;
-                // Its sphere carries the made-at point: keep that point where the palm wants the spot held now.
-                Vec3 want = g_two.bs_p2 + rot.rotate(o.made_at - g_two.bs_local);
-                set_component_transform(o.sphere, want, rot, false);
+                // Its sphere carries the made-at point: keep that point where the palm wants the spot held now
+                // (turned as the second hand has the weapon when both wrists turn it, else as it is).
+                Quat r2 = both_turn ? (g_pose.hand_rot[g_two.second] * g_two.rel).normalized() : rot;
+                Vec3 want = g_two.bs_p2 + r2.rotate(o.made_at - g_two.bs_local);
+                set_component_transform(o.sphere, want, r2, false);
                 double mm2 = eff_mass(at_world);
                 double fcap2 = hand_cap(pf * mx * (std::max)(0.0, s2b.total), length(at_world - g_two.bs_p2)) / mm2 * 100.0;
-                jh_drive(o, pk * st / mm2, pc * dst / mm2, fcap2, 0.0, 0.0, 0.0);
+                double tcap2 = both_turn ? rf * mx * (std::max)(0.0, s2b.total) / Ic : 0.0;
+                jh_drive(o, pk * st / mm2, pc * dst / mm2, fcap2, both_turn ? ka : 0.0, both_turn ? ca : 0.0, tcap2);
+                HSVR_LOG_EVERY(0.5, "Joint hold: second hand on %ls%s: %.1f cm from its spot, its turn %.0f deg from the first hand's",
+                               weapon->GetName().c_str(), both_turn ? " (fixed grips: both wrists turn it)" : "", length(at_world - g_two.bs_p2),
+                               length(scaled_axis((r2 * target_rot.inverse()).normalized())) * 57.2958);
             }
         }
         // The arm carries the weapon's weight at the grip outside the pull cap, as the old hold (its lever
@@ -14805,6 +14817,7 @@ namespace
                 ControllerState st2 = controllers_state();
                 float trig = g_fake_trigger[s2].load() >= 0.0f ? g_fake_trigger[s2].load() : st2.hand[s2].trigger;
                 bool on = g_two.sliding ? trig > 0.15f : trig > 0.3f;
+                if (g_two.use_rel && !g_two.has_handle) on = false; // a fixed grip (or no handle) never slides
                 if (on != g_two.sliding)
                 {
                     g_two.sliding = on;

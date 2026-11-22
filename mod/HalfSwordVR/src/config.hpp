@@ -506,6 +506,7 @@ namespace hsvr
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
         bool pose_two_hand_twist_only = true;
+        bool pose_two_hand_joint_both_turn = false; // joint hold, both hands on fixed grips: both wrists turn it (test)
         double pose_two_hand_swing_share = 0.0;
         // Whoosh judged on the weapon's speed against your body: the game's whoosh threshold for a weapon in
         // a tracked hand is raised by your walking speed x this (0 = off).
