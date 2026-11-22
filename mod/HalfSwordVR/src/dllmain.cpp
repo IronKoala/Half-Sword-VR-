@@ -5935,6 +5935,7 @@ namespace
     bool holster_snap(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg);
     UObject* scabbard_pin(UObject* scab);
     void return_scabbard_pin(UObject* pawn, UObject* scab, bool free);
+    void pin_angular_limit(UObject* pin, const TCHAR* fn, uint8_t motion, double degrees);
     void remove_fist(int side, UObject* pawn, const char* why);
     // A throw (B&S: released faster than 2 m/s): the game counts an unheld weapon's hits only while its
     // "Just Thrown" is set and "Last Parent" is the thrower (ModularWeaponBP @67055; hs_throwing.md),
@@ -8229,12 +8230,11 @@ namespace
             c.number(STR("LimitSize"), 0.0);
             c.run();
         }
+        // By type, not by name: the engine calls the twist's motion "ConstraintType" and the swings' "MotionType",
+        // and a missed name leaves the byte 0 = free (test 2026-11-22 06:27Z: ang 2 2 0, a mounted pavise
+        // swung up to 151 deg about the forearm).
         for (const TCHAR* fn : {STR("SetAngularSwing1Limit"), STR("SetAngularSwing2Limit"), STR("SetAngularTwistLimit")})
-        {
-            Call c(j, fn);
-            c.byte(STR("MotionType"), motion);
-            c.run();
-        }
+            pin_angular_limit(j, fn, motion, 0.0);
         Call dc(j, STR("SetDisableCollision"));
         dc.first_flag(true);
         dc.run();
