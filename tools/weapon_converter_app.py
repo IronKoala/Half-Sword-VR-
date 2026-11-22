@@ -117,6 +117,8 @@ def write_pack(mod_dir, it):
     """One weapon = one folder weapons/<id>/ in the mod: the converted files and pack.txt, which says how the
     weapon enters the game. The mod adds every pack it finds as a new weapon (no game weapon is changed)."""
     name = it["result"][0]
+    if not os.path.isfile(os.path.join(it["work"], name + ".obj")):
+        raise OSError(f"{it['name']}: its converted files are missing (convert it again); the installed copy was left as it was")
     folder = os.path.join(mod_dir, "weapons", it["name"])
     if os.path.isdir(folder):
         shutil.rmtree(folder)
@@ -657,6 +659,7 @@ class App:
             self.status.config(text="Check the picture, then Install.")
             self.inputs_changed()
         else:
+            self.schedule_first_preview()
             self.photos = []
             self.preview.config(image="")
             self.summary.config(text="")
@@ -887,7 +890,10 @@ class App:
     def first_preview(self):
         self.first_preview_job = None
         it = self.cur
-        if it is None or it["result"] is not None or self.busy or it.get("auto_previewed"):
+        if it is None or it["result"] is not None or it.get("auto_previewed"):
+            return
+        if self.busy:  # still measuring or converting something else: try again shortly
+            self.first_preview_job = self.root.after(1000, self.first_preview)
             return
         values, problem = self.inputs()
         if problem:
@@ -1423,7 +1429,8 @@ class App:
                 continue
             values = self.inputs()[0] if it is self.cur else self.item_values(it)[0]
             values = values or it["result_inputs"]
-            if it["result"][1].get("preview") or not self.same_inputs(values, it["result_inputs"]):
+            if (it["result"][1].get("preview") or it.get("full_ok") is False
+                    or not self.same_inputs(values, it["result_inputs"])):
                 out.append((it, values))
         for it, _ in out:
             it["full_ok"] = False
