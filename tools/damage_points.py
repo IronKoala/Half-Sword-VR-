@@ -226,6 +226,28 @@ def hafted_points(pos, numbers, over):
     return pts, info
 
 
+def shield_points(pos, numbers, over):
+    """A shield bash: blunt points on the front (+y) of the middle (the boss) and around the rim, Forward
+    out of the face; like the game's shields (sTip 0-25, dBlunt 1, rig 85-100)."""
+    rig = over.get("rig", 90)
+    sTip = over.get("sTip", 10)
+    pts = []
+    front = pos[pos[:, 1] > 0]
+    if len(front):
+        near = front[np.hypot(front[:, 0], front[:, 2]) < 0.15 * max(numbers.get("width", 30), 1)]
+        y = float(near[:, 1].max()) if len(near) else float(front[:, 1].max())
+        pts.append(point("Head", [0, y, 0], [0, 1, 0], [0, 0, 1], sTip, 0, 0, 1, rig))
+    for ang in range(0, 360, 45):
+        a = math.radians(ang)
+        d = np.array([math.cos(a), 0.0, math.sin(a)])
+        xz = pos[:, [0, 2]]
+        along = xz @ d[[0, 2]]
+        off = np.abs(xz @ np.array([-d[2], d[0]]))
+        far = pos[int(np.argmax(along - 0.5 * off))]  # the rim point furthest that way, near the ray
+        pts.append(point("Head", [far[0] - 0.5 * d[0], 0.0, far[2] - 0.5 * d[2]], d, [0, 1, 0], sTip, 0, 0, 1, rig))
+    return pts, dict(kind="shield", sTip=sTip, rig=rig)
+
+
 def lower_end_points(pos, numbers, hafted, over):
     """A double-ended weapon's bottom head or blade (the "Pommel" part, pommel_end..handle_bottom): the same
     rules on the model turned end over end (z' = handle_bottom - z), then turned back."""

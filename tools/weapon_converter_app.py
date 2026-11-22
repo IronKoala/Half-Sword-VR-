@@ -39,7 +39,10 @@ UNITS = [("metres", 100.0), ("centimetres", 1.0), ("millimetres", 0.1), ("inches
 MODEL_TYPES = "*.glb *.gltf *.fbx *.obj *.nif *.stl *.ply *.dae *.off"
 MODEL_EXTS = tuple(e[1:] for e in MODEL_TYPES.split())
 TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or spear", "hafted"),
-         ("Double-ended (head or blade at both ends)", "double")]
+         ("Double-ended (head or blade at both ends)", "double"), ("Shield", "shield")]
+# How a shield is held: which of the game's shields carries it (its grip is that shield's own).
+SHIELD_GRIPS = [("Fist grip (buckler)", "shield_buckler"), ("Arm straps (targe)", "shield_targe"),
+                ("Arm straps, big (pavise)", "shield_pavise")]
 # Hand spots the user can place on the picture (written as spot_<key>= in the model's .txt, cm along the
 # weapon; the mod uses them instead of its own placement). The mod's names for the game's markers:
 # main = Grip R Hand Default Pos, off = Grip L Hand Off Hand, half_main/half_off = Grip R/L Hand Alt Pos
@@ -116,6 +119,8 @@ def write_pack(mod_dir, it):
              "model=" + name + ".obj",
              "free_play=" + ("1" if it["free_play"] else "0"),
              "progression=" + ("1" if it["progression"] else "0")]
+    if it["result"][1].get("type") == "shield":
+        lines.append("carrier=" + it.get("shield_grip", "shield_buckler"))
     open(os.path.join(folder, "pack.txt"), "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
 
 
@@ -163,7 +168,7 @@ def view_scale(pos, width, heights):
     return s
 
 
-def render_view(pos, nrm, uv, tris, colour_img, zones, view, width, height, s):
+def render_view(pos, nrm, uv, tris, colour_img, zones, view, width, height, s, from_plus=False):
     """Shaded picture of the weapon lying left (pommel) to right (tip). view "flat": looking at the
     blade's flat (the edge direction is up); "edge": looking at its edge. Returns a PIL image."""
     from PIL import Image, ImageDraw
@@ -195,7 +200,8 @@ def render_view(pos, nrm, uv, tris, colour_img, zones, view, width, height, s):
     light /= np.linalg.norm(light)
     shade = 0.35 + 0.65 * np.abs(n @ light)
     col = (np.clip(base * shade[:, None], 0, 1) * 255).astype(int)
-    order = np.argsort(-pos[tris, depth].mean(axis=1))  # far side first
+    # far side first (seen from -depth; from_plus: from +depth, a shield's front)
+    order = np.argsort((1 if from_plus else -1) * pos[tris, depth].mean(axis=1))
     xs, ys = px[tris], py[tris]
     for i in order:
         draw.polygon([(xs[i, 0], ys[i, 0]), (xs[i, 1], ys[i, 1]), (xs[i, 2], ys[i, 2])], fill=tuple(col[i]))
@@ -341,7 +347,11 @@ class App:
         self.free_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(game, text="Free play", variable=self.free_var).pack(side="left", padx=(0, 6))
         self.prog_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(game, text="Progression", variable=self.prog_var).pack(side="left")
+        ttk.Checkbutton(game, text="Progression", variable=self.prog_var).pack(side="left", padx=(0, 10))
+        ttk.Label(game, text="Shield held by").pack(side="left", padx=(0, 3))
+        self.shield_var = tk.StringVar(value=SHIELD_GRIPS[0][0])
+        ttk.Combobox(game, textvariable=self.shield_var, values=[t for t, _ in SHIELD_GRIPS], state="readonly",
+                     width=22).pack(side="left")
         ttk.Label(form, text="Install adds the weapon to the game as a new weapon: in free play's weapon list, "
                              "and/or for sale at the merchant in progression.",
                   foreground="#777", wraplength=640).grid(row=11, column=1, columnspan=2, sticky="w", padx=8)
@@ -521,6 +531,7 @@ class App:
         it["slide"] = self.slide_var.get()
         it["title"] = self.title_var.get().strip() or it["title"]
         it["free_play"], it["progression"] = self.free_var.get(), self.prog_var.get()
+        it["shield_grip"] = dict(SHIELD_GRIPS).get(self.shield_var.get(), SHIELD_GRIPS[0][1])
         it["stats"] = self.read_stats()[0] or it.get("stats", {})
         it.update(flip=self.flip, raw=self.raw_length, result=self.result, result_inputs=self.result_inputs,
                   views=self.result_views)
@@ -546,6 +557,7 @@ class App:
         self.title_var.set(it["title"])
         self.free_var.set(it["free_play"])
         self.prog_var.set(it["progression"])
+        self.shield_var.set(next((t for t, v in SHIELD_GRIPS if v == it.get("shield_grip")), SHIELD_GRIPS[0][0]))
         st = it.get("stats", {})
         self.edges_var.set(next(t for t, v in EDGES if v == st.get("edges")))
         self.head_var.set(next(t for t, v in HEADS if v == st.get("head")))
@@ -910,9 +922,11 @@ class App:
             colour = Image.open(tex)
             colour.load()
         width = 900
-        s = view_scale(pos, width, (200, 70))
-        flat = render_view(pos, nrm, uv, tris, colour, zones, "flat", width, 200, s)
-        edge = render_view(pos, nrm, uv, tris, colour, zones, "edge", width, 70, s)
+        shield = info.get("type") == "shield"
+        hf, he = (360, 90) if shield else (200, 70)
+        s = view_scale(pos, width, (hf, he))
+        flat = render_view(pos, nrm, uv, tris, colour, zones, "flat", width, hf, s, from_plus=shield)
+        edge = render_view(pos, nrm, uv, tris, colour, zones, "edge", width, he, s)
         views = (flat, edge, zones, float(pos[:, 2].min()), s, width)
         self.events.put(("converted", (it, name, info, views), values))
 
@@ -1130,7 +1144,7 @@ class App:
 
     def short_summary(self, info):
         zn = info["zones_cm"]
-        return (f"{'hafted' if info['type'] == 'hafted' else 'sword'}, {self.fmt_len(zn['tip'] - zn['pommel_end'])}, "
+        return (f"{info['type']}, {self.fmt_len(zn['tip'] - zn['pommel_end'])}, "
                 f"{self.fmt_mass(info['mass_kg'])}{' (estimated)' if info['mass_note'] != 'given' else ''}")
 
     def damage_text(self, info):
@@ -1147,6 +1161,8 @@ class App:
                 f", point {dm.get('sTip')}"
             if dm.get("tip_angle") is not None:
                 what += f" (point angle {dm['tip_angle']:.0f} degrees)"
+        elif kind == "shield":
+            what = f"shield bash, point {dm.get('sTip')}"
         elif kind == "spear":
             what = f"spear point {dm.get('sTip')}, edges {dm.get('sEdge')}"
         elif kind == "axe":
@@ -1204,6 +1220,12 @@ class App:
                      " (estimated, and heavier than any real weapon: the model is probably much thicker than "
                      "the real thing. Type a weight, for example " +
                      ("1.5 for a sword or 2 for an axe)" if self.units()[2] == "kg" else "3.3 for a sword or 4.4 for an axe)"))
+        if info["type"] == "shield":
+            self.summary.config(text=f"Shield, {L(zn['width'])} wide, {L(zn['height'])} high, {mass}."
+                                     + self.damage_text(info) + "\nThe picture shows its front, then its side with "
+                                     "the front at the top. If the front is the back, press \"Blade is on the "
+                                     "wrong end\".")
+            return
         if zn.get("double"):
             parts = (f"lower head {L(zn['handle_bottom'] - zn['pommel_end'])}, haft {L(-zn['handle_bottom'])}, "
                      f"upper head {L(zn['tip'])}")

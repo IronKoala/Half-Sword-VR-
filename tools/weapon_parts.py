@@ -122,6 +122,31 @@ def build_pieces(pos, tris, handle_bottom, guard_bottom, guard_top, slice_cm=15.
     return pieces
 
 
+def build_pieces_grid(pos, tris, nx, nz, slot="Head"):
+    """Convex pieces for a broad flat thing (a shield): its triangles in nx x nz cells across x and z
+    (by their middles), one hull per cell, so a curved board is followed instead of being filled in."""
+    pieces = []
+    c = pos[tris].mean(axis=1)
+    xs = np.linspace(pos[:, 0].min(), pos[:, 0].max(), nx + 1)
+    zs = np.linspace(pos[:, 2].min(), pos[:, 2].max(), nz + 1)
+    ix = np.clip(np.searchsorted(xs, c[:, 0], side="right") - 1, 0, nx - 1)
+    iz = np.clip(np.searchsorted(zs, c[:, 2], side="right") - 1, 0, nz - 1)
+    for a in range(nx):
+        for b in range(nz):
+            sub = tris[(ix == a) & (iz == b)]
+            if len(sub) == 0:
+                continue
+            sel = pos[np.unique(sub)]
+            if len(sel) < 4:
+                continue
+            try:
+                hull = ConvexHull(sel)
+            except Exception:
+                continue
+            pieces.append((slot, sel[hull.vertices], hull))
+    return pieces
+
+
 def _slices(pos, tris, coord, cuts):
     """Convex hulls of a mesh cut into slabs along one coordinate (0 x, 1 y, 2 z) at the given cut
     values; each slab keeps its outline where the mesh's edges cross the cut planes."""

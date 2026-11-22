@@ -52,6 +52,7 @@ import damage_points as dp  # noqa: E402
 UNITS_CM = {"m": 100.0, "cm": 1.0, "mm": 0.1, "in": 2.54,
             "skyrim": 1.42875}  # Creation Kit wiki "Unit": 1 unit = 0.5625 in
 STEEL, GRIP, HAFT = 7.85, 1.0, 0.75  # g/cm3; grip = wood and leather, haft = ash/oak wood (estimates)
+WOOD = 0.75  # shields: wooden boards with leather/linen and iron fittings, as one density (estimate)
 PART_WORDS = [("Pommel", r"pommel|knob|butt|ferrule"), ("Guard", r"guard|cross|quillon"),
               ("Grip", r"grip|handle|hilt|haft|shaft|pole|staff|shank"),
               ("Head", r"blade|head|axe|spike|point|hammer|flange|mace|bit")]
@@ -524,7 +525,7 @@ def main(argv=None):
     ap.add_argument("--flip", action="store_true")
     ap.add_argument("--hand-slide", action="store_true",
                     help="long handle held by guard + pommel, the guard hand slides down it in swings (e.g. the Spit)")
-    ap.add_argument("--type", choices=["sword", "hafted", "double"],
+    ap.add_argument("--type", choices=["sword", "hafted", "double", "shield"],
                     help="sword: guard between grip and blade; hafted: head on the end of a haft (axe, mace, "
                          "hammer, spear); double: a blade or head on both ends of a haft. Default: detected "
                          "(sword or hafted)")
@@ -591,246 +592,287 @@ def main(argv=None):
               f"it works, but pressing F9 takes a moment longer")
     t = (positions - centre) @ axis
 
-    # ---- named parts ----------------------------------------------------------------------------------
-    mesh_part = [part_of(names) for names, _ in meshes]
-    named = "Head" in mesh_part and ("Grip" in mesh_part or ("Guard" in mesh_part and "Pommel" in mesh_part))
-    if named:
-        # Names are only trusted when they make sense: a "blade" mesh that also runs the length of the
-        # handle (a full tang modelled as one piece with the blade) does not mark where the blade starts.
-        head_t = t[np.isin(mesh_of_vertex, [k for k, p in enumerate(mesh_part) if p == "Head"])]
-        hilt_t = t[np.isin(mesh_of_vertex, [k for k, p in enumerate(mesh_part) if p in ("Grip", "Pommel")])]
-        if len(hilt_t):
-            ov = min(head_t.max(), hilt_t.max()) - max(head_t.min(), hilt_t.min())
-            if ov > 0.3 * max(float(np.ptp(hilt_t)), 1e-9):
-                print("part names ignored: the blade mesh runs through the handle (full tang?); finding parts from the shape")
-                named = False
-    hafted = False
-    vertex_part = np.array([mesh_part[k] or "" for k in mesh_of_vertex]) if named else None
-    if named:
-        print("parts by mesh name: " + ", ".join(f"{names[0]} -> {p or '?'}" for (names, _), p in zip(meshes, mesh_part)))
-        blade_t = t[vertex_part == "Head"]
-        hilt = vertex_part != "Head"
-        blade_up = blade_t.mean() > t[hilt].mean() if hilt.any() else True
-        hafted = args.type in ("hafted", "double") or (args.type is None and "Guard" not in mesh_part)
-    else:
-        # ---- the guard from the shape --------------------------------------------------------------
-        # Widths of cross-sections (where the mesh's edges cross each plane), so models whose vertices
-        # are far apart (a plain cylinder has them only at its ends) still measure right.
-        step = max(0.25, float(np.ptp(t)) / 400.0)
-        tmp = np.column_stack([(positions - centre) @ side_a, (positions - centre) @ side_b, t])
-        # (centre of each cross-section, its width); bounds below are put at the last narrow section
-        # either side, so a cut plane never lands inside the guard or head.
-        widths = wp.section_widths(tmp, tris, t.min() + step / 2, t.max(), step, both=True)
-        w_max = max(w for _, w in widths)
-        peak = max(range(len(widths)), key=lambda i: widths[i][1])
-        i0 = i1 = peak  # the run of sections around the widest one above 60 % of its width
-        # Then on through the guard's taper: while the width still falls steeply (a blade or grip
-        # narrows far more slowly than 2 % of the guard's width per section).
-        def wider(a, b):
-            return widths[a][1] > 0.6 * w_max or widths[a][1] < widths[b][1] - 0.02 * w_max
-        while i0 > 0 and wider(i0 - 1, i0):
-            i0 -= 1
-        while i1 < len(widths) - 1 and wider(i1 + 1, i1):
-            i1 += 1
-        g_lo, g_hi = widths[i0][0] - step, widths[i1][0] + step
-        blade_up = (t.max() - g_hi) > (g_lo - t.min())
-        # The widest part right at one end means a head on a haft, not a guard.
-        at = (widths[peak][0] - t.min()) / max(float(np.ptp(t)), 1e-9)
-        # So does a wide part much longer than a guard (an axe's head reaches over a fifth of the length).
-        long_run = (g_hi - g_lo) > 0.2 * float(np.ptp(t))
-        # A long wide part on a model whose meshes or materials say "blade" is a guardless blade
-        # (machete, long knife), not an axe head.
-        says_blade = any(re.search(r"blade|sword|knife|machete|sabre|saber|katana|dagger", " ".join(n), re.I)
-                         for n, _ in meshes)
-        end_peak = at < 0.15 or at > 0.85
-        hafted = args.type in ("hafted", "double") or (args.type is None and (end_peak or long_run) and not (says_blade and long_run))
-        guardless = not hafted and long_run  # a sword chosen by the user, but no short wide guard in it
-        if hafted or guardless:
-            blade_up = at > 0.5
-            middle = [w for s_, w in widths if w > 0 and 0.3 <= (s_ - t.min()) / np.ptp(t) <= 0.7]
-            haft_w = float(np.median(middle)) if middle else 0.0
-            # Walk from the widest slice towards the haft; the head stops where the width is back to
-            # (nearly) the haft's. (Starting at the widest slice, not the model's end, because the haft
-            # often pokes out past the head, as on an axe.)
-            idx = range(peak, -1, -1) if blade_up else range(peak, len(widths))
-            head_start = widths[idx[-1]][0]
-            for i in idx:
-                s_, w = widths[i]
-                if w > 0 and w <= 1.3 * haft_w:
-                    head_start = s_
-                    break
-            if guardless:
-                # No guard to go by: a blade is much thinner than its handle (scales, wrap), so the
-                # thickness profile splits them. The split with the biggest step between the two
-                # sides' median thickness is where the blade starts; the thinner side is the blade.
-                thk = np.column_stack([(positions - centre) @ side_b, (positions - centre) @ side_a, t])
-                th = np.array([w for _, w in wp.section_widths(thk, tris, t.min() + step / 2, t.max(), step)])
-                cs = np.array([c for c, _ in widths])
-                n_s = len(th)
-                best, k_best = -1.0, None
-                for k in range(max(1, n_s // 10), n_s - max(1, n_s // 10)):
-                    a_, b_ = np.median(th[:k]), np.median(th[k:])
-                    if abs(a_ - b_) > best:
-                        best, k_best = abs(a_ - b_), k
-                if k_best is not None:
-                    blade_up = np.median(th[k_best:]) < np.median(th[:k_best])
-                    # Exact place: from the blade side, the first section thicker than halfway between
-                    # the two medians.
-                    t_blade = np.median(th[k_best:] if blade_up else th[:k_best])
-                    t_handle = np.median(th[:k_best] if blade_up else th[k_best:])
-                    half = 0.5 * (t_blade + t_handle)
-                    order = range(n_s - 1, -1, -1) if blade_up else range(n_s)
-                    k_edge = k_best
-                    for i in order:
-                        if th[i] > half:
-                            k_edge = i
-                            break
-                    head_start = float(cs[k_edge] + (step / 2 if blade_up else -step / 2))
-                    print(f"thickness: {'-' if blade_up else '+'} side {np.median(th[:k_best] if blade_up else th[k_best:]):.2f} cm "
-                          f"(handle), {'+' if blade_up else '-'} side {np.median(th[k_best:] if blade_up else th[:k_best]):.2f} cm (blade)")
-            g_lo = g_hi = head_start
-            if guardless:
-                print(f"no guard found: the blade starts where the width changes, {head_start:.1f} cm along the axis "
-                      f"(handle {haft_w:.1f} cm wide)")
-            else:
-                print(f"head on a haft: widest {w_max:.1f} cm at the {'+' if blade_up else '-'} end, haft {haft_w:.1f} cm wide, "
-                      f"head starts {head_start:.1f} cm along the axis")
-        else:
-            print(f"guard found {g_lo:.1f}..{g_hi:.1f} cm along the axis (widest {w_max:.1f} cm)")
-    if args.flip:
-        blade_up = not blade_up
-    print(f"{'head' if hafted else 'blade'} on the {'+' if blade_up else '-'} side{' (flipped by --flip)' if args.flip else ''}")
-    if not blade_up:
-        axis = -axis
-        t = -t
-        if not named:
-            g_lo, g_hi = -g_hi, -g_lo
-
-    # Where the handle's top end is (the frame's origin) and how long the guard is.
-    if named and hafted:
-        origin_t = float(t[vertex_part == "Head"].min())  # where the head starts on the haft
-        guard_len = 0.0
-        print(f"head on a haft (no guard): head starts {origin_t:.1f} cm along the axis")
-    elif named:
-        if (vertex_part == "Grip").any():
-            top_of_grip = float(t[vertex_part == "Grip"].max())
-        else:
-            top_of_grip = float(t[vertex_part == "Guard"].min())
-        guard_t = t[vertex_part == "Guard"] if (vertex_part == "Guard").any() else np.array([top_of_grip])
-        origin_t = top_of_grip
-        guard_len = max(0.0, float(t[vertex_part == "Head"].min()) - origin_t)
-        if (vertex_part == "Guard").any():
-            guard_len = max(guard_len, float(guard_t.max()) - origin_t)
-    else:
-        origin_t = g_lo
-        guard_len = g_hi - g_lo
-
-    # ---- edge direction and the frame -----------------------------------------------------------------
-    in_blade = (vertex_part == "Head") if named else (t > origin_t + guard_len + 1.0)
-    blade = positions[in_blade] - centre
-    across = blade - np.outer(blade @ axis, axis)
-    _, _, vt2 = np.linalg.svd(across - across.mean(axis=0), full_matrices=False)
-    edge = vt2[0] - (vt2[0] @ axis) * axis
-    edge /= np.linalg.norm(edge)
-    thin = np.cross(axis, edge)  # det[edge, thin, axis] = +1, so the triangle winding is kept
-    # The origin sits on the blade's centre line (in case the model is off-centre across the axis).
-    blade_mid = blade.mean(axis=0)
-    blade_mid = blade_mid - (blade_mid @ axis) * axis
-    origin = centre + blade_mid + axis * origin_t
-    basis = np.vstack([edge, thin, axis])
-    frame_pos = (positions - origin) @ basis.T
-    frame_nrm = normals @ basis.T
-    frame_nrm /= np.maximum(np.linalg.norm(frame_nrm, axis=1, keepdims=True), 1e-12)
-    z = frame_pos[:, 2]
-    guard_bottom, guard_top = 0.0, guard_len
-
-    # ---- grip and pommel ------------------------------------------------------------------------------
-    end = float(z.min())
-    if args.handle_bottom_cm is not None:
-        handle_bottom = -abs(args.handle_bottom_cm)
-        print(f"handle bottom {handle_bottom:.1f} cm (given)")
-    elif named and (vertex_part == "Grip").any():
-        handle_bottom = float(z[vertex_part == "Grip"].min())
-        print(f"handle bottom {handle_bottom:.1f} cm (bottom of the grip mesh), pommel end {end:.1f} cm")
-    else:
-        span = -end
-        prof = wp.section_widths(frame_pos, tris, end + 0.25, guard_bottom - 0.25, 0.25)
-        mid = [w for s, w in prof if end + 0.4 * span <= s <= end + 0.8 * span and w > 0]
-        grip_w = float(np.median(mid)) if mid else 0.0
-        # The pommel: the widest section in the handle's last quarter, if clearly wider than the
-        # grip. It starts at the narrowest section (the waist) between that and the handle's middle.
-        tail = [(s, w) for s, w in prof if s <= end + 0.25 * span]
-        handle_bottom = end
-        if tail and grip_w > 0:
-            s_max, w_tail = max(tail, key=lambda p: p[1])
-            if w_tail > 1.15 * grip_w:
-                between = [(s, w) for s, w in prof if s_max < s <= end + 0.5 * span and w > 0]
-                if between:
-                    handle_bottom = min(between, key=lambda p: p[1])[0]
-                    # On a handle of even width the narrowest section is anywhere: then the pommel
-                    # starts where the width first comes back down to the grip's, going up from its
-                    # widest point.
-                    for s_, w_ in between:
-                        if w_ <= 1.05 * grip_w:
-                            handle_bottom = s_
-                            break
-        print(f"grip width {grip_w:.1f} cm; handle bottom {handle_bottom:.1f} cm, pommel end {end:.1f} cm"
-              + ("" if handle_bottom > end else " (no wider pommel found: whole handle is grip)"))
-        if args.type == "double" and grip_w > 0:
-            # The second head or blade at the bottom end: from the widest section in the lower half of the
-            # handle, up to where the width is back to the haft's (as the top head is found).
-            low = [(s, w) for s, w in prof if s <= end + 0.5 * span and w > 0]
-            if low:
-                s_peak, _ = max(low, key=lambda p: p[1])
-                handle_bottom = s_peak
-                for s_, w_ in prof:
-                    if s_ > s_peak and 0 < w_ <= 1.3 * grip_w:
-                        handle_bottom = s_
-                        break
-            print(f"double-ended: the lower head or blade is {end:.1f}..{handle_bottom:.1f} cm")
-
-    # ---- part boundaries chosen by hand ----------------------------------------------------------------
-    if args.splits:
-        a, b, c = sorted(float(v) for v in args.splits.split(","))
-        span = guard_bottom - end + (float(z.max()) - guard_bottom)
-        a, b, c = (min(max(v, 0.0), span) for v in (a, b, c))
-        hb, gb, gt = end + a, end + b, end + c
-        frame_pos[:, 2] -= gb  # the frame's origin is the guard's start (the top of the grip)
-        z = frame_pos[:, 2]
-        end, handle_bottom, guard_bottom, guard_top = end - gb, hb - gb, 0.0, gt - gb
-        named = False  # the parts now come from the boundaries, not the mesh names
-        print(f"part boundaries chosen by hand: pommel {handle_bottom - end:.1f} cm, grip {-handle_bottom:.1f} cm, "
-              f"guard {guard_top:.1f} cm, blade {float(z.max()) - guard_top:.1f} cm")
-
-    # ---- part lengths chosen by hand: each part stretched along the weapon on its own --------------------
+    shield = args.type == "shield"
     lens_before = None
-    if args.part_lengths:
-        want = [float(v) if v.strip() else 0.0 for v in args.part_lengths.split(",")] + [0.0] * 4
-        top_ = float(z.max())
-        old = [(end, handle_bottom), (handle_bottom, guard_bottom), (guard_bottom, guard_top), (guard_top, top_)]
-        lens = [hi - lo for lo, hi in old]
-        new_lens = [w if w > 0 and l > 0.05 else l for w, l in zip(want[:4], lens)]
-        # The guard's start stays at 0: the grip and pommel grow downward, the guard and blade upward.
-        nb = [-(new_lens[0] + new_lens[1]), -new_lens[1], 0.0, new_lens[2], new_lens[2] + new_lens[3]]
-        zz = z.copy()
-        nz = frame_nrm[:, 2].copy()
-        for i, (lo, hi) in enumerate(old):
-            sel = (zz >= lo - 1e-6) & (zz <= hi + 1e-6) if i == 0 else (zz > lo) & (zz <= hi + 1e-6)
-            if i == 3:
-                sel = zz > lo
-            k = new_lens[i] / lens[i] if lens[i] > 0.05 else 1.0
-            frame_pos[sel, 2] = nb[i] + (zz[sel] - lo) * k
-            nz[sel] = frame_nrm[sel, 2] / k  # a stretch along z tilts the normals toward the sides
-        frame_nrm[:, 2] = nz
+    if shield:
+        # ---- a shield: z = its height (longest), x = its width, y = its thickness; origin at the middle
+        # of its outline; +y = the front (the side it bulges towards: a curved shield's rim lies behind
+        # its middle; flat ones go by the boss). --flip turns it round.
+        sx, sz = side_a, axis
+        sy = np.cross(sz, sx)  # det[x, y, z] = +1 keeps the triangle winding
+        basis = np.vstack([sx, sy, sz])
+        fp = (positions - centre) @ basis.T
+        mid = 0.5 * (fp.min(axis=0) + fp.max(axis=0))
+        fp -= mid
+        half = np.maximum(0.5 * np.ptp(fp, axis=0), 1e-6)
+        rad = np.sqrt((fp[:, 0] / half[0]) ** 2 + (fp[:, 2] / half[2]) ** 2)
+        inner, rim = fp[rad < 0.3, 1], fp[rad > 0.8, 1]
+        front = 1.0
+        if len(inner) and len(rim):
+            curve = float(inner.mean() - rim.mean())  # > 0: the middle stands out on +y
+            if abs(curve) > 0.05 * half[1]:
+                front = 1.0 if curve > 0 else -1.0
+            else:
+                front = 1.0 if (inner.max() - rim.max()) >= (-inner.min() + rim.min()) else -1.0
+        if args.flip:
+            front = -front
+        if front < 0:  # turn it round the height axis: x and y change sign, the winding stays
+            basis = np.vstack([-sx, -sy, sz])
+            fp = (positions - centre) @ basis.T
+            fp -= 0.5 * (fp.min(axis=0) + fp.max(axis=0))
+        frame_pos = fp
+        frame_nrm = normals @ basis.T
         frame_nrm /= np.maximum(np.linalg.norm(frame_nrm, axis=1, keepdims=True), 1e-12)
         z = frame_pos[:, 2]
-        end, handle_bottom, guard_bottom, guard_top = nb[0], nb[1], 0.0, nb[3]
-        lens_before = [round(l, 3) for l in lens]
-        names_ = ("pommel", "grip", "guard", "blade")
-        print("part lengths: " + ", ".join(f"{n} {l:.1f} -> {nl:.1f} cm" for n, l, nl in zip(names_, lens, new_lens)))
+        named, hafted, vertex_part = False, False, None
+        end = float(z.min())
+        handle_bottom = guard_bottom = guard_top = end  # the whole shield is one part ("Head")
+        w_, t_, h_ = np.ptp(frame_pos, axis=0)
+        print(f"shield: {w_:.1f} cm wide, {h_:.1f} cm high, {t_:.1f} cm thick; front on the "
+              f"{'+' if front > 0 else '-'} side{' (turned round by --flip)' if args.flip else ''}")
+    else:
+        # ---- named parts ----------------------------------------------------------------------------------
+        mesh_part = [part_of(names) for names, _ in meshes]
+        named = "Head" in mesh_part and ("Grip" in mesh_part or ("Guard" in mesh_part and "Pommel" in mesh_part))
+        if named:
+            # Names are only trusted when they make sense: a "blade" mesh that also runs the length of the
+            # handle (a full tang modelled as one piece with the blade) does not mark where the blade starts.
+            head_t = t[np.isin(mesh_of_vertex, [k for k, p in enumerate(mesh_part) if p == "Head"])]
+            hilt_t = t[np.isin(mesh_of_vertex, [k for k, p in enumerate(mesh_part) if p in ("Grip", "Pommel")])]
+            if len(hilt_t):
+                ov = min(head_t.max(), hilt_t.max()) - max(head_t.min(), hilt_t.min())
+                if ov > 0.3 * max(float(np.ptp(hilt_t)), 1e-9):
+                    print("part names ignored: the blade mesh runs through the handle (full tang?); finding parts from the shape")
+                    named = False
+        hafted = False
+        vertex_part = np.array([mesh_part[k] or "" for k in mesh_of_vertex]) if named else None
+        if named:
+            print("parts by mesh name: " + ", ".join(f"{names[0]} -> {p or '?'}" for (names, _), p in zip(meshes, mesh_part)))
+            blade_t = t[vertex_part == "Head"]
+            hilt = vertex_part != "Head"
+            blade_up = blade_t.mean() > t[hilt].mean() if hilt.any() else True
+            hafted = args.type in ("hafted", "double") or (args.type is None and "Guard" not in mesh_part)
+        else:
+            # ---- the guard from the shape --------------------------------------------------------------
+            # Widths of cross-sections (where the mesh's edges cross each plane), so models whose vertices
+            # are far apart (a plain cylinder has them only at its ends) still measure right.
+            step = max(0.25, float(np.ptp(t)) / 400.0)
+            tmp = np.column_stack([(positions - centre) @ side_a, (positions - centre) @ side_b, t])
+            # (centre of each cross-section, its width); bounds below are put at the last narrow section
+            # either side, so a cut plane never lands inside the guard or head.
+            widths = wp.section_widths(tmp, tris, t.min() + step / 2, t.max(), step, both=True)
+            w_max = max(w for _, w in widths)
+            peak = max(range(len(widths)), key=lambda i: widths[i][1])
+            i0 = i1 = peak  # the run of sections around the widest one above 60 % of its width
+            # Then on through the guard's taper: while the width still falls steeply (a blade or grip
+            # narrows far more slowly than 2 % of the guard's width per section).
+            def wider(a, b):
+                return widths[a][1] > 0.6 * w_max or widths[a][1] < widths[b][1] - 0.02 * w_max
+            while i0 > 0 and wider(i0 - 1, i0):
+                i0 -= 1
+            while i1 < len(widths) - 1 and wider(i1 + 1, i1):
+                i1 += 1
+            g_lo, g_hi = widths[i0][0] - step, widths[i1][0] + step
+            blade_up = (t.max() - g_hi) > (g_lo - t.min())
+            # The widest part right at one end means a head on a haft, not a guard.
+            at = (widths[peak][0] - t.min()) / max(float(np.ptp(t)), 1e-9)
+            # So does a wide part much longer than a guard (an axe's head reaches over a fifth of the length).
+            long_run = (g_hi - g_lo) > 0.2 * float(np.ptp(t))
+            # A long wide part on a model whose meshes or materials say "blade" is a guardless blade
+            # (machete, long knife), not an axe head.
+            says_blade = any(re.search(r"blade|sword|knife|machete|sabre|saber|katana|dagger", " ".join(n), re.I)
+                             for n, _ in meshes)
+            end_peak = at < 0.15 or at > 0.85
+            hafted = args.type in ("hafted", "double") or (args.type is None and (end_peak or long_run) and not (says_blade and long_run))
+            guardless = not hafted and long_run  # a sword chosen by the user, but no short wide guard in it
+            if hafted or guardless:
+                blade_up = at > 0.5
+                middle = [w for s_, w in widths if w > 0 and 0.3 <= (s_ - t.min()) / np.ptp(t) <= 0.7]
+                haft_w = float(np.median(middle)) if middle else 0.0
+                # Walk from the widest slice towards the haft; the head stops where the width is back to
+                # (nearly) the haft's. (Starting at the widest slice, not the model's end, because the haft
+                # often pokes out past the head, as on an axe.)
+                idx = range(peak, -1, -1) if blade_up else range(peak, len(widths))
+                head_start = widths[idx[-1]][0]
+                for i in idx:
+                    s_, w = widths[i]
+                    if w > 0 and w <= 1.3 * haft_w:
+                        head_start = s_
+                        break
+                if guardless:
+                    # No guard to go by: a blade is much thinner than its handle (scales, wrap), so the
+                    # thickness profile splits them. The split with the biggest step between the two
+                    # sides' median thickness is where the blade starts; the thinner side is the blade.
+                    thk = np.column_stack([(positions - centre) @ side_b, (positions - centre) @ side_a, t])
+                    th = np.array([w for _, w in wp.section_widths(thk, tris, t.min() + step / 2, t.max(), step)])
+                    cs = np.array([c for c, _ in widths])
+                    n_s = len(th)
+                    best, k_best = -1.0, None
+                    for k in range(max(1, n_s // 10), n_s - max(1, n_s // 10)):
+                        a_, b_ = np.median(th[:k]), np.median(th[k:])
+                        if abs(a_ - b_) > best:
+                            best, k_best = abs(a_ - b_), k
+                    if k_best is not None:
+                        blade_up = np.median(th[k_best:]) < np.median(th[:k_best])
+                        # Exact place: from the blade side, the first section thicker than halfway between
+                        # the two medians.
+                        t_blade = np.median(th[k_best:] if blade_up else th[:k_best])
+                        t_handle = np.median(th[:k_best] if blade_up else th[k_best:])
+                        half = 0.5 * (t_blade + t_handle)
+                        order = range(n_s - 1, -1, -1) if blade_up else range(n_s)
+                        k_edge = k_best
+                        for i in order:
+                            if th[i] > half:
+                                k_edge = i
+                                break
+                        head_start = float(cs[k_edge] + (step / 2 if blade_up else -step / 2))
+                        print(f"thickness: {'-' if blade_up else '+'} side {np.median(th[:k_best] if blade_up else th[k_best:]):.2f} cm "
+                              f"(handle), {'+' if blade_up else '-'} side {np.median(th[k_best:] if blade_up else th[:k_best]):.2f} cm (blade)")
+                g_lo = g_hi = head_start
+                if guardless:
+                    print(f"no guard found: the blade starts where the width changes, {head_start:.1f} cm along the axis "
+                          f"(handle {haft_w:.1f} cm wide)")
+                else:
+                    print(f"head on a haft: widest {w_max:.1f} cm at the {'+' if blade_up else '-'} end, haft {haft_w:.1f} cm wide, "
+                          f"head starts {head_start:.1f} cm along the axis")
+            else:
+                print(f"guard found {g_lo:.1f}..{g_hi:.1f} cm along the axis (widest {w_max:.1f} cm)")
+        if args.flip:
+            blade_up = not blade_up
+        print(f"{'head' if hafted else 'blade'} on the {'+' if blade_up else '-'} side{' (flipped by --flip)' if args.flip else ''}")
+        if not blade_up:
+            axis = -axis
+            t = -t
+            if not named:
+                g_lo, g_hi = -g_hi, -g_lo
+
+        # Where the handle's top end is (the frame's origin) and how long the guard is.
+        if named and hafted:
+            origin_t = float(t[vertex_part == "Head"].min())  # where the head starts on the haft
+            guard_len = 0.0
+            print(f"head on a haft (no guard): head starts {origin_t:.1f} cm along the axis")
+        elif named:
+            if (vertex_part == "Grip").any():
+                top_of_grip = float(t[vertex_part == "Grip"].max())
+            else:
+                top_of_grip = float(t[vertex_part == "Guard"].min())
+            guard_t = t[vertex_part == "Guard"] if (vertex_part == "Guard").any() else np.array([top_of_grip])
+            origin_t = top_of_grip
+            guard_len = max(0.0, float(t[vertex_part == "Head"].min()) - origin_t)
+            if (vertex_part == "Guard").any():
+                guard_len = max(guard_len, float(guard_t.max()) - origin_t)
+        else:
+            origin_t = g_lo
+            guard_len = g_hi - g_lo
+
+        # ---- edge direction and the frame -----------------------------------------------------------------
+        in_blade = (vertex_part == "Head") if named else (t > origin_t + guard_len + 1.0)
+        blade = positions[in_blade] - centre
+        across = blade - np.outer(blade @ axis, axis)
+        _, _, vt2 = np.linalg.svd(across - across.mean(axis=0), full_matrices=False)
+        edge = vt2[0] - (vt2[0] @ axis) * axis
+        edge /= np.linalg.norm(edge)
+        thin = np.cross(axis, edge)  # det[edge, thin, axis] = +1, so the triangle winding is kept
+        # The origin sits on the blade's centre line (in case the model is off-centre across the axis).
+        blade_mid = blade.mean(axis=0)
+        blade_mid = blade_mid - (blade_mid @ axis) * axis
+        origin = centre + blade_mid + axis * origin_t
+        basis = np.vstack([edge, thin, axis])
+        frame_pos = (positions - origin) @ basis.T
+        frame_nrm = normals @ basis.T
+        frame_nrm /= np.maximum(np.linalg.norm(frame_nrm, axis=1, keepdims=True), 1e-12)
+        z = frame_pos[:, 2]
+        guard_bottom, guard_top = 0.0, guard_len
+
+        # ---- grip and pommel ------------------------------------------------------------------------------
+        end = float(z.min())
+        if args.handle_bottom_cm is not None:
+            handle_bottom = -abs(args.handle_bottom_cm)
+            print(f"handle bottom {handle_bottom:.1f} cm (given)")
+        elif named and (vertex_part == "Grip").any():
+            handle_bottom = float(z[vertex_part == "Grip"].min())
+            print(f"handle bottom {handle_bottom:.1f} cm (bottom of the grip mesh), pommel end {end:.1f} cm")
+        else:
+            span = -end
+            prof = wp.section_widths(frame_pos, tris, end + 0.25, guard_bottom - 0.25, 0.25)
+            mid = [w for s, w in prof if end + 0.4 * span <= s <= end + 0.8 * span and w > 0]
+            grip_w = float(np.median(mid)) if mid else 0.0
+            # The pommel: the widest section in the handle's last quarter, if clearly wider than the
+            # grip. It starts at the narrowest section (the waist) between that and the handle's middle.
+            tail = [(s, w) for s, w in prof if s <= end + 0.25 * span]
+            handle_bottom = end
+            if tail and grip_w > 0:
+                s_max, w_tail = max(tail, key=lambda p: p[1])
+                if w_tail > 1.15 * grip_w:
+                    between = [(s, w) for s, w in prof if s_max < s <= end + 0.5 * span and w > 0]
+                    if between:
+                        handle_bottom = min(between, key=lambda p: p[1])[0]
+                        # On a handle of even width the narrowest section is anywhere: then the pommel
+                        # starts where the width first comes back down to the grip's, going up from its
+                        # widest point.
+                        for s_, w_ in between:
+                            if w_ <= 1.05 * grip_w:
+                                handle_bottom = s_
+                                break
+            print(f"grip width {grip_w:.1f} cm; handle bottom {handle_bottom:.1f} cm, pommel end {end:.1f} cm"
+                  + ("" if handle_bottom > end else " (no wider pommel found: whole handle is grip)"))
+            if args.type == "double" and grip_w > 0:
+                # The second head or blade at the bottom end: from the widest section in the lower half of the
+                # handle, up to where the width is back to the haft's (as the top head is found).
+                low = [(s, w) for s, w in prof if s <= end + 0.5 * span and w > 0]
+                if low:
+                    s_peak, _ = max(low, key=lambda p: p[1])
+                    handle_bottom = s_peak
+                    for s_, w_ in prof:
+                        if s_ > s_peak and 0 < w_ <= 1.3 * grip_w:
+                            handle_bottom = s_
+                            break
+                print(f"double-ended: the lower head or blade is {end:.1f}..{handle_bottom:.1f} cm")
+
+        # ---- part boundaries chosen by hand ----------------------------------------------------------------
+        if args.splits:
+            a, b, c = sorted(float(v) for v in args.splits.split(","))
+            span = guard_bottom - end + (float(z.max()) - guard_bottom)
+            a, b, c = (min(max(v, 0.0), span) for v in (a, b, c))
+            hb, gb, gt = end + a, end + b, end + c
+            frame_pos[:, 2] -= gb  # the frame's origin is the guard's start (the top of the grip)
+            z = frame_pos[:, 2]
+            end, handle_bottom, guard_bottom, guard_top = end - gb, hb - gb, 0.0, gt - gb
+            named = False  # the parts now come from the boundaries, not the mesh names
+            print(f"part boundaries chosen by hand: pommel {handle_bottom - end:.1f} cm, grip {-handle_bottom:.1f} cm, "
+                  f"guard {guard_top:.1f} cm, blade {float(z.max()) - guard_top:.1f} cm")
+
+        # ---- part lengths chosen by hand: each part stretched along the weapon on its own --------------------
+        lens_before = None
+        if args.part_lengths:
+            want = [float(v) if v.strip() else 0.0 for v in args.part_lengths.split(",")] + [0.0] * 4
+            top_ = float(z.max())
+            old = [(end, handle_bottom), (handle_bottom, guard_bottom), (guard_bottom, guard_top), (guard_top, top_)]
+            lens = [hi - lo for lo, hi in old]
+            new_lens = [w if w > 0 and l > 0.05 else l for w, l in zip(want[:4], lens)]
+            # The guard's start stays at 0: the grip and pommel grow downward, the guard and blade upward.
+            nb = [-(new_lens[0] + new_lens[1]), -new_lens[1], 0.0, new_lens[2], new_lens[2] + new_lens[3]]
+            zz = z.copy()
+            nz = frame_nrm[:, 2].copy()
+            for i, (lo, hi) in enumerate(old):
+                sel = (zz >= lo - 1e-6) & (zz <= hi + 1e-6) if i == 0 else (zz > lo) & (zz <= hi + 1e-6)
+                if i == 3:
+                    sel = zz > lo
+                k = new_lens[i] / lens[i] if lens[i] > 0.05 else 1.0
+                frame_pos[sel, 2] = nb[i] + (zz[sel] - lo) * k
+                nz[sel] = frame_nrm[sel, 2] / k  # a stretch along z tilts the normals toward the sides
+            frame_nrm[:, 2] = nz
+            frame_nrm /= np.maximum(np.linalg.norm(frame_nrm, axis=1, keepdims=True), 1e-12)
+            z = frame_pos[:, 2]
+            end, handle_bottom, guard_bottom, guard_top = nb[0], nb[1], 0.0, nb[3]
+            lens_before = [round(l, 3) for l in lens]
+            names_ = ("pommel", "grip", "guard", "blade")
+            print("part lengths: " + ", ".join(f"{n} {l:.1f} -> {nl:.1f} cm" for n, l, nl in zip(names_, lens, new_lens)))
 
     # ---- collision pieces -----------------------------------------------------------------------------
-    if named:
+    if shield:
+        pieces = wp.build_pieces_grid(frame_pos, tris, 3, 3)
+    elif named:
         # Each part from its own meshes; a mesh with no recognised name goes by where it sits.
         parts = vertex_part.copy()
         unknown = parts == ""
@@ -933,7 +975,7 @@ def main(argv=None):
         # Convex pieces overstate the volume (fullers, tapers, curves). The model's own enclosed volume
         # (signed tetrahedra) scales them down when it is plausible.
         grip_density = HAFT if hafted else GRIP
-        grams = sum(v * (grip_density if s == "Grip" else STEEL) for s, v in volume.items())
+        grams = sum(v * (WOOD if shield else grip_density if s == "Grip" else STEEL) for s, v in volume.items())
         enclosed = 0.0
         for _, g in meshes:
             gm = g.copy()
@@ -943,18 +985,22 @@ def main(argv=None):
         convex = sum(volume.values())
         if 0.2 * convex < enclosed <= convex:
             grams *= enclosed / convex
-            mass_note = f"estimated: model volume {enclosed:.0f} cm3 (convex {convex:.0f}), steel/grip densities"
+            mass_note = f"estimated: model volume {enclosed:.0f} cm3 (convex {convex:.0f}), {'wood' if shield else 'steel/grip'} densities"
         else:
-            mass_note = f"estimated from convex volume {convex:.0f} cm3 (model volume {enclosed:.0f} not usable), steel/grip densities"
+            mass_note = f"estimated from convex volume {convex:.0f} cm3 (model volume {enclosed:.0f} not usable), {'wood' if shield else 'steel/grip'} densities"
         # Models are often far thicker than the real thing (stylised or blocky ones especially), so the
         # volume guess is checked against what real weapons of this type and length weigh: kept within
         # 0.6x..1.6x of that, then met halfway (geometric mean) with it.
         from_volume = grams / 1000.0
         length_cm = float(z.max() - z.min())
-        typical = typical_mass_kg(length_cm, hafted)
+        if shield:  # real shields: about 10.5 kg per square metre of face (buckler 1 kg, heater 3 kg)
+            w_, _, h_ = np.ptp(frame_pos, axis=0)
+            typical = 10.5 * (w_ * h_ * 0.85) / 1e4
+        else:
+            typical = typical_mass_kg(length_cm, hafted)
         kept = min(max(from_volume, 0.6 * typical), 1.6 * typical)
         mass = round(math.sqrt(kept * typical), 3)
-        mass_note += (f"; volume gives {from_volume:.2f} kg, real {'hafted weapons' if hafted else 'swords'} of "
+        mass_note += (f"; volume gives {from_volume:.2f} kg, real {'shields' if shield else 'hafted weapons' if hafted else 'swords'} of "
                       f"{length_cm:.0f} cm weigh about {typical:.2f} kg"
                       + (" (volume guess far off: the model is thicker or thinner than a real one)"
                          if kept != from_volume else ""))
@@ -964,9 +1010,12 @@ def main(argv=None):
     numbers = {"mass_kg": float(mass), "pommel_end": round(end, 2), "handle_bottom": round(float(handle_bottom), 2),
                "handle_top": 0.0, "guard_bottom": round(float(guard_bottom), 2), "guard_top": round(float(guard_top), 2),
                "tip": round(top, 2), "hafted": 1 if hafted else 0, "double": 1 if args.type == "double" else 0,
-               "hand_slide": 1 if args.hand_slide else 0}
+               "hand_slide": 1 if args.hand_slide else 0, "shield": 1 if shield else 0}
+    if shield:
+        w_, t_, h_ = np.ptp(frame_pos, axis=0)
+        numbers.update(width=round(float(w_), 2), thickness=round(float(t_), 2), height=round(float(h_), 2))
     # ---- balance and damage points --------------------------------------------------------------------
-    dens = {s: ((HAFT if hafted else GRIP) if s == "Grip" else STEEL) for s in volume}
+    dens = {s: (WOOD if shield else (HAFT if hafted else GRIP) if s == "Grip" else STEEL) for s in volume}
     wsum = sum(hull.volume * dens[s] for s, _, hull in pieces)
     def hull_cz(h):  # centroid height of a convex hull: tetrahedra from an inside point to each face
         P = h.points
@@ -992,7 +1041,8 @@ def main(argv=None):
     ab[flipab] = 1 - ab[flipab]
     tv = tri_v[pick]
     samples = tv[:, 0] + ab[:, :1] * (tv[:, 1] - tv[:, 0]) + ab[:, 1:] * (tv[:, 2] - tv[:, 0])
-    dpts, dinfo = dp.compute(np.vstack([frame_pos, samples]), numbers, hafted, over)
+    dpts, dinfo = (dp.shield_points(np.vstack([frame_pos, samples]), numbers, over) if shield else
+                   dp.compute(np.vstack([frame_pos, samples]), numbers, hafted, over))
     dp.write(os.path.join(args.out, name + "_points.txt"), dpts)
     print(f"balance {numbers['balance']:.1f} cm above the grip (model {com:.1f}); damage points: {len(dpts)} "
           f"({', '.join(f'{k} {v}' for k, v in dinfo.items())})")
@@ -1000,9 +1050,11 @@ def main(argv=None):
     json.dump({"source": os.path.basename(args.model), "scale": scale_note, "mass_kg": mass, "mass_note": mass_note,
                "zones_cm": numbers, "volumes_cm3": {s: round(v, 1) for s, v in volume.items()},
                "parts_by_name": named, "lengths_before_stretch_cm": lens_before,
-               "type": "hafted" if hafted else "sword", "damage": dinfo, "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
+               "type": "shield" if shield else "hafted" if hafted else "sword", "damage": dinfo, "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
               open(os.path.join(args.out, name + ".json"), "w"), indent=2)
-    if hafted:
+    if shield:
+        print(f"shield {numbers['width']:.1f} x {numbers['height']:.1f} cm; {len(pieces)} collision pieces")
+    elif hafted:
         print(f"length {top - end:.1f} cm: butt end {end:.1f}, haft {handle_bottom:.1f}..0, head 0..{top:.1f} cm; "
               f"{len(pieces)} collision pieces")
     else:
