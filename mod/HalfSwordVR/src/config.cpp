@@ -675,12 +675,18 @@ namespace hsvr
         num("pose_finger_scale_mcp", c.pose_finger_scale_mcp);
         num("pose_finger_scale_pip", c.pose_finger_scale_pip);
         num("pose_finger_scale_dip", c.pose_finger_scale_dip);
+        flag("pose_finger_pivot_fix", c.pose_finger_pivot_fix);
         num("pose_finger_mcp_lag", c.pose_finger_mcp_lag);
         num("pose_finger_pip_full", c.pose_finger_pip_full);
         flag("pose_wrap", c.pose_wrap);
         num("pose_wrap_ease_s", c.pose_wrap_ease_s);
         num("pose_wrap_refresh_s", c.pose_wrap_refresh_s);
         num("pose_wrap_finger_radius_cm", c.pose_wrap_finger_radius_cm);
+        flag("pose_wrap_body_pad", c.pose_wrap_body_pad);
+        flag("pose_wrap_all_bodies", c.pose_wrap_all_bodies);
+        num("pose_wrap_untouched_curl", c.pose_wrap_untouched_curl);
+        num("pose_wrap_gauntlet_pad_cm", c.pose_wrap_gauntlet_pad_cm);
+        num("pose_wrap_halfgauntlet_pad_cm", c.pose_wrap_halfgauntlet_pad_cm);
         flag("pose_wrap_open_base", c.pose_wrap_open_base);
         flag("pose_grab_seat_palm", c.pose_grab_seat_palm);
         num("pose_grab_palm_cm", c.pose_grab_palm_cm);
