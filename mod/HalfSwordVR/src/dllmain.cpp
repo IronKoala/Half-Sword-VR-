@@ -10136,6 +10136,142 @@ namespace
     {
         hsvr::Vec3 p, n;
     };
+    // A held mesh's convex collision (BodySetup.AggGeom.ConvexElems), in the component's own frame
+    // (unscaled mesh units). The engine's distance to a convex (Chaos FConvex::PhiWithNormal) only
+    // measures against the face whose plane is farthest from the point, so beside an edge it says
+    // 5-7 cm where the true distance is under 1 (rock replay, 9592808): fingers that touched were
+    // told they didn't and closed to a fist. Measured exactly here instead.
+    struct ConvexTri
+    {
+        hsvr::Vec3 a, b, c, n; // n: outward
+    };
+    struct ConvexShape
+    {
+        std::vector<ConvexTri> tris;
+    };
+    double read_num(const uint8_t* at, FProperty* p)
+    {
+        if (!p) return 0.0;
+        if (p->GetClass().GetName() == STR("DoubleProperty")) return *reinterpret_cast<const double*>(at + p->GetOffset_Internal());
+        return *reinterpret_cast<const float*>(at + p->GetOffset_Internal());
+    }
+    hsvr::Vec3 read_vec_struct(const uint8_t* at, UScriptStruct* type)
+    {
+        return {read_num(at, struct_member(type, STR("X"))), read_num(at, struct_member(type, STR("Y"))), read_num(at, struct_member(type, STR("Z")))};
+    }
+    // Reads the convex hulls of a static mesh component's mesh. False when it has none.
+    bool load_convex(UObject* comp, std::vector<ConvexShape>& out)
+    {
+        using namespace hsvr;
+        out.clear();
+        if (!comp || !is_a(comp, STR("StaticMeshComponent"))) return false;
+        UObject* sm = object_property(comp, STR("StaticMesh"));
+        UObject* bs = sm ? object_property(sm, STR("BodySetup")) : nullptr;
+        FProperty* agg = bs ? prop_chain(bs, STR("AggGeom")) : nullptr;
+        UScriptStruct* agg_t = struct_type(agg);
+        FProperty* ce = struct_member(agg_t, STR("ConvexElems"));
+        if (!ce || ce->GetClass().GetName() != STR("ArrayProperty")) return false;
+        const uint8_t* agg_at = reinterpret_cast<const uint8_t*>(bs) + agg->GetOffset_Internal();
+        const RawArray* elems = reinterpret_cast<const RawArray*>(agg_at + ce->GetOffset_Internal());
+        FProperty* inner = static_cast<FArrayProperty*>(ce)->GetInner();
+        UScriptStruct* elem_t = struct_type(inner);
+        if (!elem_t || elems->Num <= 0 || elems->Num > 64) return false;
+        int32_t esize = inner->GetSize();
+        FProperty* vd = struct_member(elem_t, STR("VertexData"));
+        FProperty* id = struct_member(elem_t, STR("IndexData"));
+        FProperty* tr = struct_member(elem_t, STR("Transform"));
+        if (!vd || !id) return false;
+        FProperty* vinner = static_cast<FArrayProperty*>(vd)->GetInner();
+        UScriptStruct* vec_t = struct_type(vinner);
+        int32_t vsize = vinner->GetSize();
+        // The element's own transform (usually identity).
+        UScriptStruct* tr_t = struct_type(tr);
+        FProperty* tr_t_p = struct_member(tr_t, STR("Translation"));
+        FProperty* tr_r_p = struct_member(tr_t, STR("Rotation"));
+        for (int32_t e = 0; e < elems->Num; ++e)
+        {
+            const uint8_t* el = reinterpret_cast<const uint8_t*>(elems->Data) + (size_t)e * esize;
+            const RawArray* verts = reinterpret_cast<const RawArray*>(el + vd->GetOffset_Internal());
+            const RawArray* idx = reinterpret_cast<const RawArray*>(el + id->GetOffset_Internal());
+            if (verts->Num < 4 || idx->Num < 12 || verts->Num > 4096 || idx->Num > 3 * 8192) continue;
+            Vec3 et{0, 0, 0};
+            Quat eq{0, 0, 0, 1};
+            if (tr && tr_t_p && tr_r_p)
+            {
+                const uint8_t* ta = el + tr->GetOffset_Internal();
+                et = read_vec_struct(ta + tr_t_p->GetOffset_Internal(), struct_type(tr_t_p));
+                const uint8_t* ra = ta + tr_r_p->GetOffset_Internal();
+                UScriptStruct* q_t = struct_type(tr_r_p);
+                eq = Quat{read_num(ra, struct_member(q_t, STR("X"))), read_num(ra, struct_member(q_t, STR("Y"))), read_num(ra, struct_member(q_t, STR("Z"))),
+                          read_num(ra, struct_member(q_t, STR("W")))};
+                if (length(Vec3{eq.x, eq.y, eq.z}) < 1e-9 && std::fabs(eq.w) < 1e-9) eq = Quat{0, 0, 0, 1};
+                eq = eq.normalized();
+            }
+            std::vector<Vec3> v((size_t)verts->Num);
+            Vec3 mid{0, 0, 0};
+            for (int32_t i = 0; i < verts->Num; ++i)
+            {
+                v[i] = et + eq.rotate(read_vec_struct(reinterpret_cast<const uint8_t*>(verts->Data) + (size_t)i * vsize, vec_t));
+                mid = mid + v[i];
+            }
+            mid = mid * (1.0 / verts->Num);
+            const int32_t* ix = reinterpret_cast<const int32_t*>(idx->Data);
+            ConvexShape shape;
+            for (int32_t t = 0; t + 2 < idx->Num; t += 3)
+            {
+                int32_t i0 = ix[t], i1 = ix[t + 1], i2 = ix[t + 2];
+                if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= verts->Num || i1 >= verts->Num || i2 >= verts->Num) continue;
+                ConvexTri ct{v[i0], v[i1], v[i2], cross(v[i1] - v[i0], v[i2] - v[i0])};
+                double nl = length(ct.n);
+                if (nl < 1e-9) continue;
+                ct.n = ct.n * (1.0 / nl);
+                if (dot(ct.n, ct.a - mid) < 0.0) ct.n = ct.n * -1.0; // outward, whatever the winding
+                shape.tris.push_back(ct);
+            }
+            if (shape.tris.size() >= 4) out.push_back(std::move(shape));
+        }
+        return !out.empty();
+    }
+    // Closest point on triangle abc to p (Ericson, Real-Time Collision Detection 5.1.5).
+    hsvr::Vec3 closest_on_tri(const hsvr::Vec3& p, const hsvr::Vec3& a, const hsvr::Vec3& b, const hsvr::Vec3& c)
+    {
+        using namespace hsvr;
+        Vec3 ab = b - a, ac = c - a, ap = p - a;
+        double d1 = dot(ab, ap), d2 = dot(ac, ap);
+        if (d1 <= 0 && d2 <= 0) return a;
+        Vec3 bp = p - b;
+        double d3 = dot(ab, bp), d4 = dot(ac, bp);
+        if (d3 >= 0 && d4 <= d3) return b;
+        double vc = d1 * d4 - d3 * d2;
+        if (vc <= 0 && d1 >= 0 && d3 <= 0) return a + ab * (d1 / (d1 - d3));
+        Vec3 cp = p - c;
+        double d5 = dot(ab, cp), d6 = dot(ac, cp);
+        if (d6 >= 0 && d5 <= d6) return c;
+        double vb = d5 * d2 - d1 * d6;
+        if (vb <= 0 && d2 >= 0 && d6 <= 0) return a + ac * (d2 / (d2 - d6));
+        double va = d3 * d6 - d5 * d4;
+        if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+        double den = 1.0 / (va + vb + vc);
+        return a + ab * (vb * den) + ac * (vc * den);
+    }
+    // Distance from p (component frame, mesh units) to the nearest hull; 0 inside one.
+    double convex_distance(const std::vector<ConvexShape>& shapes, const hsvr::Vec3& p)
+    {
+        double best = 1e18;
+        for (const ConvexShape& s : shapes)
+        {
+            bool inside = true;
+            for (const ConvexTri& t : s.tris)
+                if (hsvr::dot(p - t.a, t.n) > 0.0) { inside = false; break; }
+            if (inside) return 0.0;
+            for (const ConvexTri& t : s.tris)
+            {
+                hsvr::Vec3 d = p - closest_on_tri(p, t.a, t.b, t.c);
+                best = (std::min)(best, hsvr::dot(d, d));
+            }
+        }
+        return std::sqrt(best);
+    }
     struct WrapGrab
     {
         bool on = false;
@@ -10167,6 +10303,7 @@ namespace
         hsvr::Vec3 spot_local, palm_local;  // the held spot (thing's frame) and the palm (hand frame)
         hsvr::Vec3 hand_v;                  // the drawn hand's velocity (cm/s), for letting go
         std::vector<SurfacePoint> cloud;    // scenery with triangles only: its surface round the spot
+        std::vector<ConvexShape> convex;    // a static mesh's convex hulls (measured exactly)
         bool resolved_seated = false;       // the fingers solved again once the hand sat on it
         double rigidity = 0.4;              // Hands Rigidity (Gauntlets): 0.4 bare, 0.7 half gauntlets, 0.75+ gloves/gauntlets
         double pad = 0.0;                   // cm the thing's skin stands outside its collision
@@ -10176,6 +10313,7 @@ namespace
     bool g_wrap_on_side(int side) { return g_wrap[side].on; }
     const double kWrapSamples[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
     const double kWrapCrease = 0.5, kWrapSplay = 0.1, kWrapSunk = 0.5;
+    const double kNoTouch = -9.0; // a solved joint that touched nothing: your own curl
     const int kWrapSteps = 10, kWrapHalvings = 4, kWrapLiftSteps = 6;
     const double kFingerTip = 2.5; // cm past the last finger bone (as pose_hand_fingers)
     // Willie's bare fingers (SK_Body_Man LOD0, reference pose), index/middle/ring/pinky, per segment and
@@ -10241,6 +10379,9 @@ namespace
         hsvr::Vec3 cp;
         hsvr::Quat cq;
         double cs = 1.0, radius = 0.9, pad = 0.0;
+        hsvr::Vec3 op;      // the held component's place, turn and scale this solve (for its convex hulls)
+        hsvr::Quat oq;
+        double os = 1.0;
         // Measured finger (index-pinky, not the thumb): the bone line does not run down the finger's
         // middle. From ~60% along the first phalanx it lies on or outside the palm-side skin, the finger
         // sitting toward the back of the hand (SK_Body_Man LOD0 cross-sections in each bone's frame,
@@ -10287,6 +10428,12 @@ namespace
                 if (have > 0 && behind == have) return 0.0;
                 double e = std::sqrt(e4[0]), plane = hsvr::dot(p - near4[0]->p, near4[0]->n);
                 return (plane >= 0.0 ? (std::max)(plane, e - 1.5) : e) / cs;
+            }
+            if (!g->convex.empty())
+            {
+                ++queries;
+                double d = convex_distance(g->convex, oq.inverse().rotate(p - op) * (1.0 / os)) * os;
+                return (std::max)(0.0, d - pad) / cs;
             }
             write_three(query->buffer.data() + q_point->GetOffset_Internal(), q_point, p.x, p.y, p.z);
             *reinterpret_cast<FName*>(query->buffer.data() + q_bone->GetOffset_Internal()) = g->bone;
@@ -10409,13 +10556,10 @@ namespace
                 held = hit + 1;
                 while (held < n && touches(curls, held)) ++held;
             }
-            if (held < n)
-            {
-                double c[3];
-                at(curls, held, 1.0, c);
-                std::memcpy(curls, c, sizeof(curls));
-            }
-            for (int k = 0; k < 3; ++k) out[k] = (std::min)(1.0, curls[k]);
+            // Segments that met nothing over the whole sweep (past the thing's edge) don't close to a
+            // fist in the air: they follow your own finger (kNoTouch; wrap_fingers swaps in your curl).
+            // (9592808 test: ring and pinky fisted beside a rock and a throat.)
+            for (int k = 0; k < 3; ++k) out[k] = k >= held ? kNoTouch : (std::min)(1.0, curls[k]);
         }
     };
 
@@ -10462,6 +10606,12 @@ namespace
                 ws.cp = component_location(g_frig.driver);
                 ws.cq = component_rotation(g_frig.driver);
                 ws.cs = component_scale_z(g_frig.driver);
+                if (!g.convex.empty())
+                {
+                    ws.op = component_location(g.comp);
+                    ws.oq = component_rotation(g.comp);
+                    ws.os = component_scale_z(g.comp);
+                }
                 Vec3 hand = xf_pos(B[g_frig.hand[side]]), mid = xf_pos(B[g_frig.chain[side][2][0]]);
                 // The thumb (unmeasured) and a set pose_wrap_finger_radius_cm: one radius down the bone
                 // line, tapered at the joints (the framework's 9.5% of the hand). The other fingers:
@@ -10516,7 +10666,9 @@ namespace
                         // Scenery: how far each joint and the tip end up from the sampled surface, and
                         // how far the nearest sample is (a finger off the cloud's edge sees no surface).
                         Vec3 seg[3][2];
-                        ws.place(out, seg);
+                        double shown[3];
+                        for (int k = 0; k < 3; ++k) shown[k] = out[k] <= kNoTouch + 0.5 ? 0.0 : out[k]; // (untouched: logged straight)
+                        ws.place(shown, seg);
                         double dj[4], near_tip = 1e9;
                         for (int k = 0; k < 3; ++k) dj[k] = ws.distance(seg[k][0]) * ws.cs;
                         dj[3] = ws.distance(seg[2][1]) * ws.cs;
@@ -10534,7 +10686,7 @@ namespace
             if (f != 0 && own_joint) for (int k = 0; k < 3; ++k) base[k] = own_joint[f][k];
             else if (f != 0 && g_finger_schedule.load()) finger_schedule(own[f], base);
             double ww = g.solved[f] ? w : 0.0;
-            for (int k = 0; k < 3; ++k) joint_out[f][k] = base[k] + (g.curls[f][k] - base[k]) * ww;
+            for (int k = 0; k < 3; ++k) joint_out[f][k] = g.curls[f][k] <= kNoTouch + 0.5 ? base[k] : base[k] + (g.curls[f][k] - base[k]) * ww;
         }
         splay += (kWrapSplay - splay) * w;
         return w;
@@ -10825,6 +10977,12 @@ namespace
                 // Hand armour: the game sets Hands Rigidity (Gauntlets) above its bare 0.4 (0.8 in his
                 // 13:44 playtest with Gauntlets_10 on). Read once per grab.
                 g.rigidity = read_number_variable(pawn, STR("Hands Rigidity (Gauntlets)"));
+                if (load_convex(comp, g.convex) && cfg.log_wrap)
+                {
+                    size_t tris = 0;
+                    for (const ConvexShape& c : g.convex) tris += c.tris.size();
+                    HSVR_LOG("Wrap: %s hand: %ls has %d convex hulls (%d triangles), measured exactly", L ? "left" : "right", comp->GetName().c_str(), (int)g.convex.size(), (int)tris);
+                }
                 if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls (hand rigidity %.2f)", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str(), g.rigidity);
             }
             // (Let go first: a hand that drops its hold before it was seated must not seat a stale thing.)
