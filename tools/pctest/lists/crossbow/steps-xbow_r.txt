@@ -1,0 +1,58 @@
+0.5:hsvr.fake_head_drop 0
+0.6:hsvr.fake_look 0
+1:hsvr.squeeze 0 1
+1:hsvr.squeeze 1 1
+1.5:hsvr.squeeze 0 0
+1.5:hsvr.squeeze 1 0
+2.4:hsvr.expect held_r = 0 right hand empty
+2.4:hsvr.expect held_l = 0 left hand empty
+2.5:hsvr.arm_move 1
+3:hsvr.squeeze 1 1
+3.5:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C
+5:hsvr.weapon_dump 1
+5:hsvr.xbow_report
+5.2:hsvr.xbow_quiver 20
+5.5:hsvr.expect xbow_quiver = 20 quiver filled
+5.5:hsvr.expect held_r = 1 crossbow in hand
+6:hsvr.xbow_hand 0 front
+9.5:hsvr.squeeze 0 1
+10.5:hsvr.expect two_hand = 1 front grip taken by grip
+10.5:hsvr.xbow_report
+10.6:hsvr.trigger 0 1
+10.8:hsvr.trigger 0 0
+11:hsvr.expect xstring = 0 front-hand trigger does not take the string
+11:hsvr.expect two_hand = 1 front-hand trigger keeps the front grip
+11.2:hsvr.trigger 1 1
+11.5:hsvr.trigger 1 0
+12:hsvr.squeeze 0 0
+13:hsvr.expect two_hand = 0 front grip let go
+13.5:hsvr.xbow_hand 0 string
+17:hsvr.squeeze 0 1
+17.5:hsvr.expect xstring = 0 grip at the string does not take it
+18:hsvr.squeeze 0 0
+18.5:hsvr.expect two_hand = 0 grip at the string let go
+19.5:hsvr.trigger 0 1
+20:hsvr.expect xstring = 1 trigger takes the string
+20:hsvr.xbow_hand 0 pull 30
+23.5:hsvr.expect xbow_string = 1 cocked
+23.5:hsvr.xbow_report
+24:hsvr.trigger 0 0
+24.5:hsvr.expect xstring = 0 trigger let go of the string
+25:hsvr.expect xbow_string = 1 stays cocked
+25.5:hsvr.xbow_hand 0 quiver
+29:hsvr.squeeze 0 1
+30:hsvr.expect bolt_l = 1 bolt from quiver
+30:hsvr.expect xbow_quiver = 19 one fewer
+30.5:hsvr.xbow_hand 0 cradle
+34:hsvr.expect xbow_bolt = 1 bolt in the cradle
+34:hsvr.expect bolt_l = 0 bolt left the hand
+34:hsvr.xbow_report
+34.5:hsvr.squeeze 0 0
+34.6:hsvr.xbow_hand 0 off
+35:hsvr.trigger 1 1
+35.5:hsvr.trigger 1 0
+36:hsvr.expect xbow_bolt = 0 shot
+36:hsvr.expect xbow_string = 0 uncocked by the shot
+37.5:hsvr.expect held_r = 1 still holds the crossbow
+37.5:hsvr.xbow_report
+39:quit
