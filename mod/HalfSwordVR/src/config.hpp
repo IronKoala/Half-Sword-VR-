@@ -572,6 +572,9 @@ namespace hsvr
         // 0 = off (grip slides), 1 = hand-and-a-half (bastard sword, Grip_15) only, 2 = every two-handed
         // sword (also longswords and greatswords).
         int pose_grip_two_zones_2h_sword = 1; // Matthew 2026-11-21: bastard swords only
+        // The lower zone sits just above the pommel (Matthew 2026-11-22: "you grab just above the pommel"): the
+        // pommel's top is this far above its origin (measured 4.7 on a Grip_15 pommel, 8 cm long).
+        double pose_grip_pommel_top_cm = 4.7;
         // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
         bool pose_grip_dagger_fixed = true;
         double pose_slide_rate_min = 3.0;

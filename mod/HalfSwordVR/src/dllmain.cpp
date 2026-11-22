@@ -12216,7 +12216,10 @@ namespace
                 // them to one-handed types; 0-9 and 17 stay as they are; grip_type_flow.md section 3).
                 double grip_type = read_number_variable(item, STR("Grip R Hand Default"));
                 bool two_hand_type = grip_type >= 10.0 && grip_type <= 16.0;
-                bool sword = !hafted && wide_hi && weapon_has_guard(item);
+                // A messer/falchion's crossguard is part of its Grip mesh (no Guard part), so it was never seen as
+                // a sword: no fixed grip, no flip, no blade (playtest 2026-11-22 03:45: 16 refused flips).
+                bool messer = grip_cls.rfind(STR("Weapon_Module_Messer"), 0) == 0;
+                bool sword = !hafted && wide_hi && (weapon_has_guard(item) || messer);
                 // Hand-and-a-half = the bastard sword's grip family (Grip_15); the game's grip type is 11 for
                 // every two-hander, so it cannot tell them apart (sword_dagger_grip_zones.md).
                 bool hand_and_half = sword && grip_cls.rfind(STR("Weapon_Sword_Grip_15"), 0) == 0;
@@ -12240,13 +12243,23 @@ namespace
                     // one under the guard (the grip's top, where the game's grip point is) and one above the
                     // pommel (the grip's bottom). A touch on the upper half of the grip takes the upper zone,
                     // on the lower half the lower one.
-                    double mid = 0.5 * (g0 + g1);
+                    // The lower zone is just above the pommel, not on it (playtest 2026-11-22: the grip's bottom
+                    // was walked through the pommel, so all 7 second-hand grabs sat on the pommel at -29.5 cm).
+                    double low = g0;
+                    if (UObject* pom = object_property(item, STR("PommelSk")))
+                    {
+                        double pz = component_rotation(base).inverse().rotate(component_location(pom) - component_location(base)).z;
+                        low = (std::max)(g0, pz + cfg.pose_grip_pommel_top_cm + half);
+                        HSVR_LOG("Handles: %ls: pommel at %.1f cm, lower hand zone at %.1f (grip %.1f..%.1f)", item->GetName().c_str(), pz, low, g0, g1);
+                    }
+                    low = (std::min)(low, g1 - 2.0 * half); // hands side by side at least
+                    double mid = (std::max)(0.5 * (g0 + g1), low);
                     hs.back() = Handle{Vec3{0, 0, mid}, Vec3{0, 0, g1}, "grip", -1, 2};
                     hs.back().fixed = true;
                     hs.back().fixed_t = 1.0;
                     hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, mid}, "grip", -1, 2});
                     hs.back().fixed = true;
-                    hs.back().fixed_t = 0.0;
+                    hs.back().fixed_t = mid - g0 > 1e-3 ? (low - g0) / (mid - g0) : 1.0;
                 }
                 if (dagger)
                 {
@@ -12271,7 +12284,7 @@ namespace
                 {
                     // Only a sword's blade (past a Guard) is a handle (half-swording); an axe's or a tool's head is not.
                     double b0 = hi + half + cfg.pose_two_hand_blade_gap_cm, b1 = top - half;
-                    if (wide_hi && weapon_has_guard(item) && top > 0.0 && b1 > b0 + 2.0) hs.push_back(Handle{Vec3{0, 0, b0}, Vec3{0, 0, b1}, "blade", 5, 5});
+                    if (wide_hi && (weapon_has_guard(item) || messer) && top > 0.0 && b1 > b0 + 2.0) hs.push_back(Handle{Vec3{0, 0, b0}, Vec3{0, 0, b1}, "blade", 5, 5});
                 }
             }
             else

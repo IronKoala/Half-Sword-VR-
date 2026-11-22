@@ -364,6 +364,7 @@ LAYOUT = [
         ("pose_slide_butt_is_haft", ""),
         ("pose_slide_fixed_1h_sword", ""),
         ("pose_grip_two_zones_2h_sword", "Two fixed grip zones (under guard, above pommel): 0 off, 1 bastard swords only, 2 all two-handed swords."),
+        ("pose_grip_pommel_top_cm", ""),
         ("pose_grip_dagger_fixed", ""),
         ("pose_two_hand", ""),
         ("pose_two_hand_blade_gap_cm", ""),

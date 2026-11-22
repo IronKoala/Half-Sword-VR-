@@ -534,6 +534,7 @@ namespace hsvr
         flag("pose_slide_butt_is_haft", c.pose_slide_butt_is_haft);
         flag("pose_slide_fixed_1h_sword", c.pose_slide_fixed_1h_sword);
         integer("pose_grip_two_zones_2h_sword", c.pose_grip_two_zones_2h_sword);
+        num("pose_grip_pommel_top_cm", c.pose_grip_pommel_top_cm);
         flag("pose_grip_dagger_fixed", c.pose_grip_dagger_fixed);
         num("pose_slide_rate_min", c.pose_slide_rate_min);
         num("pose_slide_rate_max", c.pose_slide_rate_max);
