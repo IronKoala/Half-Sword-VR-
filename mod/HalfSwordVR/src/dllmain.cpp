@@ -10124,6 +10124,8 @@ namespace
         hsvr::Vec3 spot_local, palm_local;  // the held spot (thing's frame) and the palm (hand frame)
         hsvr::Vec3 hand_v;                  // the drawn hand's velocity (cm/s), for letting go
         std::vector<SurfacePoint> cloud;    // scenery with triangles only: its surface round the spot
+        bool resolved_seated = false;       // scenery: the fingers solved again once the hand sat on it
+        int resolves_left = 0;              // finger solves still due for that
     };
     WrapGrab g_wrap[2];
     bool g_wrap_on_side(int side) { return g_wrap[side].on; }
@@ -10305,12 +10307,20 @@ namespace
         double ease = g.ease;
         double w = g.on ? wrap_smooth((now - g.since) / ease) : g.w_off * (1.0 - wrap_smooth((now - g.off_at) / ease));
         if (w <= 0.0 || !g_frig.ok) return 0.0;
+        // Scenery doesn't move and the hand is pinned on it: once the pin has eased the hand onto it,
+        // solve every finger once more there and keep those curls. Re-solving all along straightened
+        // them as the hand slid against the rail (b8b5cb1 test: middle 0.31/0.62/1 at seating, 0/0/0
+        // two seconds later with the palm at 0 cm); freezing the first solve kept curls made 7 cm off
+        // the rail, before the hand got there (d9c490e test).
+        if (g.world && g.seated && !g.resolved_seated && now - g.seated_at >= hsvr::config().pose_wrap_ease_s + 0.05)
+        {
+            g.resolved_seated = true;
+            g.resolves_left = 5; // (each finger keeps its curl until its new solve: no flick open)
+            g.next_at = now;
+        }
         bool all_solved = true;
         for (bool b : g.solved) all_solved = all_solved && b;
-        // Scenery doesn't move and the hand is pinned on it: keep the curls found at the grab. Re-solving
-        // straightened them as the hand slid against the rail (b8b5cb1 test: middle 0.31/0.62/1 at
-        // seating, 0/0/0 two seconds later with the palm at 0 cm).
-        bool frozen = g.world && all_solved;
+        bool frozen = g.world && g.resolved_seated && all_solved && g.resolves_left <= 0;
         if (g.on && g.comp && !frozen && now >= g.next_at && g_frig.driver)
         {
             hsvr::Config cfg = hsvr::config();
@@ -10346,7 +10356,9 @@ namespace
                 bool all = true;
                 for (bool b : g.solved) all = all && b;
                 g.next_at = all ? now + cfg.pose_wrap_refresh_s / 5.0 : now;
-                if (cfg.log_wrap && (first || now - g.last_log >= 1.0))
+                bool reseat = g.resolved_seated && g.resolves_left > 0;
+                if (reseat) { --g.resolves_left; g.next_at = now; } // the seated re-solve: one finger a frame
+                if (cfg.log_wrap && (first || reseat || now - g.last_log >= 1.0))
                 {
                     g.last_log = now;
                     // (Where the snapshot's hand is against the drawn hand, and how far its palm is from the thing.)
