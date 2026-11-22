@@ -14237,6 +14237,15 @@ namespace
         HSVR_LOG("Strength: training: Muscle Rate %.4f, Muscle Growth Due %.5f, Mass Scale %.4f | Stamina Burn %.3f (Swing R %.3f, Swing L %.3f, Lower Body %.3f), "
                  "Stamina %.1f, Movement Dislocation %.1f, Muscles Growth Rate %.3f, SMH Energy %.3f -> gain a minute %.6f from effort + %.6f from movement",
                  mr, due, mass, burn, sr, sl, lower, st, md, mgr, smh, from_burn, from_move);
+        // Rest (11-19 listing @309656-312141): Rest Rate eases (FInterpTo 0.1) toward 0.1 x Nutrients Due +
+        // (Asleep ? 10 : tonus/stamina/energy x movement x MRC(Get Up Rate, 0..1 -> 1..0) x temperature) x energy x
+        // pain x dislocations x darkness, capped at MRC(Aim Swing Speed, 0..100 -> MRC(Dodge Rate, 0..0.5 -> 10..0), 0),
+        // 0 while dressing up. The movement factor only drops near |Movement Dislocation| ~ 100 cm x his scale.
+        HSVR_LOG("Strength: rest: Rest Rate %.4f, Rest %.0f, Asleep %.0f, Get Up Rate %.3f, Aim Swing Speed %.1f, Dodge Rate %.3f, Pain %.2f, Temperature %.3f, "
+                 "In Light Meter (Pre Armor) %.3f, Nutrients Due %.3f, Body Liquid %.3f, Dehydration %.5f, Consciousness %.1f, DressUp %.0f",
+                 num(STR("Rest Rate")), num(STR("Rest")), num(STR("Asleep")), num(STR("Get Up Rate")), num(STR("Aim Swing Speed")), num(STR("Dodge Rate")),
+                 num(STR("Pain")), num(STR("Temperature")), num(STR("In Light Meter (Pre Armor)")), num(STR("Nutrients Due")), num(STR("Body Liquid")),
+                 num(STR("Dehydration")), num(STR("Consciousness")), num(STR("DressUp")));
     }
 
     BodyStrength body_strength(UObject* pawn, int side, const hsvr::Config& cfg)
