@@ -61,7 +61,7 @@ namespace
     // answer is kept per class (or per function, for parameters) and name. Classes and functions are
     // dropped when the game frees them (lookup_cache_prune, from gc_sync). A receiver that is itself a
     // class or struct is looked up the old way: UE4SS then searches that struct, not its class.
-    enum LookupKind : int { LkProp, LkFunc, LkIsA, LkParam, LkCount };
+    enum LookupKind : int { LkProp, LkPropNumbered, LkFunc, LkIsA, LkParam, LkCount };
     struct LookupKey
     {
         const void* owner;
@@ -146,6 +146,24 @@ namespace
         if (!o) return nullptr;
         if (receiver_is_struct(o)) return (*o).GetPropertyByNameInChain(name);
         return static_cast<FProperty*>(cached_lookup(LkProp, o->GetClassPrivate(), name, [&] { return static_cast<void*>((*o).GetPropertyByNameInChain(name)); }));
+    }
+    // A variable whose name ends in _<number> ("Scabbard_L_1", "Scabbard_L_2"). An FName keeps that number
+    // apart from the text, and UE4SS's GetPropertyByNameInChain compares the text alone (FName::Equals,
+    // NameTypes.hpp): prop_chain gives the same variable for both. This one compares the number too.
+    FProperty* prop_numbered(UObject* o, const TCHAR* name)
+    {
+        if (!o) return nullptr;
+        return static_cast<FProperty*>(cached_lookup(LkPropNumbered, o->GetClassPrivate(), name, [&]() -> void* {
+            const FName want(name, FNAME_Add);
+            for (FProperty* p : TFieldRange<FProperty>(o->GetClassPrivate(), EFieldIterationFlags::IncludeSuper))
+                if (p->GetFName().IsEqual(want)) return p;
+            return nullptr;
+        }));
+    }
+    UObject** numbered_object_ptr(UObject* o, const TCHAR* name)
+    {
+        FProperty* p = prop_numbered(o, name);
+        return p && p->GetClass().GetName() == STR("ObjectProperty") ? reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(o) + p->GetOffset_Internal()) : nullptr;
     }
     template <typename T> T* value_ptr(UObject* o, const TCHAR* name)
     {
@@ -16490,8 +16508,14 @@ namespace
         Quat gp_rot{0, 0, 0, 1};
         if (grab_point) gp_at = component_location(grab_point), gp_rot = component_rotation(grab_point);
 
-        UObject* stale = object_property(pawn, scab_var.c_str());
-        if (!set_variable(pawn, scab_var.c_str(), 0.0, nullptr, nullptr)) return -1;
+        UObject** scab_at = numbered_object_ptr(pawn, scab_var.c_str());
+        if (!scab_at)
+        {
+            HSVR_LOG_EVERY(5.0, "Sheathe: the character has no %ls; not sheathed", scab_var.c_str());
+            return -1;
+        }
+        UObject* stale = *scab_at;
+        *scab_at = nullptr;
         set_variable(pawn, current_var.c_str(), 0.0, nullptr, nullptr);
         set_variable(pawn, slot_var.c_str(), 3.0);
         if (across) set_variable(pawn, weapon_t, 0.0, w, nullptr);
@@ -16511,7 +16535,7 @@ namespace
         if (across || !good) set_variable(pawn, nm(L"%ls Sheath Slot Concrete").c_str(), 11.0);
         if (!good)
         {
-            if (!object_property(pawn, scab_var.c_str())) set_variable(pawn, scab_var.c_str(), 0.0, stale, nullptr);
+            if (!*scab_at) *scab_at = stale;
             set_variable(pawn, slot_var.c_str(), 3.0);
             g_sheathe_armed[side] = false; // not again every tick: once the tip has been clear
             HSVR_LOG("Sheathe: %s hand to the %s hip: Assign %ls %s (slot %.0f of %d, scabbard %s); not sheathed until the tip has been clear", hand, hip, T,
