@@ -1378,6 +1378,8 @@ namespace
         V3 hs{1, 1, 1};
         double shift = 0;
         std::map<std::string, double> numbers;
+        V3 off{0, 0, 0}; // shields: model cm + off = the shield component's frame (before its scale)
+        bool shield = false;
     };
     std::map<UObject*, Built> g_built;
 
@@ -2372,8 +2374,9 @@ namespace
     // loot, save), the converted model is put on it at the end of its BeginPlay, after the game built
     // the parts and before anyone reads them. The passport itself is never changed (the game saves and
     // compares it), so without this mod a saved converted weapon is simply the carrier: nothing is lost.
-    enum Kind { K_DAGGER, K_ARMING, K_BASTARD, K_LONGSWORD, K_MACE, K_AXE2H, K_SPEAR, K_COUNT };
-    const char* const kind_names[K_COUNT] = {"dagger", "arming", "bastard", "longsword", "mace", "axe2h", "spear"};
+    enum Kind { K_DAGGER, K_ARMING, K_BASTARD, K_LONGSWORD, K_MACE, K_AXE2H, K_SPEAR, K_BUCKLER, K_TARGE, K_PAVISE, K_COUNT };
+    const char* const kind_names[K_COUNT] = {"dagger", "arming", "bastard", "longsword", "mace", "axe2h", "spear",
+                                             "shield_buckler", "shield_targe", "shield_pavise"};
 
     struct Pack
     {
@@ -2395,6 +2398,7 @@ namespace
             for (int k = 0; k < K_COUNT; ++k)
                 if (c->second == kind_names[k]) return k;
         auto num = [&](const char* k) { auto i = nums.find(k); return i == nums.end() ? 0.0 : i->second; };
+        if (num("shield") > 0.5) return K_BUCKLER;
         bool hafted = num("hafted") > 0.5;
         double grip = -num("handle_bottom"), total = num("tip") - num("pommel_end");
         if (!hafted)
@@ -2563,6 +2567,8 @@ namespace
                     : g == L"Weapon_Part_Mace_Grip_I_S_C" ? K_MACE
                     : c == L"ModularWeaponBP_Axe2H_C"   ? K_AXE2H
                     : c == L"ModularWeaponBP_Spear_A_C" ? K_SPEAR
+                    : c == L"Shield_Buckler_C"          ? K_BUCKLER
+                    : c == L"Shield_Pavise_Light_C"     ? K_PAVISE
                                                         : -1;
             if (k >= 0 && g_tmpl[k].empty()) g_tmpl[k].assign(pp, pp + g_pp.size);
         }
@@ -2571,6 +2577,15 @@ namespace
             g_tmpl[K_DAGGER].assign(g_pp.size, 0);
             *reinterpret_cast<UObject**>(g_tmpl[K_DAGGER].data() + g_pp.weapon_class) = knife;
         }
+        // The targe has no passport in that list: a copy of a shield passport with its class (shields have
+        // no part classes, add_new_weapons.md §7).
+        const std::vector<uint8_t>& shield = !g_tmpl[K_PAVISE].empty() ? g_tmpl[K_PAVISE] : g_tmpl[K_BUCKLER];
+        if (!shield.empty())
+            if (UObject* targe = load_asset(L"/Game/Assets/Weapons/Built_Weapons/Shield_Tagre.Shield_Tagre_C"))
+            {
+                g_tmpl[K_TARGE] = shield;
+                *reinterpret_cast<UObject**>(g_tmpl[K_TARGE].data() + g_pp.weapon_class) = targe;
+            }
         std::string have;
         for (int k = 0; k < K_COUNT; ++k) have += std::string(" ") + kind_names[k] + (g_tmpl[k].empty() ? ":MISSING" : ":ok");
         log("Carrier passports from the game:%s", have.c_str());
@@ -2581,7 +2596,7 @@ namespace
     {
         if (!carrier_templates()) return false;
         int k = pk.kind;
-        if (g_tmpl[k].empty()) k = k <= K_LONGSWORD ? K_ARMING : K_MACE; // missing carrier: nearest kind
+        if (g_tmpl[k].empty()) k = k <= K_LONGSWORD ? K_ARMING : k >= K_BUCKLER ? (k == K_BUCKLER ? K_PAVISE : K_BUCKLER) : K_MACE; // nearest kind
         if (g_tmpl[k].empty()) return false;
         out = g_tmpl[k];
         passport_name(out.data()) = pk.marker;
@@ -2839,6 +2854,7 @@ namespace
             for (V3 p : h.points)
             {
                 p.z += b.shift;
+                p = V3{p.x + b.off.x, p.y + b.off.y, p.z + b.off.z};
                 V3 l = to_base.apply(to_world.apply(V3{p.x / b.hs.x, p.y / b.hs.y, p.z / b.hs.z}));
                 double r2 = l.x * l.x + l.y * l.y;
                 if (r2 > 100.0 * 100.0) continue;
@@ -2877,6 +2893,165 @@ namespace
         }
         log("  measured: length %.1f cm (top %.1f, bottom %.1f in BaseMesh z), balance %.2f of the length", len, top_l.z,
             bot_l.z, len > 1e-3 ? dist(B, com) / len : 0.0);
+    }
+
+    // ---- shields (step 7; decompile: add_new_weapons.md §7 "Shield frames") ----------------------------
+    // Shield_* classes are ModularWeaponBP children with no part classes: one StaticMeshComponent (Buckler,
+    // Targe, Pavise) is both the visible plate and the blocking body, a Box child is the hit box, Tip/Base
+    // children hold the damage tags. Its local frame: front = +Y for all three (the arm is on -Y), height Z,
+    // width X. The converter's shield frame (model_to_weapon.py --type shield) is the same: z height,
+    // x width, +y front, origin in the middle of its outline. The model goes in with its back where the
+    // game plate's back is and its middle where the game plate's middle is, so the game's grip scenes and
+    // arm joint (5 hand / 6 forearm) still fit.
+    struct ShieldFrame
+    {
+        const TCHAR* comp;
+        double back_y, mid_x, mid_z; // plate's back (min y), middle of its outline, component space
+    };
+    const ShieldFrame* shield_frame(int kind)
+    {
+        static const ShieldFrame buckler{STR("Buckler"), 4.79, 0.012, -0.002}, targe{STR("Targe"), -0.04, -0.212, 2.512},
+                pavise{STR("Pavise"), -2.08, 0.0, -1.085};
+        return kind == K_BUCKLER ? &buckler : kind == K_TARGE ? &targe : kind == K_PAVISE ? &pavise : nullptr;
+    }
+
+    bool apply_shield(UObject* actor, const Pack& pk)
+    {
+        const ShieldFrame* fr = shield_frame(pk.kind);
+        UObject* comp = fr ? object_property(actor, fr->comp) : nullptr;
+        if (!comp || !has_mesh(comp))
+        {
+            log("  ! shield component %s not found on %s", fr ? narrow(fr->comp).c_str() : "?", name_of(actor).c_str());
+            return false;
+        }
+        const ModelData* data = model_data(pk.dir + pk.model);
+        if (!data || data->hulls.empty()) return false;
+        auto numbers = data->numbers;
+        Model model = data->model;
+
+        // Where the model goes: its back on the plate's back. A buckler model whose middle stands out behind
+        // its rim by more than 2 cm has its own handle there: that goes on the game's grip bar (y -0.5).
+        double ymin = 1e30, xlo = 1e30, xhi = -1e30, zlo = 1e30, zhi = -1e30, ylo_mid = 1e30, ylo_rim = 1e30;
+        for (const V3& p : model.positions)
+        {
+            ymin = (std::min)(ymin, p.y);
+            xlo = (std::min)(xlo, p.x), xhi = (std::max)(xhi, p.x), zlo = (std::min)(zlo, p.z), zhi = (std::max)(zhi, p.z);
+        }
+        double hx = (std::max)(1e-3, 0.5 * (xhi - xlo)), hz = (std::max)(1e-3, 0.5 * (zhi - zlo));
+        for (const V3& p : model.positions)
+        {
+            double r = std::sqrt(std::pow((p.x - 0.5 * (xlo + xhi)) / hx, 2) + std::pow((p.z - 0.5 * (zlo + zhi)) / hz, 2));
+            if (r < 0.3) ylo_mid = (std::min)(ylo_mid, p.y);
+            if (r > 0.8) ylo_rim = (std::min)(ylo_rim, p.y);
+        }
+        double back = fr->back_y;
+        bool own_handle = pk.kind == K_BUCKLER && ylo_mid < 1e29 && ylo_rim < 1e29 && ylo_rim - ylo_mid > 2.0;
+        if (own_handle) back = -0.5;
+        V3 off{fr->mid_x - 0.5 * (xlo + xhi), back - ymin, fr->mid_z - 0.5 * (zlo + zhi)};
+
+        V3 ss{1, 1, 1};
+        {
+            Call sc(comp, STR("K2_GetComponentScale"));
+            FProperty* r = sc.run() ? sc.param(STR("ReturnValue")) : nullptr;
+            if (r) ss = read_three(sc.buffer.data() + r->GetOffset_Internal(), r);
+            if (ss.x == 0 || ss.y == 0 || ss.z == 0) ss = {1, 1, 1};
+        }
+        auto local = [&](V3 p) { return V3{(p.x + off.x) / ss.x, (p.y + off.y) / ss.y, (p.z + off.z) / ss.z}; };
+        Xf cxf = world_transform(comp);
+        if (cxf.bytes.empty()) return false;
+        auto world = [&](V3 p) { return transform_point(cxf, local(p), false); };
+        log("Shield %s on %s: %.0f x %.0f cm, offset (%.1f %.1f %.1f)%s", narrow(pk.id).c_str(), narrow(fr->comp).c_str(), xhi - xlo,
+            zhi - zlo, off.x, off.y, off.z, own_handle ? ", own handle on the grip bar" : "");
+
+        // Collision and mass.
+        UObject* base_mesh = object_property(actor, STR("BaseMesh"));
+        float part_kg = 0;
+        body_mass(comp, false, part_kg);
+        double whole = mass_of(base_mesh), base_share = whole - part_kg;
+        double mass_total = numbers.count("mass_kg") ? numbers["mass_kg"] : 3.0;
+        double kg_d = mass_total - base_share;
+        if (base_share < 0 || kg_d < 0.25 * mass_total) kg_d = mass_total;
+        std::vector<std::vector<V3>> pieces;
+        for (const Hull& h : data->hulls)
+        {
+            std::vector<V3> pts;
+            for (V3 p : h.points) pts.push_back(local(p));
+            pieces.push_back(pts);
+        }
+        Call get_mat(comp, STR("GetMaterial"));
+        get_mat.i32(STR("ElementIndex"), 0);
+        UObject* material = get_mat.run() ? get_mat.ret_object() : nullptr;
+        UObject* mesh = build_part_mesh(actor, comp, pieces);
+        if (!mesh) return false;
+        float kg = (float)kg_d;
+        body_mass(comp, true, kg);
+        Call set(comp, STR("SetStaticMesh"));
+        set.object(STR("NewMesh"), mesh).run();
+        hide(comp);
+        log("  %s: %zu collision pieces, mass setting %.2f kg (BaseMesh keeps %.2f)", narrow(fr->comp).c_str(), pieces.size(), kg, base_share);
+
+        // The hit box around the model; damage points: the carrier's untagged, the model's added.
+        static FName tip_tag(STR("Tip"), FNAME_Add), off_tag(STR("CW_Tip_Off"), FNAME_Add), base_tag(STR("Base"), FNAME_Add),
+                base_off_tag(STR("CW_Base_Off"), FNAME_Add);
+        V3 mid = local(V3{0.5 * (xlo + xhi), 0, 0.5 * (zlo + zhi)});
+        double ymax = -1e30;
+        for (const V3& p : model.positions) ymax = (std::max)(ymax, p.y);
+        V3 ylo = local(V3{0, ymin, 0}), yhi = local(V3{0, ymax, 0});
+        for (UObject* c : children_of(comp))
+        {
+            std::wstring cls = c->GetClassPrivate()->GetName();
+            if (cls.find(STR("BoxComponent")) == std::wstring::npos) continue;
+            Call ext(c, STR("SetBoxExtent"));
+            ext.three(STR("InBoxExtent"), hx / ss.x + 0.5, 0.5 * (yhi.y - ylo.y) + 0.5, hz / ss.z + 0.5).flag(STR("bUpdateOverlaps"), false);
+            ext.run();
+            Call mv(c, STR("K2_SetRelativeLocation"));
+            mv.three(STR("NewLocation"), mid.x, 0.5 * (ylo.y + yhi.y), mid.z).flag(STR("bTeleport"), true);
+            mv.run();
+            log("  hit box %s fitted to the model", narrow(c->GetName()).c_str());
+        }
+        if (!data->points.empty())
+        {
+            int untagged = 0, added = 0;
+            std::vector<UObject*> all;
+            descendants(comp, all);
+            for (UObject* c : all) untagged += retag(c, tip_tag, off_tag);
+            bool own_base = false;
+            for (const DPoint& d : data->points) own_base = own_base || (!d.flags.empty() && d.flags[0] == "BASE");
+            if (own_base)
+                for (UObject* c : children_of(comp)) retag(c, base_tag, base_off_tag);
+            for (const DPoint& d : data->points)
+            {
+                V3 w = world(d.p);
+                V3 wf = unit(sub(world(V3{d.p.x + d.f.x, d.p.y + d.f.y, d.p.z + d.f.z}), w));
+                V3 wu = unit(sub(world(V3{d.p.x + d.u.x, d.p.y + d.u.y, d.p.z + d.u.z}), w));
+                if (!d.flags.empty() && d.flags[0] == "BASE")
+                {
+                    if (add_damage_point(actor, comp, w, wf, wu, {base_tag})) ++added;
+                    continue;
+                }
+                std::vector<FName> tags{tip_tag};
+                wchar_t buf[32];
+                swprintf(buf, 32, L"sTip%03d", d.sTip), tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"sEdge%03d", d.sEdge), tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"dSharp%d", d.dSharp), tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"dBlunt%d", d.dBlunt), tags.emplace_back(buf, FNAME_Add);
+                swprintf(buf, 32, L"rig%03d", d.rig), tags.emplace_back(buf, FNAME_Add);
+                for (auto& fl : d.flags) tags.emplace_back(widen(fl).c_str(), FNAME_Add);
+                if (add_damage_point(actor, comp, w, wf, wu, tags)) ++added;
+            }
+            log("  damage points: %d of the carrier's untagged, %d of the model's added", untagged, added);
+        }
+
+        // The visible model on the component (normals: inverse transpose of the scale).
+        for (V3& p : model.positions) p = local(p);
+        for (V3& n : model.normals) n = unit(V3{n.x * ss.x, n.y * ss.y, n.z * ss.z});
+        UObject* proc = build_visual(actor, comp, model, material);
+        if (proc) apply_own_textures(actor, proc, material, pk.dir + pk.model);
+        Built b;
+        b.head = comp, b.hs = ss, b.shift = 0, b.numbers = numbers, b.off = off, b.shield = true;
+        g_built[actor] = b;
+        log(proc ? "Done." : "  ! visual model failed (collision above still applies)");
+        return true;
     }
 
     // ---- the scabbard (step 4; decompile: add_new_weapons.md "Steps 3, 4, 7 facts" §4) ----------------
@@ -3074,7 +3249,7 @@ namespace
         load_settings();
         double mass_was = g_settings.mass_kg;
         g_settings.mass_kg = 0; // the pack's own mass (from the converter)
-        bool ok = apply_full_weapon(actor, pk->dir + pk->model, false);
+        bool ok = pk->kind >= K_BUCKLER ? apply_shield(actor, *pk) : apply_full_weapon(actor, pk->dir + pk->model, false);
         g_settings.mass_kg = mass_was;
         if (!ok) return;
         // The name the trader and menus show (the passport keeps the marker).
@@ -3107,6 +3282,7 @@ namespace
         if (!pp || !pack_for(passport_name(pp))) return; // an old pointer reused by another weapon
         log("---- player took %s ----", name_of(weapon).c_str());
         Built& b = it->second;
+        if (b.shield) return; // a shield's hands are its own grip scenes
         fit_hands(pawn, weapon, world_transform(b.head), b.hs, b.shift, b.numbers);
     }
 
