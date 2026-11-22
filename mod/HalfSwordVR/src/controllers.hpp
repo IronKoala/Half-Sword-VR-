@@ -70,4 +70,7 @@ namespace hsvr
     // 0..1 -> amplitude 0..1) played over `seconds` at `volume`. Every frame each hand gets the sum
     // of its envelopes playing (clamped to 1), sent as a 1/30 s pulse.
     void controllers_hit(int hand, const float* key_t, const float* key_v, int keys, double seconds, float volume);
+    // Like controllers_hit, but exclusive: while it plays, every other buzz and hit on that hand is
+    // dropped (the bug-marker pattern must not blur into a fight's buzzes).
+    void controllers_signature(int hand, const float* key_t, const float* key_v, int keys, double seconds, float volume);
 } // namespace hsvr

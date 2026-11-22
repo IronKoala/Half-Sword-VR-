@@ -37,6 +37,7 @@ With `test_room=1` the game instead goes from the first menu straight into the t
 | `test_room_respawn` | 1 | 1 = a killed or beaten foe is replaced; 0 = the dead stay dead (and killing them all wins the match as usual). |
 | `test_room_respawn_seconds` | 10 | Seconds from a foe being out to the new foe in his slot. |
 | `test_room_despawn_seconds` | 7 | Seconds from a foe being out to his body being removed (0 = bodies stay). |
+| `test_room_crossbow` | 1 | The game's crossbow on the second table and 20 bolts in your quiver: 1 = when you come in by the Train button, 2 = always, 0 = never. Unattended tests booted with `test_room=1` get none unless it is 2. |
 
 ## Your save
 
