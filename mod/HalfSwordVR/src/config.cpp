@@ -385,6 +385,9 @@ namespace hsvr
         flag("test_room", c.test_room);
         flag("test_room_button", c.test_room_button);
         text("test_room_map", c.test_room_map);
+        flag("test_room_blackout", c.test_room_blackout);
+        flag("test_room_books", c.test_room_books);
+        num("test_room_book_light", c.test_room_book_light);
         integer("test_room_foes", c.test_room_foes);
         integer("test_room_tier", c.test_room_tier);
         integer("test_room_weapon_tier", c.test_room_weapon_tier);
@@ -589,6 +592,10 @@ namespace hsvr
         num("pose_throw_speed", c.pose_throw_speed);
         flag("pose_holster_snap", c.pose_holster_snap);
         flag("log_frames", c.log_frames);
+        flag("replay_capture", c.replay_capture);
+        num("replay_hold_s", c.replay_hold_s);
+        num("replay_before_s", c.replay_before_s);
+        num("replay_after_s", c.replay_after_s);
         flag("pose_keep_scabbard_on_drop", c.pose_keep_scabbard_on_drop);
         flag("crossbow", c.crossbow);
         num("crossbow_string_reach_cm", c.crossbow_string_reach_cm);

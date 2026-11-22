@@ -14,6 +14,9 @@
 #include <cwctype>
 #include <functional>
 #include <map>
+#include <memory>
+#include <thread>
+#include <share.h>
 #include <mutex>
 #include <unordered_set>
 #include <unordered_map>
@@ -1326,6 +1329,7 @@ namespace
 
     hsvr::Vec3 g_wall_ok;          // where his capsule last stood legally (pose_body_wall_stop)
     bool g_wall_ok_have = false;
+    UObject* g_ground_ignore = nullptr; // ground_below also looks through this actor (room_lay: the item being laid)
     UObject* g_wall_pawn = nullptr; // whose (a respawn starts over)
     double g_kept_z = 0.0;          // his capsule's height as capsule_hold last kept it
     bool g_kept_have = false;
@@ -1539,7 +1543,7 @@ namespace
         if (!cdo || !pawn) return false;
         const double bottom = from_z - 200.0;
         double start = from_z;
-        for (int attempt = 0; attempt < 5 && start > bottom; ++attempt)
+        for (int attempt = 0; attempt < (g_ground_ignore ? 12 : 5) && start > bottom; ++attempt)
         {
             Call trace(cdo, STR("LineTraceSingle"));
             if (!trace.fn) return false;
@@ -1569,7 +1573,7 @@ namespace
                     actor = b.object_result(STR("HitActor"));
                 }
             }
-            bool look_through = actor && (actor == pawn || is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")));
+            bool look_through = actor && (actor == pawn || actor == g_ground_ignore || is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")));
             if (!look_through)
             {
                 ground_z = hit_z;
@@ -14323,6 +14327,15 @@ namespace
         HSVR_LOG("Strength: training: Muscle Rate %.4f, Muscle Growth Due %.5f, Mass Scale %.4f | Stamina Burn %.3f (Swing R %.3f, Swing L %.3f, Lower Body %.3f), "
                  "Stamina %.1f, Movement Dislocation %.1f, Muscles Growth Rate %.3f, SMH Energy %.3f -> gain a minute %.6f from effort + %.6f from movement",
                  mr, due, mass, burn, sr, sl, lower, st, md, mgr, smh, from_burn, from_move);
+        // Rest (11-19 listing @309656-312141): Rest Rate eases (FInterpTo 0.1) toward 0.1 x Nutrients Due +
+        // (Asleep ? 10 : tonus/stamina/energy x movement x MRC(Get Up Rate, 0..1 -> 1..0) x temperature) x energy x
+        // pain x dislocations x darkness, capped at MRC(Aim Swing Speed, 0..100 -> MRC(Dodge Rate, 0..0.5 -> 10..0), 0),
+        // 0 while dressing up. The movement factor only drops near |Movement Dislocation| ~ 100 cm x his scale.
+        HSVR_LOG("Strength: rest: Rest Rate %.4f, Rest %.0f, Asleep %.0f, Get Up Rate %.3f, Aim Swing Speed %.1f, Dodge Rate %.3f, Pain %.2f, Temperature %.3f, "
+                 "In Light Meter (Pre Armor) %.3f, Nutrients Due %.3f, Body Liquid %.3f, Dehydration %.5f, Consciousness %.1f, DressUp %.0f",
+                 num(STR("Rest Rate")), num(STR("Rest")), num(STR("Asleep")), num(STR("Get Up Rate")), num(STR("Aim Swing Speed")), num(STR("Dodge Rate")),
+                 num(STR("Pain")), num(STR("Temperature")), num(STR("In Light Meter (Pre Armor)")), num(STR("Nutrients Due")), num(STR("Body Liquid")),
+                 num(STR("Dehydration")), num(STR("Consciousness")), num(STR("DressUp")));
     }
 
     BodyStrength body_strength(UObject* pawn, int side, const hsvr::Config& cfg)
@@ -14496,6 +14509,22 @@ namespace
     // (sanity 8503226: both let-gos were a remake).
     struct JointGone { UObject* weapon = nullptr; double at = -1.0, made_t = -1.0, fade_until = -1.0; };
     JointGone g_jh_gone[2];
+    // A level change (the test room reopened between cases, leaving an arena) frees the held weapon and the
+    // joint's parts; jh_sweep's own gone() checks only see a batch while it is being pruned, so without this
+    // the next sweep read the old weapon's name (crash 2026-11-22 21:22Z, pctest b-shared-57142d1).
+    bool g_jh_tracked = on_freed([] {
+        for (auto& side : g_jh)
+            for (JointHand& j : side)
+            {
+                if (gone(j.weapon)) j.weapon = nullptr;
+                if (gone(j.sphere)) j.sphere = nullptr;
+                if (gone(j.con)) j.con = nullptr;
+                if (!j.sphere && !j.con) j = JointHand{};
+                else if (!j.weapon) j.touched = false; // its weapon is gone: the next sweep removes what is left
+            }
+        for (JointGone& g : g_jh_gone)
+            if (gone(g.weapon)) g = JointGone{};
+    });
 
     bool cfg_slerp() { return hsvr::config().pose_hold_joint_slerp; }
 
@@ -20136,6 +20165,462 @@ namespace
         }
     }
 
+
+    // ---- Bug-marker replay (replay_capture) --------------------------------------------------------
+    // Every tick of his (after the game's tick) one fixed-size frame goes into a ring held in memory:
+    // headset, both controllers (pose, trigger, grip, stick, buttons, finger curls), the mod's hand
+    // targets, his posed hand bones, both held weapons (name, pose and hold numbers), his capsule and
+    // every physics-body bone of his visible mesh. Nothing is written to disk until he holds left Y
+    // (left B on Index) for replay_hold_s: then three strong pulses play on both controllers, a
+    // "Replay: MARK" line goes into the log, recording goes on for replay_after_s, and a helper thread
+    // writes replays\replay-<time>.csv (replay_before_s before the press .. replay_after_s after) with
+    // the log lines of that window. Read one with tools/replay/replay.py.
+    // Per tick: pointer compares, cached property reads and one engine call per bone (reused call
+    // buffers, no allocation, no names; a weapon's name is read only when the slot's pointer changes).
+    namespace replay
+    {
+        constexpr int kMaxBones = 40;
+        constexpr int kRing = 4096; // 15 s at up to 270 ticks a second
+        struct Pose7
+        {
+            float p[3];
+            float q[4];
+        };
+        struct Hand
+        {
+            Pose7 ctl;          // controller grip, world
+            float trigger, squeeze, stick_x, stick_y;
+            uint8_t buttons;    // 1 A/X, 2 B/Y, 4 stick click, 8 menu, 16 trigger touch, 32 thumb touch
+            uint8_t valid;      // 1 controller pose, 2 hand bone, 4 weapon pose, 8 finger skeleton
+            uint8_t hold;       // 1 force capped, 2 torque capped, 4 sliding, 8 drawing, 16 sheathing, 32 scabbard held, 64 free grip, 128 flipped
+            float curl[5];
+            float target[3];    // where the mod sends his hand bone (from the controller)
+            Pose7 hand;         // his posed hand bone (driver), world
+            int16_t slot_item;  // the game's Weapon L / Weapon R (name index, -1 none)
+            int16_t hold_item;  // what the mod's hold has (name index, -1 none)
+            Pose7 item;         // that item's BaseMesh, world
+            float lag_cm, turn_deg, force_n, torque_nm, on_item, slide_cm, strength, blocked_cm;
+        };
+        struct Frame
+        {
+            double t;
+            float dt;
+            uint32_t flags;     // 1 head valid, 2 two hands, 4 slow-mo, 8 fallen, 16 kicking L, 32 kicking R, 64 button crouch, 128 menu/panel focus lost
+            Pose7 head;
+            Hand hand[2];
+            Pose7 actor;
+            float crouch_cm, button_crouch_cm, stamina, consciousness;
+            uint8_t bones;
+            Pose7 bone[kMaxBones];
+        };
+
+        std::vector<Frame> g_ring;     // allocated on the first recorded tick
+        int g_head = 0, g_count = 0;   // next slot, frames held
+        std::vector<std::string> g_names{"-"}; // item names by index (game thread)
+        std::vector<std::string> g_bone_names;
+        UObject* g_bone_mesh = nullptr;
+        std::vector<FName> g_bone_fnames;
+        // A pressed marker: recording goes on until `until`, then the window is written.
+        std::vector<double> g_marks;
+        double g_until = -1.0;
+        std::string g_mark_why;
+        std::atomic<bool> g_fake_mark{false}; // test: hsvr.replay_mark
+        std::atomic<int> g_writing{0};
+
+        // A reflected engine call kept between ticks (no allocation per call); rebuilt when the target changes.
+        struct Kept
+        {
+            UObject* target = nullptr;
+            UStruct* cls = nullptr;
+            const TCHAR* fn_name = nullptr;
+            std::unique_ptr<Call> call;
+            FProperty* ret = nullptr;
+            FProperty* name_param = nullptr;
+            FProperty* space_param = nullptr;
+            Call* get(UObject* t, const TCHAR* fn)
+            {
+                if (!t) return nullptr;
+                if (t != target || !call || fn != fn_name || t->GetClassPrivate() != cls)
+                {
+                    target = t;
+                    cls = t->GetClassPrivate();
+                    fn_name = fn;
+                    call = std::make_unique<Call>(t, fn);
+                    ret = call->param(STR("ReturnValue"));
+                    name_param = call->param(STR("InSocketName"));
+                    space_param = call->param(STR("TransformSpace"));
+                    if (!call->fn || !ret || ret->GetSize() != (int)sizeof(XForm96)) call->fn = nullptr;
+                }
+                return call->fn ? call.get() : nullptr;
+            }
+        };
+        Kept g_bone_call, g_item_call[2], g_hand_call[2];
+
+        void put(Pose7& out, const hsvr::Vec3& p, const hsvr::Quat& q)
+        {
+            out.p[0] = (float)p.x, out.p[1] = (float)p.y, out.p[2] = (float)p.z;
+            out.q[0] = (float)q.x, out.q[1] = (float)q.y, out.q[2] = (float)q.z, out.q[3] = (float)q.w;
+        }
+        bool put_xform(Pose7& out, Kept& k)
+        {
+            if (!k.call || !k.call->fn) return false;
+            if (!k.call->run()) return false;
+            const XForm96* x = reinterpret_cast<const XForm96*>(k.call->buffer.data() + k.ret->GetOffset_Internal());
+            out.p[0] = (float)x->tx, out.p[1] = (float)x->ty, out.p[2] = (float)x->tz;
+            out.q[0] = (float)x->qx, out.q[1] = (float)x->qy, out.q[2] = (float)x->qz, out.q[3] = (float)x->qw;
+            return true;
+        }
+        // A bone's world transform (GetSocketTransform, RTS_World) through a kept call.
+        bool bone_world(Kept& k, UObject* mesh, FName bone, Pose7& out)
+        {
+            if (!k.get(mesh, STR("GetSocketTransform")) || !k.name_param) return false;
+            *reinterpret_cast<FName*>(k.call->buffer.data() + k.name_param->GetOffset_Internal()) = bone;
+            if (k.space_param) *(k.call->buffer.data() + k.space_param->GetOffset_Internal()) = 0; // RTS_World
+            return put_xform(out, k);
+        }
+        // A number variable read through its property, looked up once per class.
+        struct NumVar
+        {
+            UStruct* cls = nullptr;
+            FProperty* p = nullptr;
+            int kind = 0; // 1 float, 2 double, 3 int, 4 byte
+        };
+        float number(UObject* o, const TCHAR* name, NumVar& c)
+        {
+            if (!o) return -1.0f;
+            UStruct* cls = o->GetClassPrivate();
+            if (cls != c.cls)
+            {
+                c.cls = cls;
+                c.p = prop_chain(o, name);
+                c.kind = 0;
+                if (c.p)
+                {
+                    auto k = c.p->GetClass().GetName();
+                    c.kind = k == STR("FloatProperty") ? 1 : k == STR("DoubleProperty") ? 2 : k == STR("IntProperty") ? 3 : (k == STR("ByteProperty") || k == STR("EnumProperty")) ? 4 : 0;
+                }
+            }
+            if (!c.p || !c.kind) return -1.0f;
+            const uint8_t* at = reinterpret_cast<const uint8_t*>(o) + c.p->GetOffset_Internal();
+            switch (c.kind)
+            {
+            case 1: return *reinterpret_cast<const float*>(at);
+            case 2: return (float)*reinterpret_cast<const double*>(at);
+            case 3: return (float)*reinterpret_cast<const int32_t*>(at);
+            default: return (float)*at;
+            }
+        }
+        // A slot's item as a name index; the name is read only when the slot's pointer changes.
+        int16_t item_index(UObject* item, UObject*& last_ptr, int16_t& last_index)
+        {
+            if (item == last_ptr) return last_index;
+            last_ptr = item;
+            if (!item) return last_index = -1;
+            std::string n = narrow(item->GetName());
+            for (char& ch : n)
+                if (ch == ',') ch = ';';
+            for (size_t i = 0; i < g_names.size(); ++i)
+                if (g_names[i] == n) return last_index = (int16_t)i;
+            if (g_names.size() >= 30000) return last_index = 0;
+            g_names.push_back(n);
+            return last_index = (int16_t)(g_names.size() - 1);
+        }
+
+        // The marker's buzz: three 0.1 s full-strength pulses with 0.12 s gaps, both hands together
+        // (every other buzz in the mod is one pulse or one hit envelope on one hand; they are muted
+        // while it plays, so its gaps stay silent).
+        const float kPulseT[] = {0.0f, 0.001f, 0.143f, 0.144f, 0.314f, 0.315f, 0.457f, 0.458f, 0.629f, 0.63f, 0.771f, 0.772f, 1.0f};
+        const float kPulseV[] = {1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f};
+        void pulse_both()
+        {
+            for (int h = 0; h < 2; ++h) hsvr::controllers_signature(h, kPulseT, kPulseV, (int)(sizeof(kPulseT) / sizeof(kPulseT[0])), 0.7, 1.0f);
+        }
+
+        std::string csv_header(const std::vector<std::string>& bones)
+        {
+            std::string h = "t,dt,flags,head_x,head_y,head_z,head_qx,head_qy,head_qz,head_qw";
+            for (const char* s : {"l", "r"})
+            {
+                std::string p = std::string(",") + s + "_";
+                for (const char* c : {"ctl_x", "ctl_y", "ctl_z", "ctl_qx", "ctl_qy", "ctl_qz", "ctl_qw", "trigger", "squeeze", "stick_x", "stick_y", "buttons", "valid",
+                                      "hold", "curl_thumb", "curl_index", "curl_middle", "curl_ring", "curl_pinky", "target_x", "target_y", "target_z", "hand_x",
+                                      "hand_y", "hand_z", "hand_qx", "hand_qy", "hand_qz", "hand_qw", "slot_item", "hold_item", "item_x", "item_y", "item_z",
+                                      "item_qx", "item_qy", "item_qz", "item_qw", "lag_cm", "turn_deg", "force_n", "torque_nm", "on_item", "slide_cm", "strength",
+                                      "blocked_cm"})
+                    h += p + c;
+            }
+            h += ",actor_x,actor_y,actor_z,actor_qx,actor_qy,actor_qz,actor_qw,crouch_cm,button_crouch_cm,stamina,consciousness";
+            for (const std::string& b : bones)
+                for (const char* c : {"_x", "_y", "_z", "_qx", "_qy", "_qz", "_qw"}) h += ",bone_" + b + c; // bone_ so "Head" never meets head_ (case-insensitive readers)
+            return h + "\n";
+        }
+
+        void write_pose(std::string& row, const Pose7& p, bool valid)
+        {
+            char b[128];
+            if (!valid)
+            {
+                row += ",,,,,,,";
+                return;
+            }
+            snprintf(b, sizeof b, ",%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f", p.p[0], p.p[1], p.p[2], p.q[0], p.q[1], p.q[2], p.q[3]);
+            row += b;
+        }
+
+        // Helper thread: the CSV, then the log lines of the window.
+        void write_file(std::vector<Frame> frames, std::vector<std::string> names, std::vector<std::string> bones, std::vector<double> marks, std::string why,
+                        std::string meta, std::wstring path)
+        {
+            FILE* f = _wfopen(path.c_str(), L"wb");
+            if (!f)
+            {
+                HSVR_LOG("Replay: could not write %ls", path.c_str());
+                --g_writing;
+                return;
+            }
+            fprintf(f, "# Half Sword VR replay capture v1\n");
+            fputs(meta.c_str(), f);
+            fprintf(f, "# trigger: %s\n", why.c_str());
+            for (double m : marks) fprintf(f, "# mark_t: %.4f\n", m);
+            fprintf(f, "# frames: %d, from t %.4f to %.4f\n", (int)frames.size(), frames.empty() ? 0.0 : frames.front().t, frames.empty() ? 0.0 : frames.back().t);
+            fprintf(f, "# items: ");
+            for (size_t i = 0; i < names.size(); ++i) fprintf(f, "%s%d=%s", i ? "|" : "", (int)i, names[i].c_str());
+            fprintf(f, "\n# units: cm, Unreal world axes (X forward, Y right, Z up), quaternions x y z w; t = log seconds\n");
+            fputs(csv_header(bones).c_str(), f);
+            std::string row;
+            row.reserve(8192);
+            char b[256];
+            for (const Frame& fr : frames)
+            {
+                snprintf(b, sizeof b, "%.4f,%.4f,%u", fr.t, fr.dt, fr.flags);
+                row = b;
+                write_pose(row, fr.head, (fr.flags & 1) != 0);
+                for (const Hand& h : fr.hand)
+                {
+                    write_pose(row, h.ctl, (h.valid & 1) != 0);
+                    snprintf(b, sizeof b, ",%.3f,%.3f,%.3f,%.3f,%u,%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f", h.trigger, h.squeeze, h.stick_x, h.stick_y,
+                             (unsigned)h.buttons, (unsigned)h.valid, (unsigned)h.hold, h.curl[0], h.curl[1], h.curl[2], h.curl[3], h.curl[4], h.target[0], h.target[1],
+                             h.target[2]);
+                    row += b;
+                    write_pose(row, h.hand, (h.valid & 2) != 0);
+                    snprintf(b, sizeof b, ",%d,%d", (int)h.slot_item, (int)h.hold_item);
+                    row += b;
+                    write_pose(row, h.item, (h.valid & 4) != 0);
+                    snprintf(b, sizeof b, ",%.2f,%.2f,%.1f,%.1f,%.3f,%.2f,%.3f,%.2f", h.lag_cm, h.turn_deg, h.force_n, h.torque_nm, h.on_item, h.slide_cm, h.strength,
+                             h.blocked_cm);
+                    row += b;
+                }
+                write_pose(row, fr.actor, true);
+                snprintf(b, sizeof b, ",%.2f,%.2f,%.3f,%.2f", fr.crouch_cm, fr.button_crouch_cm, fr.stamina, fr.consciousness);
+                row += b;
+                for (size_t i = 0; i < bones.size(); ++i) write_pose(row, fr.bone[i], i < fr.bones);
+                row += "\n";
+                fputs(row.c_str(), f);
+            }
+            // The log lines of the window (the log's own clock is t).
+            double from = frames.empty() ? 0.0 : frames.front().t - 0.5, to = frames.empty() ? 0.0 : frames.back().t + 0.5;
+            int lines = 0;
+            if (FILE* lf = _wfsopen((hsvr::mod_dir() + L"HalfSwordVR.log").c_str(), L"rb", _SH_DENYNO))
+            {
+                static char line[16384];
+                while (fgets(line, sizeof line, lf))
+                {
+                    double lt = 0.0;
+                    if (line[0] != '[' || sscanf_s(line + 1, "%lf", &lt) != 1 || lt < from || lt > to) continue;
+                    fputs("#log ", f);
+                    fputs(line, f);
+                    ++lines;
+                }
+                fclose(lf);
+            }
+            long size = ftell(f);
+            fclose(f);
+            HSVR_LOG("Replay: saved %ls (%d frames, %.1f s, %d log lines, %.1f MB)", path.c_str(), (int)frames.size(),
+                     frames.empty() ? 0.0 : frames.back().t - frames.front().t, lines, size / 1048576.0);
+            --g_writing;
+        }
+
+        // The window is complete: copy it out of the ring and hand it to a helper thread.
+        void save(UObject* pawn)
+        {
+            const hsvr::Config& cfg = hsvr::config();
+            double from = g_marks.front() - (std::max)(0.0, cfg.replay_before_s), to = g_until;
+            std::vector<Frame> out;
+            out.reserve(g_count);
+            for (int i = 0; i < g_count; ++i)
+            {
+                const Frame& fr = g_ring[(g_head - g_count + i + kRing) % kRing];
+                if (fr.t >= from && fr.t <= to) out.push_back(fr);
+            }
+            SYSTEMTIME st;
+            GetLocalTime(&st);
+            wchar_t name[96];
+            swprintf(name, 96, L"replay-%04u-%02u-%02u_%02u-%02u-%02u.csv", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+            std::wstring dir = hsvr::mod_dir() + L"replays";
+            CreateDirectoryW(dir.c_str(), nullptr);
+            std::wstring path = dir + L"\\" + name;
+            char meta[1024];
+            std::string map = "?";
+            if (pawn)
+                if (UObject* level = pawn->GetOuterPrivate())
+                    if (UObject* world = level->GetOuterPrivate()) map = narrow(world->GetName());
+            hsvr::ControllerState cs = hsvr::controllers_state();
+            snprintf(meta, sizeof meta,
+                     "# saved_local: %04u-%02u-%02u %02u:%02u:%02u\n# mod_built: %s %s\n# map: %s\n# vr: %s, controllers %s\n# before_s: %.2f, after_s: %.2f\n",
+                     st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, __DATE__, __TIME__, map.c_str(),
+                     hsvr::config().dev_fake_headset ? "pretend headset (test)" : "headset", cs.active ? "active" : "not active", cfg.replay_before_s,
+                     cfg.replay_after_s);
+            HSVR_LOG("Replay: window done (%.2f .. %.2f, %d frames, %d mark%s): writing replays\\%ls on a helper thread", from, to, (int)out.size(),
+                     (int)g_marks.size(), g_marks.size() == 1 ? "" : "s", name);
+            ++g_writing;
+            std::thread(write_file, std::move(out), g_names, g_bone_names, g_marks, g_mark_why, std::string(meta), path).detach();
+            g_marks.clear();
+            g_until = -1.0;
+        }
+
+        void mark(const char* why)
+        {
+            const hsvr::Config& cfg = hsvr::config();
+            double now = hsvr::now_seconds();
+            pulse_both();
+            if (g_marks.empty()) g_mark_why = why;
+            g_marks.push_back(now);
+            g_until = now + (std::max)(0.0, cfg.replay_after_s);
+            // The ring holds about kRing ticks; a window longer than that loses its start.
+            HSVR_LOG("Replay: MARK %d at t %.3f (%s): saving %.0f s before and recording %.0f s more", (int)g_marks.size(), now, why, cfg.replay_before_s,
+                     cfg.replay_after_s);
+        }
+
+        // Left Y (left secondary) held replay_hold_s with right B never down meanwhile (both held is
+        // the arm measure); one marker per hold.
+        void button(const hsvr::ControllerState& state, double now)
+        {
+            const hsvr::Config& cfg = hsvr::config();
+            static double down_since = -1.0;
+            static bool spent = false, other = false;
+            bool y = state.active && state.focused && state.hand[0].secondary;
+            if (!y)
+            {
+                down_since = -1.0;
+                spent = other = false;
+            }
+            else
+            {
+                if (down_since < 0.0) down_since = now;
+                if (state.hand[1].secondary) other = true;
+                if (!spent && !other && now - down_since >= cfg.replay_hold_s)
+                {
+                    spent = true;
+                    mark("left Y held");
+                }
+            }
+            if (g_fake_mark.exchange(false)) mark("script hsvr.replay_mark");
+        }
+
+        void tick(UObject* pawn)
+        {
+            using namespace hsvr;
+            const Config& cfg = config();
+            if (!cfg.replay_capture || !pawn || !g_pose.driver)
+            {
+                if (!cfg.replay_capture) g_count = 0, g_marks.clear(), g_until = -1.0;
+                return;
+            }
+            if (g_ring.empty())
+            {
+                g_ring.resize(kRing);
+                HSVR_LOG("Replay: recording into memory (%d ticks, %.1f MB); hold left Y %.1f s to save the last %.0f s + next %.0f s", kRing,
+                         kRing * sizeof(Frame) / 1048576.0, cfg.replay_hold_s, cfg.replay_before_s, cfg.replay_after_s);
+            }
+            double now = now_seconds();
+            ControllerState st = controllers_state();
+            button(st, now);
+
+            UObject* mesh = g_pose.mesh ? g_pose.mesh : g_pose.driver;
+            if (mesh != g_bone_mesh)
+            {
+                if (!g_marks.empty() && g_count > 0)
+                {
+                    HSVR_LOG("Replay: his body changed (respawn or new level) during a marker: saving what was recorded so far");
+                    g_until = now;
+                    save(pawn);
+                }
+                g_bone_mesh = mesh;
+                g_bone_fnames = physics_body_bones(mesh);
+                if ((int)g_bone_fnames.size() > kMaxBones) g_bone_fnames.resize(kMaxBones);
+                g_bone_names.clear();
+                for (FName n : g_bone_fnames) g_bone_names.push_back(narrow(n.ToString()));
+                g_count = 0; // a new body: the old frames' bone columns no longer match
+                HSVR_LOG("Replay: %d bones of his mesh recorded", (int)g_bone_fnames.size());
+            }
+
+            Frame& fr = g_ring[g_head];
+            static double last_t = -1.0;
+            fr.t = now;
+            fr.dt = last_t > 0.0 ? (float)(now - last_t) : 0.0f;
+            last_t = now;
+            fr.flags = 0;
+            Vec3 p;
+            Quat q;
+            if (st.head_valid && stereo_tracking_to_world(st.head, p, q)) put(fr.head, p, q), fr.flags |= 1;
+            if (g_two.active) fr.flags |= 2;
+            if (bool_property(pawn, STR("Slomo Active"))) fr.flags |= 4;
+            if (bool_property(pawn, STR("Fallen"))) fr.flags |= 8;
+            if (bool_property(pawn, STR("Kicking L"))) fr.flags |= 16;
+            if (bool_property(pawn, STR("Kicking R"))) fr.flags |= 32;
+            if (g_button_crouch_on) fr.flags |= 64;
+            if (st.active && !st.focused) fr.flags |= 128;
+            static UObject* slot_ptr[2] = {nullptr, nullptr};
+            static UObject* hold_ptr[2] = {nullptr, nullptr};
+            static int16_t slot_idx[2] = {-1, -1}, hold_idx[2] = {-1, -1};
+            for (int side = 0; side < 2; ++side)
+            {
+                Hand& h = fr.hand[side];
+                const HandState& hs = st.hand[side];
+                h.valid = 0;
+                if (hs.grip_valid && stereo_tracking_to_world(hs.grip, p, q)) put(h.ctl, p, q), h.valid |= 1;
+                h.trigger = hs.trigger, h.squeeze = hs.squeeze, h.stick_x = hs.stick_x, h.stick_y = hs.stick_y;
+                h.buttons = (uint8_t)((hs.primary ? 1 : 0) | (hs.secondary ? 2 : 0) | (hs.stick_click ? 4 : 0) | (hs.menu ? 8 : 0) | (hs.trigger_touch ? 16 : 0) |
+                                      (hs.thumb_touch ? 32 : 0));
+                if (hs.joints_valid) h.valid |= 8;
+                for (int f = 0; f < 5; ++f) h.curl[f] = hs.curl[f];
+                h.target[0] = (float)g_pose.target[side].x, h.target[1] = (float)g_pose.target[side].y, h.target[2] = (float)g_pose.target[side].z;
+                static FName hand_bone[2] = {bone_fname("hand_l"), bone_fname("hand_r")};
+                if (bone_world(g_hand_call[side], g_pose.driver, hand_bone[side], h.hand)) h.valid |= 2;
+                UObject* slot = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+                const HoldState& hold = g_hold[side];
+                h.slot_item = item_index(slot, slot_ptr[side], slot_idx[side]);
+                h.hold_item = item_index(hold.weapon, hold_ptr[side], hold_idx[side]);
+                UObject* item = hold.weapon ? hold.weapon : slot;
+                UObject* base = item ? object_property(item, STR("BaseMesh")) : nullptr;
+                if (g_item_call[side].get(base, STR("K2_GetComponentToWorld")) && put_xform(h.item, g_item_call[side])) h.valid |= 4;
+                h.hold = (uint8_t)((hold.force_capped ? 1 : 0) | (hold.torque_capped ? 2 : 0) | (hold.handle_slide ? 4 : 0) | (g_draw[side].active ? 8 : 0) |
+                                   (g_draw[side].active && g_draw[side].sheathing ? 16 : 0) | (g_scab[side].active ? 32 : 0) | (hold.free.set ? 64 : 0) |
+                                   (hold.flipped ? 128 : 0));
+                h.lag_cm = (float)hold.lag, h.turn_deg = (float)hold.turn_deg, h.force_n = (float)hold.force_n, h.torque_nm = (float)hold.torque_nm;
+                h.on_item = (float)hold.on_weapon, h.slide_cm = (float)hold.slide, h.strength = (float)hold.body_strength, h.blocked_cm = (float)hold.blocked_cm;
+            }
+            {
+                static Kept actor_call;
+                UObject* root = object_property(pawn, STR("RootComponent"));
+                if (!(actor_call.get(root, STR("K2_GetComponentToWorld")) && put_xform(fr.actor, actor_call))) put(fr.actor, actor_location(pawn), Quat{});
+            }
+            fr.crouch_cm = (float)g_crouch_drop, fr.button_crouch_cm = (float)g_button_crouch;
+            static NumVar stamina, consciousness;
+            fr.stamina = number(pawn, STR("Stamina"), stamina);
+            fr.consciousness = number(pawn, STR("Consciousness"), consciousness);
+            int n = 0;
+            for (FName b : g_bone_fnames)
+                if (bone_world(g_bone_call, mesh, b, fr.bone[n])) ++n;
+                else break;
+            fr.bones = (uint8_t)n;
+            g_head = (g_head + 1) % kRing;
+            g_count = (std::min)(g_count + 1, kRing);
+
+            if (g_until > 0.0 && now >= g_until) save(pawn);
+        }
+    } // namespace replay
+
     // Pointers kept to the old pawn's weapons, scabbards and thrown items are dropped when the pawn
     // changes (a map change frees them; the old pawn's holds end with it).
     void forget_level_objects()
@@ -20194,6 +20679,7 @@ namespace
             { HSVR_SUB("after:dismember_watch_tick"); dismember_watch_tick(context); }
             { HSVR_SUB("after:thrown_tick"); thrown_tick(context); }
             { HSVR_SUB("after:frames_tick"); frames_tick(context); }
+            { HSVR_SUB("after:replay_tick"); replay::tick(context); }
         }
         { HSVR_SUB("after:install_player_damage"); install_player_damage(true); }
         { HSVR_SUB("after:install_muscle_hooks"); install_muscle_hooks(); }
@@ -22222,6 +22708,8 @@ namespace
             UObject* foe;
             double dead_since; // < 0 = alive
             std::vector<UObject*> gear; // what he has had in hand or sheathed (room_note_gear)
+            bool book = false;   // made from the Willie book: never replaced, his slot goes when he is out
+            bool fights = false; // made from the Willie book in Fighting mode: his AI stays on
         };
         std::vector<Slot> slots;
         // Bodies of foes who are out, removed test_room_despawn_seconds later (not while in use).
@@ -22233,6 +22721,31 @@ namespace
             std::vector<UObject*> gear; // his weapons and shield, removed with him
         };
         std::vector<Body> bodies;
+        // Furniture the room puts up (test_room_books): static tables, the two spawn books, the
+        // pointer's dot and beam. Plain StaticMeshActors (Movable, no physics): nothing can shove them.
+        std::vector<UObject*> furniture;
+        std::vector<UObject*> tables; // their mesh components, for the report
+        struct WeaponSpot { hsvr::Vec3 at; hsvr::Quat q; };
+        std::vector<WeaponSpot> spots; // where weapons lie on the tables (the book fills free ones)
+        struct Book
+        {
+            UObject* actor = nullptr;       // the lectern
+            int kind = 0;                   // 0 weapons, 1 Willies
+            hsvr::Vec3 centre, normal, up, right; // the page: its centre, facing the reader, up the page, the reader's right
+            double half_w = 25.0, half_h = 20.0;
+            std::vector<UObject*> rows;     // one TextRender per line, row 0 at the top
+            int hover = -1;                 // the line pointed at
+            int tier = -1;                  // -1 random, 0 Beggar .. 8 Lord
+            bool fights = false;            // Willie book: new Willies fight (AI on) instead of standing passive
+        };
+        std::vector<Book> books;
+        UObject* dot[2] = {nullptr, nullptr};  // where each hand's pointer meets a page
+        UObject* beam[2] = {nullptr, nullptr};
+        bool trigger_down[2] = {false, false};
+        bool pointer_shown[2] = {false, false};
+        double built_at = -1.0;   // the room was put up (stage 1)
+        double reveal_at = -1.0;  // the headset fades back in from black
+        double black_since = -1.0;
         double next_respawn_check = 0.0;
         double watch_from = 0.0, next_watch = 0.0;     // diagnostics after the weapons are put down
         std::map<UObject*, hsvr::Vec3> watch_last;
@@ -22362,8 +22875,10 @@ namespace
     }
 
     // Leaving the room: the save back, loaded into the game instance, and the values before the room.
+    void room_blackout(bool on);
     void room_leave()
     {
+        room_blackout(false);
         g_room.armed = false;
         g_room.done = true;
         room_restore_save("left the room");
@@ -22659,12 +23174,13 @@ namespace
         }
     }
 
-    UObject* room_spawn_foe(UObject* player, const TestRoom::Slot& slot)
+    // tier_choice: -2 = test_room_tier, -1 random, 0..8. passive = false: his AI stays on (he fights).
+    UObject* room_spawn_foe(UObject* player, const TestRoom::Slot& slot, int tier_choice = -2, bool passive = true)
     {
         using hsvr::Vec3;
         const hsvr::Config& cfg = hsvr::config();
         static unsigned seed = (unsigned)GetTickCount64() ^ 0x9e3779b9u;
-        int tier = cfg.test_room_tier;
+        int tier = tier_choice == -2 ? cfg.test_room_tier : tier_choice;
         if (tier < 0)
         {
             seed = seed * 1103515245u + 12345u;
@@ -22726,9 +23242,9 @@ namespace
             return nullptr;
         }
         UObject* ai = object_property(foe, STR("Controller"));
-        if (ai) make_foe_passive(ai, foe);
+        if (ai && passive) make_foe_passive(ai, foe);
         HSVR_LOG("TestRoom: respawn: %ls (tier %d, height %.2f) at (%.0f, %.0f, %.0f), facing you, AI %ls", foe->GetName().c_str(), tier, height, at.x, at.y, at.z,
-                 ai ? STR("off") : STR("not there yet (the sweep stops it)"));
+                 !passive ? STR("on (he fights)") : ai ? STR("off") : STR("not there yet (the sweep stops it)"));
         return foe;
     }
 
@@ -22808,9 +23324,12 @@ namespace
     void room_respawn_tick(UObject* player)
     {
         const hsvr::Config& cfg = hsvr::config();
-        if (!cfg.test_room_respawn || g_room.slots.empty()) return;
-        double now = hsvr::now_seconds();
+        // The count is held whenever foes respawn, also with no foe left (after "Remove all Willies"
+        // the game called the match won every 2 s: test 2026-11-22).
+        if (!cfg.test_room_respawn) return;
         room_hold_enemy_count(); // every tick
+        if (g_room.slots.empty()) return;
+        double now = hsvr::now_seconds();
         if (now < g_room.next_respawn_check) return;
         g_room.next_respawn_check = now + 0.25;
         std::vector<UObject*> willies;
@@ -22821,6 +23340,7 @@ namespace
             TestRoom::Slot* oldest = nullptr;
             for (TestRoom::Slot& s : g_room.slots)
             {
+                if (s.book) continue; // the book's Willies are never replaced
                 if (room_alive(s.foe, willies)) ++alive;
                 else if (s.dead_since >= 0.0 && (!oldest || s.dead_since < oldest->dead_since)) oldest = &s;
             }
@@ -22851,6 +23371,8 @@ namespace
                 s.foe = nullptr;
             }
         }
+        // A Willie from the book who is out leaves no slot behind (nobody replaces him).
+        g_room.slots.erase(std::remove_if(g_room.slots.begin(), g_room.slots.end(), [](const TestRoom::Slot& s) { return s.book && !s.foe; }), g_room.slots.end());
         // Bodies: removed the way the arena removes Willies, but never one you are using.
         for (size_t i = 0; i < g_room.bodies.size();)
         {
@@ -22883,7 +23405,7 @@ namespace
         // foe spawned into it: then he stands 1 m further back.
         for (TestRoom::Slot& s : g_room.slots)
         {
-            if (s.foe || s.dead_since < 0.0 || now - s.dead_since < cfg.test_room_respawn_seconds) continue;
+            if (s.book || s.foe || s.dead_since < 0.0 || now - s.dead_since < cfg.test_room_respawn_seconds) continue;
             TestRoom::Slot at = s;
             static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
             for (const TestRoom::Body& b : g_room.bodies)
@@ -22907,11 +23429,189 @@ namespace
         }
     }
 
-    // Two weapon tables side by side, 1.1 m in front of him, long side across his view.
-    void room_place_tables(UObject* player)
+    // ---- Furniture: static tables and spawn books (test_room_books) ---------------------------------
+    // The Yard room used the game's weapon tables (BP_Container_Weapon_Table_1: a physics body with
+    // mass x1000) and dropped the weapons onto them 1.5 s later: the weapons fell, bounced and hitched
+    // the game as they came in, and a swing could shove a table (Matthew 2026-11-22). Now a table is the
+    // same mesh as a plain StaticMeshActor (Movable, never simulating), each weapon is laid on its top
+    // (its bounds measured, the top found with straight-down traces), and the whole room is put up in
+    // one tick while the headset shows black (test_room_tick).
+
+    UObject* room_mesh_of(UObject* actor) { return object_property(actor, STR("StaticMeshComponent")); }
+
+    void room_set_mesh(UObject* comp, UObject* mesh)
     {
-        using hsvr::Vec3;
-        double floor_z = g_room.origin.z;
+        Call mob(comp, STR("SetMobility"));
+        mob.byte(STR("NewMobility"), 2); // Movable: a registered Static component takes no new mesh
+        mob.run();
+        Call sm(comp, STR("SetStaticMesh"));
+        sm.object(STR("NewMesh"), mesh);
+        sm.run();
+    }
+
+    void room_no_collision(UObject* comp)
+    {
+        Call ce(comp, STR("SetCollisionEnabled"));
+        ce.byte(STR("NewType"), 0);
+        ce.run();
+        Call cs(comp, STR("SetCastShadow"));
+        cs.first_flag(false);
+        cs.run();
+    }
+
+    void room_scale(UObject* comp, const hsvr::Vec3& s)
+    {
+        Call c(comp, STR("SetWorldScale3D"));
+        c.three(STR("NewScale"), s.x, s.y, s.z);
+        c.run();
+    }
+
+    void room_hide(UObject* comp, bool hidden)
+    {
+        Call c(comp, STR("SetHiddenInGame"));
+        c.first_flag(hidden);
+        c.run();
+    }
+
+    // A StaticMeshActor with `mesh_path`, Movable, no physics. It is a world object like a wall.
+    UObject* room_static(UObject* ctx, const TCHAR* mesh_path, const hsvr::Vec3& at, const hsvr::Quat& q)
+    {
+        UObject* mesh = load_asset_object(mesh_path);
+        if (!mesh)
+        {
+            HSVR_LOG("TestRoom: mesh %ls not found", mesh_path);
+            return nullptr;
+        }
+        UObject* a = room_spawn(STR("/Script/Engine.StaticMeshActor"), ctx, at, q, [&](UObject* actor) {
+            if (UObject* c = room_mesh_of(actor)) room_set_mesh(c, mesh);
+        });
+        if (a) g_room.furniture.push_back(a);
+        return a;
+    }
+
+    // A component of `owner` (attached to its root), at the world spot given.
+    UObject* room_add_component(UObject* owner, const TCHAR* class_path, const hsvr::Vec3& at, const hsvr::Quat& q)
+    {
+        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, class_path);
+        if (!cls || !owner) return nullptr;
+        Call add(owner, STR("AddComponentByClass"));
+        add.object(STR("Class"), cls);
+        add.flag(STR("bManualAttachment"), false);
+        if (FProperty* t = add.param(STR("RelativeTransform")))
+        {
+            uint8_t* tat = add.buffer.data() + t->GetOffset_Internal();
+            UScriptStruct* type = struct_type(t);
+            if (FProperty* r = struct_member(type, STR("Rotation")))
+                if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                {
+                    uint8_t* wat = tat + r->GetOffset_Internal() + w->GetOffset_Internal();
+                    if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                    else *reinterpret_cast<float*>(wat) = 1.0f;
+                }
+            if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(tat + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+        }
+        add.flag(STR("bDeferredFinish"), false);
+        if (!add.run() || !add.object_result())
+        {
+            HSVR_LOG("TestRoom: could not add a %ls", class_path);
+            return nullptr;
+        }
+        UObject* c = add.object_result();
+        set_component_transform(c, at, q);
+        return c;
+    }
+
+    // A plain engine shape (/Engine/BasicShapes/...) on `owner`, coloured, no collision.
+    UObject* room_shape(UObject* owner, const TCHAR* mesh_path, const hsvr::Vec3& at, const hsvr::Quat& q, const hsvr::Vec3& scale, float r, float g, float b)
+    {
+        UObject* mesh = load_asset_object(mesh_path);
+        UObject* c = mesh ? room_add_component(owner, STR("/Script/Engine.StaticMeshComponent"), at, q) : nullptr;
+        if (!c)
+        {
+            HSVR_LOG("TestRoom: shape %ls not made", mesh_path);
+            return nullptr;
+        }
+        room_set_mesh(c, mesh);
+        room_no_collision(c);
+        room_scale(c, scale);
+        Call mk(c, STR("CreateDynamicMaterialInstance"));
+        if (FProperty* ip = mk.param(STR("ElementIndex"))) *reinterpret_cast<int32_t*>(mk.buffer.data() + ip->GetOffset_Internal()) = 0;
+        mk.run();
+        UObject* mid = mk.object_result();
+        static const FName color_name(STR("Color"), FNAME_Add);
+        Call col(mid, STR("SetVectorParameterValue"));
+        col.name(STR("ParameterName"), color_name);
+        if (FProperty* v = col.param(STR("Value")))
+        {
+            float* f = reinterpret_cast<float*>(col.buffer.data() + v->GetOffset_Internal());
+            f[0] = r, f[1] = g, f[2] = b, f[3] = 1.0f;
+        }
+        if (!mid || !col.run()) HSVR_LOG("TestRoom: shape %ls keeps its own colour (no dynamic material)", mesh_path);
+        return c;
+    }
+
+    // A TextRender's text (FText from a string; every temporary destroyed after).
+    void room_text(UObject* tr, const std::wstring& text)
+    {
+        static UObject* ktl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetTextLibrary"));
+        if (!ktl || !tr) return;
+        Call conv(ktl, STR("Conv_StringToText"));
+        FProperty* in = conv.param(STR("InString"));
+        FProperty* out = conv.param(STR("ReturnValue"));
+        if (!conv.fn || !in || !out) return;
+        new (conv.buffer.data() + in->GetOffset_Internal()) Unreal::FString(text.c_str());
+        conv.run();
+        auto apply = [&](const TCHAR* fname) {
+            Call set(tr, fname);
+            if (!set.fn) return false;
+            for (FProperty* p : set.fn->ForEachProperty())
+            {
+                if (p->GetClass().GetName() != STR("TextProperty")) continue;
+                p->CopyCompleteValue(set.buffer.data() + p->GetOffset_Internal(), conv.buffer.data() + out->GetOffset_Internal());
+                set.run();
+                p->DestroyValue(set.buffer.data() + p->GetOffset_Internal());
+                return true;
+            }
+            return false;
+        };
+        if (!apply(STR("K2_SetText")) && !apply(STR("SetText"))) HSVR_LOG_EVERY(5.0, "TestRoom: TextRender has no SetText");
+        out->DestroyValue(conv.buffer.data() + out->GetOffset_Internal());
+        in->DestroyValue(conv.buffer.data() + in->GetOffset_Internal());
+    }
+
+    void room_text_colour(UObject* tr, uint8_t r, uint8_t g, uint8_t b)
+    {
+        Call c(tr, STR("SetTextRenderColor"));
+        if (FProperty* v = c.param(STR("Value")))
+        {
+            uint8_t* at = c.buffer.data() + v->GetOffset_Internal();
+            at[0] = b, at[1] = g, at[2] = r, at[3] = 255; // FColor is B, G, R, A in memory
+        }
+        c.run();
+    }
+
+    // One line of a page: a TextRender facing the reader (its +X), centred on its spot.
+    UObject* room_text_line(UObject* owner, const hsvr::Vec3& at, const hsvr::Quat& q, double height_cm, const std::wstring& text)
+    {
+        UObject* tr = room_add_component(owner, STR("/Script/Engine.TextRenderComponent"), at, q);
+        if (!tr) return nullptr;
+        room_no_collision(tr);
+        Call ws(tr, STR("SetWorldSize"));
+        ws.number(STR("Value"), height_cm);
+        ws.run();
+        Call ha(tr, STR("SetHorizontalAlignment"));
+        ha.byte(STR("Value"), 1); // EHTA_Center
+        ha.run();
+        Call va(tr, STR("SetVerticalAlignment"));
+        va.byte(STR("Value"), 1); // EVRTA_TextCenter
+        va.run();
+        room_text(tr, text);
+        return tr;
+    }
+
+    double room_floor_z(UObject* player)
+    {
+        double floor_z = actor_location(player).z;
         if (UObject* capsule = object_property(player, STR("CapsuleComponent")))
         {
             Call hh(capsule, STR("GetScaledCapsuleHalfHeight"));
@@ -22919,117 +23619,363 @@ namespace
             if (FProperty* p = hh.param(STR("ReturnValue")))
             {
                 uint8_t* at = hh.buffer.data() + p->GetOffset_Internal();
-                double half = p->GetClass().GetName() == STR("DoubleProperty") ? *reinterpret_cast<double*>(at) : *reinterpret_cast<float*>(at);
-                floor_z -= half;
+                floor_z -= p->GetClass().GetName() == STR("DoubleProperty") ? *reinterpret_cast<double*>(at) : *reinterpret_cast<float*>(at);
             }
         }
+        return floor_z;
+    }
+
+    // Two weapon tables side by side, 1.1 m in front of him, long side across his view: the game's
+    // Table_1 mesh (SM_Prop_Furniture_Table_011, origin on the floor, top ~89-95 cm), static.
+    void room_place_tables(UObject* player)
+    {
+        using hsvr::Vec3;
+        double floor_z = room_floor_z(player);
         Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
         g_room.table_yaw = std::atan2(g_room.forward.y, g_room.forward.x) * 57.29577951308232;
         g_room.table_at.clear();
-        int tier = hsvr::config().test_room_weapon_tier;
+        g_room.tables.clear();
         for (int t = 0; t < 2; ++t)
         {
-            Vec3 at = g_room.origin + g_room.forward * 110.0 + right * (t == 0 ? -104.0 : 104.0); // 35 cm between them (Matthew 2026-11-20)
-            at.z = floor_z + 1.0;
-            UObject* table = room_spawn(STR("/Game/Assets/Props/Blueprints/BP_Container_Weapon_Table_1.BP_Container_Weapon_Table_1_C"), player, at, yaw_quat(g_room.table_yaw),
-                                        [&](UObject* a) {
-                                            set_variable(a, STR("Tier"), tier < 0 ? 4.0 : (double)tier);
-                                            // None of the table's own loot: it lands on the same spots as
-                                            // the room's weapons and the overlap threw them (test 16:38).
-                                            set_variable(a, STR("Weapon Spawn Chance"), 0.0);
-                                            set_variable(a, STR("Armor Spawn Chance"), 0.0);
-                                            set_variable(a, STR("Treasure Spawn Chance"), 0.0);
-                                            set_variable(a, STR("Bolts Spawn Chance Modifier"), 0.0);
-                                        });
-            HSVR_LOG("TestRoom: weapon table %ls at (%.0f, %.0f, %.0f)", table ? table->GetName().c_str() : STR("NOT spawned"), at.x, at.y, at.z);
-            if (table) g_room.table_at.push_back(at);
+            Vec3 at = g_room.origin + g_room.forward * 125.0 + right * (t == 0 ? -104.0 : 104.0); // 35 cm between them (Matthew 2026-11-20); 125 (was 110): a weapon in his hand at rest stayed clear of the tables (test 2026-11-22 21:58)
+            at.z = floor_z;
+            UObject* table = room_static(player, STR("/Game/Assets/Props/Furniture/Meshes/SM_Prop_Furniture_Table_011.SM_Prop_Furniture_Table_011"), at, yaw_quat(g_room.table_yaw));
+            HSVR_LOG("TestRoom: weapon table %ls at (%.0f, %.0f, %.0f) (static)", table ? table->GetName().c_str() : STR("NOT made"), at.x, at.y, at.z);
+            if (!table) continue;
+            g_room.table_at.push_back(at);
+            g_room.tables.push_back(room_mesh_of(table));
         }
+        // Where weapons lie: 5 per table along his forward, 16 cm apart; every other one 30 cm further
+        // along, so neighbouring heads and guards are never side by side.
+        g_room.spots.clear();
+        hsvr::Quat lying = hsvr::quat_from_axes(Vec3{0, 0, 1}, hsvr::cross(right, Vec3{0, 0, 1}), right); // weapon +Z along `right`, its +X up
+        for (size_t t = 0; t < g_room.table_at.size(); ++t)
+            for (int row = 0; row < 5; ++row)
+            {
+                double depth = (row - 2) * 16.0;
+                Vec3 at = g_room.table_at[t] + g_room.forward * depth - right * (row % 2 ? 25.0 : 55.0);
+                at.z = g_room.table_at[t].z + 120.0;
+                g_room.spots.push_back(TestRoom::WeaponSpot{at, lying});
+            }
     }
 
-    // One weapon of every kind, lying along the tables (BaseMesh +Z, the blade, across his view),
-    // through BP_Loot_Weapon (Spawn Chance 1): 1H/2H swords, maces, hafted, polearm, a shield, a
-    // secondary. Each table also stocks one random piece of its own.
-    void room_spawn_weapons(UObject* player)
+    // World bounds of a component (KismetSystemLibrary GetComponentBounds: an axis-aligned box).
+    bool room_component_box(UObject* c, hsvr::Vec3& origin, hsvr::Vec3& extent)
+    {
+        static UObject* ksl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        if (!ksl || !c) return false;
+        Call b(ksl, STR("GetComponentBounds"));
+        b.object(STR("Component"), c);
+        if (!b.run()) return false;
+        origin = b.vec(STR("Origin"));
+        extent = b.vec(STR("BoxExtent"));
+        return extent.x > 0.0 || extent.y > 0.0 || extent.z > 0.0;
+    }
+
+    // The box round what you see of a weapon: BaseMesh and its visible parts. Not GetActorBounds: a
+    // weapon with a scabbard carries an invisible mass part 1e15 cm below it (ModularWeaponBP "Set Up
+    // Module" @4315; reforged and tool weapons 1e7 cm), and its AI search beacon is a big sphere; both
+    // counted in the actor's bounds threw swords out of the world and lifted the others 30 cm
+    // (test 2026-11-22 16:23).
+    bool room_weapon_box(UObject* weapon, hsvr::Vec3& origin, hsvr::Vec3& extent)
+    {
+        using hsvr::Vec3;
+        UObject* base = object_property(weapon, STR("BaseMesh"));
+        if (!base) return false;
+        Vec3 at = component_location(base);
+        std::vector<UObject*> parts{base};
+        Call kids(base, STR("GetChildrenComponents"));
+        kids.flag(STR("bIncludeAllDescendants"), true);
+        FProperty* cp = kids.param(STR("Children"));
+        if (kids.run() && cp)
+        {
+            struct RawArray { UObject** data; int32_t num, max; };
+            RawArray* arr = reinterpret_cast<RawArray*>(kids.buffer.data() + cp->GetOffset_Internal());
+            for (int32_t i = 0; arr->data && i < arr->num && i < 64; ++i)
+                if (arr->data[i]) parts.push_back(arr->data[i]);
+            cp->DestroyValue(kids.buffer.data() + cp->GetOffset_Internal());
+        }
+        Vec3 lo{1e18, 1e18, 1e18}, hi{-1e18, -1e18, -1e18};
+        int used = 0;
+        for (UObject* p : parts)
+        {
+            if (p != base)
+            {
+                if (p->GetName().find(STR("Beacon")) != std::wstring::npos) continue;
+                Call vis(p, STR("IsVisible"));
+                if (!vis.fn) continue; // not a scene component
+                vis.run();
+                FProperty* vr = vis.param(STR("ReturnValue"));
+                if (!vr || !*(vis.buffer.data() + vr->GetOffset_Internal())) continue;
+            }
+            Vec3 o, e;
+            if (!room_component_box(p, o, e)) continue;
+            if (hsvr::length(o - at) > 300.0 || e.x > 300.0 || e.y > 300.0 || e.z > 300.0) continue;
+            lo = Vec3{(std::min)(lo.x, o.x - e.x), (std::min)(lo.y, o.y - e.y), (std::min)(lo.z, o.z - e.z)};
+            hi = Vec3{(std::max)(hi.x, o.x + e.x), (std::max)(hi.y, o.y + e.y), (std::max)(hi.z, o.z + e.z)};
+            ++used;
+        }
+        if (!used) return false;
+        origin = (lo + hi) * 0.5;
+        extent = (hi - lo) * 0.5;
+        return true;
+    }
+
+    // Where a weapon lies, seen from above: a segment along its length (BaseMesh +Z, which the table
+    // spots lay along `right`) with a thickness, or a disc for one lying flat (a shield). Got from the
+    // world box, which for a long weapon turned off the world axes covers far more than the weapon (a
+    // polearm 16 deg off took a 60 cm wide box, so the free spot beside it read as taken: "the tables
+    // are full" at the first book click, test 2026-11-22 21:59).
+    struct RoomFoot { hsvr::Vec3 c, axis; double half = 0.0, r = 0.0; };
+    bool room_weapon_foot(UObject* weapon, RoomFoot& f)
+    {
+        using hsvr::Vec3;
+        Vec3 o, e;
+        if (!room_weapon_box(weapon, o, e)) return false;
+        f.c = Vec3{o.x, o.y, 0.0};
+        UObject* base = object_property(weapon, STR("BaseMesh"));
+        Vec3 a = base ? component_rotation(base).rotate(Vec3{0, 0, 1}) : Vec3{0, 0, 1};
+        double n = std::sqrt(a.x * a.x + a.y * a.y);
+        if (n < 0.5)
+        {
+            f.axis = Vec3{1, 0, 0};
+            f.half = 0.0;
+            f.r = (std::max)(e.x, e.y);
+            return true;
+        }
+        Vec3 an{a.x / n, a.y / n, 0.0};
+        const double t = 6.0;
+        bool use_x = std::fabs(an.x) >= std::fabs(an.y);
+        f.half = (std::max)(0.0, ((use_x ? e.x : e.y) - t) / (std::max)(0.3, std::fabs(use_x ? an.x : an.y)));
+        f.half = (std::min)(f.half, std::hypot(e.x, e.y));
+        double across = (use_x ? e.y : e.x) - f.half * std::fabs(use_x ? an.y : an.x); // what is left over the other way: its width
+        f.r = (std::clamp)(across, 3.0, 40.0);
+        f.axis = an;
+        return true;
+    }
+    double room_foot_distance(const RoomFoot& f, const hsvr::Vec3& p)
+    {
+        hsvr::Vec3 d{p.x - f.c.x, p.y - f.c.y, 0.0};
+        double along = (std::clamp)(d.x * f.axis.x + d.y * f.axis.y, -f.half, f.half);
+        hsvr::Vec3 q{f.c.x + f.axis.x * along, f.c.y + f.axis.y * along, 0.0};
+        return std::hypot(p.x - q.x, p.y - q.y) - f.r;
+    }
+
+    // A weapon laid on whatever is under it: its visible bounds measured (room_weapon_box), the surface found with
+    // straight-down traces along its length (the highest hit), then moved so its lowest point is 0.5 cm
+    // above that, with no speed. It is never dropped from a height.
+    bool room_lay(UObject* weapon, UObject* player)
+    {
+        using hsvr::Vec3;
+        Vec3 o, e;
+        if (!room_weapon_box(weapon, o, e)) return false;
+        // Along the longer horizontal side of the box, 7 points, 2 cm in from its ends.
+        Vec3 along = e.x >= e.y ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+        double half = (std::max)(0.0, (std::max)(e.x, e.y) - 2.0);
+        double top = -1e18;
+        int hits = 0;
+        for (int i = 0; i < 7; ++i)
+        {
+            Vec3 p = o + along * (-half + half * i / 3.0);
+            double gz = 0.0;
+            g_ground_ignore = weapon; // a shield or tool is no ModularWeaponBP: its own top was taken for the table (pavise 28 cm up, 2026-11-22)
+            bool got = ground_below(player, p.x, p.y, o.z + e.z + 2.0, gz);
+            g_ground_ignore = nullptr;
+            if (got)
+            {
+                top = (std::max)(top, gz);
+                ++hits;
+            }
+        }
+        if (!hits) return false;
+        double dz = top + 0.5 - (o.z - e.z);
+        Vec3 at = actor_location(weapon);
+        Call mv(weapon, STR("K2_SetActorLocation"));
+        mv.three(STR("NewLocation"), at.x, at.y, at.z + dz);
+        mv.flag(STR("bSweep"), false);
+        mv.flag(STR("bTeleport"), true);
+        mv.run();
+        if (UObject* base = object_property(weapon, STR("BaseMesh")))
+        {
+            Call lin(base, STR("SetAllPhysicsLinearVelocity"));
+            lin.three(STR("NewVel"), 0.0, 0.0, 0.0);
+            lin.run();
+            Call ang(base, STR("SetAllPhysicsAngularVelocityInDegrees"));
+            ang.three(STR("NewAngVel"), 0.0, 0.0, 0.0);
+            ang.run();
+        }
+        HSVR_LOG("TestRoom: %ls laid down: surface z %.1f (%d of 7 traces), moved %.1f cm", weapon->GetName().c_str(), top, hits, dz);
+        return true;
+    }
+
+    // A weapon laid on a table is slid along its length (the table's `right`) until it lies within the
+    // table top and its centre of mass is over it: a polearm laid from its spot stuck 65 cm out into
+    // the gap, where his held crossbow lifted it until it tipped off (test 2026-11-22 21:58), and one
+    // whose head hangs over the edge tips off by itself.
+    void room_keep_on_table(UObject* weapon)
     {
         using hsvr::Vec3;
         if (g_room.table_at.empty()) return;
-        struct Kind { int specific; int premade; const char* label; };
-        // Enum_WeaponType_Specific: 1 Swords 1H, 2 Swords 2H, 3 Maces 1H, 4 Maces 2H, 5 Hafted 1H,
-        // 6 Hafted 2H, 7 Polearms. Premade kinds (Enum_WeaponType): 2 Shield, 3 Secondary.
-        static const Kind kinds[] = {{1, -1, "sword 1H"}, {2, -1, "sword 2H"}, {3, -1, "mace 1H"}, {4, -1, "mace 2H"}, {2, 2, "shield"},
-                                     {5, -1, "hafted 1H"}, {6, -1, "hafted 2H"}, {7, -1, "polearm"}, {3, 3, "secondary"}};
-        int tier_cfg = hsvr::config().test_room_weapon_tier;
-        static unsigned seed = (unsigned)GetTickCount64();
+        RoomFoot f;
+        if (!room_weapon_foot(weapon, f)) return;
         Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
-        // Lying: weapon +Z along `right`, its +X up.
-        hsvr::Quat lying = hsvr::quat_from_axes(Vec3{0, 0, 1}, hsvr::cross(right, Vec3{0, 0, 1}), right);
-        const int count = (int)(sizeof(kinds) / sizeof(kinds[0]));
-        for (int i = 0; i < count; ++i)
+        const Vec3* table = nullptr;
+        for (const Vec3& t : g_room.table_at)
         {
-            int t = (i < 5 || g_room.table_at.size() < 2) ? 0 : 1;
-            int row = t == 0 ? i : i - 5;
-            int rows = t == 0 ? 5 : count - 5;
-            // Along his forward, 16 cm apart (the top is 101 cm deep, +-50; at 20 cm the outer ones
-            // rolled off). Every other one lies 30 cm further along, so neighbouring heads and guards
-            // are never side by side and don't start inside each other.
-            double depth = (row - (rows - 1) * 0.5) * 16.0;
-            Vec3 base = g_room.table_at[t];
-            Vec3 at = base + g_room.forward * depth - right * (row % 2 ? 25.0 : 55.0);
-            if (kinds[i].premade == 2) at = base + g_room.forward * depth; // a shield lies in the middle
-            // The game's own weapon points are at 112 (top at 89-95 cm). Lower, a guard starts inside
-            // the top and the push-out threw the weapons and tipped the table (test 2026-11-19 16:36).
-            at.z = base.z + 112.0;
-            seed = seed * 1103515245u + 12345u;
-            int first = tier_cfg < 0 ? (int)((seed >> 16) % 8u) : (std::min)(tier_cfg, 8);
-            hsvr::Quat q = kinds[i].premade == 2 ? hsvr::quat_from_axes(right, hsvr::cross(Vec3{0, 0, 1}, right), Vec3{0, 0, 1}) : lying;
-            // The game's generator gives no weapon when a kind has none at that tier (Generate Weapon:
-            // the kind's types that the tier allows; mace 2H and secondary at tier 6 gave none in the
-            // test). Then the nearest other tiers are tried.
-            bool got = false;
-            int tier = first;
-            for (int k = 0; k < 17 && !got; ++k)
+            Vec3 d{f.c.x - t.x, f.c.y - t.y, 0.0};
+            if (std::fabs(d.x * g_room.forward.x + d.y * g_room.forward.y) < 55.0 && std::fabs(d.x * right.x + d.y * right.y) < 130.0) table = &t;
+        }
+        if (!table) return;
+        double ly = (f.c.x - table->x) * right.x + (f.c.y - table->y) * right.y;
+        double c = std::fabs(f.axis.x * right.x + f.axis.y * right.y);
+        double ext = f.half * c + f.r * std::sqrt((std::max)(0.0, 1.0 - c * c));
+        const double edge = 85.0; // the top is 90 cm each side of its centre along `right`
+        double shift = 0.0;
+        if (2.0 * ext >= 2.0 * edge) shift = -ly;
+        else if (ly - ext < -edge) shift = -edge - (ly - ext);
+        else if (ly + ext > edge) shift = edge - (ly + ext);
+        double com_y = 1e9;
+        if (UObject* base = object_property(weapon, STR("BaseMesh")))
+        {
+            Call cm(base, STR("GetCenterOfMass"));
+            if (cm.run())
             {
-                int d = (k + 1) / 2;
-                tier = k % 2 ? first - d : first + d;
-                if (k == 0) tier = first;
-                if (tier < 0 || tier > 8) continue;
-                UObject* loot = room_spawn(STR("/Game/Blueprints/Procedural/LootPoints/BP_Loot_Weapon.BP_Loot_Weapon_C"), player, at, q, [&](UObject* a) {
-                    set_variable(a, STR("Spawn Chance"), 1.0);
-                    set_variable(a, STR("Tier"), (double)tier);
-                    set_variable(a, STR("Premade"), kinds[i].premade >= 0 ? 1.0 : 0.0);
-                    if (kinds[i].premade >= 0) set_variable(a, STR("Weapon Type (Premade)"), (double)kinds[i].premade);
-                    else
-                    {
-                        set_variable(a, STR("Weapon Type"), (double)kinds[i].specific);
-                        // Enum_WeaponType of that kind (0 1H, 1 2H), which the generator also reads.
-                        int s = kinds[i].specific;
-                        set_variable(a, STR("Weapon Type (Premade)"), (s == 1 || s == 3 || s == 5) ? 0.0 : 1.0);
-                    }
-                });
-                // The loot point is destroyed in its BeginPlay but still readable this tick: its
-                // passport says which weapon class it spawned (none = nothing).
-                UObject* cls = nullptr;
-                if (loot)
-                    if (FProperty* pp = prop_chain(loot, STR("Weapon Passport")))
-                        if (FProperty* wc = struct_member_prefix(struct_type(pp), STR("WeaponClass")))
-                            cls = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(loot) + pp->GetOffset_Internal() + wc->GetOffset_Internal());
-                got = cls != nullptr;
-                if (got)
-                    HSVR_LOG("TestRoom: %s (tier %d) spawned at (%.0f, %.0f, %.0f): %ls", kinds[i].label, tier, at.x, at.y, at.z, cls->GetName().c_str());
-                else
-                    HSVR_LOG("TestRoom: %s: the game has none at tier %d%s", kinds[i].label, tier, loot ? "" : " (no loot point)");
+                Vec3 com = cm.vec();
+                if (hsvr::length(Vec3{com.x - f.c.x, com.y - f.c.y, 0.0}) < 300.0)
+                {
+                    com_y = (com.x - table->x) * right.x + (com.y - table->y) * right.y + shift;
+                    if (com_y > 60.0) shift -= com_y - 60.0;
+                    else if (com_y < -60.0) shift += -60.0 - com_y;
+                }
             }
-            if (!got) HSVR_LOG("TestRoom: %s NOT spawned at any tier", kinds[i].label);
+        }
+        if (std::fabs(shift) < 0.5) return;
+        Call mv(weapon, STR("K2_AddActorWorldOffset"));
+        mv.three(STR("DeltaLocation"), right.x * shift, right.y * shift, 0.0);
+        mv.flag(STR("bSweep"), false);
+        mv.flag(STR("bTeleport"), true);
+        mv.run();
+        HSVR_LOG("TestRoom: %ls slid %.0f cm along the table (%.0f cm long, centre %.0f from the table's middle, centre of mass %.0f)", weapon->GetName().c_str(), shift,
+                 2.0 * ext, ly, com_y);
+    }
+
+    // Weapon kinds (Enum_WeaponType_Specific 1 Swords 1H, 2 Swords 2H, 3 Maces 1H, 4 Maces 2H, 5 Hafted
+    // 1H, 6 Hafted 2H, 7 Polearms; premade Enum_WeaponType 2 Shield, 3 Secondary).
+    struct RoomKind { int specific; int premade; const char* label; const wchar_t* name; };
+    const RoomKind kRoomKinds[] = {{1, -1, "sword 1H", L"Sword"}, {2, -1, "sword 2H", L"Longsword"}, {3, -1, "mace 1H", L"Mace"}, {4, -1, "mace 2H", L"Two-hand mace"},
+                                   {2, 2, "shield", L"Shield"}, {5, -1, "hafted 1H", L"Axe / hammer"}, {6, -1, "hafted 2H", L"Two-hand axe"}, {7, -1, "polearm", L"Polearm"},
+                                   {3, 3, "secondary", L"Dagger / secondary"}};
+    const int kRoomKindCount = (int)(sizeof(kRoomKinds) / sizeof(kRoomKinds[0]));
+    const wchar_t* const kRankNames[9] = {L"Beggar", L"Peasant", L"Commoner", L"Militia", L"Soldier", L"Veteran", L"Man at Arms", L"Knight", L"Lord"};
+
+    // One weapon of a kind through the game's own loot point (BP_Loot_Weapon, Spawn Chance 1: GI
+    // "Generate Weapon" and a deferred spawn of its class, BP_Loot_Weapon UG @227-@806), at `at`, then
+    // laid down (room_lay). tier_choice -1 = random 0-7. When the game has no weapon of the kind at
+    // that tier, the nearest other tiers are tried. Returns the weapon.
+    UObject* room_make_weapon(UObject* player, int k, int tier_choice, const hsvr::Vec3& at, const hsvr::Quat& q)
+    {
+        static unsigned seed = (unsigned)GetTickCount64();
+        seed = seed * 1103515245u + 12345u;
+        int first = tier_choice < 0 ? (int)((seed >> 16) % 8u) : (std::min)(tier_choice, 8);
+        const RoomKind& kind = kRoomKinds[k];
+        for (int i = 0; i < 17; ++i)
+        {
+            int d = (i + 1) / 2;
+            int tier = i == 0 ? first : (i % 2 ? first - d : first + d);
+            if (tier < 0 || tier > 8) continue;
+            std::vector<UObject*> before;
+            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), before);
+            std::unordered_set<UObject*> had(before.begin(), before.end());
+            UObject* loot = room_spawn(STR("/Game/Blueprints/Procedural/LootPoints/BP_Loot_Weapon.BP_Loot_Weapon_C"), player, at, q, [&](UObject* a) {
+                set_variable(a, STR("Spawn Chance"), 1.0);
+                set_variable(a, STR("Tier"), (double)tier);
+                set_variable(a, STR("Premade"), kind.premade >= 0 ? 1.0 : 0.0);
+                if (kind.premade >= 0) set_variable(a, STR("Weapon Type (Premade)"), (double)kind.premade);
+                else
+                {
+                    set_variable(a, STR("Weapon Type"), (double)kind.specific);
+                    // Enum_WeaponType of that kind (0 1H, 1 2H), which the generator also reads.
+                    int s = kind.specific;
+                    set_variable(a, STR("Weapon Type (Premade)"), (s == 1 || s == 3 || s == 5) ? 0.0 : 1.0);
+                }
+            });
+            // The loot point is destroyed in its BeginPlay but still readable this tick: its passport
+            // says which weapon class it spawned (none = nothing).
+            UObject* cls = nullptr;
+            if (loot)
+                if (FProperty* pp = prop_chain(loot, STR("Weapon Passport")))
+                    if (FProperty* wc = struct_member_prefix(struct_type(pp), STR("WeaponClass")))
+                        cls = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(loot) + pp->GetOffset_Internal() + wc->GetOffset_Internal());
+            if (!cls)
+            {
+                HSVR_LOG("TestRoom: %s: the game has none at tier %d%s", kind.label, tier, loot ? "" : " (no loot point)");
+                continue;
+            }
+            // The weapon it made: the one ModularWeaponBP that was not there before.
+            std::vector<UObject*> after;
+            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), after);
+            UObject* weapon = nullptr;
+            for (UObject* w : after)
+                if (w && !had.count(w) && w->GetName().rfind(STR("Default__"), 0) != 0 && hsvr::length(actor_location(w) - at) < 150.0) weapon = w;
+            HSVR_LOG("TestRoom: %s (tier %d) made at (%.0f, %.0f, %.0f): %ls (%ls)", kind.label, tier, at.x, at.y, at.z, cls->GetName().c_str(),
+                     weapon ? weapon->GetName().c_str() : STR("NOT found after"));
+            // A shield lies on its face: of its own three axes, the one that leaves it lowest is put upright
+            // (a pavise's face is not its Z: it stood on its edge, 45-65 cm up, test 2026-11-22 22:17).
+            if (weapon && kind.premade == 2)
+                if (UObject* base = object_property(weapon, STR("BaseMesh")))
+                {
+                    hsvr::Vec3 pos = component_location(base);
+                    hsvr::Quat q0 = component_rotation(base);
+                    const double half_pi = 1.5707963267948966;
+                    hsvr::Quat tries[3] = {q0, q0 * hsvr::quat_axis_angle(hsvr::Vec3{1, 0, 0}, half_pi), q0 * hsvr::quat_axis_angle(hsvr::Vec3{0, 1, 0}, half_pi)};
+                    double best_h = 1e18, hs[3] = {-1, -1, -1};
+                    int best = 0;
+                    for (int t = 0; t < 3; ++t)
+                    {
+                        set_component_transform(base, pos, tries[t]);
+                        hsvr::Vec3 o, e;
+                        if (!room_weapon_box(weapon, o, e)) continue;
+                        hs[t] = 2.0 * e.z;
+                        if (e.z < best_h - 0.5) { best_h = e.z; best = t; }
+                    }
+                    set_component_transform(base, pos, tries[best]);
+                    HSVR_LOG("TestRoom: %ls laid on its face: heights %.0f / %.0f / %.0f cm, took %d", weapon->GetName().c_str(), hs[0], hs[1], hs[2], best);
+                }
+            if (weapon && !room_lay(weapon, player)) HSVR_LOG("TestRoom: %ls: nothing found under it; left where it was made", weapon->GetName().c_str());
+            else if (weapon) room_keep_on_table(weapon);
+            return weapon;
+        }
+        HSVR_LOG("TestRoom: %s NOT made at any tier", kind.label);
+        return nullptr;
+    }
+
+    // One weapon of every kind on the tables (test_room_weapon_tier).
+    void room_spawn_weapons(UObject* player)
+    {
+        int tier = hsvr::config().test_room_weapon_tier;
+        for (int i = 0; i < kRoomKindCount && i < (int)g_room.spots.size(); ++i)
+        {
+            const TestRoom::WeaponSpot& s = g_room.spots[i];
+            hsvr::Quat q = s.q;
+            hsvr::Vec3 at = s.at;
+            if (kRoomKinds[i].premade == 2) // a shield lies flat (its face up), in the middle of the table
+            {
+                hsvr::Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+                q = hsvr::quat_from_axes(right, hsvr::cross(hsvr::Vec3{0, 0, 1}, right), hsvr::Vec3{0, 0, 1});
+                at = at + right * (i % 2 ? 25.0 : 55.0);
+            }
+            room_make_weapon(player, i, tier, at, q);
         }
         // The crossbow (test_room_crossbow; it is in no Free Mode list): on the second table along its
         // depth, string side up, and 20 bolts in his quiver.
         int xbow_mode = hsvr::config().test_room_crossbow;
-        if ((xbow_mode == 1 && g_room.via_button) || xbow_mode == 2)
+        if (((xbow_mode == 1 && g_room.via_button) || xbow_mode == 2) && !g_room.table_at.empty())
         {
-            Vec3 base = g_room.table_at[g_room.table_at.size() > 1 ? 1 : 0];
-            Vec3 at = base - g_room.forward * 25.0 + right * 8.0;
+            hsvr::Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+            hsvr::Vec3 base = g_room.table_at[g_room.table_at.size() > 1 ? 1 : 0];
+            hsvr::Vec3 at = base - g_room.forward * 25.0 + right * 8.0;
             at.z = base.z + 112.0;
-            hsvr::Quat flat = hsvr::quat_from_axes(Vec3{0, 0, 1}, hsvr::cross(g_room.forward, Vec3{0, 0, 1}), g_room.forward);
+            hsvr::Quat flat = hsvr::quat_from_axes(hsvr::Vec3{0, 0, 1}, hsvr::cross(g_room.forward, hsvr::Vec3{0, 0, 1}), g_room.forward);
             UObject* xb = room_spawn(STR("/Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C"),
                                      player, at, flat, [](UObject*) {});
             int added = 0;
@@ -23042,6 +23988,523 @@ namespace
             int32_t* c = q ? value_ptr<int32_t>(q, STR("Projectile Count")) : nullptr;
             HSVR_LOG("TestRoom: crossbow %s at (%.0f, %.0f, %.0f); quiver %ls with %d bolts (Add Bolt to Quiver x%d)", xb ? "spawned" : "NOT spawned", at.x, at.y, at.z,
                      q ? q->GetName().c_str() : STR("none"), c ? *c : -1, added);
+        }
+    }
+
+    // A weapon spot is free when no loose weapon's bounds take in any of 3 points along it.
+    bool room_spot_free(const TestRoom::WeaponSpot& s, const std::vector<RoomFoot>& feet, bool along_forward = false)
+    {
+        hsvr::Vec3 right = along_forward ? g_room.forward : hsvr::Vec3{-g_room.forward.y, g_room.forward.x, 0.0};
+        for (double along : {-30.0, 0.0, 30.0})
+        {
+            hsvr::Vec3 p = s.at + right * along;
+            for (const RoomFoot& f : feet)
+                if (room_foot_distance(f, p) < 4.0) return false;
+        }
+        return true;
+    }
+
+    // ---- The spawn books (Blade & Sorcery style) ---------------------------------------------------
+    // Two lecterns (the game's SM_Prop_Furniture_Lectern_001, static) beside the tables, each with a
+    // page: weapons on the left, Willies on the right. Point at a line with an empty hand (its aim ray;
+    // a dot and a thin beam show where) and pull the trigger. The page is found on the lectern's
+    // slanted top by traces (its normal says which way it faces); without one it stands above it.
+    const int kWeaponRows = 2 + 9;  // title, tier, 9 kinds
+    const int kWillieRows = 2 + 9 + 2; // title, mode, 9 tiers, random, remove all
+
+    std::wstring room_tier_text(int tier) { return tier < 0 ? std::wstring(L"Random") : std::wstring(kRankNames[(std::min)(tier, 8)]); }
+
+    std::wstring room_row_text(const TestRoom::Book& b, int row)
+    {
+        if (row == 0) return b.kind == 0 ? L"WEAPONS" : L"WILLIES";
+        if (b.kind == 0)
+        {
+            if (row == 1) return L"<     Tier: " + room_tier_text(b.tier) + L"     >";
+            return kRoomKinds[row - 2].name;
+        }
+        if (row == 1) return std::wstring(L"Mode: ") + (b.fights ? L"Fighting" : L"Passive");
+        if (row >= 2 && row <= 10) return kRankNames[row - 2];
+        if (row == 11) return L"Random tier";
+        return L"Remove all Willies";
+    }
+
+    void room_book_colours(TestRoom::Book& b)
+    {
+        for (int i = 0; i < (int)b.rows.size(); ++i)
+        {
+            if (i == b.hover) room_text_colour(b.rows[i], 255, 214, 60);      // pointed at: gold
+            else if (i == 0) room_text_colour(b.rows[i], 120, 20, 15);       // title: dark red
+            else room_text_colour(b.rows[i], 30, 22, 14);                    // ink
+        }
+    }
+
+    // The lectern's reading surface: traces straight down over its footprint; the hits on its upper
+    // part give the slope (their mean normal) and the page's centre. False if it has no slanted top.
+    bool room_lectern_top(UObject* comp, hsvr::Vec3& centre, hsvr::Vec3& normal)
+    {
+        using hsvr::Vec3;
+        // World bounds (GetLocalBounds' Min/Max read as 0 here: the reflected names' case differs).
+        Vec3 bo, be;
+        if (!room_component_box(comp, bo, be) || be.z < 15.0) return false;
+        Vec3 lo = bo - be, hi = bo + be;
+        Vec3 at{0, 0, 0};
+        hsvr::Quat q{};
+        struct Hit { Vec3 p, n; };
+        std::vector<Hit> hits;
+        double top = -1e18;
+        for (int i = 0; i <= 6; ++i)
+            for (int j = 0; j <= 6; ++j)
+            {
+                Vec3 local{lo.x + (hi.x - lo.x) * (0.05 + 0.9 * i / 6.0), lo.y + (hi.y - lo.y) * (0.05 + 0.9 * j / 6.0), hi.z + 10.0};
+                Vec3 a = at + q.rotate(local);
+                Vec3 h, n;
+                if (!trace_component(comp, a, a - Vec3{0, 0, hi.z - lo.z + 20.0}, h, n) || n.z < 0.3) continue;
+                hits.push_back(Hit{h, n});
+                top = (std::max)(top, h.z);
+            }
+        Vec3 sum_p{}, sum_n{};
+        int k = 0;
+        for (const Hit& h : hits)
+            if (h.p.z > top - 30.0)
+            {
+                sum_p = sum_p + h.p;
+                sum_n = sum_n + h.n;
+                ++k;
+            }
+        HSVR_LOG("TestRoom: lectern bounds (%.0f, %.0f, %.0f)..(%.0f, %.0f, %.0f); %d hits, %d on its top", lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, (int)hits.size(), k);
+        if (k < 4) return false;
+        centre = sum_p * (1.0 / k);
+        normal = hsvr::normalized(sum_n);
+        double tilt = std::acos((std::min)(1.0, normal.z)) * 57.29577951308232;
+        HSVR_LOG("TestRoom: lectern top at (%.0f, %.0f, %.0f), tilted %.0f deg", centre.x, centre.y, centre.z, tilt);
+        return tilt > 8.0 && tilt < 70.0;
+    }
+
+    // How far the lectern comes through the page (cm in front of the page's face, the largest over a 7 x 7
+    // grid of the page; 0 or less = none of it does). Complex traces against the lectern alone, from 30 cm
+    // in front of the page back through it.
+    double room_page_clip(UObject* lectern_mesh, const hsvr::Vec3& centre, const hsvr::Vec3& normal, const hsvr::Vec3& up, const hsvr::Vec3& right, double half_w,
+                          double half_h)
+    {
+        double worst = -1e9;
+        if (!lectern_mesh) return worst;
+        for (int i = 0; i <= 6; ++i)
+            for (int j = 0; j <= 6; ++j)
+            {
+                hsvr::Vec3 p = centre + right * (half_w * (i / 3.0 - 1.0)) + up * (half_h * (j / 3.0 - 1.0));
+                hsvr::Vec3 h, n;
+                if (!trace_component(lectern_mesh, p + normal * 30.0, p - normal * 10.0, h, n)) continue;
+                worst = (std::max)(worst, hsvr::dot(h - p, normal));
+            }
+        return worst;
+    }
+
+    void room_place_book(UObject* player, int kind, const hsvr::Vec3& at)
+    {
+        using hsvr::Vec3;
+        const wchar_t* lectern_path = L"/Game/Assets/Props/Furniture/Meshes/SM_Prop_Furniture_Lectern_001.SM_Prop_Furniture_Lectern_001";
+        Vec3 to_player = g_room.origin - at;
+        to_player.z = 0.0;
+        to_player = hsvr::normalized(to_player);
+        double yaw = std::atan2(to_player.y, to_player.x) * 57.29577951308232;
+        UObject* lectern = room_static(player, lectern_path, at, yaw_quat(yaw - 90.0)); // its slope faces the mesh's +Y (test pictures 2026-11-22)
+        if (!lectern)
+        {
+            HSVR_LOG("TestRoom: %s book: no lectern", kind == 0 ? "weapon" : "Willie");
+            return;
+        }
+        UObject* comp = room_mesh_of(lectern);
+        Vec3 centre, n;
+        bool slanted = comp && room_lectern_top(comp, centre, n);
+        if (slanted)
+        {
+            // Turn the lectern so that its slope faces him, then measure again.
+            Vec3 faces{n.x, n.y, 0.0};
+            double turn = std::atan2(to_player.y, to_player.x) - std::atan2(faces.y, faces.x);
+            Call rot(lectern, STR("K2_SetActorRotation"));
+            rot.three(STR("NewRotation"), 0.0, yaw - 90.0 + turn * 57.29577951308232, 0.0);
+            rot.flag(STR("bTeleportPhysics"), true);
+            rot.run();
+            slanted = room_lectern_top(comp, centre, n);
+        }
+        if (!slanted)
+        {
+            // No slanted top found: the page stands above the lectern, leaning back 35 degrees.
+            double top_z = at.z + 100.0;
+            Vec3 bo, be;
+            if (comp && room_component_box(comp, bo, be)) top_z = bo.z + be.z;
+            double lean = 35.0 * 3.14159265358979 / 180.0;
+            n = to_player * std::cos(lean) + Vec3{0, 0, std::sin(lean)};
+            centre = at + Vec3{0, 0, top_z - at.z + 22.0};
+            HSVR_LOG("TestRoom: lectern has no slanted top; the page stands above it at z %.0f", centre.z);
+        }
+        TestRoom::Book book;
+        book.actor = lectern;
+        book.kind = kind;
+        book.tier = kind == 0 ? hsvr::config().test_room_weapon_tier : hsvr::config().test_room_tier;
+        if (book.tier < -1 || book.tier > 8) book.tier = -1;
+        book.normal = hsvr::normalized(n);
+        book.up = hsvr::normalized(Vec3{0, 0, 1} - book.normal * book.normal.z);
+        book.right = hsvr::cross(book.normal, book.up);
+        int rows = kind == 0 ? kWeaponRows : kWillieRows;
+        book.half_w = 26.0;
+        book.half_h = 21.0;
+        book.centre = centre + book.normal * 1.0 + book.up * (book.half_h * 0.35); // the page rests on the slope's lower lip
+        // Out along its face until no part of the lectern comes through it (the page sat inside the
+        // stand, so he could neither read nor point at it: Matthew 2026-11-22 22:15). The slab is 0.8 cm
+        // thick behind the face.
+        {
+            double clip = room_page_clip(comp, book.centre, book.normal, book.up, book.right, book.half_w, book.half_h);
+            double out = clip > -1.5 ? (std::min)(clip + 1.5, 25.0) : 0.0;
+            book.centre = book.centre + book.normal * out;
+            HSVR_LOG("TestRoom: %s page: the lectern came %.1f cm through it; moved %.1f cm out along its face, now %.1f", kind == 0 ? "weapon" : "Willie", clip, out,
+                     room_page_clip(comp, book.centre, book.normal, book.up, book.right, book.half_w, book.half_h));
+        }
+        hsvr::Quat q = hsvr::quat_from_axes(book.normal, hsvr::cross(book.up, book.normal), book.up);
+        // The page: a thin parchment-coloured slab, and a small warm light over it so it can be read.
+        room_shape(lectern, STR("/Engine/BasicShapes/Cube.Cube"), book.centre - book.normal * 0.4, q, Vec3{0.008, book.half_w / 50.0, book.half_h / 50.0}, 0.78f, 0.66f, 0.45f);
+        if (hsvr::config().test_room_book_light > 0.0)
+        if (UObject* light = room_add_component(lectern, STR("/Script/Engine.PointLightComponent"), book.centre + book.normal * 35.0 + book.up * 10.0, q))
+        {
+            Call in(light, STR("SetIntensity"));
+            in.number(STR("NewIntensity"), hsvr::config().test_room_book_light); // 1200 blew the page out to white (test 2026-11-22)
+            in.run();
+            Call ar(light, STR("SetAttenuationRadius"));
+            ar.number(STR("NewRadius"), 70.0);
+            ar.run();
+            Call cs(light, STR("SetCastShadows"));
+            cs.first_flag(false);
+            cs.run();
+        }
+        double line = 2.0 * book.half_h / (rows + 0.5);
+        for (int r = 0; r < rows; ++r)
+        {
+            Vec3 p = book.centre + book.normal * 0.15 + book.up * (book.half_h - line * (r + 0.75));
+            UObject* tr = room_text_line(lectern, p, q, r == 0 ? line * 0.95 : line * 0.72, room_row_text(book, r));
+            book.rows.push_back(tr);
+        }
+        room_book_colours(book);
+        HSVR_LOG("TestRoom: %s book at (%.0f, %.0f, %.0f), page centre (%.0f, %.0f, %.0f) facing (%.2f, %.2f, %.2f), %d lines", kind == 0 ? "weapon" : "Willie", at.x, at.y,
+                 at.z, book.centre.x, book.centre.y, book.centre.z, book.normal.x, book.normal.y, book.normal.z, rows);
+        g_room.books.push_back(book);
+    }
+
+    void room_place_books(UObject* player)
+    {
+        g_room.books.clear();
+        if (!hsvr::config().test_room_books) return;
+        using hsvr::Vec3;
+        Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+        double floor_z = room_floor_z(player);
+        for (int kind = 0; kind < 2; ++kind)
+        {
+            Vec3 at = g_room.origin - g_room.forward * 30.0 + right * (kind == 0 ? -150.0 : 150.0);
+            at.z = floor_z;
+            room_place_book(player, kind, at);
+        }
+        // The pointer: a dot where the ray meets the page and a thin beam to it, one per hand, hidden
+        // until a hand points at a page. They belong to the first book.
+        if (!g_room.books.empty())
+            for (int side = 0; side < 2; ++side)
+            {
+                UObject* owner = g_room.books[0].actor;
+                g_room.dot[side] = room_shape(owner, STR("/Engine/BasicShapes/Sphere.Sphere"), g_room.origin, hsvr::Quat{}, Vec3{0.012, 0.012, 0.012}, 1.0f, 0.8f, 0.2f);
+                g_room.beam[side] = room_shape(owner, STR("/Engine/BasicShapes/Cylinder.Cylinder"), g_room.origin, hsvr::Quat{}, Vec3{0.003, 0.003, 0.01}, 1.0f, 0.8f, 0.2f);
+                room_hide(g_room.dot[side], true);
+                room_hide(g_room.beam[side], true);
+            }
+    }
+
+    // Free spots for a new Willie: rings behind where you started (2.2 m, then 3.2 m), on the floor
+    // (a wall there would put the floor trace on its top), at least 1 m from every Willie and 1.2 m
+    // from the books and tables.
+    bool room_willie_spot(UObject* player, TestRoom::Slot& out)
+    {
+        using hsvr::Vec3;
+        double floor_z = room_floor_z(player);
+        std::vector<UObject*> willies;
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        std::vector<Vec3> taken;
+        for (UObject* w : willies)
+        {
+            if (!w || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            Vec3 a = actor_location(w);
+            if (a.x == 0.0 && a.y == 0.0 && a.z == 0.0) continue;
+            UObject* m = object_property(w, STR("Mesh"));
+            taken.push_back(m ? socket_location(m, pelvis_bone) : a);
+        }
+        Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+        for (double radius : {220.0, 320.0})
+            for (int k = 0; k < 11; ++k)
+            {
+                double deg = 180.0 + (k % 2 ? 1.0 : -1.0) * ((k + 1) / 2) * 22.0;
+                double a = deg * 3.14159265358979 / 180.0;
+                Vec3 dir = g_room.forward * std::cos(a) + right * std::sin(a);
+                Vec3 at = g_room.origin + dir * radius;
+                bool ok = true;
+                for (const Vec3& t : taken)
+                    if (std::hypot(t.x - at.x, t.y - at.y) < 100.0) ok = false;
+                for (const TestRoom::Book& b : g_room.books)
+                    if (b.actor && std::hypot(b.centre.x - at.x, b.centre.y - at.y) < 120.0) ok = false;
+                for (const Vec3& t : g_room.table_at)
+                    if (std::hypot(t.x - at.x, t.y - at.y) < 130.0) ok = false;
+                double gz = 0.0;
+                if (ok && (!ground_below(player, at.x, at.y, floor_z + 150.0, gz) || std::fabs(gz - floor_z) > 25.0)) ok = false;
+                if (!ok) continue;
+                out = TestRoom::Slot{at, std::atan2(-dir.y, -dir.x) * 57.29577951308232, nullptr, -1.0, {}};
+                return true;
+            }
+        return false;
+    }
+
+    // Every Willie but you goes (bodies you are using stay); the room's slots go too, so nobody comes back.
+    void room_remove_all_willies(UObject* player)
+    {
+        std::vector<UObject*> willies;
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        int removed = 0, kept = 0, gear = 0;
+        auto remove = [&](UObject* w, std::vector<UObject*>& his_gear) {
+            if (!w || w == player || std::find(willies.begin(), willies.end(), w) == willies.end()) return;
+            if (const char* why = room_body_in_use(w, player))
+            {
+                HSVR_LOG("TestRoom: book: %ls stays: %s", w->GetName().c_str(), why);
+                ++kept;
+                return;
+            }
+            room_note_gear(w, his_gear);
+            Call d(w, STR("Destroy Willie"));
+            d.run();
+            gear += room_clear_gear(his_gear, willies, w);
+            ++removed;
+        };
+        for (TestRoom::Slot& s : g_room.slots) remove(s.foe, s.gear);
+        for (TestRoom::Body& b : g_room.bodies) remove(b.body, b.gear);
+        g_room.slots.clear();
+        g_room.bodies.clear();
+        HSVR_LOG("TestRoom: book: removed %d Willie(s) and %d of their weapons; %d kept (in use)", removed, gear, kept);
+    }
+
+    void room_book_click(UObject* player, TestRoom::Book& b, int row, double u)
+    {
+        if (row <= 0) return;
+        if (b.kind == 0)
+        {
+            if (row == 1)
+            {
+                int step = u < -0.25 ? -1 : u > 0.25 ? 1 : 0;
+                if (!step) return;
+                b.tier += step;
+                if (b.tier > 8) b.tier = -1;
+                if (b.tier < -1) b.tier = 8;
+                room_text(b.rows[1], room_row_text(b, 1));
+                HSVR_LOG("TestRoom: book: weapon tier %ls", room_tier_text(b.tier).c_str());
+                return;
+            }
+            int k = row - 2;
+            if (k < 0 || k >= kRoomKindCount) return;
+            // The first free spot on the tables; else on the floor in front of the book.
+            std::vector<UObject*> weapons;
+            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+            std::vector<RoomFoot> boxes;
+            for (UObject* w : weapons)
+            {
+                if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || is_fist(w) || !object_alive(w) || bool_property(w, STR("Is Sheathed"))) continue;
+                RoomFoot f;
+                if (room_weapon_foot(w, f)) boxes.push_back(f);
+            }
+            const TestRoom::WeaponSpot* spot = nullptr;
+            for (const TestRoom::WeaponSpot& s : g_room.spots)
+                if (room_spot_free(s, boxes)) { spot = &s; break; }
+            hsvr::Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+            TestRoom::WeaponSpot floor_spot;
+            if (!spot)
+            {
+                hsvr::Vec3 toward = hsvr::normalized(hsvr::Vec3{b.centre.x - g_room.origin.x, b.centre.y - g_room.origin.y, 0.0});
+                double floor_z = room_floor_z(player);
+                // Behind the books, away from him and the tables: 3 rows of 8, 25 cm apart, the weapon along
+                // `right` like on the tables (in front of the book a pile crept for seconds, and weapons laid
+                // within reach of his legs were pushed about: tests 2026-11-22 22:11-22:21). A spot must
+                // have floor under its middle and 40 cm each way (no wall, no furniture), and lie 80 cm
+                // or more from him.
+                hsvr::Vec3 me = actor_location(player);
+                double side = ((b.centre.x - g_room.origin.x) * right.x + (b.centre.y - g_room.origin.y) * right.y) >= 0.0 ? 1.0 : -1.0;
+                hsvr::Quat lying = hsvr::quat_from_axes(hsvr::Vec3{0, 0, 1}, hsvr::cross(right, hsvr::Vec3{0, 0, 1}), right);
+                for (int i = 0; i < 24 && !spot; ++i)
+                {
+                    floor_spot.at = hsvr::Vec3{g_room.origin.x, g_room.origin.y, floor_z + 30.0} - g_room.forward * (90.0 + (i / 8) * 25.0) +
+                                    right * (side * (150.0 - (i % 8) * 20.0));
+                    floor_spot.q = lying;
+                    if (std::hypot(floor_spot.at.x - me.x, floor_spot.at.y - me.y) < 80.0) continue;
+                    bool floor_ok = true;
+                    for (double along : {-40.0, 0.0, 40.0})
+                    {
+                        hsvr::Vec3 p = floor_spot.at + right * along;
+                        double gz = 0.0;
+                        if (!ground_below(player, p.x, p.y, floor_z + 60.0, gz) || std::fabs(gz - floor_z) > 8.0) floor_ok = false;
+                    }
+                    if (floor_ok && room_spot_free(floor_spot, boxes)) spot = &floor_spot;
+                }
+                if (!spot)
+                {
+                    // No free floor behind the books (a wall): between the book and where he started.
+                    floor_spot.at = hsvr::Vec3{b.centre.x, b.centre.y, floor_z + 30.0} - toward * 60.0;
+                    floor_spot.q = lying;
+                    spot = &floor_spot;
+                    HSVR_LOG("TestRoom: book: no free floor behind the books; in front of the book instead");
+                }
+            }
+            hsvr::Quat q = spot->q;
+            if (kRoomKinds[k].premade == 2) q = hsvr::quat_from_axes(right, hsvr::cross(hsvr::Vec3{0, 0, 1}, right), hsvr::Vec3{0, 0, 1});
+            UObject* w = room_make_weapon(player, k, b.tier, spot->at, q);
+            HSVR_LOG("TestRoom: book: %s (%ls) -> %ls %s", kRoomKinds[k].label, room_tier_text(b.tier).c_str(), w ? w->GetName().c_str() : STR("nothing"),
+                     spot == &floor_spot ? "on the floor (the tables are full)" : "on a table");
+            return;
+        }
+        if (row == 1)
+        {
+            b.fights = !b.fights;
+            room_text(b.rows[1], room_row_text(b, 1));
+            HSVR_LOG("TestRoom: book: new Willies %s", b.fights ? "fight" : "stand passive");
+            return;
+        }
+        if (row == 12)
+        {
+            room_remove_all_willies(player);
+            return;
+        }
+        int tier = row == 11 ? -1 : row - 2;
+        TestRoom::Slot slot;
+        if (!room_willie_spot(player, slot))
+        {
+            HSVR_LOG("TestRoom: book: no free spot for a Willie");
+            return;
+        }
+        slot.foe = room_spawn_foe(player, slot, tier, !b.fights);
+        slot.book = true;
+        slot.fights = b.fights;
+        if (slot.foe) g_room.slots.push_back(slot);
+        HSVR_LOG("TestRoom: book: Willie (%ls, %s) -> %ls", room_tier_text(tier).c_str(), b.fights ? "fights" : "passive", slot.foe ? slot.foe->GetName().c_str() : STR("NOT made"));
+    }
+
+    // Is this hand free to point (nothing in it, not grabbing)?
+    bool room_hand_free(UObject* player, int side)
+    {
+        if (g_object_grab[side].component || g_body_grab[side].victim) return false;
+        UObject* w = object_property(player, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+        return !w || is_fist(w);
+    }
+
+    // Every tick once the room is up: each free hand's aim ray against the pages.
+    void room_books_tick(UObject* player)
+    {
+        using hsvr::Vec3;
+        if (g_room.books.empty()) return;
+        hsvr::ControllerState cs = hsvr::controllers_state();
+        int hover[8];
+        for (size_t i = 0; i < g_room.books.size() && i < 8; ++i) hover[i] = -1;
+        for (int side = 0; side < 2; ++side)
+        {
+            const hsvr::HandState& h = cs.hand[side];
+            float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : h.trigger;
+            bool shown = false;
+            Vec3 O;
+            hsvr::Quat Q;
+            if (cs.active && h.aim_valid && room_hand_free(player, side) && hsvr::stereo_tracking_to_world(h.aim, O, Q))
+            {
+                Vec3 D = Q.rotate(Vec3{1, 0, 0});
+                int best_book = -1, best_row = -1;
+                double best_t = 250.0, best_u = 0.0;
+                Vec3 best_p;
+                for (size_t i = 0; i < g_room.books.size() && i < 8; ++i)
+                {
+                    const TestRoom::Book& b = g_room.books[i];
+                    double dn = hsvr::dot(D, b.normal);
+                    if (dn > -0.05) continue; // from behind or edge on
+                    double t = hsvr::dot(b.centre - O, b.normal) / dn;
+                    if (t < 0.0 || t > best_t) continue;
+                    Vec3 p = O + D * t;
+                    double u = hsvr::dot(p - b.centre, b.right) / b.half_w, v = hsvr::dot(p - b.centre, b.up) / b.half_h;
+                    if (std::fabs(u) > 1.0 || std::fabs(v) > 1.0) continue;
+                    int rows = (int)b.rows.size();
+                    double line = 2.0 * b.half_h / (rows + 0.5);
+                    int row = (int)std::floor((b.half_h - v * b.half_h - line * 0.25) / line);
+                    best_book = (int)i, best_row = (std::max)(0, (std::min)(rows - 1, row)), best_t = t, best_u = u, best_p = p;
+                }
+                if (best_book >= 0)
+                {
+                    shown = true;
+                    hover[best_book] = best_row;
+                    TestRoom::Book& b = g_room.books[best_book];
+                    set_component_transform(g_room.dot[side], best_p + b.normal * 0.3, hsvr::Quat{});
+                    Vec3 mid = (O + best_p) * 0.5;
+                    Vec3 bx = hsvr::cross(D, Vec3{0, 0, 1});
+                    bx = hsvr::length(bx) < 1e-3 ? Vec3{1, 0, 0} : hsvr::normalized(bx);
+                    set_component_transform(g_room.beam[side], mid, hsvr::quat_from_axes(bx, hsvr::cross(D, bx), D)); // the cylinder's length (its Z) along the ray
+                    room_scale(g_room.beam[side], Vec3{0.003, 0.003, best_t / 100.0});
+                    bool down = g_room.trigger_down[side] ? trig > 0.35f : trig > 0.75f;
+                    if (down && !g_room.trigger_down[side])
+                    {
+                        HSVR_LOG("TestRoom: book: %s hand clicks %s book line %d (%ls), u %.2f", side == 0 ? "left" : "right", b.kind == 0 ? "weapon" : "Willie", best_row,
+                                 room_row_text(b, best_row).c_str(), best_u);
+                        hsvr::controllers_buzz(side, 0.4f);
+                        room_book_click(player, b, best_row, best_u);
+                    }
+                    g_room.trigger_down[side] = down;
+                }
+            }
+            if (!shown) g_room.trigger_down[side] = trig > 0.35f; // a trigger already held when the ray arrives is no click
+            if (shown != g_room.pointer_shown[side])
+            {
+                g_room.pointer_shown[side] = shown;
+                if (g_room.dot[side]) room_hide(g_room.dot[side], !shown);
+                if (g_room.beam[side]) room_hide(g_room.beam[side], !shown);
+            }
+        }
+        for (size_t i = 0; i < g_room.books.size() && i < 8; ++i)
+            if (g_room.books[i].hover != hover[i])
+            {
+                g_room.books[i].hover = hover[i];
+                room_book_colours(g_room.books[i]);
+            }
+    }
+
+    // Everything the room put up is taken down (a rebuild for a new pawn, leaving).
+    void room_clear_furniture()
+    {
+        for (UObject* a : g_room.furniture)
+            if (a && object_alive(a))
+            {
+                Call d(a, STR("K2_DestroyActor"));
+                d.run();
+            }
+        g_room.furniture.clear();
+        g_room.tables.clear();
+        g_room.books.clear();
+        for (int side = 0; side < 2; ++side) g_room.dot[side] = g_room.beam[side] = nullptr;
+    }
+
+    // The headset is held black while the room is put up and fades back in over 0.5 s.
+    void room_blackout(bool on)
+    {
+        if (!hsvr::config().test_room_blackout) on = false;
+        hsvr::shared().blackout.store(on ? 1.0f : 0.0f);
+        g_room.black_since = on ? hsvr::now_seconds() : -1.0;
+        g_room.reveal_at = -1.0;
+    }
+    void room_blackout_tick()
+    {
+        double now = hsvr::now_seconds();
+        if (g_room.reveal_at >= 0.0)
+        {
+            double k = (now - g_room.reveal_at) / 0.5;
+            hsvr::shared().blackout.store(k >= 1.0 ? 0.0f : (float)(1.0 - k));
+            if (k >= 1.0) g_room.reveal_at = -1.0, g_room.black_since = -1.0;
+        }
+        else if (g_room.black_since >= 0.0 && now - g_room.black_since > 20.0)
+        {
+            HSVR_LOG("TestRoom: still black after 20 s; showing the room as it is");
+            g_room.reveal_at = now;
         }
     }
 
@@ -23270,6 +24733,7 @@ namespace
         room_boot(cfg);
         if (g_room.failed) return;
         input_to_game();
+        room_blackout(true); // black from here until the room is up (test_room_tick)
         HSVR_LOG("TestRoom: %s: into the test room (%s)", why, cfg.test_room_map.c_str());
         run_console_command(std::string("open ") + cfg.test_room_map);
     }
@@ -23383,6 +24847,7 @@ namespace
             FILETIME t{};
             if (file_time(g_room.save_path, t) && (!g_room.save_time_known || CompareFileTime(&t, &g_room.save_time) != 0)) room_restore_save("the game saved");
         }
+        room_blackout_tick(); // fades in once the room is up; never black more than 20 s
         UObject* controller = find_player_controller();
         if (!controller) return;
         bool in_room = controller->GetFullName().find(g_room.map_key) != std::wstring::npos;
@@ -23400,10 +24865,15 @@ namespace
             g_room.pawn = player;
             g_room.pawn_at = now;
             g_room.stage = 0;
+            room_clear_furniture(); // a new pawn on the same map (restart): put up afresh
+            if (g_room.black_since < 0.0) room_blackout(true);
             HSVR_LOG("TestRoom: in the room (%ls)", player->GetFullName().c_str());
         }
         // The arena clears weapons, tables and foes at BeginPlay and again at +1 s, then spawns the
-        // foes: the room is set up after that.
+        // foes: the room is set up after that, all in this one tick, while the headset is black (the
+        // Yard room put the tables up, then 1.5 s later dropped the weapons onto them: lag, and weapons
+        // bouncing off; Matthew 2026-11-22). The foes get their physics back 0.4 s later at rest
+        // (room_settle_foes) and the headset fades in 1.6 s after the room is up.
         if (g_room.stage == 0 && now - g_room.pawn_at >= 3.0)
         {
             g_room.stage = 1;
@@ -23414,18 +24884,25 @@ namespace
             f.z = 0.0;
             double fl = hsvr::length(f);
             g_room.forward = fl > 1e-3 ? f * (1.0 / fl) : hsvr::Vec3{1, 0, 0};
+            double t0 = hsvr::now_seconds();
             room_place_foes(player);
             room_place_tables(player);
-            g_room.watch_from = now; // diagnostics: tables now, weapons at +1.5 s
+            room_spawn_weapons(player);
+            room_place_books(player);
+            g_room.built_at = now;
+            g_room.watch_from = now; // diagnostics: everything that moves in the room's first 5 s
+            HSVR_LOG("TestRoom: room put up in %.0f ms", (hsvr::now_seconds() - t0) * 1000.0);
         }
-        if (g_room.stage == 1 && now - g_room.pawn_at >= 4.5)
+        if (g_room.stage == 1 && now - g_room.built_at >= 1.6)
         {
             g_room.stage = 2;
-            room_spawn_weapons(player);
+            if (g_room.black_since >= 0.0) g_room.reveal_at = now;
+            HSVR_LOG("TestRoom: the room is ready");
         }
         room_settle_foes();
         if (g_room.stage >= 1) room_respawn_tick(player);
-        // Diagnostics: for 5 s from the tables (weapons at +1.5 s), every table or loose weapon near the
+        if (g_room.stage >= 2) room_books_tick(player);
+        // Diagnostics: for 5 s from the room going up, every table or loose weapon near the
         // tables that moves more than 3 cm between samples (20 a second).
         if (g_room.watch_from > 0.0 && now - g_room.watch_from < 5.0 && now >= g_room.next_watch)
         {
@@ -23466,7 +24943,10 @@ namespace
                 Call gp(ai, STR("K2_GetPawn"));
                 gp.run();
                 UObject* foe = gp.object_result();
-                if (foe && foe != player) make_foe_passive(ai, foe);
+                if (!foe || foe == player) continue;
+                bool fights = false;
+                for (const TestRoom::Slot& s : g_room.slots) fights = fights || (s.foe == foe && s.fights);
+                if (!fights) make_foe_passive(ai, foe);
             }
         }
         (void)cfg;
@@ -23502,6 +24982,16 @@ namespace
                      up.z > 0.95 ? "standing" : "TIPPED");
             tables.push_back(t);
         }
+        for (UObject* box : g_room.tables) // the room's own static tables
+        {
+            if (!box) continue;
+            Table t{component_location(box), component_rotation(box)};
+            HSVR_LOG("TestRoom: check: static table at (%.0f, %.0f, %.0f)", t.at.x, t.at.y, t.at.z);
+            tables.push_back(t);
+        }
+        for (const TestRoom::Book& b : g_room.books)
+            HSVR_LOG("TestRoom: check: %s book, page at (%.0f, %.0f, %.0f), %d lines, tier %ls%s", b.kind == 0 ? "weapon" : "Willie", b.centre.x, b.centre.y, b.centre.z,
+                     (int)b.rows.size(), room_tier_text(b.tier).c_str(), b.kind == 1 ? (b.fights ? ", fighting" : ", passive") : "");
         std::vector<UObject*> weapons, willies;
         UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
         UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
@@ -23518,6 +25008,12 @@ namespace
             Vec3 at = component_location(base);
             // The generator's own throwaway weapons (destroyed, waiting for clean-up) sit at 0,0,0.
             if (at.x == 0.0 && at.y == 0.0 && at.z == 0.0) continue;
+            // Where it lies is the middle of what you see of it, not its grip (a polearm slid to have its
+            // centre of mass over the table has its grip 99 cm out from the table's middle).
+            {
+                Vec3 bo, be;
+                if (room_weapon_box(w, bo, be)) at = bo;
+            }
             ++loose;
             int best = -1;
             Vec3 local{};
@@ -23564,6 +25060,77 @@ namespace
     }
 
     bool g_script_player_immortal = false;
+
+    // ---- Cases in one launch (tools/pctest) ------------------------------------------------------
+    // "hsvr.case <name>" starts one test case without a relaunch: the steps still waiting from the
+    // case before are dropped, the made-up inputs go back to how a launch starts them, and the test
+    // room is opened again (a fresh level: his Willie, the foes, the weapons all new). The runner
+    // then waits for the room, as it does after a launch, and writes the case's steps.
+    // "hsvr.case_end" logs how its checks went. Any check that fails marks a replay (replay_capture),
+    // so the 10 s before it are saved next to the log.
+    struct CaseState
+    {
+        std::string name;
+        int number = 0;
+        int pass = 0, fail = 0;
+        bool replay_marked = false;
+    };
+    CaseState g_case;
+    int g_case_count = 0;
+
+    // What every made-up input and test aid is at launch (each initialiser above). A test aid that
+    // is not listed here stays set into the next case: put a case that uses one in its own launch
+    // ("# fresh" in its steps file) or add it here.
+    void case_reset_inputs()
+    {
+        g_fake_tilt_pitch.store(0.0);
+        g_fake_tilt_roll.store(0.0);
+        g_fake_tilt_drop.store(0.0);
+        g_fake_head_pose.store(false);
+        g_fake_wobble_deg.store(0.0);
+        g_fake_wobble_hz.store(1.0);
+        g_fake_shift_fwd.store(0.0);
+        g_fake_shift_right.store(0.0);
+        g_fake_head_drop.store(-1.0);
+        g_fake_arm_mode.store(0);
+        g_fake_arm_epoch.fetch_add(1);
+        g_fake_two_up.store(20.0);
+        g_fake_thrust_pitch.store(60.0);
+        g_fake_thrust_up.store(-5.0);
+        for (int i = 0; i < 2; ++i)
+        {
+            g_fake_roll_deg[i].store(0.0);
+            g_fake_trigger[i].store(-1.0f);
+            g_fake_squeeze[i].store(-1.0f);
+            g_fake_thumb[i].store(-1.0f);
+            g_worst_lag[i].store(0.0);
+        }
+        g_carry_log_until.store(0.0);
+        g_count_letgo.store(0);
+        g_count_kicks.store(0);
+        g_fake_continue.store(false);
+        g_fake_x.store(false);
+        g_fake_rstick.store(false);
+        g_fake_stick_click.store(false);
+        g_fake_stick[0].store(-9.0);
+        g_fake_stick[1].store(0.0);
+        g_park_socket.clear();
+        g_arm_floor[0] = 45.0;
+        g_arm_floor[1] = 15.0;
+        g_arm_floor[2] = 5.0;
+        const double slot_test[5] = {1.0, 4.0, 0.0, 0.0, 0.0};
+        for (int i = 0; i < 5; ++i) g_slot_test[i] = slot_test[i];
+        g_fake_jitter_cm.store(0.0);
+        g_script_player_immortal = false;
+    }
+
+    void case_end_log()
+    {
+        if (g_case.name.empty()) return;
+        HSVR_LOG("Case: end %s (#%d): %d check(s) passed, %d failed%s", g_case.name.c_str(), g_case.number, g_case.pass, g_case.fail,
+                 g_case.replay_marked ? "; replay marked at the first failure" : "");
+        g_case.name.clear();
+    }
     void script_immortal_tick()
     {
         static double last = -10.0;
@@ -23575,6 +25142,233 @@ namespace
         find_pawn_mesh(&pawn);
         if (pawn && !set_bool_property(pawn, STR("Immortal"), true)) HSVR_LOG_EVERY(30.0, "Script: hsvr.player_immortal: no Immortal variable on the player");
     }
+    // A value the tests can check (hsvr.expect, hsvr.wait): false when <what> is not known.
+    // Test-room numbers for hsvr.expect / hsvr.wait:
+    //   room_ready (1 once the room is up and faded in), room_books, room_tables, room_foes (Willies but
+    //   you, standing in the world), room_foes_ai (of them with AI on), room_won (the game mode's Match Won),
+    //   room_on_tables (loose weapons lying on a table top), room_on_floor (loose weapons within 30 cm of the
+    //   floor near the room), room_lost (weapons more than 3 m below the floor or 50 m from you),
+    //   room_moved (loose weapons that moved more than 3 cm since room_ready first read 1 / hsvr.mark_room),
+    //   room_page_z (lowest page centre above the floor, cm), room_page_up (smallest page normal z: its lean).
+    std::map<UObject*, hsvr::Vec3> g_room_marks;
+    bool room_value(const std::string& w, double& value)
+    {
+        using hsvr::Vec3;
+        UObject* player = nullptr;
+        find_pawn_mesh(&player);
+        if (!player) return false;
+        double floor_z = room_floor_z(player);
+        Vec3 me = actor_location(player);
+        if (w == "room_ready") { value = g_room.stage >= 2 ? 1.0 : 0.0; return true; }
+        if (w == "room_books") { value = (double)g_room.books.size(); return true; }
+        if (w == "room_tables") { value = (double)g_room.tables.size(); return true; }
+        if (w == "room_won")
+        {
+            UObject* gm = room_game_mode();
+            value = gm && (bool_property(gm, STR("Match Won")) || bool_property(gm, STR("All Enemies Dead"))) ? 1.0 : 0.0;
+            return gm != nullptr;
+        }
+        if (w == "room_page_clip")
+        {
+            // The most any lectern comes through its page, cm (0 or less: clear).
+            if (g_room.books.empty()) return false;
+            value = -1e9;
+            for (const TestRoom::Book& b : g_room.books)
+                value = (std::max)(value, room_page_clip(b.actor && object_alive(b.actor) ? room_mesh_of(b.actor) : nullptr, b.centre, b.normal, b.up, b.right, b.half_w, b.half_h));
+            return true;
+        }
+        if (w == "room_page_z" || w == "room_page_up")
+        {
+            if (g_room.books.empty()) return false;
+            value = 1e9;
+            for (const TestRoom::Book& b : g_room.books) value = (std::min)(value, w == "room_page_z" ? b.centre.z - floor_z : b.normal.z);
+            return true;
+        }
+        std::vector<UObject*> willies;
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        if (w == "room_foes" || w == "room_foes_ai")
+        {
+            int n = 0, ai = 0;
+            for (UObject* f : willies)
+            {
+                if (!f || f == player || f->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                Vec3 a = actor_location(f);
+                if (a.x == 0.0 && a.y == 0.0 && a.z == 0.0) continue;
+                ++n;
+                UObject* c = object_property(f, STR("Controller"));
+                if (c && !bool_property(c, STR("DED"))) ++ai;
+            }
+            value = w == "room_foes" ? n : ai;
+            return true;
+        }
+        std::vector<UObject*> weapons;
+        UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+        int on_tables = 0, on_floor = 0, lost = 0, moved = 0;
+        bool mark = w == "room_mark";
+        for (UObject* wp : weapons)
+        {
+            if (!wp || wp->GetName().rfind(STR("Default__"), 0) == 0 || is_fist(wp) || bool_property(wp, STR("Is Sheathed"))) continue;
+            bool held = false;
+            for (UObject* c : willies)
+                if (c && (object_property(c, STR("Weapon R")) == wp || object_property(c, STR("Weapon L")) == wp)) held = true;
+            if (held) continue;
+            UObject* base = object_property(wp, STR("BaseMesh"));
+            if (!base) continue;
+            Vec3 at = component_location(base);
+            if (at.x == 0.0 && at.y == 0.0 && at.z == 0.0) continue;
+            {
+                Vec3 bo, be;
+                if (room_weapon_box(wp, bo, be)) at = bo; // the middle of what you see of it (room_report)
+            }
+            if (at.z < floor_z - 300.0 || hsvr::length(at - me) > 5000.0) { ++lost; continue; }
+            bool table = false;
+            for (const Vec3& t : g_room.table_at)
+            {
+                Vec3 l = yaw_quat(g_room.table_yaw).inverse().rotate(at - t);
+                if (std::fabs(l.x) < 55.0 && std::fabs(l.y) < 90.0 && l.z > 80.0 && l.z < 130.0) table = true;
+            }
+            if (table) ++on_tables;
+            else if (at.z < floor_z + 30.0 && hsvr::length(at - g_room.origin) < 600.0) ++on_floor;
+            if (mark) g_room_marks[wp] = at;
+            else
+            {
+                auto it = g_room_marks.find(wp);
+                if (it != g_room_marks.end() && hsvr::length(at - it->second) > 3.0)
+                {
+                    ++moved;
+                    if (w == "room_moved")
+                        HSVR_LOG("TestRoom: %ls moved %.0f cm since the mark, from (%.0f, %.0f, %.0f) to (%.0f, %.0f, %.0f)", wp->GetName().c_str(), hsvr::length(at - it->second),
+                                 it->second.x, it->second.y, it->second.z, at.x, at.y, at.z);
+                }
+            }
+        }
+        if (mark) { value = (double)g_room_marks.size(); return true; }
+        if (w == "room_on_tables") value = on_tables;
+        else if (w == "room_on_floor") value = on_floor;
+        else if (w == "room_lost") value = lost;
+        else if (w == "room_moved") value = moved;
+        else return false;
+        return true;
+    }
+
+    bool script_value(const std::string& w, double& value)
+    {
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        value = 0.0;
+        bool known = true;
+        if (w == "held_r") value = object_property(pawn, STR("Weapon R")) ? 1.0 : 0.0;
+        else if (w == "hand_speed_l" || w == "hand_speed_r")
+        {
+            // How fast the hand bone moves (cm/s) between two reads; for "hsvr.wait hand_speed_l < 5 3 0.2"
+            // (the hand has arrived). The first read, or one more than 0.5 s after the last, is 1e9.
+            int side = w.back() == 'l' ? 0 : 1;
+            static hsvr::Vec3 last[2];
+            static double last_t[2] = {-1.0, -1.0};
+            double t = hsvr::now_seconds();
+            hsvr::Vec3 at = g_pose.mesh ? socket_location(g_pose.mesh, bone_fname(side == 0 ? "hand_l" : "hand_r")) : hsvr::Vec3{};
+            double dt = t - last_t[side];
+            value = last_t[side] >= 0.0 && dt > 1e-4 && dt < 0.5 ? hsvr::length(at - last[side]) / dt : 1e9;
+            last[side] = at;
+            last_t[side] = t;
+            if (!g_pose.mesh) known = false;
+        }
+        else if (w == "held_l") value = object_property(pawn, STR("Weapon L")) ? 1.0 : 0.0;
+        else if (w.rfind("room_", 0) == 0) known = room_value(w, value);
+        else if (w == "grabbed_r") value = bool_property(pawn, STR("Grabbed R")) ? 1.0 : 0.0;
+        else if (w == "grabbed_l") value = bool_property(pawn, STR("Grabbed L")) ? 1.0 : 0.0;
+        else if (w == "letgo") value = g_count_letgo.load();
+        else if (w == "kicks") value = g_count_kicks.load();
+        else if (w == "lag_r") value = g_worst_lag[1].load();
+        else if (w == "lag_l") value = g_worst_lag[0].load();
+        else if (w == "stamina") value = read_number_variable(pawn, STR("Stamina"));
+        else if (w == "strength_r") value = g_hold[1].body_strength;
+        else if (w == "strength_l") value = g_hold[0].body_strength;
+        else if (w == "two_hand") value = g_two.active ? 1.0 : 0.0;
+        else if (w == "fist_r") value = is_fist(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
+        else if (w == "fist_l") value = is_fist(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
+        else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
+        else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
+        else if (w == "actor_z") value = pawn ? actor_location(pawn).z : 0.0;
+        else if (w == "xbow_string" || w == "xbow_bolt")
+        {
+            // the crossbow in either hand: String Loaded / Bolt Loaded
+            UObject* xb = object_property(pawn, STR("Weapon R"));
+            if (!is_crossbow(xb)) xb = object_property(pawn, STR("Weapon L"));
+            value = is_crossbow(xb) && bool_property(xb, w == "xbow_string" ? STR("String Loaded") : STR("Bolt Loaded")) ? 1.0 : 0.0;
+        }
+        else if (w == "xbow_quiver")
+        {
+            UObject* q = object_property(pawn, STR("Attached Bolt Quiver"));
+            int32_t* c = q ? value_ptr<int32_t>(q, STR("Projectile Count")) : nullptr;
+            value = c ? *c : -1.0;
+        }
+        else if (w == "bolt_r") value = is_bolt(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
+        else if (w == "bolt_l") value = is_bolt(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
+        else if (w == "xstring") value = g_xstring.on ? g_xstring.side + 1.0 : 0.0;
+        else if (w.rfind("var:", 0) == 0 && pawn)
+        {
+            // var:<pawn variable>, '_' for spaces (var:Leg_R_Tonus); a variable named with '_' is tried as written first
+            std::wstring n(w.begin() + 4, w.end());
+            FProperty* p = prop_chain(pawn, n.c_str());
+            if (!p)
+            {
+                for (auto& ch : n)
+                    if (ch == L'_') ch = L' ';
+                p = prop_chain(pawn, n.c_str());
+            }
+            if (p) value = number_property(pawn, p);
+            else known = false;
+        }
+        else known = false;
+        return known;
+    }
+
+    bool script_compare(double value, const std::string& op, double want, bool& known)
+    {
+        if (op == "<") return value < want;
+        if (op == "<=") return value <= want;
+        if (op == "=" || op == "==") return std::fabs(value - want) < 1e-6;
+        if (op == ">=") return value >= want;
+        if (op == ">") return value > want;
+        known = false;
+        return false;
+    }
+
+    // One check of a case passed or failed (hsvr.expect, hsvr.wait); the first failure marks a replay.
+    void case_check(bool ok, const hsvr::Config& cfg)
+    {
+        if (ok)
+        {
+            ++g_case.pass;
+            return;
+        }
+        ++g_case.fail;
+        if (!g_case.replay_marked && cfg.replay_capture)
+        {
+            g_case.replay_marked = true;
+            replay::g_fake_mark.store(true);
+            HSVR_LOG("Script: failed check: replay marked");
+        }
+    }
+
+    // hsvr.wait <what> <op> <value> <timeout s> [hold s] [label]: the steps after it wait until the
+    // check holds (for <hold> seconds, 0 = at once) or <timeout> passes, and then run as many seconds
+    // after that moment as they were after the wait. Same <what> as hsvr.expect. A timeout is a failed
+    // check; a pass is not counted (it is a wait, not a check).
+    struct ScriptWait
+    {
+        bool on = false;
+        size_t index = 0;    // the wait's entry
+        size_t end = 0;      // the entries there were then (a batch written later is not moved)
+        double at = 0.0;     // its time
+        double since = 0.0;  // when it started
+        double deadline = 0.0, hold = 0.0, true_since = -1.0;
+        std::string what, op, label;
+        double want = 0.0;
+    };
+    ScriptWait g_wait;
+
     void run_dev_script(const hsvr::Config& cfg)
     {
         static bool parsed = false;
@@ -23657,6 +25451,32 @@ namespace
             {
                 menu_at = now;
                 HSVR_LOG("Script: first menu on screen at %.1f s; M+ steps count from here", now);
+            }
+        }
+        if (g_wait.on)
+        {
+            double v = 0.0;
+            bool known = script_value(g_wait.what, v);
+            bool ok = script_compare(v, g_wait.op, g_wait.want, known) && known;
+            if (!ok) g_wait.true_since = -1.0;
+            else if (g_wait.true_since < 0.0) g_wait.true_since = now;
+            bool met = ok && now - g_wait.true_since >= g_wait.hold;
+            if (!met && now < g_wait.deadline && known) return;
+            g_wait.on = false;
+            // The steps after the wait: as long after now as they were after the wait.
+            double shift = now - g_wait.at;
+            for (size_t i = g_wait.index + 1; i < g_wait.end && i < entries.size(); ++i)
+                if (!entries[i].done && !entries[i].after_menu && entries[i].at >= g_wait.at) entries[i].at += shift;
+            if (met)
+                HSVR_LOG("WAIT OK: %s %s %g (is %g) after %.2f s%s%s", g_wait.what.c_str(), g_wait.op.c_str(), g_wait.want, v, now - g_wait.since,
+                         g_wait.label.empty() ? "" : " - ", g_wait.label.c_str());
+            else
+            {
+                if (!known) HSVR_LOG("WAIT FAIL: could not read %s %s", g_wait.what.c_str(), g_wait.op.c_str());
+                else
+                    HSVR_LOG("WAIT TIMEOUT: %s %s %g (is %g) after %.2f s%s%s", g_wait.what.c_str(), g_wait.op.c_str(), g_wait.want, v, now - g_wait.since,
+                             g_wait.label.empty() ? "" : " - ", g_wait.label.c_str());
+                case_check(false, cfg);
             }
         }
         for (ScriptEntry& entry : entries)
@@ -23762,16 +25582,85 @@ namespace
                 if (!killed) HSVR_LOG("TestRoom: kill: no living foe%s", want >= 0 ? " in that slot" : "");
                 continue;
             }
+            // hsvr.book_click <book 0 weapons | 1 Willies> <line> [u -1 left .. 1 right]: what pointing
+            // at that line of the page and pulling the trigger does.
+            if (entry.command.rfind("hsvr.book_click", 0) == 0)
+            {
+                int book = 0, row = 0;
+                double u = 0.0;
+                int got = sscanf(entry.command.c_str(), "hsvr.book_click %d %d %lf", &book, &row, &u);
+                UObject* player = nullptr;
+                find_pawn_mesh(&player);
+                if (got >= 2 && player && book >= 0 && book < (int)g_room.books.size())
+                {
+                    HSVR_LOG("TestRoom: book: test click, %s book line %d (%ls), u %.2f", g_room.books[book].kind == 0 ? "weapon" : "Willie", row,
+                             room_row_text(g_room.books[book], row).c_str(), u);
+                    room_book_click(player, g_room.books[book], row, u);
+                }
+                else HSVR_LOG("TestRoom: book: hsvr.book_click needs <book> <line> and a room with books (%d)", (int)g_room.books.size());
+                continue;
+            }
             if (entry.command == "hsvr.test_room_report")
             {
                 room_report();
                 continue;
+            }
+            if (entry.command.rfind("hsvr.case_end", 0) == 0)
+            {
+                case_end_log();
+                continue;
+            }
+            if (entry.command.rfind("hsvr.case_here ", 0) == 0)
+            {
+                // The case's room is ready: the one the launch opened (first case), or the one hsvr.case
+                // opened for it. The latter case is already open: ending it here would log "Case: end"
+                // with no checks, which the runner takes for the case's result.
+                std::string name = entry.command.substr(15);
+                if (g_case.name != name)
+                {
+                    case_end_log();
+                    g_case = CaseState{};
+                    g_case.name = name;
+                    g_case.number = ++g_case_count;
+                }
+                HSVR_LOG("Case: begin %s (#%d) in the room as it is", g_case.name.c_str(), g_case.number);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.case ", 0) == 0)
+            {
+                case_end_log(); // a case that never reached its end (timed out)
+                // Steps of the case before that never ran are dropped (this entry is the one running).
+                int dropped = 0;
+                for (ScriptEntry& other : entries)
+                    if (&other != &entry && !other.done)
+                    {
+                        other.done = true;
+                        ++dropped;
+                    }
+                case_reset_inputs();
+                g_wait.on = false;
+                g_case = CaseState{};
+                g_case.name = entry.command.substr(10);
+                g_case.number = ++g_case_count;
+                HSVR_LOG("Case: begin %s (#%d)%s; inputs as at launch, the test room opens again", g_case.name.c_str(), g_case.number,
+                         dropped ? " (steps left from the case before dropped)" : "");
+                if (g_room.booted && !g_room.failed && !g_room.done)
+                {
+                    g_room_marks.clear();
+                    room_apply_values(); // a case may have changed the game instance's mode values
+                    input_to_game();
+                    room_blackout(true);
+                    run_console_command(std::string("open ") + cfg.test_room_map);
+                }
+                else HSVR_LOG("Case: no test room this launch (test_room=1 is needed); not reopened");
+                return;
             }
             if (entry.command == "hsvr.test_room_open")
             {
                 if (g_room.booted && !g_room.failed)
                 {
                     input_to_game(); // no menu pointer left over from the first menu
+                    room_blackout(true);
                     run_console_command(std::string("open ") + cfg.test_room_map);
                 }
                 return;
@@ -23835,6 +25724,38 @@ namespace
                 HSVR_LOG("Script: hsvr.mark: test counters cleared");
                 continue;
             }
+            if (entry.command.rfind("hsvr.wait ", 0) == 0)
+            {
+                char what[64] = {0}, op[4] = {0};
+                double want = 0.0, timeout = 0.0;
+                int used = 0;
+                int got_n = sscanf(entry.command.c_str() + 10, "%63s %3s %lf %lf%n", what, op, &want, &timeout, &used);
+                if (got_n < 4 || timeout <= 0.0)
+                {
+                    HSVR_LOG("WAIT FAIL: bad step \"%s\" (hsvr.wait <what> <op> <value> <timeout s> [hold s] [label])", entry.command.c_str());
+                    case_check(false, cfg);
+                    continue;
+                }
+                std::string rest = entry.command.substr(10 + (size_t)used);
+                double hold = 0.0;
+                int used2 = 0;
+                if (sscanf(rest.c_str(), " %lf%n", &hold, &used2) == 1) rest = rest.substr((size_t)used2);
+                else hold = 0.0;
+                size_t f = rest.find_first_not_of(" \t");
+                g_wait = ScriptWait{};
+                g_wait.on = true;
+                g_wait.index = (size_t)(&entry - entries.data());
+                g_wait.end = entries.size();
+                g_wait.at = entry.at;
+                g_wait.since = now;
+                g_wait.deadline = now + timeout;
+                g_wait.hold = (std::max)(0.0, hold);
+                g_wait.what = what;
+                g_wait.op = op;
+                g_wait.want = want;
+                g_wait.label = f == std::string::npos ? std::string() : rest.substr(f);
+                return; // the gate above checks it from the next tick
+            }
             if (entry.command.rfind("hsvr.expect ", 0) == 0)
             {
                 // hsvr.expect <what> <op> <value> [label]; what: held_r, held_l, grabbed_r, grabbed_l,
@@ -23842,69 +25763,13 @@ namespace
                 char what[64] = {0}, op[4] = {0}, label[128] = {0};
                 double want = 0.0;
                 int got_n = sscanf(entry.command.c_str() + 12, "%63s %3s %lf %127[^\n]", what, op, &want, label);
-                UObject* pawn = nullptr;
-                find_pawn_mesh(&pawn);
                 std::string w = what;
                 double value = 0.0;
-                bool known = true;
-                if (w == "held_r") value = object_property(pawn, STR("Weapon R")) ? 1.0 : 0.0;
-                else if (w == "held_l") value = object_property(pawn, STR("Weapon L")) ? 1.0 : 0.0;
-                else if (w == "grabbed_r") value = bool_property(pawn, STR("Grabbed R")) ? 1.0 : 0.0;
-                else if (w == "grabbed_l") value = bool_property(pawn, STR("Grabbed L")) ? 1.0 : 0.0;
-                else if (w == "letgo") value = g_count_letgo.load();
-                else if (w == "kicks") value = g_count_kicks.load();
-                else if (w == "lag_r") value = g_worst_lag[1].load();
-                else if (w == "lag_l") value = g_worst_lag[0].load();
-                else if (w == "stamina") value = read_number_variable(pawn, STR("Stamina"));
-                else if (w == "strength_r") value = g_hold[1].body_strength;
-                else if (w == "strength_l") value = g_hold[0].body_strength;
-                else if (w == "two_hand") value = g_two.active ? 1.0 : 0.0;
-                else if (w == "fist_r") value = is_fist(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
-                else if (w == "fist_l") value = is_fist(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
-                else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
-                else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
-                else if (w == "actor_z") value = pawn ? actor_location(pawn).z : 0.0;
-                else if (w == "xbow_string" || w == "xbow_bolt")
-                {
-                    // the crossbow in either hand: String Loaded / Bolt Loaded
-                    UObject* xb = object_property(pawn, STR("Weapon R"));
-                    if (!is_crossbow(xb)) xb = object_property(pawn, STR("Weapon L"));
-                    value = is_crossbow(xb) && bool_property(xb, w == "xbow_string" ? STR("String Loaded") : STR("Bolt Loaded")) ? 1.0 : 0.0;
-                }
-                else if (w == "xbow_quiver")
-                {
-                    UObject* q = object_property(pawn, STR("Attached Bolt Quiver"));
-                    int32_t* c = q ? value_ptr<int32_t>(q, STR("Projectile Count")) : nullptr;
-                    value = c ? *c : -1.0;
-                }
-                else if (w == "bolt_r") value = is_bolt(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
-                else if (w == "bolt_l") value = is_bolt(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
-                else if (w == "xstring") value = g_xstring.on ? g_xstring.side + 1.0 : 0.0;
-                else if (w.rfind("var:", 0) == 0 && pawn)
-                {
-                    // var:<pawn variable>, '_' for spaces (var:Leg_R_Tonus); a variable named with '_' is tried as written first
-                    std::wstring n(w.begin() + 4, w.end());
-                    FProperty* p = prop_chain(pawn, n.c_str());
-                    if (!p)
-                    {
-                        for (auto& ch : n)
-                            if (ch == L'_') ch = L' ';
-                        p = prop_chain(pawn, n.c_str());
-                    }
-                    if (p) value = number_property(pawn, p);
-                    else known = false;
-                }
-                else known = false;
-                std::string o = op;
-                bool pass = false;
-                if (o == "<") pass = value < want;
-                else if (o == "<=") pass = value <= want;
-                else if (o == "=" || o == "==") pass = std::fabs(value - want) < 1e-6;
-                else if (o == ">=") pass = value >= want;
-                else if (o == ">") pass = value > want;
-                else known = false;
+                bool known = script_value(w, value);
+                bool pass = script_compare(value, op, want, known);
                 if (got_n < 3 || !known) HSVR_LOG("EXPECT FAIL: could not read \"%s\"", entry.command.c_str());
                 else HSVR_LOG("EXPECT %s: %s %s %g (is %g)%s%s", pass ? "PASS" : "FAIL", what, op, want, value, label[0] ? " - " : "", label);
+                case_check(got_n >= 3 && known && pass, cfg);
                 continue;
             }
             if (entry.command.rfind("hsvr.pawn_set ", 0) == 0)
@@ -25310,6 +27175,12 @@ namespace
                 HSVR_LOG("Script: hsvr.stick %.2f %.2f%s", fx, fy, fx <= -5.0 ? " (off)" : "");
                 continue;
             }
+            if (entry.command.rfind("hsvr.replay_mark", 0) == 0)
+            {
+                replay::g_fake_mark.store(true);
+                HSVR_LOG("Script: hsvr.replay_mark");
+                continue;
+            }
             if (entry.command.rfind("hsvr.stick_click ", 0) == 0)
             {
                 g_fake_stick_click.store(atoi(entry.command.c_str() + 17) != 0);
@@ -26204,6 +28075,17 @@ namespace
             erase_gone(s.gear);
         }
         for (TestRoom::Body& b : g_room.bodies) erase_gone(b.gear);
+        erase_gone(g_room.furniture);
+        erase_gone(g_room.tables);
+        g_room.books.erase(std::remove_if(g_room.books.begin(), g_room.books.end(), [](const TestRoom::Book& b) { return gone(b.actor); }), g_room.books.end());
+        for (TestRoom::Book& b : g_room.books)
+            for (UObject*& r : b.rows)
+                if (gone(r)) r = nullptr;
+        for (int side = 0; side < 2; ++side)
+        {
+            if (gone(g_room.dot[side])) g_room.dot[side] = nullptr;
+            if (gone(g_room.beam[side])) g_room.beam[side] = nullptr;
+        }
         g_room.bodies.erase(std::remove_if(g_room.bodies.begin(), g_room.bodies.end(), [](const TestRoom::Body& b) { return gone(b.body); }), g_room.bodies.end());
         if (dropped) HSVR_LOG("Freed: %d holder(s) cleared after the game freed %d object(s)", dropped, (int)g_freed_now.size());
     }
