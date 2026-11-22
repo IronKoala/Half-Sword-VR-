@@ -22406,6 +22406,19 @@ namespace
                     spawn_side = 0;
                     rest.resize(rest.size() - 5);
                 }
+                // "... mesh <static mesh asset path>": the spawned actor's "Mesh" component gets that
+                // mesh (BP_Physical_Clutter_Spawner picks a random one in its construction script;
+                // e.g. /Game/Assets/Props/Cooking_Utencils/Meshes/SM_Prop_Cooking_Kettle_001.SM_Prop_Cooking_Kettle_001).
+                std::wstring mesh_path;
+                {
+                    size_t mp = rest.find(" mesh ");
+                    if (mp != std::string::npos)
+                    {
+                        std::string m = rest.substr(mp + 6);
+                        mesh_path.assign(m.begin(), m.end());
+                        rest.resize(mp);
+                    }
+                }
                 std::wstring path(rest.begin(), rest.end());
                 UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
                 if (!cls)
@@ -22452,6 +22465,22 @@ namespace
                     finish.object(STR("Actor"), actor);
                     fill_transform(finish);
                     finish.run();
+                    if (!mesh_path.empty())
+                    {
+                        UObject* sm_asset = load_asset_object(mesh_path);
+                        UObject* comp = object_property(actor, STR("Mesh"));
+                        if (sm_asset && comp)
+                        {
+                            Call sm(comp, STR("SetStaticMesh"));
+                            sm.object(STR("NewMesh"), sm_asset);
+                            sm.run();
+                            Call gm(comp, STR("GetMass"));
+                            gm.run();
+                            HSVR_LOG("Script: hsvr.spawn: mesh %ls set (%.1f kg)", sm_asset->GetName().c_str(), gm.number());
+                        }
+                        else
+                            HSVR_LOG("Script: hsvr.spawn: mesh %ls %s", mesh_path.c_str(), sm_asset ? "but the actor has no Mesh component" : "NOT FOUND");
+                    }
                 }
                 HSVR_LOG("Script: hsvr.spawn: %ls at the %s hand (%.0f, %.0f, %.0f)", actor ? actor->GetFullName().c_str() : STR("NOTHING spawned"),
                          spawn_side == 0 ? "left" : "right", at.x, at.y, at.z);
