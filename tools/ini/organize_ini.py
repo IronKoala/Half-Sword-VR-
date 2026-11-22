@@ -314,7 +314,7 @@ LAYOUT = [
         ("pose_hold_let_go_grace_s", ""),
         ("pose_hold_let_go_dead", "1 = a stuck weapon is let go with no speed (never flies off)."),
         ("pose_hold_measured_v", "1 = a stopped weapon is driven from how it really moves (no wind-up)."),
-        ("pose_hold_joint", "Experimental: 1 = weapons held by engine joints (B&S style), 0 = old hold."),
+        ("pose_hold_joint", "1 = weapons held by engine joints (B&S style), 0 = old hold."),
         ("pose_hold_joint_stiffness", ""),
         ("pose_hold_joint_damping", ""),
         ("pose_hold_joint_max", ""),

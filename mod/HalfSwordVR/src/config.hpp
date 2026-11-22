@@ -477,7 +477,7 @@ namespace hsvr
         // hand: pose_hold_spring/damper/max_force and turn_spring/damper/max_torque; two hands: each
         // hand pulls (pose_bs_two_pos_*), only the main hand turns (pose_bs_two_rot_*). Caps scale with
         // strength/stamina/injury. Not used while drawing, sliding or stuck in a wound. 0 = the old hold.
-        bool pose_hold_joint = false;
+        bool pose_hold_joint = true;
         double pose_hold_joint_stiffness = 1.0; // multiplies the springs
         double pose_hold_joint_damping = 1.0;   // multiplies the dampers (the lag in a steady swing is about damper / spring x speed)
         double pose_hold_joint_max = 1.0;       // multiplies the force and torque caps
