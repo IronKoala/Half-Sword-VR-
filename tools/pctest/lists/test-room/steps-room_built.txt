@@ -1,0 +1,13 @@
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.6:hsvr.expect room_books = 2 two books
+0.7:hsvr.expect room_tables = 2 two tables
+0.8:hsvr.expect room_lost = 0 no weapon fell out of the world
+0.9:hsvr.expect room_on_tables >= 6 weapons lying on the tables
+1.0:hsvr.expect room_on_floor = 0 none on the floor
+1.1:hsvr.expect room_page_z > 80 page at lectern height
+1.2:hsvr.expect room_page_up > 0.3 page faces up
+1.3:hsvr.expect room_foes = 1 the one passive foe
+1.4:hsvr.expect room_mark > 0 marked the weapons
+4.4:hsvr.expect room_moved = 0 nothing moved in 3 s
+4.5:hsvr.expect room_won = 0 no win screen
+4.6:hsvr.test_room_report
