@@ -12545,7 +12545,10 @@ namespace
                     {
                         double pz = component_rotation(base).inverse().rotate(component_location(pom) - component_location(base)).z;
                         low = (std::max)(g0, pz + cfg.pose_grip_pommel_top_cm + half);
-                        HSVR_LOG("Handles: %ls: pommel at %.1f cm, lower hand zone at %.1f (grip %.1f..%.1f)", item->GetName().c_str(), pz, low, g0, g1);
+                        double want = low;
+                        low = (std::min)(low, g1 - 2.0 * half); // hands side by side at least
+                        HSVR_LOG("Handles: %ls: pommel at %.1f cm, lower hand zone at %.1f (clear of the pommel at %.1f; grip %.1f..%.1f)%s", item->GetName().c_str(), pz,
+                                 low, want, g0, g1, low < want ? ": no room for two hands above the pommel" : "");
                     }
                     low = (std::min)(low, g1 - 2.0 * half); // hands side by side at least
                     double mid = (std::max)(0.5 * (g0 + g1), low);
@@ -13354,7 +13357,24 @@ namespace
         double k = pk * st / mm, c = pc * dst / mm, fcap = cap1 / mm * 100.0;
         // The angular drive's acceleration mode scales by the inertia about the centre of mass (r5: dividing
         // by the inertia about the grip, 3.3 vs 0.55 kg m^2 for the staff, left it ~5 N m of its 30).
-        double ka = rk * st / Ic / ang_scale, ca = rc * dst / Ic / ang_scale, tcap = rf * mx * (std::max)(0.0, two ? 0.5 * (body.total + s2b.total) : body.total) / Ic;
+        double tcap_nm = rf * mx * (std::max)(0.0, two ? 0.5 * (body.total + s2b.total) : body.total);
+        // One hand: the turn is a torque about the centre of mass, and turning about the GRIP needs the hand's
+        // pull to hold the grip still against it (|F| = tau r m_eff / Ic). So the turn can be no stronger than
+        // the hand's pull can follow: with B&S's full turn and the shoulder's ~28 N pull a polehammer grabbed
+        // off a table swung about its middle, the grip left the hand and the weapon was flung 3.6-5.4 m
+        // (sanity run 2026-11-22 10:40). The old hold solves pull and turn together, so it never did this.
+        double r_m = length(pivot_world - com) * 0.01;
+        if (!two && cfg.pose_hold_joint_turn_by_grip && r_m > 0.02)
+        {
+            double most = cap1 * Ic / (r_m * mm);
+            if (most < tcap_nm)
+            {
+                HSVR_LOG_EVERY(1.0, "Joint hold: %s %ls: turn held to %.1f N m (of %.1f) so the %.0f N pull keeps the grip %.0f cm from its centre in the hand",
+                               side == 0 ? "left" : "right", weapon->GetName().c_str(), most, tcap_nm, cap1, r_m * 100.0);
+                tcap_nm = most;
+            }
+        }
+        double ka = rk * st / Ic / ang_scale, ca = rc * dst / Ic / ang_scale, tcap = tcap_nm / Ic;
         // Two hands: the main hand only rolls it about the line between the hands (pose_two_hand_twist_only,
         // as the old hold); where it points is the two hands' pulls. The joint's own twist-only drive let
         // the staff tumble on a wrist roll (r2: 243 deg/s off its axis vs 41 for the old hold): the twist is
@@ -13363,6 +13383,20 @@ namespace
         // drive (full) then has no swing to pull and damps the weapon's turn only against its own.
         Vec3 s_pos = target_pos;
         Quat s_rot = target_rot;
+        {
+            // Just grabbed: brought into the hand from where it lay along the same path as the old hold, not
+            // yanked round to the hand's turn in one tick.
+            const HoldState& h = g_hold[side];
+            if (h.settle_until > now && h.settle_s > 0.0)
+            {
+                double u = 1.0 - (h.settle_until - now) / h.settle_s;
+                u = u * u * (3.0 - 2.0 * u);
+                s_rot = (from_scaled_axis(scaled_axis((target_rot * h.settle_from_rot.inverse()).normalized()) * u) * h.settle_from_rot).normalized();
+                Vec3 from_pivot = h.settle_from_pos + h.settle_from_rot.rotate(pivot);
+                Vec3 p = from_pivot + (target_pivot - from_pivot) * u;
+                s_pos = p - s_rot.rotate(pivot);
+            }
+        }
         if (two && cfg.pose_two_hand_twist_only)
         {
             Vec3 ax = (pos + rot.rotate(g_two.bs_local)) - pivot_world;
@@ -14451,6 +14485,26 @@ namespace
             Vec3 rp = pivot_now - com;
             double ig = ((std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp)) / 1e4; // kg m^2 about the grip
             by_joint = joint_hold(side, pawn, base, weapon, mass, ig, pivot, target_pos, target_rot, pos, rot, body, com, cfg);
+            // The old hold's own limits on what it sets (2000 cm/s, pose_bs_max_spin): a joint gone wrong must
+            // not throw a weapon across the map (fade gate off: a polehammer at 697 m/s, 76 m).
+            if (by_joint && cfg.pose_hold_joint_speed_limit)
+            {
+                double spin = (std::max)(1.0, cfg.pose_bs_max_spin);
+                if (length(v_lin) > 2000.0 || length(w_now) > spin)
+                {
+                    HSVR_LOG_EVERY(0.25, "Joint hold: %s %ls at %.0f cm/s, %.0f rad/s: held to %.0f cm/s, %.0f rad/s", side == 0 ? "left" : "right",
+                                   weapon->GetName().c_str(), length(v_lin), length(w_now), (std::min)(2000.0, length(v_lin)), (std::min)(spin, length(w_now)));
+                    Vec3 lv2 = clamp_length(v_lin, 2000.0), av2 = clamp_length(w_now, spin);
+                    Call slv(base, STR("SetPhysicsLinearVelocity"));
+                    slv.three(STR("NewVel"), lv2.x, lv2.y, lv2.z);
+                    slv.flag(STR("bAddToCurrent"), false);
+                    slv.run();
+                    Call sav(base, STR("SetPhysicsAngularVelocityInRadians"));
+                    sav.three(STR("NewAngVel"), av2.x, av2.y, av2.z);
+                    sav.flag(STR("bAddToCurrent"), false);
+                    sav.run();
+                }
+            }
         }
         if (!by_joint)
         {

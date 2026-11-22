@@ -490,6 +490,10 @@ namespace hsvr
         bool pose_hold_joint_shoulder = true;
         // The arm carries the weapon's weight at the grip outside that cap (as the old hold). 0 = the cap pays it.
         bool pose_hold_joint_carry_weight = true;
+        // One hand: the joint's turn no stronger than the hand's pull can hold the grip still against.
+        bool pose_hold_joint_turn_by_grip = true;
+        // A joint-held weapon never goes faster than the old hold sets (2000 cm/s, pose_bs_max_spin).
+        bool pose_hold_joint_speed_limit = true;
         double pose_hold_joint_fade_min_speed = 50.0; // cm/s: below it a grip far behind is stopped by something, no ease to B&S's cap
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
