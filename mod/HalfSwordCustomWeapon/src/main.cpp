@@ -2155,10 +2155,14 @@ namespace
             }
             pk.kind = kind_for(kv, d->numbers);
             bool sword = pk.kind <= K_LONGSWORD;
-            pk.marker = FName((std::wstring(sword ? L"cw sword " : L"cw ") + pk.id).c_str(), FNAME_Add);
             uint32_t hsh = 2166136261u;
             for (wchar_t ch : pk.id) hsh = (hsh ^ (uint32_t)towlower(ch)) * 16777619u;
             pk.hash = (int32_t)(hsh & 0x7fffffff) | 1;
+            // The marker is built from the hash, not the folder name: a name like "Greatsword" would put
+            // "great" into it (Blossfechten drops those).
+            wchar_t tag[16];
+            swprintf(tag, 16, L"%08x", (unsigned)pk.hash);
+            pk.marker = FName((std::wstring(sword ? L"cw sword " : L"cw ") + tag).c_str(), FNAME_Add);
             packs.push_back(pk);
         } while (FindNextFileW(h, &fd));
         FindClose(h);
@@ -2348,7 +2352,9 @@ namespace
             weapon_class = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Game/Assets/Weapons/Blueprints/ModularWeaponBP.ModularWeaponBP_C"));
             if (!weapon_class) return;
         }
-        if (!actor || !actor->IsA(weapon_class) || !passport_layout()) return;
+        if (!actor || !actor->IsA(weapon_class)) return;
+        g_built.erase(actor); // an old entry at a reused address
+        if (!passport_layout()) return;
         uint8_t* pp = actor->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Weapon Passport"));
         if (!pp) return;
         FName marker = passport_name(pp);
