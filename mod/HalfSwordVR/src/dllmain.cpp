@@ -10167,6 +10167,10 @@ namespace
         if (!comp || !is_a(comp, STR("StaticMeshComponent"))) return false;
         UObject* sm = object_property(comp, STR("StaticMesh"));
         UObject* bs = sm ? object_property(sm, STR("BodySetup")) : nullptr;
+        // Complex-as-simple (the Yard fence): its triangles are the collision, a hull it may carry is
+        // not (that would make the rail a solid block).
+        if (FProperty* tf = bs ? prop_chain(bs, STR("CollisionTraceFlag")) : nullptr)
+            if (*(reinterpret_cast<const uint8_t*>(bs) + tf->GetOffset_Internal()) == 3) return false;
         FProperty* agg = bs ? prop_chain(bs, STR("AggGeom")) : nullptr;
         UScriptStruct* agg_t = struct_type(agg);
         FProperty* ce = struct_member(agg_t, STR("ConvexElems"));
@@ -10313,7 +10317,8 @@ namespace
     bool g_wrap_on_side(int side) { return g_wrap[side].on; }
     const double kWrapSamples[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
     const double kWrapCrease = 0.5, kWrapSplay = 0.1, kWrapSunk = 0.5;
-    const double kNoTouch = -9.0; // a solved joint that touched nothing: your own curl
+    const double kNoTouch = -9.0; // a solved joint that touched nothing (see wrap_fingers)
+    std::atomic<double> g_wrap_untouched{0.45};
     const int kWrapSteps = 10, kWrapHalvings = 4, kWrapLiftSteps = 6;
     const double kFingerTip = 2.5; // cm past the last finger bone (as pose_hand_fingers)
     // Willie's bare fingers (SK_Body_Man LOD0, reference pose), index/middle/ring/pinky, per segment and
@@ -10340,6 +10345,15 @@ namespace
         if (bone == STR("clavicle_l") || bone == STR("clavicle_r")) return 0.87;
         if (bone == STR("spine_05")) return 0.74;
         if (bone == STR("spine_04")) return 1.28;
+        return 0.0;
+    }
+    double body_skin_pad(const FName& bone)
+    {
+        static const FName names[6] = {FName(STR("neck_01"), FNAME_Add), FName(STR("neck_02"), FNAME_Add), FName(STR("clavicle_l"), FNAME_Add),
+                                       FName(STR("clavicle_r"), FNAME_Add), FName(STR("spine_05"), FNAME_Add), FName(STR("spine_04"), FNAME_Add)};
+        static const double pads[6] = {0.96, 0.55, 0.87, 0.87, 0.74, 1.28};
+        for (int i = 0; i < 6; ++i)
+            if (bone == names[i]) return pads[i];
         return 0.0;
     }
 
@@ -10379,6 +10393,12 @@ namespace
         hsvr::Vec3 cp;
         hsvr::Quat cq;
         double cs = 1.0, radius = 0.9, pad = 0.0;
+        // A Willie: the nearest of ALL his bodies (K2_GetClosestPointOnPhysicsAsset; 0 inside), each
+        // with its own skin pad. Only the grabbed bone's capsule was asked before, so at the throat
+        // fingers passed neck_02's short capsule into his jaw and collarbones and closed to fists.
+        Call* pa = nullptr;
+        FProperty *pa_pos = nullptr, *pa_bone = nullptr, *pa_dist = nullptr, *pa_ret = nullptr;
+        bool pad_by_bone = false;
         hsvr::Vec3 op;      // the held component's place, turn and scale this solve (for its convex hulls)
         hsvr::Quat oq;
         double os = 1.0;
@@ -10429,18 +10449,27 @@ namespace
                 double e = std::sqrt(e4[0]), plane = hsvr::dot(p - near4[0]->p, near4[0]->n);
                 return (plane >= 0.0 ? (std::max)(plane, e - 1.5) : e) / cs;
             }
-            if (!g->convex.empty())
+            if (pa)
             {
+                write_three(pa->buffer.data() + pa_pos->GetOffset_Internal(), pa_pos, p.x, p.y, p.z);
+                pa->run();
                 ++queries;
-                double d = convex_distance(g->convex, oq.inverse().rotate(p - op) * (1.0 / os)) * os;
-                return (std::max)(0.0, d - pad) / cs;
+                bool ok = *(pa->buffer.data() + pa_ret->GetOffset_Internal()) != 0;
+                double d = read_num(pa->buffer.data(), pa_dist);
+                if (!ok || d < 0.0) return 1e9;
+                double bp = pad_by_bone ? body_skin_pad(*reinterpret_cast<FName*>(pa->buffer.data() + pa_bone->GetOffset_Internal())) : 0.0;
+                return (std::max)(0.0, d - bp) / cs;
             }
             write_three(query->buffer.data() + q_point->GetOffset_Internal(), q_point, p.x, p.y, p.z);
             *reinterpret_cast<FName*>(query->buffer.data() + q_bone->GetOffset_Internal()) = g->bone;
             query->run();
             ++queries;
             double d = query->number();
-            return d < 0.0 ? 1e9 : (std::max)(0.0, d - pad) / cs; // in snapshot centimetres
+            if (d < 0.0) d = 1e9;
+            // The engine errs only high, and only on convex hulls (its spheres, boxes and capsules are
+            // exact): the smaller of the two.
+            if (!g->convex.empty()) d = (std::min)(d, convex_distance(g->convex, oq.inverse().rotate(p - op) * (1.0 / os)) * os);
+            return d >= 1e9 ? 1e9 : (std::max)(0.0, d - pad) / cs; // in snapshot centimetres
         }
         void place(const double c[3], hsvr::Vec3 seg[3][2])
         {
@@ -10573,6 +10602,7 @@ namespace
         double ease = g.ease;
         double w = g.on ? wrap_smooth((now - g.since) / ease) : g.w_off * (1.0 - wrap_smooth((now - g.off_at) / ease));
         if (w <= 0.0 || !g_frig.ok) return 0.0;
+        int log_shown = -1; // the finger whose solve was logged this frame: its shown curls are logged too
         // Once the hand has been eased onto what it holds, solve every finger once more there; scenery
         // doesn't move and the hand is pinned on it, so it keeps those curls. Re-solving all along straightened
         // them as the hand slid against the rail (b8b5cb1 test: middle 0.31/0.62/1 at seating, 0/0/0
@@ -10606,6 +10636,19 @@ namespace
                 ws.cp = component_location(g_frig.driver);
                 ws.cq = component_rotation(g_frig.driver);
                 ws.cs = component_scale_z(g_frig.driver);
+                Call pq(g.comp, STR("K2_GetClosestPointOnPhysicsAsset"));
+                if (g.body && cfg.pose_wrap_all_bodies && pq.fn)
+                {
+                    ws.pa_pos = pq.param(STR("WorldPosition"));
+                    ws.pa_bone = pq.param(STR("BoneName"));
+                    ws.pa_dist = pq.param(STR("Distance"));
+                    ws.pa_ret = pq.param(STR("ReturnValue"));
+                    if (ws.pa_pos && ws.pa_bone && ws.pa_dist && ws.pa_ret)
+                    {
+                        ws.pa = &pq;
+                        ws.pad_by_bone = cfg.pose_wrap_body_pad;
+                    }
+                }
                 if (!g.convex.empty())
                 {
                     ws.op = component_location(g.comp);
@@ -10654,6 +10697,7 @@ namespace
                 if (cfg.log_wrap && (first || reseat || now - g.last_log >= 1.0))
                 {
                     g.last_log = now;
+                    log_shown = f;
                     // (Where the snapshot's hand is against the drawn hand, and how far its palm is from the thing.)
                     Vec3 hand_w = ws.cp + ws.cq.rotate(hand * ws.cs);
                     Vec3 drawn = g_pose.mesh ? socket_location(g_pose.mesh, bone_fname(side == 0 ? "hand_l" : "hand_r")) : hand_w;
@@ -10686,7 +10730,27 @@ namespace
             if (f != 0 && own_joint) for (int k = 0; k < 3; ++k) base[k] = own_joint[f][k];
             else if (f != 0 && g_finger_schedule.load()) finger_schedule(own[f], base);
             double ww = g.solved[f] ? w : 0.0;
-            for (int k = 0; k < 3; ++k) joint_out[f][k] = g.curls[f][k] <= kNoTouch + 0.5 ? base[k] : base[k] + (g.curls[f][k] - base[k]) * ww;
+            for (int k = 0; k < 3; ++k)
+            {
+                double c = g.curls[f][k];
+                if (c <= kNoTouch + 0.5)
+                {
+                    // Touched nothing: as the nearest neighbouring finger that touched at this joint,
+                    // else relaxed (your own curl, at most pose_wrap_untouched_curl). Your own curl
+                    // alone was nearly a fist: middle >= 0.95, ring 0.98 while holding (his 11-21 plays).
+                    c = -1.0;
+                    for (int dfi : {-1, 1, -2, 2})
+                    {
+                        int n = f + dfi;
+                        if (n < 1 || n > 4 || !g.solved[n] || g.curls[n][k] <= kNoTouch + 0.5) continue;
+                        c = g.curls[n][k];
+                        break;
+                    }
+                    if (c < 0.0) c = (std::min)(base[k], g_wrap_untouched.load());
+                }
+                joint_out[f][k] = base[k] + (c - base[k]) * ww;
+            }
+            if (f == log_shown) HSVR_LOG("Wrap: %s %s shown %.2f/%.2f/%.2f", side == 0 ? "left" : "right", kFingerNames[f], joint_out[f][0], joint_out[f][1], joint_out[f][2]);
         }
         splay += (kWrapSplay - splay) * w;
         return w;
@@ -10977,11 +11041,13 @@ namespace
                 // Hand armour: the game sets Hands Rigidity (Gauntlets) above its bare 0.4 (0.8 in his
                 // 13:44 playtest with Gauntlets_10 on). Read once per grab.
                 g.rigidity = read_number_variable(pawn, STR("Hands Rigidity (Gauntlets)"));
-                if (load_convex(comp, g.convex) && cfg.log_wrap)
+                bool hulls = load_convex(comp, g.convex);
+                if (cfg.log_wrap && is_a(comp, STR("StaticMeshComponent")))
                 {
                     size_t tris = 0;
                     for (const ConvexShape& c : g.convex) tris += c.tris.size();
-                    HSVR_LOG("Wrap: %s hand: %ls has %d convex hulls (%d triangles), measured exactly", L ? "left" : "right", comp->GetName().c_str(), (int)g.convex.size(), (int)tris);
+                    if (hulls) HSVR_LOG("Wrap: %s hand: %ls has %d convex hulls (%d triangles), measured exactly", L ? "left" : "right", comp->GetName().c_str(), (int)g.convex.size(), (int)tris);
+                    else HSVR_LOG("Wrap: %s hand: %ls: no convex hulls read (none, complex-as-simple, or unreadable): the engine's distance", L ? "left" : "right", comp->GetName().c_str());
                 }
                 if (cfg.log_wrap) HSVR_LOG("Wrap: %s hand closes on %ls bone %ls (hand rigidity %.2f)", L ? "left" : "right", comp->GetName().c_str(), bone.ToString().c_str(), g.rigidity);
             }
@@ -11655,6 +11721,7 @@ namespace
         g_finger_joint_scale[1].store(cfg.pose_finger_scale_pip);
         g_finger_joint_scale[2].store(cfg.pose_finger_scale_dip);
         g_finger_pivot_on.store(cfg.pose_finger_pivot_fix);
+        g_wrap_untouched.store(cfg.pose_wrap_untouched_curl);
         if (pawn && g_pose_active.load()) wrap_tick(cfg, pawn);
         if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())

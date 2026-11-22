@@ -239,6 +239,8 @@ LAYOUT = [
         ("pose_wrap_ease_s", ""),
         ("pose_wrap_refresh_s", ""),
         ("pose_wrap_finger_radius_cm", "0 = the measured finger shape (set a number for one plain radius)."),
+        ("pose_wrap_all_bodies", "1 = on a Willie, fingers feel all of him (jaw, collarbones), not only the part you grabbed."),
+        ("pose_wrap_untouched_curl", "A finger that misses what you hold curls like its neighbour, else at most this (0-1)."),
         ("pose_wrap_body_pad", "1 = fingers stop at a Willie's skin where it stands outside his collision (neck, collarbones, upper back)."),
         ("pose_wrap_gauntlet_pad_cm", "Extra palm-side finger thickness with full gauntlets or gloves on."),
         ("pose_wrap_halfgauntlet_pad_cm", "The same for half gauntlets (first finger segment only)."),

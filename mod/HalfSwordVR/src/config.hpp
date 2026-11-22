@@ -821,6 +821,11 @@ namespace hsvr
         // spine stand out of it); hand armour makes the fingers this much thicker on the palm side (full gauntlets/gloves:
         // every segment; half gauntlets: the first).
         bool pose_wrap_body_pad = true;
+        // 1 = on a Willie, fingers feel all his collision bodies (jaw, collarbones), not only the grabbed one.
+        bool pose_wrap_all_bodies = true;
+        // A finger joint that touched nothing while wrapping (past the edge): curled like its nearest
+        // neighbour that touched, else your own curl but at most this.
+        double pose_wrap_untouched_curl = 0.45;
         double pose_wrap_gauntlet_pad_cm = 0.85;
         double pose_wrap_halfgauntlet_pad_cm = 1.0;
         bool pose_wrap_open_base = true;
