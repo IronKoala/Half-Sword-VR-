@@ -10596,6 +10596,7 @@ namespace
     // Returns the wrap's weight (0 = the hand's own curls).
     double wrap_fingers(const XForm96* B, int side, double joint_out[5][3], const double own[5], double& splay, const double (*own_joint)[3] = nullptr)
     {
+        HSVR_SUB("anim:wrap_fingers");
         using namespace hsvr;
         WrapGrab& g = g_wrap[side];
         double now = now_seconds();
@@ -10730,22 +10731,34 @@ namespace
             if (f != 0 && own_joint) for (int k = 0; k < 3; ++k) base[k] = own_joint[f][k];
             else if (f != 0 && g_finger_schedule.load()) finger_schedule(own[f], base);
             double ww = g.solved[f] ? w : 0.0;
+            int joint_borrow = -1; // the neighbour a wholly untouched finger copies
             for (int k = 0; k < 3; ++k)
             {
                 double c = g.curls[f][k];
                 if (c <= kNoTouch + 0.5)
                 {
-                    // Touched nothing: as the nearest neighbouring finger that touched at this joint,
-                    // else relaxed (your own curl, at most pose_wrap_untouched_curl). Your own curl
-                    // alone was nearly a fist: middle >= 0.95, ring 0.98 while holding (his 11-21 plays).
+                    // Touched nothing. Part of the finger touched: the rest keeps the curl of its last
+                    // touching joint. None of it touched: as the nearest neighbouring finger that
+                    // touched at this joint (not for the thumb, whose curls mean something else), else
+                    // relaxed (your own curl, at most pose_wrap_untouched_curl). Your own curl alone was
+                    // nearly a fist: middle >= 0.95, ring 0.98 while holding (his 11-21 plays).
                     c = -1.0;
-                    for (int dfi : {-1, 1, -2, 2})
+                    bool prev_touched = k > 0 && g.curls[f][k - 1] > kNoTouch + 0.5;
+                    if (prev_touched)
+                        c = (std::max)(0.0, joint_out[f][k - 1]);
+                    else if (k == 0 && f != 0)
                     {
-                        int n = f + dfi;
-                        if (n < 1 || n > 4 || !g.solved[n] || g.curls[n][k] <= kNoTouch + 0.5) continue;
-                        c = g.curls[n][k];
-                        break;
+                        for (int dfi : {-1, 1, -2, 2})
+                        {
+                            int n = f + dfi;
+                            if (n < 1 || n > 4 || !g.solved[n] || g.curls[n][0] <= kNoTouch + 0.5) continue;
+                            joint_borrow = n;
+                            break;
+                        }
+                        if (joint_borrow >= 0) c = g.curls[joint_borrow][0];
                     }
+                    else if (k > 0 && joint_borrow >= 0)
+                        c = g.curls[joint_borrow][k] > kNoTouch + 0.5 ? g.curls[joint_borrow][k] : (std::max)(0.0, joint_out[f][k - 1]);
                     if (c < 0.0) c = (std::min)(base[k], g_wrap_untouched.load());
                 }
                 joint_out[f][k] = base[k] + (c - base[k]) * ww;
