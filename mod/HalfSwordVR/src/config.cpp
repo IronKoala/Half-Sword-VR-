@@ -478,6 +478,8 @@ namespace hsvr
         integer("pose_bs_iterations", c.pose_bs_iterations);
         num("pose_bs_two_let_go_cm", c.pose_bs_two_let_go_cm);
         flag("pose_hold_ignore_body", c.pose_hold_ignore_body);
+        flag("pose_hold_ignore_own_helmet", c.pose_hold_ignore_own_helmet);
+        flag("hold_blocker_log", c.hold_blocker_log);
         num("pose_hold_weight_spin_extra", c.pose_hold_weight_spin_extra);
         flag("pose_hold_hand_on_weapon", c.pose_hold_hand_on_weapon);
         flag("pose_arm_solve_drawn_hand", c.pose_arm_solve_drawn_hand);

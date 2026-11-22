@@ -322,6 +322,8 @@ LAYOUT = [
         ("pose_hold_contact_cm", ""),
         ("pose_hold_ignore_hand", ""),
         ("pose_hold_ignore_body", ""),
+        ("pose_hold_ignore_own_helmet", "1 = your held weapon also passes through your own worn helmet's collision. Others' helmets are still hit."),
+        ("hold_blocker_log", "Test: log which component a held weapon hits or is held off by (writes a lot)."),
         ("pose_hold_block_offhand_search", ""),
     ]),
     ("Grabbing, sliding, two hands, shields", "", [
