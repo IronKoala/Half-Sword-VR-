@@ -803,6 +803,16 @@ namespace hsvr
         bool pose_fist_clear = true;
         double pose_fist_clear_margin_cm = 2.0;
         double pose_fist_clear_retry_s = 0.03;
+        // A fist blow's assisted impulse (hit_assist) goes into the victim's damage as is. The game
+        // scales a sliding contact by the weapon's cutting rate, ~0 for a fist ball, so without this
+        // a hard punch reached his damage as impulse ~1 (playtest 2026-11-22).
+        bool pose_fist_full_impulse = true;
+        // Grabbing a weapon someone else holds: a tug of war under the game's own grip rule; his hand
+        // lets go when its joint is pulled harder than his grip strength T x disarm_grip_scale (pain
+        // weakens it, out cold he has none) for disarm_hold_s, and it is yours.
+        bool disarm = true;
+        double disarm_grip_scale = 3.0;
+        double disarm_hold_s = 0.25;
         // The fist's finger shape in his animation: -2 = the game's own, -1 = the animation's grab
         // shape (its 'Grabbed' switch), 0..17 = that grip type, 100 = its guard fist ('Guarding' for
         // that hand, with the swing speed its fist blend reads held at 75 in the animation only).
@@ -937,10 +947,15 @@ namespace hsvr
         // or knee dislocates (the game relocates it by its own rules), or the back breaks (Break Back).
         // A twist's excess counts as a bend of excess x joint_break_twist_gain degrees.
         bool joint_break = true;
-        double joint_break_twist_free_neck_deg = 60.0;
-        double joint_break_twist_free_arm_deg = 60.0;
+        // A twist counts only for a limb a hand of yours is on (his head, neck, arm or back), and the
+        // free range shrinks to joint_break_free_min of itself (and the strain rate doubles) as his
+        // consciousness and pain take his resistance away. His neck stops turning at about 70 deg from
+        // where it sat (playtest 2026-11-22), so the neck's free range is well short of that.
+        double joint_break_twist_free_neck_deg = 40.0;
+        double joint_break_twist_free_arm_deg = 45.0;
         double joint_break_twist_free_back_deg = 30.0;
-        double joint_break_twist_gain = 2.0;
+        double joint_break_twist_gain = 3.0;
+        double joint_break_free_min = 0.4;
         // Knees too (the old rule read the calf's bend against the thigh).
         bool joint_break_legs = false;
         // Every part's strain rate x this (1 = the old game).
