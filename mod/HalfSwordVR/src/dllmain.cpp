@@ -2044,6 +2044,7 @@ namespace
     std::atomic<double> g_fake_stick[2] = {-9.0, 0.0}; // test: hsvr.stick <x> <y> holds the left stick (x -9 = off)
     std::string g_park_socket;                  // test: hsvr.arm_park <socket> (arm mode 13): right hand there
     double g_arm_floor[3] = {45.0, 15.0, 5.0};
+    double g_slot_test[5] = {1.0, 4.0, 0.0, 0.0, 0.0}; // test: hsvr.arm_to_slot <hand> <slot 0-4> <along cm> <out cm> [cm/s] (arm mode 22)
     std::atomic<double> g_fake_jitter_cm{0.0};
     bool is_fist(UObject* weapon);  // test: hsvr.fake_jitter <cm>: tracking-like noise on the fake hands (rms per axis)  // test: hsvr.arm_floor <fwd> <side> <height> (arm mode 14): right hand near the floor
     std::atomic<float> g_fake_trigger[2] = {-1.0f, -1.0f}; // test: hsvr.trigger <0|1> <value>, -1 = the controller
@@ -2714,6 +2715,41 @@ namespace
                         else grip = hold_at + (pull_to - hold_at) * (std::min)(1.0, (t - 2.0) / 1.0);
                     }
                 }
+            }
+            if (mode == 22 && side == (int)g_slot_test[0] && g_pose.pawn)
+            {
+                // Hip/back test: this hand on the item on his slot (0 R1, 1 R2, 2 L1, 3 L2, 4 Back), at this far
+                // along its own +Z from its BaseMesh, pushed this far out from his pelvis (a hand reaching for
+                // it, short of it). It stays there once the item has been taken.
+                static Vec3 last{0, 0, 0};
+                static bool have = false;
+                static const TCHAR* vars[5] = {STR("Weapon Slot R 1"), STR("Weapon Slot R 2"), STR("Weapon Slot L 1"), STR("Weapon Slot L 2"), STR("Weapon Slot Back")};
+                int si = (std::max)(0, (std::min)(4, (int)g_slot_test[1]));
+                UObject* w = object_property(g_pose.pawn, vars[si]);
+                UObject* b = w ? object_property(w, STR("BaseMesh")) : nullptr;
+                UObject* m = object_property(g_pose.pawn, STR("Mesh"));
+                if (b && m)
+                {
+                    Vec3 p = component_location(b) + component_rotation(b).rotate(Vec3{0, 0, g_slot_test[2]});
+                    Vec3 pel = socket_location(m, bone_fname("pelvis"));
+                    Vec3 outw{p.x - pel.x, p.y - pel.y, 0.0};
+                    double ol = length(outw);
+                    if (ol > 1.0) outw = outw * (1.0 / ol);
+                    last = p + outw * g_slot_test[3];
+                    have = true;
+                }
+                else if (have && g_slot_test[4] > 0.0)
+                {
+                    // Taken: the hand carries it to the front (40 cm ahead of the shoulder) at this speed.
+                    static double t_prev = now;
+                    double dt = (std::min)(0.1, (std::max)(0.0, now - t_prev));
+                    t_prev = now;
+                    Vec3 front = shoulder + body.rotate(Vec3{40.0, out * 15.0, -10.0});
+                    Vec3 d = front - last;
+                    double dl = length(d), step = g_slot_test[4] * dt;
+                    last = dl <= step ? front : last + d * (step / dl);
+                }
+                if (have) grip = last;
             }
             if (mode == 14 && side == 1 && g_pose.pawn)
             {
@@ -4330,7 +4366,16 @@ namespace
     std::unordered_map<UObject*, SheathFit> g_sheath_fit;
     bool any_draw() { return g_draw[0].active || g_draw[1].active; }
     bool cfg_scabbard_free() { return hsvr::config().pose_draw_scabbard_free; }
-    bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg);
+    bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Vec3& palm, const hsvr::Config& cfg);
+    bool in_own_slot(UObject* pawn, UObject* w);
+    struct SlotTake
+    {
+        UObject* weapon = nullptr;
+        int slot = 0; // index into k_slots
+        double t0 = 0.0;
+    };
+    SlotTake g_slot_take[2];
+    void slot_take_tick(UObject* pawn);
     bool try_scabbard_grab(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg);
     void scabbard_let_go(int side, const char* why);
     bool scabbard_held(int side);
@@ -11282,6 +11327,7 @@ namespace
             return;
         }
         keep_brought_object(pawn, mesh);
+        slot_take_tick(pawn);
         fist_trace(pawn);
         body_grab_tick(pawn, cfg);
         for (int side = 0; side < 2; ++side) check_object_grab(side, pawn);
@@ -11363,8 +11409,6 @@ namespace
             if (mine || menu_up) continue;
             if (cfg.pose_grab_handles ? try_second_hand(side, pawn, mesh, cfg) : try_two_hand(side, pawn, mesh, cfg)) continue;
             Vec3 at = hand_grab_point(mesh, side);
-            if (cfg.pose_draw && try_draw(side, pawn, mesh, at, cfg)) continue;
-            if (try_scabbard_grab(side, pawn, mesh, at, cfg)) continue;
             // His arm can be too short for where your hand is (reaching to the floor: his crouch stops at
             // 55 cm and he does not bend forward, so his hand stayed 20 cm above your controller on the
             // floor, playtest 14:31). Then items are looked for at your controller, and what you touch there
@@ -11381,6 +11425,8 @@ namespace
                              at.y, at.z);
                 }
             }
+            if (cfg.pose_draw && try_draw(side, pawn, mesh, at, palm_drawn, cfg)) continue;
+            if (try_scabbard_grab(side, pawn, mesh, palm_drawn, cfg)) continue;
             std::vector<UObject*> weapons, willies;
             UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
@@ -11392,7 +11438,7 @@ namespace
             for (UObject* w : weapons)
             {
                 if (!w || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
-                if (bool_property(w, STR("Is Sheathed")) || is_fist(w)) continue;
+                if (bool_property(w, STR("Is Sheathed")) || is_fist(w) || in_own_slot(pawn, w)) continue;
                 bool taken = false;
                 for (UObject* c : willies)
                     if (c && (object_property(c, STR("Weapon R")) == w || object_property(c, STR("Weapon L")) == w)) taken = true;
@@ -15677,6 +15723,17 @@ namespace
                                 {STR("Weapon Slot L 2"), 0, 1, STR("Slot L 2 Constraint"), "Sheath_Slot_L_2"},
                                 {STR("Weapon Slot Back"), 1, 2, STR("Slot Back Constraint"), "Sheath_Slot_Back"}};
 
+    // On one of his own belt/back slots: taken only through try_draw (the game's Draw Weapon frees its slot
+    // joint). A plain grab of it left the slot joint holding it to his body while the hold pulled it to
+    // the hand: the two fought (Matthew 2026-11-21: the pavise on his shoulder "glitches and freaks out").
+    bool in_own_slot(UObject* pawn, UObject* w)
+    {
+        if (!pawn || !w) return false;
+        for (const SlotDef& sd : k_slots)
+            if (object_property(pawn, sd.var) == w) return true;
+        return false;
+    }
+
     bool call_one_object(UObject* owner, const TCHAR* name, UObject* arg)
     {
         Call c(owner, name);
@@ -15690,44 +15747,224 @@ namespace
         return c.run();
     }
 
-    bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg)
+    // After a no-scabbard take: the game breaks the slot joint on its next Check tick. If it has not
+    // within 0.4 s (the item still in its Weapon Slot while this hand holds it), the mod frees it as that
+    // break does (hs_draw_sheathe_calls.md, Drawn / break): BreakConstraint + destroy, Weapon Slot = None,
+    // Sheath Slot = 3, Concrete = 11, flags off, Unsheathed Mode on the weapon.
+    // Off the back slot the game leaves a shield's BaseMesh kinematic (test 2026-11-21 21:55Z: "simulating 0"
+    // after Sheathe on Spawn Back and after every take; the hand's joint had nothing to pull and the slot
+    // joint's break left it hanging in the air). A belt mace stays simulating. Taken into a hand, the item
+    // is let off any parent it hangs from (keeping where it is) and made to simulate, as a loose one does.
+    // A body's state for the log: collision enabled (0 none .. 3 query+physics), simulating, mass.
+    std::string body_state(UObject* base)
+    {
+        Call ce(base, STR("GetCollisionEnabled"));
+        ce.run();
+        FProperty* cp = ce.param(STR("ReturnValue"));
+        Call sim(base, STR("IsSimulatingPhysics"));
+        sim.run();
+        FProperty* sp = sim.param(STR("ReturnValue"));
+        Call m(base, STR("GetMass"));
+        m.run();
+        FProperty* mp = m.param(STR("ReturnValue"));
+        char buf[128];
+        std::snprintf(buf, sizeof buf, "collision %d, simulating %d, mass %.2f kg", cp ? (int)*(ce.buffer.data() + cp->GetOffset_Internal()) : -1,
+                      sp ? (int)*(sim.buffer.data() + sp->GetOffset_Internal()) : -1, mp ? (double)*reinterpret_cast<float*>(m.buffer.data() + mp->GetOffset_Internal()) : -1.0);
+        return buf;
+    }
+    bool is_simulating(UObject* base);
+    // A live body the hand can move: simulating, with collision, and its welded parts' mass (off the
+    // back it read simulating 1 at the take yet collision 0 / mass 0.05 a tick later: 23:35Z test).
+    bool body_live(UObject* base)
+    {
+        Call ce(base, STR("GetCollisionEnabled"));
+        ce.run();
+        FProperty* cp = ce.param(STR("ReturnValue"));
+        Call m(base, STR("GetMass"));
+        m.run();
+        FProperty* mp = m.param(STR("ReturnValue"));
+        bool coll = !cp || *(ce.buffer.data() + cp->GetOffset_Internal()) != 0;
+        bool mass = !mp || *reinterpret_cast<float*>(m.buffer.data() + mp->GetOffset_Internal()) > 0.1f;
+        return coll && mass && is_simulating(base);
+    }
+    bool is_simulating(UObject* base)
+    {
+        Call sim(base, STR("IsSimulatingPhysics"));
+        sim.run();
+        FProperty* sp = sim.param(STR("ReturnValue"));
+        return sp && *(sim.buffer.data() + sp->GetOffset_Internal());
+    }
+
+    // Off the back slot the shield's BaseMesh has no live physics body (test 2026-11-21: "simulating 0";
+    // SetSimulatePhysics(true) only stores the flag until the body is recreated) and its child meshes
+    // are unwelded (mass 0.05 kg: the 2 cm dummy): Sheathed Mode toggles each child's collision 0 -> 3
+    // (ModularWeaponBP @72062/@72695), which recreates them apart. The weapon's own rebuild, Refresh
+    // Collisions (@68979-71215), recreates BaseMesh's body (collision 0 then 3) and welds every child back
+    // (defaults\back_slot_physics.md). So: flag, Refresh Collisions, flag again, then the game's pick-up
+    // damping.
+    bool make_loose_simulating(UObject* w, const char* why)
+    {
+        UObject* base = w ? object_property(w, STR("BaseMesh")) : nullptr;
+        if (!base) return false;
+        std::string before = body_state(base);
+        Call on(base, STR("SetSimulatePhysics"));
+        on.first_flag(true);
+        on.run();
+        if (FProperty* vp = prop_chain(w, STR("Weapon Velocity"))) write_three(reinterpret_cast<uint8_t*>(w) + vp->GetOffset_Internal(), vp, 0.0, 0.0, 0.0);
+        bool refreshed = Call(w, STR("Refresh Collisions")).run();
+        Call on2(base, STR("SetSimulatePhysics"));
+        on2.first_flag(true);
+        on2.run();
+        bool damp = Call(w, STR("Set Weapon Damping Pick Up")).run();
+        bool ok = is_simulating(base);
+        HSVR_LOG("Draw: %ls (%s): before %s; Refresh Collisions %s, pick-up damping %s; after %s%s", w->GetName().c_str(), why, before.c_str(),
+                 refreshed ? "run" : "MISSING", damp ? "set" : "missing", body_state(base).c_str(), ok ? "" : " - STILL NOT SIMULATING");
+        return ok;
+    }
+
+    // The game's draw-off-a-slot bookkeeping, done by the mod (Check Scabbard Unsheath State's break,
+    // Enum 2 @6020-6458, back_slot_physics.md step 1-2; WeaponsinSlots is left to the game's next save).
+    void free_slot(UObject* pawn, int slot, UObject* w, const char* why)
+    {
+        const SlotDef& sd = k_slots[slot];
+        const TCHAR* S = sd.side == 0 ? STR("L") : STR("R");
+        UObject* joint = object_property(pawn, sd.constraint);
+        if (joint)
+        {
+            Call(joint, STR("BreakConstraint")).run();
+            Call(joint, STR("K2_DestroyComponent")).run();
+        }
+        set_variable(pawn, sd.constraint, 0.0, nullptr, nullptr);
+        if (UObject* beacon = object_property(w, STR("SearchBeacon")))
+        {
+            Call sb(beacon, STR("SetCollisionEnabled"));
+            sb.byte(STR("NewType"), 1);
+            sb.run();
+        }
+        bool um = Call(w, STR("Unsheathed Mode")).run();
+        Call weights(pawn, STR("Add and Remove Weapon Weights"));
+        bool wt = false;
+        if (weights.fn)
+        {
+            for (FProperty* p : weights.fn->ForEachProperty())
+                if (p->GetClass().GetName() == STR("ObjectProperty"))
+                {
+                    *reinterpret_cast<UObject**>(weights.buffer.data() + p->GetOffset_Internal()) = w;
+                    break;
+                }
+            wt = weights.run(); // its bool (add) left false: remove
+        }
+        set_variable(pawn, sd.var, 0.0, nullptr, nullptr);
+        set_variable(pawn, (std::wstring(L"Sheath Slot ") + S).c_str(), 3.0);
+        set_variable(pawn, (std::wstring(S) + L" Sheath Slot Concrete").c_str(), 11.0);
+        set_bool_property(pawn, (std::wstring(L"Weapon UnSheathing ") + S).c_str(), false);
+        set_bool_property(pawn, (std::wstring(S) + L" Weapon Sheathing").c_str(), false);
+        set_bool_property(pawn, (std::wstring(L"Block ") + S + L" Weapon From Sheathing").c_str(), false);
+        set_bool_property(pawn, STR("Cross Unsheath"), false);
+        HSVR_LOG("Draw: the mod freed %ls from %ls (%s): joint %s, Unsheathed Mode %s, weights %s", w->GetName().c_str(), sd.var, why, joint ? "broken" : "missing",
+                 um ? "run" : "missing", wt ? "removed" : "call missing");
+    }
+
+    void slot_take_tick(UObject* pawn)
     {
         using namespace hsvr;
+        static bool tracked0 = track_freed(&g_slot_take[0].weapon), tracked1 = track_freed(&g_slot_take[1].weapon);
+        (void)tracked0;
+        (void)tracked1;
+        for (int side = 0; side < 2; ++side)
+        {
+            SlotTake& st = g_slot_take[side];
+            if (!st.weapon) continue;
+            const SlotDef& sd = k_slots[st.slot];
+            UObject* held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (held != st.weapon || object_property(pawn, sd.var) != st.weapon)
+            {
+                if (object_property(pawn, sd.var) != st.weapon)
+                    HSVR_LOG("Draw: %ls off %ls: the game freed its slot after %.2f s", st.weapon->GetName().c_str(), sd.var, now_seconds() - st.t0);
+                st = SlotTake{};
+                continue;
+            }
+            if (now_seconds() - st.t0 < 0.4) continue;
+            free_slot(pawn, st.slot, st.weapon, "the game had not after 0.4 s");
+            make_loose_simulating(st.weapon, "after the mod's slot break");
+            // The rebuilt body is a new physics body: the hold's no-collide joints against his own bodies
+            // (made at the take) no longer apply, and it was pinned on his own upper arm and pelvis (23:35Z
+            // test: 1100-1400 N, 80 cm behind). Made again for the new body.
+            if (UObject* b = object_property(st.weapon, STR("BaseMesh")))
+            {
+                clear_arm_ignore(side);
+                ignore_arm_collision(pawn, object_property(pawn, STR("Mesh")), st.weapon, b, side);
+            }
+            st = SlotTake{};
+        }
+    }
+
+    bool try_draw(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Vec3& palm, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        // What can be taken off him. A scabbarded weapon is drawn by its grip (the physical draw Matthew
+        // likes, pose_draw_touch_cm); anything else on a slot (a hafted weapon on the belt, a shield on the
+        // back) is taken B&S-style: a squeeze within pose_draw_zone_cm of ANY part of it (B&S HolderHips /
+        // HolderBack: playerGrabFromHandle false, so the holder's touch zone takes it, then the item's handle
+        // is put in the hand: Holder.TryTouchAction -> ragdollHand.Grab(item.GetMainHandle)). The hand lands
+        // on its nearest handle, so heads stay ungrabbable as handles (2026-11-19 20:32Z).
         int best = -1;
-        double best_d = 1e9, best_t = 0.0;
+        double best_d = 1e9, best_t = 0.0, best_need = 0.0;
         const Handle* best_h = nullptr;
+        std::string misses;
         for (int i = 0; i < 5; ++i)
         {
             UObject* w = object_property(pawn, k_slots[i].var);
             UObject* base = w ? object_property(w, STR("BaseMesh")) : nullptr;
             if (!base) continue;
+            bool scab = object_property(w, STR("Scabbard")) != nullptr;
             Vec3 bp = component_location(base);
             Quat bq = component_rotation(base);
             Vec3 local = bq.inverse().rotate(at - bp);
+            double hd_best = 1e9, t_best = 0.0;
+            const Handle* h_best = nullptr;
             for (const Handle& hd : item_handles(w, base))
             {
-                if (hd.name != "grip") continue;
+                if (scab && hd.name != "grip") continue; // the rest of a sheathed sword is in its scabbard
                 Vec3 ab = hd.b - hd.a;
                 double len2 = dot(ab, ab);
                 double u = len2 > 1e-6 ? (std::min)(1.0, (std::max)(0.0, dot(local - hd.a, ab) / len2)) : 0.0;
                 double d = length(local - (hd.a + ab * u));
-                if (d < best_d)
+                if (d < hd_best)
                 {
-                    best_d = d;
-                    best = i;
-                    best_t = u;
-                    best_h = &hd;
+                    hd_best = d;
+                    t_best = u;
+                    h_best = &hd;
                 }
             }
+            double touch = scab ? -1.0 : closest_on_weapon(w, at);
+            double d = hd_best;
+            if (touch >= 0.0) d = (std::min)(d, touch);
+            double need = scab ? cfg.pose_draw_touch_cm : cfg.pose_draw_zone_cm;
+            if (d < 40.0)
+            {
+                char buf[256];
+                std::snprintf(buf, sizeof buf, "%s%ls (%s): %s %.1f cm, touch %.1f cm, needs %.0f", misses.empty() ? "" : "; ", w->GetName().c_str(),
+                              k_slots[i].socket, h_best ? h_best->name.c_str() : "no handle", hd_best, touch, need);
+                misses += buf;
+            }
+            if (d > need || (scab && !h_best)) continue;
+            if (d - need < best_d - best_need)
+            {
+                best_d = d;
+                best_need = need;
+                best = i;
+                best_t = t_best;
+                best_h = h_best;
+            }
         }
-        if (best < 0) return false;
-        const SlotDef& sd = k_slots[best];
-        UObject* w = object_property(pawn, sd.var);
-        if (best_d > cfg.pose_draw_touch_cm)
+        if (best < 0)
         {
-            if (best_d < 30.0) HSVR_LOG("Draw: %s hand squeezed %.1f cm from the grip of %ls (needs %.0f)", side == 0 ? "left" : "right", best_d, w->GetName().c_str(), cfg.pose_draw_touch_cm);
+            if (!misses.empty()) HSVR_LOG("Draw: %s hand squeezed near what you carry, nothing taken: %s", side == 0 ? "left" : "right", misses.c_str());
             return false;
         }
+        const SlotDef& sd = k_slots[best];
+        UObject* w = object_property(pawn, sd.var);
         const TCHAR* S = sd.side == 0 ? STR("L") : STR("R");
         auto name = [&](const wchar_t* fmt) {
             wchar_t buf[96];
@@ -15770,13 +16007,55 @@ namespace
             UObject* base0 = object_property(w, STR("BaseMesh"));
             Vec3 p0 = component_location(base0);
             Quat q0 = component_rotation(base0);
+            bool freed = false;
+            if (!body_live(base0))
+            {
+                freed = true;
+                // Off the back (or any slot that left it without a live body): freed and rebuilt first,
+                // else the hand holds a body that cannot move (back_slot_physics.md).
+                free_slot(pawn, best, w, "it was not simulating");
+                if (!make_loose_simulating(w, best == 4 ? "off his back" : "off his belt"))
+                {
+                    HSVR_LOG("Draw: %s hand: %ls could not be made to simulate; not taken", side == 0 ? "left" : "right", w->GetName().c_str());
+                    return true;
+                }
+                p0 = component_location(base0);
+                q0 = component_rotation(base0);
+            }
             bool ok0 = give_hand_weapon(side, pawn, w);
             if (!ok0 || object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != w)
             {
                 HSVR_LOG("Draw: %s hand could not take %ls (no scabbard) from %ls", side == 0 ? "left" : "right", w->GetName().c_str(), sd.var);
                 return true;
             }
-            FreeGrip g0 = handle_grip(side, mesh, p0, q0, at, *best_h, best_t);
+            const char* hname = side == 0 ? "left" : "right";
+            // What the game's own attach does for a weapon taken off Weapon Slot R1/R2/Back (L1/L2: the L
+            // flags; they follow the SLOT's side): without UnSheathing, Check Scabbard Unsheath State's
+            // "lock as seated" ((Back ? true : Z <= 20) and !UnSheathing) re-seated a back shield every
+            // tick and never broke its joint (test 2026-11-21 21:40Z: the pavise stayed on his back).
+            if (!freed)
+            {
+                set_bool_property(pawn, name(L"Weapon UnSheathing %ls").c_str(), true);
+                set_bool_property(pawn, (std::wstring(sd.side == 0 ? STR("Block L") : STR("Block R")) + STR(" Weapon From Sheathing")).c_str(), true);
+                g_slot_take[side] = SlotTake{w, best, now_seconds()};
+            }
+            controllers_buzz(side, 0.3f);
+            if (class_name_starts(w, STR("Shield")) && pavise_on_forearm(w, side, cfg))
+            {
+                HSVR_LOG("Draw: %s hand takes %ls off %ls: strapped on the forearm (the game's own strap grip, pose_pavise_forearm; touched %.1f cm away)", hname,
+                         w->GetName().c_str(), sd.var, best_d);
+                return true;
+            }
+            if (!best_h)
+            {
+                Vec3 touch;
+                if (closest_on_weapon(w, at, &touch) < 0.0) touch = at;
+                hold_where_touched(side, mesh, w, base0, p0, q0, palm, touch, "spot where the hand touched it", nullptr, true);
+                set_component_transform(base0, p0, q0, true);
+                HSVR_LOG("Draw: %s hand takes %ls off %ls where it touched it (no handles; %.1f cm from the hand)", hname, w->GetName().c_str(), sd.var, best_d);
+                return true;
+            }
+            FreeGrip g0 = handle_grip(side, mesh, p0, q0, palm, *best_h, best_t);
             g0.hold_at = cfg.pose_grab_settle_s > 0.0;
             g0.at_pos = p0;
             g0.at_rot = q0;
@@ -15784,9 +16063,8 @@ namespace
             g_pending_free[side] = g0;
             g_pending_item[side] = w;
             set_component_transform(base0, p0, q0, true);
-            controllers_buzz(side, 0.3f);
-            HSVR_LOG("Draw: %s hand takes %ls off %ls (no scabbard: a plain grab, grip at %.0f%%, %.1f cm from the hand)", side == 0 ? "left" : "right",
-                     w->GetName().c_str(), sd.var, best_t * 100.0, best_d);
+            HSVR_LOG("Draw: %s hand takes %ls off %ls (no scabbard: B&S holster grab, touched %.1f cm away; hand on its %s at %.0f%%)", hname,
+                     w->GetName().c_str(), sd.var, best_d, best_h->name.c_str(), best_t * 100.0);
             return true;
         }
         // A hard bottom at the seat: after a seat the game leaves the slide's reference at 0 (a +-L
@@ -15845,7 +16123,7 @@ namespace
             call_one_object(pawn, cfg_scabbard_free() ? STR("Set Scabbard Constraint Free") : STR("Return Scabbard Constraint To Locked"), scab);
         }
         set_bool_property(pawn, side == 0 ? STR("Grab L Target Found") : STR("Grab R Target Found"), false);
-        FreeGrip g = handle_grip(side, mesh, w0_pos, w0_rot, at, *best_h, best_t);
+        FreeGrip g = handle_grip(side, mesh, w0_pos, w0_rot, palm, *best_h, best_t);
         g.place = false;
         g.hold_at = false;
         g_pending_free[side] = g;
@@ -22426,6 +22704,14 @@ namespace
                 std::sscanf(entry.command.c_str() + 15, "%lf %lf %lf", &g_arm_floor[0], &g_arm_floor[1], &g_arm_floor[2]);
                 g_fake_arm_mode.store(14);
                 HSVR_LOG("Script: hsvr.arm_floor %.0f ahead, %.0f to the side, %.0f cm above the floor (right hand)", g_arm_floor[0], g_arm_floor[1], g_arm_floor[2]);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.arm_to_slot ", 0) == 0)
+            {
+                std::sscanf(entry.command.c_str() + 17, "%lf %lf %lf %lf %lf", &g_slot_test[0], &g_slot_test[1], &g_slot_test[2], &g_slot_test[3], &g_slot_test[4]);
+                g_fake_arm_mode.store(22);
+                HSVR_LOG("Script: hsvr.arm_to_slot %s hand on slot %.0f item, %.0f cm along it, %.0f cm out", g_slot_test[0] == 0.0 ? "left" : "right", g_slot_test[1],
+                         g_slot_test[2], g_slot_test[3]);
                 continue;
             }
             if (entry.command.rfind("hsvr.arm_park ", 0) == 0)
