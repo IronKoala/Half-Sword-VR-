@@ -186,12 +186,43 @@ def parse(path):
 
 # ---- the scene ------------------------------------------------------------------------------------------
 def _props70(node):
+    """A node's property table: FBX 7 "Properties70" of P records (name, type, label, flags, values...)
+    or FBX 6 "Properties60" of Property records (name, type, flags, values...)."""
     out = {}
-    p70 = node.find("Properties70") if node is not None else None
+    if node is None:
+        return out
+    p70 = node.find("Properties70")
     for p in (p70.all("P") if p70 is not None else []):
         if p.props:
             out[p.props[0]] = p.props[4:] if len(p.props) > 4 else []
+    p60 = node.find("Properties60")
+    for p in (p60.all("Property") if p60 is not None else []):
+        if p.props:
+            out[p.props[0]] = p.props[3:] if len(p.props) > 3 else []
     return out
+
+
+def _array(node, dtype):
+    """An array value: one numpy property (binary, and text FBX 7's "*N { a: }"), or FBX 6 text's plain
+    comma list (many number properties)."""
+    if node is None or not node.props:
+        return np.zeros(0, dtype)
+    if len(node.props) == 1 and isinstance(node.props[0], np.ndarray):
+        return np.asarray(node.props[0], dtype)
+    return np.asarray([v for v in node.props if isinstance(v, (int, float, np.integer, np.floating))], dtype)
+
+
+def _find_prop(node, name):
+    """The first Properties70/60 value called name anywhere in the tree (FBX 6 keeps the unit in
+    different places)."""
+    t = _props70(node)
+    if t.get(name):
+        return t[name]
+    for c in node.children:
+        v = _find_prop(c, name)
+        if v:
+            return v
+    return None
 
 
 def _vec(props, key, default):
@@ -251,7 +282,7 @@ def _layer(geom, name, values_key, index_key, n_ctrl, poly_of_corner, ctrl_of_co
     if vals is None or not vals.props:
         return None
     width = 3 if values_key == "Normals" else 2
-    v = np.asarray(vals.props[0], np.float64)
+    v = _array(vals, np.float64)
     v = v[: len(v) // width * width].reshape(-1, width)
     mapping = str(le.value("MappingInformationType", "ByPolygonVertex"))
     ref = str(le.value("ReferenceInformationType", "Direct"))
@@ -266,8 +297,9 @@ def _layer(geom, name, values_key, index_key, n_ctrl, poly_of_corner, ctrl_of_co
         key = np.arange(n_corner)
     if ref in ("IndexToDirect", "Index"):
         idx = le.find(index_key)
-        if idx is not None and idx.props:
-            key = np.asarray(idx.props[0], np.int64)[np.clip(key, 0, len(idx.props[0]) - 1)]
+        ia = _array(idx, np.int64)
+        if len(ia):
+            key = ia[np.clip(key, 0, len(ia) - 1)]
     key = np.clip(key, 0, len(v) - 1)
     return v[key]
 
@@ -277,21 +309,27 @@ def load(path):
     entry per mesh and material; material = dict(name, diffuse=(r,g,b) or None, textures={slot: (file
     names, embedded bytes or None)}). Unit: GlobalSettings UnitScaleFactor (cm per unit)."""
     root = parse(path)
-    gs = _props70(root.find("GlobalSettings"))
-    unit_cm = float(gs.get("UnitScaleFactor", [1.0])[0]) if gs.get("UnitScaleFactor") else 1.0
+    us = _find_prop(root, "UnitScaleFactor")
+    unit_cm = float(us[0]) if us else 1.0
     objects = root.find("Objects")
     if objects is None:
         return [], unit_cm
+    # Objects by id: FBX 7 numbers; FBX 6 the "Type::name" string.
     by_id = {}
     for o in objects.children:
         if o.props and isinstance(o.props[0], (int, np.integer)):
             by_id[int(o.props[0])] = o
+        elif o.props and isinstance(o.props[0], str):
+            by_id[o.props[0]] = o
+
+    def key(v):
+        return int(v) if isinstance(v, (int, np.integer)) else str(v)
     parent_of, children_of, prop_links = {}, {}, []
     conns = root.find("Connections")
-    for c in (conns.all("C") if conns is not None else []):
+    for c in ((conns.all("C") + conns.all("Connect")) if conns is not None else []):
         if len(c.props) < 3:
             continue
-        kind, child, parent = c.props[0], int(c.props[1]), int(c.props[2])
+        kind, child, parent = c.props[0], key(c.props[1]), key(c.props[2])
         children_of.setdefault(parent, []).append(child)
         if kind == "OO":
             parent_of.setdefault(child, parent)
@@ -299,7 +337,7 @@ def load(path):
             prop_links.append((child, parent, str(c.props[3])))
 
     def short(n):
-        s = str(n.props[1]) if len(n.props) > 1 else ""
+        s = str(n.props[1]) if len(n.props) > 1 and not isinstance(n.props[0], str) else str(n.props[0])
         return s.split("\x00\x01")[0].split("::")[-1]
 
     world_cache = {}
@@ -336,10 +374,29 @@ def load(path):
                 names += [str(vn.value(k)) for k in ("RelativeFilename", "Filename") if vn.value(k)]
         return names, content
 
+    # FBX 6: an embedded image may sit in a Video that is not linked to its texture: matched by file name.
+    video_by_name = {}
+    for v in by_id.values():
+        if v.name == "Video" and v.find("Content") is not None and v.find("Content").props:
+            raw = v.find("Content").props[0]
+            if isinstance(raw, (bytes, bytearray)) and len(raw) > 4:
+                for k in ("RelativeFilename", "Filename", "FileName"):
+                    if v.value(k):
+                        video_by_name[str(v.value(k)).replace("\\", "/").rsplit("/", 1)[-1].lower()] = bytes(raw)
+
+    def texture_info_any(tid):
+        names, content = texture_info(tid)
+        if content is None:
+            for n in names:
+                content = video_by_name.get(n.replace("\\", "/").rsplit("/", 1)[-1].lower())
+                if content:
+                    break
+        return names, content
+
     mat_textures = {}
     for child, parent, prop in prop_links:
         if child in by_id and by_id[child].name == "Texture" and parent in by_id and by_id[parent].name == "Material":
-            mat_textures.setdefault(parent, {})[prop] = texture_info(child)
+            mat_textures.setdefault(parent, {})[prop] = texture_info_any(child)
 
     def material(mid):
         if mid is None or mid not in by_id:
@@ -355,15 +412,16 @@ def load(path):
 
     out = []
     for gid, g in by_id.items():
-        if g.name != "Geometry" or g.find("Vertices") is None or g.find("PolygonVertexIndex") is None:
+        if g.name not in ("Geometry", "Model") or g.find("Vertices") is None or g.find("PolygonVertexIndex") is None:
             continue
-        model = parent_of.get(gid)
+        # FBX 7: a Geometry linked to its Model; FBX 6: the Model holds its own mesh.
+        model = gid if g.name == "Model" else parent_of.get(gid)
         if model is None or model not in by_id or by_id[model].name != "Model":
             continue
         mnode = by_id[model]
-        ctrl = np.asarray(g.find("Vertices").props[0], np.float64)
+        ctrl = _array(g.find("Vertices"), np.float64)
         ctrl = ctrl[: len(ctrl) // 3 * 3].reshape(-1, 3)
-        pvi = np.asarray(g.find("PolygonVertexIndex").props[0], np.int64)
+        pvi = _array(g.find("PolygonVertexIndex"), np.int64)
         if len(pvi) == 0 or len(ctrl) == 0:
             continue
         last = pvi < 0
@@ -374,10 +432,34 @@ def load(path):
         nrm = _layer(g, "LayerElementNormal", "Normals", "NormalsIndex", len(ctrl), poly_of_corner, ctrl_of_corner)
         uv = _layer(g, "LayerElementUV", "UV", "UVIndex", len(ctrl), poly_of_corner, ctrl_of_corner)
         mats_of_model = [c for c in children_of.get(model, []) if c in by_id and by_id[c].name == "Material"]
+        # FBX 6: textures hang on the model, not on its materials: material i gets texture i (or the only one).
+        # Which: LayerElementTexture's TextureId per polygon, matched to the polygons' materials; without
+        # it, texture i to material i (one texture and one material: that one).
+        tex_of_model = [c for c in children_of.get(model, []) if c in by_id and by_id[c].name == "Texture"]
+        let = g.find("LayerElementTexture")
+        tex_ids = _array(let.find("TextureId"), np.int64) if let is not None else np.zeros(0, np.int64)
+        lem0 = g.find("LayerElementMaterial")
+        mat_ids = _array(lem0.find("Materials"), np.int64) if lem0 is not None else np.zeros(0, np.int64)
+        for i, mid in enumerate(mats_of_model):
+            if not tex_of_model or mat_textures.get(mid):
+                continue
+            pick = None
+            if len(tex_ids):
+                if len(tex_ids) == 1 or str(let.value("MappingInformationType", "")) == "AllSame":
+                    pick = int(tex_ids[0])
+                elif len(mat_ids) == len(tex_ids):
+                    ids = tex_ids[mat_ids == i]
+                    pick = int(np.bincount(ids[ids >= 0]).argmax()) if (ids >= 0).any() else None
+                elif len(mat_ids) <= 1:
+                    pick = int(np.bincount(tex_ids[tex_ids >= 0]).argmax()) if (tex_ids >= 0).any() else None
+            elif i < len(tex_of_model) and (len(tex_of_model) == len(mats_of_model) or len(mats_of_model) == 1):
+                pick = i
+            if pick is not None and 0 <= pick < len(tex_of_model):
+                mat_textures[mid] = {"DiffuseColor": texture_info_any(tex_of_model[pick])}
         lem = g.find("LayerElementMaterial")
         n_poly = len(ends)
-        if lem is not None and lem.find("Materials") is not None and lem.find("Materials").props:
-            mi = np.asarray(lem.find("Materials").props[0], np.int64)
+        if lem is not None and len(_array(lem.find("Materials"), np.int64)):
+            mi = _array(lem.find("Materials"), np.int64)
             poly_mat = (np.full(n_poly, mi[0] if len(mi) else 0) if str(lem.value("MappingInformationType", "")) == "AllSame"
                         or len(mi) < n_poly else mi[:n_poly])
         else:
