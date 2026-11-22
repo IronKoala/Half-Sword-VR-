@@ -2590,7 +2590,7 @@ namespace
                         kept_along = along;
                     }
                     along = kept_along;
-                    (void)two_hands_hold;
+                    (void)&two_hands_hold;
                     local = local + along * g_fake_two_up.load();
                     if (mode == 24) local = local + Vec3{0.0, 15.0 * std::sin(now * 3.14159265358979), 0.0};
                 }
@@ -5591,6 +5591,7 @@ namespace
         double handle_keep = 0.0;      // how much of its own motion along the line it keeps (0..1)
         bool handle_sliding_logged = false;
         double handle_damp = 0.0;      // the slide's damper along the handle (N s/m), from the trigger
+        double shoulder_cap_n = -1.0;  // the shoulder's limit on each held point's pull this tick (N; -1 = none)
         double settle_until = -1.0;    // pulled from settle_from into the hand until then
         bool flipped = false;          // turned end for end by the grip flip (for the log)
         bool drag_capped = false;      // dragging a body by a stuck weapon with all the hand's strength
@@ -12851,7 +12852,17 @@ namespace
         double mm = (std::max)(0.05, two ? mass * 0.5 : mass); // each of two hands moves half of it
         double I = (std::max)(1e-4, ig_kgm2);
         double ang_scale = 1.5; // p.Chaos.JointConstraint.AngularDriveStiffnessScale / DampingScale default
-        double k = pk * st / mm, c = pc * dst / mm, fcap = pf * mx * (std::max)(0.0, body.total) / mm * 100.0;
+        // Each hand's pull cap (N): B&S's, or the shoulder's (as the old hold) easing to B&S's when far behind.
+        auto hand_cap = [&](double bs_n, double err_cm) {
+            double sc = g_hold[side].shoulder_cap_n;
+            if (!cfg.pose_hold_joint_shoulder || sc < 0.0 || sc >= bs_n) return bs_n;
+            double f0 = cfg.pose_hold_shoulder_fade_from_cm, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_shoulder_fade_to_cm);
+            double u = (std::min)(1.0, (std::max)(0.0, (err_cm - f0) / (f1 - f0)));
+            return sc + (bs_n - sc) * u;
+        };
+        Vec3 target_pivot = target_pos + target_rot.rotate(pivot);
+        double cap1 = hand_cap(pf * mx * (std::max)(0.0, body.total), length(pivot_world - target_pivot));
+        double k = pk * st / mm, c = pc * dst / mm, fcap = cap1 / mm * 100.0;
         double ka = rk * st / I / ang_scale, ca = rc * dst / I / ang_scale, tcap = rf * mx * (std::max)(0.0, two ? 0.5 * (body.total + s2b.total) : body.total) / I;
         // Two hands: the main hand only rolls it about the line between the hands (pose_two_hand_twist_only,
         // as the old hold); where it points is the two hands' pulls. The joint's own twist-only drive let
@@ -12873,8 +12884,7 @@ namespace
                 double n = std::sqrt(tw.x * tw.x + tw.y * tw.y + tw.z * tw.z + tw.w * tw.w);
                 tw = n > 1e-9 ? Quat{tw.x / n, tw.y / n, tw.z / n, tw.w / n} : Quat{};
                 s_rot = (tw * rot).normalized();
-                Vec3 tp = target_pos + target_rot.rotate(pivot); // where the main hand puts the point held
-                s_pos = tp - s_rot.rotate(pivot);
+                s_pos = target_pivot - s_rot.rotate(pivot); // the point held where the main hand puts it
             }
         }
         set_component_transform(m.sphere, s_pos, s_rot, false);
@@ -12891,7 +12901,7 @@ namespace
                 // Its sphere carries the made-at point: keep that point where the palm wants the spot held now.
                 Vec3 want = g_two.bs_p2 + rot.rotate(o.made_at - g_two.bs_local);
                 set_component_transform(o.sphere, want, rot, false);
-                double fcap2 = pf * mx * (std::max)(0.0, s2b.total) / mm * 100.0;
+                double fcap2 = hand_cap(pf * mx * (std::max)(0.0, s2b.total), length(at_world - g_two.bs_p2)) / mm * 100.0;
                 jh_drive(o, k, c, fcap2, 0.0, 0.0, 0.0);
             }
         }
@@ -13747,6 +13757,7 @@ namespace
                     HSVR_LOG_EVERY(2.0, "Hold: %s dampers for %ls (%.2f kg, %.3f kg m^2 about the grip): position %.0f, turn %.1f", side == 0 ? "left" : "right",
                                    weapon->GetName().c_str(), mass, ig / 1e4, pc * dst, rc * dst);
                 }
+                h.shoulder_cap_n = arm_fcap; // (the joint hold uses it too)
                 double draw_scale = 1.0;
                 if (cfg.pose_hold_stuck_force_scale < 1.0 && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon)) draw_scale = (std::max)(0.0, cfg.pose_hold_stuck_force_scale);
                 SoftPoint pts[2];

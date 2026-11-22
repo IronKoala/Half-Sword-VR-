@@ -481,6 +481,9 @@ namespace hsvr
         double pose_hold_joint_stiffness = 1.0; // multiplies the springs
         double pose_hold_joint_damping = 1.0;   // multiplies the dampers (the lag in a steady swing is about damper / spring x speed)
         double pose_hold_joint_max = 1.0;       // multiplies the force and torque caps
+        // The shoulder's limit on each hand's pull (the arm-lag decision 2026-11-20: weight shows as the arm
+        // being slow), as the old hold; it eases off to B&S's cap when the grip is far behind. 0 = B&S caps only.
+        bool pose_hold_joint_shoulder = true;
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).

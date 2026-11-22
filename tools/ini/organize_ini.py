@@ -314,6 +314,7 @@ LAYOUT = [
         ("pose_hold_joint_stiffness", ""),
         ("pose_hold_joint_damping", ""),
         ("pose_hold_joint_max", ""),
+        ("pose_hold_joint_shoulder", ""),
         ("pose_hold_let_go_ignore_self", ""),
         ("pose_hold_contact_cm", ""),
         ("pose_hold_ignore_hand", ""),
