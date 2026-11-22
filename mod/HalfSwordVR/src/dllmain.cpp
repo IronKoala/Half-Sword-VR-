@@ -13115,6 +13115,7 @@ namespace
         hsvr::Vec3 prev_grip{0, 0, 0};   // where the point held actually was last tick (world)
         double fade_until = -1.0;        // the ease to B&S's cap stays allowed until then (it must also brake)
         bool fresh = false;              // made this tick: the weapon is given the old hold's velocity once
+        bool force = false;              // its drives are in force mode (N, N m), not acceleration mode
         int drives = -1; // which angular drives are on: bit 0 twist, bit 1 swing (-1 = not set yet)
     };
     JointHand g_jh[2][2]; // [side][0 = the hand's own joint, 1 = its joint as the second hand on the other's weapon]
@@ -13125,6 +13126,42 @@ namespace
     JointGone g_jh_gone[2];
 
     bool cfg_slerp() { return hsvr::config().pose_hold_joint_slerp; }
+
+    // Puts all six drives of a constraint's profile in force mode (bAccelerationMode off), before it is joined
+    // (the joint is built from the profile). In acceleration mode Chaos scales each axis by that axis's own
+    // inertia, and the game's tensors can be far from a rod's (polehammer 6784 / 779 / 818 kg cm^2): scaled by
+    // the biggest, the polehammer got ~1/8 of the turn and pull asked and hung backwards (sanity c238662).
+    // Returns how many drives were set (6 = all).
+    int jh_force_mode(UObject* con)
+    {
+        FProperty* ci = prop_chain(con, STR("ConstraintInstance"));
+        UScriptStruct* ci_t = struct_type(ci);
+        FProperty* pi = struct_member(ci_t, STR("ProfileInstance"));
+        UScriptStruct* pi_t = struct_type(pi);
+        if (!ci || !pi || !pi_t) return 0;
+        uint8_t* prof = reinterpret_cast<uint8_t*>(con) + ci->GetOffset_Internal() + pi->GetOffset_Internal();
+        int n = 0;
+        struct Group { const TCHAR* name; const TCHAR* drives[3]; };
+        for (const Group& g : {Group{STR("LinearDrive"), {STR("XDrive"), STR("YDrive"), STR("ZDrive")}},
+                               Group{STR("AngularDrive"), {STR("SlerpDrive"), STR("TwistDrive"), STR("SwingDrive")}}})
+        {
+            FProperty* gp = struct_member(pi_t, g.name);
+            UScriptStruct* g_t = struct_type(gp);
+            if (!gp || !g_t) continue;
+            for (const TCHAR* dn : g.drives)
+            {
+                FProperty* dp = struct_member(g_t, dn);
+                UScriptStruct* d_t = struct_type(dp);
+                FProperty* am = struct_member(d_t, STR("bAccelerationMode"));
+                if (!dp || !am || am->GetClass().GetName() != STR("BoolProperty")) continue;
+                auto* flag = static_cast<FBoolProperty*>(am);
+                uint8_t* byte = prof + gp->GetOffset_Internal() + dp->GetOffset_Internal() + am->GetOffset_Internal() + flag->GetByteOffset();
+                *byte &= (uint8_t)~flag->GetFieldMask();
+                ++n;
+            }
+        }
+        return n;
+    }
 
     void jh_destroy(JointHand& j)
     {
@@ -13232,6 +13269,14 @@ namespace
             Call dc(c, STR("SetDisableCollision"));
             dc.first_flag(true);
             dc.run();
+            if (hsvr::config().pose_hold_joint_force_mode)
+            {
+                int n = jh_force_mode(c);
+                j.force = n == 6;
+                static bool told = false;
+                if (!told || n != 6) HSVR_LOG("Joint hold: drives in force mode: %d of 6 set%s", n, n == 6 ? "" : " (staying in acceleration mode)");
+                told = true;
+            }
             Call join(c, STR("SetConstrainedComponents"));
             join.object(STR("Component1"), s);
             join.name(STR("BoneName1"), FName());
@@ -13434,7 +13479,9 @@ namespace
         };
         Vec3 target_pivot = target_pos + target_rot.rotate(pivot);
         double cap1 = hand_cap(pf * mx * (std::max)(0.0, body.total), length(pivot_world - target_pivot));
-        double k = pk * st / mm, c = pc * dst / mm, fcap = cap1 / mm * 100.0;
+        // Force mode: N/m, N s/m and N as they are (UE: kg/s^2, kg/s, kg cm/s^2); acceleration mode: per effective mass.
+        double lin_div = m.force ? 1.0 : mm;
+        double k = pk * st / lin_div, c = pc * dst / lin_div, fcap = cap1 / lin_div * 100.0;
         // The angular drive's acceleration mode scales by the inertia about the centre of mass (r5: dividing
         // by the inertia about the grip, 3.3 vs 0.55 kg m^2 for the staff, left it ~5 N m of its 30).
         double tcap_nm = rf * mx * (std::max)(0.0, two ? 0.5 * (body.total + s2b.total) : body.total);
@@ -13464,7 +13511,8 @@ namespace
             HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls: wrist stop, turn up to %.0f N m", side == 0 ? "left" : "right", weapon->GetName().c_str(), wrist_nm);
             tcap_nm = wrist_nm;
         }
-        double ka = rk * st / Ic / ang_scale, ca = rc * dst / Ic / ang_scale, tcap = tcap_nm / Ic;
+        double ang_div = m.force ? 1e-4 : Ic; // force mode: N m -> kg cm^2/s^2
+        double ka = rk * st / ang_div / ang_scale, ca = rc * dst / ang_div / ang_scale, tcap = tcap_nm / ang_div;
         // Two hands: the main hand only rolls it about the line between the hands (pose_two_hand_twist_only,
         // as the old hold); where it points is the two hands' pulls. The joint's own twist-only drive let
         // the staff tumble on a wrist roll (r2: 243 deg/s off its axis vs 41 for the old hold): the twist is
@@ -13517,8 +13565,9 @@ namespace
                 Vec3 want = g_two.bs_p2 + rot.rotate(o.made_at - g_two.bs_local);
                 set_component_transform(o.sphere, want, rot, false);
                 double mm2 = eff_mass(at_world);
-                double fcap2 = hand_cap(pf * mx * (std::max)(0.0, s2b.total), length(at_world - g_two.bs_p2)) / mm2 * 100.0;
-                jh_drive(o, pk * st / mm2, pc * dst / mm2, fcap2, 0.0, 0.0, 0.0);
+                double div2 = o.force ? 1.0 : mm2;
+                double fcap2 = hand_cap(pf * mx * (std::max)(0.0, s2b.total), length(at_world - g_two.bs_p2)) / div2 * 100.0;
+                jh_drive(o, pk * st / div2, pc * dst / div2, fcap2, 0.0, 0.0, 0.0);
             }
         }
         // The arm carries the weapon's weight at the grip outside the pull cap, as the old hold (its lever
