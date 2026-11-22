@@ -513,6 +513,8 @@ namespace hsvr
         num("pose_hold_joint_fade_after_s", c.pose_hold_joint_fade_after_s);
         flag("pose_hold_joint_slerp", c.pose_hold_joint_slerp);
         flag("pose_hold_joint_mod_turn", c.pose_hold_joint_mod_turn);
+        num("pose_hold_joint_target_max_speed", c.pose_hold_joint_target_max_speed);
+        flag("pose_hold_joint_draw_wound", c.pose_hold_joint_draw_wound);
         flag("pose_hold_joint_turn_by_grip", c.pose_hold_joint_turn_by_grip);
         flag("pose_hold_joint_speed_limit", c.pose_hold_joint_speed_limit);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
@@ -565,6 +567,8 @@ namespace hsvr
         flag("pose_slide_bs_damper", c.pose_slide_bs_damper);
         flag("draw_seat_ref_fix", c.draw_seat_ref_fix);
         num("pose_grab_settle_s", c.pose_grab_settle_s);
+        flag("pose_grab_joint", c.pose_grab_joint);
+        num("pose_grab_joint_hz", c.pose_grab_joint_hz);
         flag("pose_shield_free_grip", c.pose_shield_free_grip);
         flag("pose_weapon_free_grip", c.pose_weapon_free_grip);
         num("pose_weapon_free_cm", c.pose_weapon_free_cm);
@@ -672,6 +676,7 @@ namespace hsvr
         }
         flag("pose_two_hand_twist_only", c.pose_two_hand_twist_only);
         flag("pose_two_hand_joint_both_turn", c.pose_two_hand_joint_both_turn);
+        flag("pose_two_hand_fixed_rebase", c.pose_two_hand_fixed_rebase);
         num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
         flag("pose_fists", c.pose_fists);
         text("pose_fist_class", c.pose_fist_class);

@@ -11920,6 +11920,8 @@ namespace
             }
         }
     }
+    bool obj_joint(int side, UObject* pawn, UObject* comp, FName bone, const hsvr::Vec3& p, const hsvr::Quat& q, const hsvr::Vec3& spot_local,
+                   const hsvr::Vec3& palm, const hsvr::Quat& tq, const hsvr::Vec3& com, double mass, double amax, double aamax, const hsvr::Config& cfg);
     void grab_drive(int side, UObject* pawn, WrapGrab& g, const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -12024,6 +12026,20 @@ namespace
             want = want - cross(ang, r);
             want.z += 980.0 * dt; // the step's gravity, which the framework turns off while held
             g_drive_held_until[side] = now + 0.25; // the game's slip rule held off while the mod carries it
+            if (cfg.pose_hold_joint && cfg.pose_grab_joint &&
+                obj_joint(side, pawn, g.comp, g.bone, p, q, g.spot_local, palm, tq, com, g.mass, amax, aamax, cfg))
+            {
+                if (cfg.log_wrap && now - g.last_drive_log >= 0.5)
+                {
+                    g.last_drive_log = now;
+                    HSVR_LOG("Grab hold: %s hand carries %ls (%.1f kg) on a joint: %.1f cm / %.0f deg off its place in the hand, accel cap %.0f m/s^2, speed %.0f cm/s (top %.0f)",
+                             hand, g.comp->GetName().c_str(), g.mass, length(to), angle * 57.2958, amax / 100.0, length(v), vmax[side]);
+                }
+                if (g.have_last_hand) g.hand_v = (hp - g.last_hand) * (1.0 / dt);
+                g.last_hand = hp;
+                g.have_last_hand = true;
+                return;
+            }
             Call wake(g.comp, STR("WakeRigidBody"));
             wake.name(STR("BoneName"), g.bone);
             wake.run();
@@ -15051,6 +15067,12 @@ namespace
         double fade_until = -1.0;        // the ease to B&S's cap stays allowed until then (it must also brake)
         bool fresh = false;              // made this tick: the weapon is given the old hold's velocity once
         bool mod_turn = false;           // this tick the old hold's turn is set on the weapon, the joint only pulls
+        hsvr::Vec3 lim_p{0, 0, 0};       // where the point held is sent, rate-limited (world)
+        double lim_t = -1.0;
+        bool lim_valid = false;
+        bool rel2_set = false;           // second hand on fixed grips: its turn and spot taken from the first hand once
+        hsvr::Quat rel2;
+        hsvr::Vec3 off2{0, 0, 0};
         int drives = -1; // which angular drives are on: bit 0 twist, bit 1 swing (-1 = not set yet)
     };
     JointHand g_jh[2][2]; // [side][0 = the hand's own joint, 1 = its joint as the second hand on the other's weapon]
@@ -15117,7 +15139,7 @@ namespace
 
     // Makes the joint with the sphere on the weapon at `at_world` (the point held), turned as the weapon.
     bool jh_make(JointHand& j, UObject* pawn, UObject* base, UObject* weapon, const hsvr::Vec3& at_world, const hsvr::Vec3& at_local,
-                 const hsvr::Vec3& sphere_pos, const hsvr::Quat& sphere_rot, bool turns, int side)
+                 const hsvr::Vec3& sphere_pos, const hsvr::Quat& sphere_rot, bool turns, int side, FName bone2 = FName())
     {
         jh_destroy(j);
         UObject* s = jh_add(pawn, STR("/Script/Engine.SphereComponent"));
@@ -15188,7 +15210,7 @@ namespace
             join.object(STR("Component1"), s);
             join.name(STR("BoneName1"), FName());
             join.object(STR("Component2"), base);
-            join.name(STR("BoneName2"), FName());
+            join.name(STR("BoneName2"), bone2);
             join.run();
             Call pos(c, STR("SetLinearPositionDrive"));
             pos.flag(STR("bEnableDriveX"), true);
@@ -15268,6 +15290,44 @@ namespace
     }
 
     // Once per tick, after the holds: a joint no hold touched this tick goes (let go, dropped, swapped).
+    // Loose objects (cups, kettles, rocks) on the same kind of joint (Matthew 2026-11-22: the five joint pieces).
+    // The hold keeps its rules: the held spot goes to the palm turned as the seat measured, pulled no harder
+    // than its accel caps (heavier things slower). The joint pulls instead of the velocity being set, so what
+    // it bumps pushes back as physics. Accel-mode drives: k = w^2, c = 2 w, caps as accelerations.
+    JointHand g_jo[2];
+    bool g_jo_tracked = on_freed([] {
+        for (JointHand& j : g_jo)
+        {
+            if (gone(j.weapon)) j.weapon = nullptr;
+            if (gone(j.sphere)) j.sphere = nullptr;
+            if (gone(j.con)) j.con = nullptr;
+            if (!j.sphere && !j.con) j = JointHand{};
+            else if (!j.weapon) j.touched = false;
+        }
+    });
+    bool obj_joint(int side, UObject* pawn, UObject* comp, FName bone, const hsvr::Vec3& p, const hsvr::Quat& q, const hsvr::Vec3& spot_local,
+                   const hsvr::Vec3& palm, const hsvr::Quat& tq, const hsvr::Vec3& com, double mass, double amax, double aamax, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        JointHand& j = g_jo[side];
+        Vec3 spot = p + q.rotate(spot_local);
+        if (!j.con || j.weapon != comp)
+            if (!jh_make(j, pawn, comp, comp, spot, spot_local, p, q, true, side, bone)) return false;
+        j.touched = true;
+        Vec3 t_pos = palm - tq.rotate(spot_local);
+        set_component_transform(j.sphere, t_pos, tq, false);
+        double w = 2.0 * 3.14159265 * (std::max)(1.0, cfg.pose_grab_joint_hz);
+        double ang_scale = 1.5; // the CVar scale on angular drives (as joint_hold)
+        jh_drive(j, w * w, 2.0 * w, amax, w * w / ang_scale, 2.0 * w / ang_scale, aamax, true);
+        // Its weight, at its centre of mass (no turn), as the old hold's gravity step did.
+        Call f(comp, STR("AddForceAtLocation"));
+        f.three(STR("Force"), 0.0, 0.0, mass * 980.0);
+        f.three(STR("Location"), com.x, com.y, com.z);
+        f.name(STR("BoneName"), bone);
+        f.run();
+        return true;
+    }
+
     void jh_sweep(UObject* pawn)
     {
         // Speed net for whatever each hand holds, every tick, hold or not (sanity 5dd9267: on ticks with no hold
@@ -15303,6 +15363,18 @@ namespace
                 }
         }
         for (int s = 0; s < 2; ++s)
+        {
+            JointHand& j = g_jo[s];
+            if ((j.sphere || j.con) && (!j.touched || gone(j.weapon) || gone(j.sphere) || gone(j.con)))
+            {
+                if (j.weapon && !gone(j.weapon)) HSVR_LOG("Joint hold: %s hand's joint on %ls removed", s == 0 ? "left" : "right", j.weapon->GetName().c_str());
+                if (gone(j.sphere)) j.sphere = nullptr;
+                if (gone(j.con)) j.con = nullptr;
+                jh_destroy(j);
+            }
+            j.touched = false;
+        }
+        for (int s = 0; s < 2; ++s)
             for (int i = 0; i < 2; ++i)
             {
                 JointHand& j = g_jh[s][i];
@@ -15334,6 +15406,31 @@ namespace
         if (!m.con || m.weapon != weapon)
             if (!jh_make(m, pawn, base, weapon, pivot_world, pivot, pos, rot, true, side)) return false;
         m.touched = true;
+        // The hand's target may jump (tracking, a snap turn: 31-54 cm in one frame flung a polehammer 81-272 cm out
+        // as the boosted pull yanked it, sanity d4cae75). The point held follows the hand no faster than
+        // pose_hold_joint_target_max_speed and catches up over the next ticks.
+        Vec3 tpos = target_pos;
+        {
+            double tnow = now_seconds();
+            Vec3 want_p = target_pos + target_rot.rotate(pivot);
+            if (!m.lim_valid) { m.lim_p = pivot_world; m.lim_valid = true; m.lim_t = tnow; }
+            double vmax = cfg.pose_hold_joint_target_max_speed, gap = (std::min)(0.1, (std::max)(0.0, tnow - m.lim_t));
+            Vec3 lp = want_p;
+            if (vmax > 0.0 && gap > 0.0)
+            {
+                Vec3 step = want_p - m.lim_p;
+                double most = vmax * gap;
+                if (length(step) > most)
+                {
+                    lp = m.lim_p + step * (most / length(step));
+                    HSVR_LOG_EVERY(0.25, "Joint hold: %s hand's target jumped %.0f cm in %.0f ms: followed at %.0f cm/s", side == 0 ? "left" : "right", length(step),
+                                   gap * 1000.0, vmax);
+                }
+            }
+            m.lim_p = lp;
+            m.lim_t = tnow;
+            tpos = target_pos + (lp - want_p);
+        }
         BodyStrength s2b = two ? body_strength(pawn, g_two.second, cfg) : BodyStrength{};
         double pk = two ? cfg.pose_bs_two_pos_k : cfg.pose_hold_spring, pc = two ? cfg.pose_bs_two_pos_c : cfg.pose_hold_damper,
                pf = two ? cfg.pose_bs_two_pos_max : cfg.pose_hold_max_force;
@@ -15362,7 +15459,7 @@ namespace
         // The speed is the HAND's (where it wants the point held), not the grip's: a grip shaking against
         // the ease kept itself over the threshold and the cap pumped at 18 Hz (r6).
         double now = now_seconds();
-        Vec3 want_pivot = target_pos + target_rot.rotate(pivot);
+        Vec3 want_pivot = tpos + target_rot.rotate(pivot);
         double gap = now - m.prev_t;
         bool have_prev = m.prev_t > 0.0 && gap > 1e-4;
         double speed = have_prev ? length(want_pivot - m.prev_p) / gap : 0.0;
@@ -15384,7 +15481,7 @@ namespace
             double u = (std::min)(1.0, (std::max)(0.0, (err_cm - f0) / (f1 - f0)));
             return sc + (bs_n - sc) * u;
         };
-        Vec3 target_pivot = target_pos + target_rot.rotate(pivot);
+        Vec3 target_pivot = tpos + target_rot.rotate(pivot);
         double cap1 = hand_cap(pf * mx * (std::max)(0.0, body.total), length(pivot_world - target_pivot));
         double k = pk * st / mm, c = pc * dst / mm, fcap = cap1 / mm * 100.0;
         // The angular drive's acceleration mode scales by the inertia about the centre of mass (r5: dividing
@@ -15423,7 +15520,7 @@ namespace
         // measured about the joint's frame, which swings far from the hands' line. So the mod takes the
         // twist about the line itself and turns the sphere only by that from where the weapon is now; the
         // drive (full) then has no swing to pull and damps the weapon's turn only against its own.
-        Vec3 s_pos = target_pos;
+        Vec3 s_pos = tpos;
         Quat s_rot = target_rot;
         {
             // Just grabbed: brought into the hand from where it lay along the same path as the old hold, not
@@ -15481,10 +15578,29 @@ namespace
                 // Its sphere carries the made-at point: keep that point where the palm wants the spot held now
                 // (turned as the second hand has the weapon when both wrists turn it, else as it is).
                 Quat r2 = both_turn ? (g_pose.hand_rot[g_two.second] * g_two.rel).normalized() : rot;
-                Vec3 want = g_two.bs_p2 + r2.rotate(o.made_at - g_two.bs_local);
+                Vec3 p2 = g_two.bs_p2;
+                if (both_turn && cfg.pose_two_hand_fixed_rebase)
+                {
+                    // Fixed grips: the second hand keeps, in its own frame, the turn and the spot the FIRST hand gives
+                    // the weapon as it took hold, so the two don't pull against each other at rest (rerun 388ca67:
+                    // the hands' seat turns differed 8.7 deg and the weapon sat 2.5-3.3 cm / 5-6 deg between them).
+                    Quat hq2 = g_pose.hand_rot[g_two.second];
+                    if (!o.rel2_set)
+                    {
+                        o.rel2 = (hq2.inverse() * target_rot).normalized();
+                        Vec3 spot_first = tpos + target_rot.rotate(g_two.bs_local); // where the first hand puts the second's spot
+                        o.off2 = hq2.inverse().rotate(spot_first - g_two.bs_p2);
+                        o.rel2_set = true;
+                        HSVR_LOG("Joint hold: second hand on %ls rebased to the first hand: %.1f deg, %.1f cm", weapon->GetName().c_str(),
+                                 length(scaled_axis((r2 * target_rot.inverse()).normalized())) * 57.2958, length(o.off2));
+                    }
+                    r2 = (hq2 * o.rel2).normalized();
+                    p2 = g_two.bs_p2 + hq2.rotate(o.off2);
+                }
+                Vec3 want = p2 + r2.rotate(o.made_at - g_two.bs_local);
                 set_component_transform(o.sphere, want, r2, false);
                 double mm2 = eff_mass(at_world);
-                double fcap2 = hand_cap(pf * mx * (std::max)(0.0, s2b.total), length(at_world - g_two.bs_p2)) / mm2 * 100.0;
+                double fcap2 = hand_cap(pf * mx * (std::max)(0.0, s2b.total), length(at_world - p2)) / mm2 * 100.0;
                 double tcap2 = both_turn ? rf * mx * (std::max)(0.0, s2b.total) / Ic : 0.0;
                 jh_drive(o, pk * st / mm2, pc * dst / mm2, fcap2, both_turn ? ka : 0.0, both_turn ? ca : 0.0, tcap2);
                 HSVR_LOG_EVERY(0.5, "Joint hold: second hand on %ls%s: %.1f cm from its spot, its turn %.0f deg from the first hand's",
@@ -15528,7 +15644,7 @@ namespace
         }
         HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls%s: grip %.1f cm / %.0f deg off; drive k %.0f c %.1f max %.0f cm/s^2, turn k %.0f c %.1f max %.0f rad/s^2 (%.2f kg, %.3f kg m^2)",
                        side == 0 ? "left" : "right", weapon->GetName().c_str(), two ? " (two hands)" : "",
-                       length(pivot_world - (target_pos + target_rot.rotate(pivot))), length(scaled_axis((rot * target_rot.inverse()).normalized())) * 57.2958,
+                       length(pivot_world - (tpos + target_rot.rotate(pivot))), length(scaled_axis((rot * target_rot.inverse()).normalized())) * 57.2958,
                        k, c, fcap, ka, ca, tcap, mass, I);
         return true;
     }
@@ -16546,12 +16662,30 @@ namespace
         // handle's ends stops it. Not while drawing or sheathing (the scabbard's own slide joint) or in
         // a wound (the game's stuck joint): those still run the old hold.
         bool by_joint = false;
-        if (cfg.pose_hold_joint && g_pose.hand_valid[side] && !is_fist(weapon) && !(g_draw[side].active && g_draw[side].weapon == weapon) &&
-            !(cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon)))
+        bool drawing = g_draw[side].active && g_draw[side].weapon == weapon;
+        bool wounded = cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon);
+        bool special = drawing || wounded;
+        if (cfg.pose_hold_joint && g_pose.hand_valid[side] && !is_fist(weapon) && (!special || cfg.pose_hold_joint_draw_wound))
         {
             Vec3 rp = pivot_now - com;
             double ig = ((std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp)) / 1e4; // kg m^2 about the grip
-            by_joint = joint_hold(side, pawn, base, weapon, mass, ig, pivot, target_pos, target_rot, pos, rot, body, com, cfg);
+            Vec3 jt_pos = target_pos;
+            Quat jt_rot = target_rot;
+            if (special)
+            {
+                // Drawing / sheathing (the scabbard's slide) and a blade in a wound (slides along it, slowed): the old
+                // hold's rules decide where it goes this frame (set_v, w_next); the joint is sent to that pose, so
+                // the weapon stays on the same joint through a draw or a stab and contacts push it as physics.
+                double DTj = world_delta_seconds(pawn);
+                if (!(DTj > 1e-4 && DTj < 0.1)) DTj = dt;
+                Quat r_next = (from_scaled_axis(w_next * DTj) * rot).normalized();
+                Vec3 com_n = com + set_v * DTj;
+                jt_rot = r_next;
+                jt_pos = com_n - r_next.rotate(local_com);
+                HSVR_LOG_EVERY(1.0, "Joint hold: %s %ls %s: on the joint, sent where the %s rule puts it", side == 0 ? "left" : "right", weapon->GetName().c_str(),
+                               drawing ? "in its scabbard" : "in a wound", drawing ? "scabbard" : "wound");
+            }
+            by_joint = joint_hold(side, pawn, base, weapon, mass, ig, pivot, jt_pos, jt_rot, pos, rot, body, com, cfg);
             // A new joint starts from the old hold's answer for this tick, not from whatever speed the weapon
             // picked up before the hold (sanity 5b22359: a polehammer kept in place for the grab reached 25-38 m/s
             // of physics speed, which the joint inherited and threw it 224 cm).
