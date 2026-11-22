@@ -390,6 +390,7 @@ LAYOUT = [
         ("pose_sheathe", ""),
         ("pose_sheathe_mouth_cm", ""),
         ("pose_sheathe_angle_deg", ""),
+        ("pose_sheathe_two_hand", "1 = sheathing takes two hands: hold the sword's scabbard on your belt with the other hand, then put the blade in. 0 = the blade goes into any free mouth by itself."),
         ("pose_sheathe_cross", ""),
         ("pose_scabbard_grab", ""),
         ("pose_scabbard_handle", ""),

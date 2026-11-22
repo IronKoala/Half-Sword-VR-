@@ -709,6 +709,9 @@ namespace hsvr
         bool pose_sheathe = true;
         double pose_sheathe_mouth_cm = 10.0;
         double pose_sheathe_angle_deg = 30.0;
+        // Sheathing takes two hands (Matthew 2026-11-22): the other hand holds the sword's own scabbard
+        // where it hangs; the blade never goes in by itself. 0 = the old one-hand sheathe at any free mouth.
+        bool pose_sheathe_two_hand = true;
         bool pose_sheathe_cross = true; // a weapon whose scabbard hangs on the other hip goes back across (the game's cross path)
         // The off hand on a belt scabbard: a squeeze within touch_cm of it takes it; it turns with the hand
         // up to angle_deg on the belt (the game's own loose limit is 30) and stays pinned there; let go and it

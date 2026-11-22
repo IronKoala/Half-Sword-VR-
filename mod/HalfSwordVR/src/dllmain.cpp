@@ -4410,6 +4410,7 @@ namespace
     SlotTake g_slot_take[2];
     void slot_take_tick(UObject* pawn);
     bool try_scabbard_grab(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& at, const hsvr::Config& cfg);
+    UObject* held_scabbard(int side); // the belt scabbard that hand holds, else null
     void scabbard_let_go(int side, const char* why);
     bool scabbard_held(int side);
     void scabbard_before_tick(UObject* pawn);
@@ -16853,6 +16854,27 @@ namespace
             else
                 m.ok = belt_mouth(hip, pawn, m.at, m.ax);
         }
+        // Two hands (Matthew 2026-11-22: "it needs to be a 2 hand job. One holding the scabbard, one
+        // holstering the sword. In the past, I've had the sword get into position to sheath itself whilst
+        // I was fighting"): only into its own scabbard, on the belt where it hangs, while the other hand
+        // holds that scabbard (try_scabbard_grab: it can be angled). No free-slot or across-fresh sheathe.
+        if (cfg.pose_sheathe_two_hand)
+        {
+            UObject* held = held_scabbard(1 - side);
+            if (!held) return;
+            if (held != scab)
+            {
+                HSVR_LOG_EVERY(2.0, "Sheathe: %s hand's sword: the other hand holds a scabbard that is not this sword's; not sheathed", hand);
+                return;
+            }
+            if (!pinned)
+            {
+                HSVR_LOG_EVERY(2.0, "Sheathe: %s hand's sword: its scabbard is held but the mod has no mouth for it (not drawn from it this life); not sheathed", hand);
+                return;
+            }
+            for (Mouth& m : mouths)
+                if (!m.real) m.ok = false;
+        }
         if (!mouths[0].ok && !mouths[1].ok) return;
         Vec3 blade = component_rotation(base).rotate(Vec3{0, 0, 1});
         Vec3 tip = component_location(base) + blade * blade_length(w);
@@ -17120,6 +17142,7 @@ namespace
         double last_slide_t = -1.0;
     };
     ScabHold g_scab[2];
+    UObject* held_scabbard(int side) { return g_scab[side].active ? g_scab[side].scab : nullptr; }
 
     // A scabbard's length along its own Z, from its collision: the stretch of its axis within 3.5 cm of it.
     bool scabbard_segment(UObject* scab, double len, double& z0, double& z1)
