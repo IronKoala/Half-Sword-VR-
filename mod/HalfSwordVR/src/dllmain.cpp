@@ -10743,9 +10743,13 @@ namespace
                     // relaxed (your own curl, at most pose_wrap_untouched_curl). Your own curl alone was
                     // nearly a fist: middle >= 0.95, ring 0.98 while holding (his 11-21 plays).
                     c = -1.0;
-                    bool prev_touched = k > 0 && g.curls[f][k - 1] > kNoTouch + 0.5;
+                    // (Untouched joints are always the tail of the finger, so "part touched" is the
+                    // knuckle having touched. Past it: the middle joint at least relaxed, the end joint as
+                    // the middle; a knuckle-only touch gave 0/0/0.45, a straight finger with a bent tip.)
+                    bool prev_touched = k > 0 && g.curls[f][0] > kNoTouch + 0.5;
                     if (prev_touched)
-                        c = (std::max)(0.0, joint_out[f][k - 1]);
+                        c = k == 1 ? (std::max)((std::min)(base[k], g_wrap_untouched.load()), (std::max)(0.0, joint_out[f][0]))
+                                   : (std::max)(0.0, joint_out[f][k - 1]);
                     else if (k == 0 && f != 0)
                     {
                         for (int dfi : {-1, 1, -2, 2})
