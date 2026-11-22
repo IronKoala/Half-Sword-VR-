@@ -1017,6 +1017,7 @@ class App:
     def converted(self, payload, values):
         it, name, info, views = payload
         it.update(result=(name, info), result_inputs=values, views=views)
+        it.pop("pending_b", None)
         self.write_spots(it)
         it["status"] = "converted"
         self.refresh_row(it)
@@ -1162,12 +1163,15 @@ class App:
         if it is None:
             return
         it["splits"], it["part_len"] = None, {}
+        it.pop("pending_b", None)
         self.show_part_lengths()
         self.inputs_changed()
         self.status.config(text="Parts back to what the converter found. Press Convert.")
 
     def boundaries(self):
         """The part boundaries of the picture shown, cm along the weapon: pommel|grip, grip|guard, guard|blade."""
+        if self.cur.get("pending_b"):  # lines moved since the last Convert
+            return list(self.cur["pending_b"])
         zn = self.cur["result"][1]["zones_cm"]
         return [zn["handle_bottom"], zn["guard_bottom"], zn["guard_top"]]
 
@@ -1203,10 +1207,11 @@ class App:
             self.redraw_result()
             return
         b[i] = z
+        it["pending_b"] = list(b)  # shown until the next Convert, so several lines can be moved first
         # The splits go to the converter before any stretching, so a picture with stretched parts is
         # mapped back to the model's own lengths, part by part.
         p0 = zn["pommel_end"]
-        shown = [p0] + self.boundaries() + [zn["tip"]]
+        shown = [p0, zn["handle_bottom"], zn["guard_bottom"], zn["guard_top"], zn["tip"]]  # the picture's own
         raw_lens = it["result"][1].get("lengths_before_stretch_cm")
         if raw_lens:
             raw = [p0]
@@ -1224,7 +1229,11 @@ class App:
         # Kept as shares of the whole length, so a new real length moves the lines with it.
         it["splits"] = tuple(round((v - p0) / span, 5) for v in b)
         self.show_part_lengths()
-        self.convert()
+        # No Convert per line (Matthew 2026-11-22: moving pommel and guard took two waits): move them all, then
+        # press Convert once.
+        self.redraw_result()
+        self.inputs_changed()
+        self.status.config(text="Line moved. Move any others, then press Convert.")
 
     def short_summary(self, info):
         zn = info["zones_cm"]
