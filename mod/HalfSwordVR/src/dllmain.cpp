@@ -13865,6 +13865,17 @@ namespace
                     for (int i = 0; i < n; ++i)
                     {
                         Vec3 J = g * (-mass * DT / n);
+                        // Two hands with the wrist only rolling it: they carry the weight like two supports on
+                        // a beam (each by the other's lever to the centre of mass), since nothing else holds
+                        // the lever (playtest 2026-11-22 03:45: two-handing "goes haywire" with ~29 N pulls).
+                        if (n == 2 && cfg.pose_two_hand_twist_only)
+                        {
+                            Vec3 d = pts[1].r - pts[0].r;
+                            double L2 = dot(d, d);
+                            double t = L2 > 25.0 ? dot(pts[0].r * -1.0, d) / L2 : 0.5;
+                            t = (std::min)(3.0, (std::max)(-2.0, t));
+                            J = g * (-mass * DT * (i == 0 ? 1.0 - t : t));
+                        }
                         if (pts[i].slide && cfg.pose_slide_bs_damper)
                         {
                             Vec3 ax = normalized(pts[i].axis);
