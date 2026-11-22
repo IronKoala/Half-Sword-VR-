@@ -24867,6 +24867,95 @@ namespace
         if (pawn && !set_bool_property(pawn, STR("Immortal"), true)) HSVR_LOG_EVERY(30.0, "Script: hsvr.player_immortal: no Immortal variable on the player");
     }
     // A value the tests can check (hsvr.expect, hsvr.wait): false when <what> is not known.
+    // Test-room numbers for hsvr.expect / hsvr.wait:
+    //   room_ready (1 once the room is up and faded in), room_books, room_tables, room_foes (Willies but
+    //   you, standing in the world), room_foes_ai (of them with AI on), room_won (the game mode's Match Won),
+    //   room_on_tables (loose weapons lying on a table top), room_on_floor (loose weapons within 30 cm of the
+    //   floor near the room), room_lost (weapons more than 3 m below the floor or 50 m from you),
+    //   room_moved (loose weapons that moved more than 3 cm since room_ready first read 1 / hsvr.mark_room),
+    //   room_page_z (lowest page centre above the floor, cm), room_page_up (smallest page normal z: its lean).
+    std::map<UObject*, hsvr::Vec3> g_room_marks;
+    bool room_value(const std::string& w, double& value)
+    {
+        using hsvr::Vec3;
+        UObject* player = nullptr;
+        find_pawn_mesh(&player);
+        if (!player) return false;
+        double floor_z = room_floor_z(player);
+        Vec3 me = actor_location(player);
+        if (w == "room_ready") { value = g_room.stage >= 2 ? 1.0 : 0.0; return true; }
+        if (w == "room_books") { value = (double)g_room.books.size(); return true; }
+        if (w == "room_tables") { value = (double)g_room.tables.size(); return true; }
+        if (w == "room_won")
+        {
+            UObject* gm = room_game_mode();
+            value = gm && (bool_property(gm, STR("Match Won")) || bool_property(gm, STR("All Enemies Dead"))) ? 1.0 : 0.0;
+            return gm != nullptr;
+        }
+        if (w == "room_page_z" || w == "room_page_up")
+        {
+            if (g_room.books.empty()) return false;
+            value = 1e9;
+            for (const TestRoom::Book& b : g_room.books) value = (std::min)(value, w == "room_page_z" ? b.centre.z - floor_z : b.normal.z);
+            return true;
+        }
+        std::vector<UObject*> willies;
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        if (w == "room_foes" || w == "room_foes_ai")
+        {
+            int n = 0, ai = 0;
+            for (UObject* f : willies)
+            {
+                if (!f || f == player || f->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                Vec3 a = actor_location(f);
+                if (a.x == 0.0 && a.y == 0.0 && a.z == 0.0) continue;
+                ++n;
+                UObject* c = object_property(f, STR("Controller"));
+                if (c && !bool_property(c, STR("DED"))) ++ai;
+            }
+            value = w == "room_foes" ? n : ai;
+            return true;
+        }
+        std::vector<UObject*> weapons;
+        UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+        int on_tables = 0, on_floor = 0, lost = 0, moved = 0;
+        bool mark = w == "room_mark";
+        for (UObject* wp : weapons)
+        {
+            if (!wp || wp->GetName().rfind(STR("Default__"), 0) == 0 || is_fist(wp) || bool_property(wp, STR("Is Sheathed"))) continue;
+            bool held = false;
+            for (UObject* c : willies)
+                if (c && (object_property(c, STR("Weapon R")) == wp || object_property(c, STR("Weapon L")) == wp)) held = true;
+            if (held) continue;
+            UObject* base = object_property(wp, STR("BaseMesh"));
+            if (!base) continue;
+            Vec3 at = component_location(base);
+            if (at.x == 0.0 && at.y == 0.0 && at.z == 0.0) continue;
+            if (at.z < floor_z - 300.0 || hsvr::length(at - me) > 5000.0) { ++lost; continue; }
+            bool table = false;
+            for (const Vec3& t : g_room.table_at)
+            {
+                Vec3 l = yaw_quat(g_room.table_yaw).inverse().rotate(at - t);
+                if (std::fabs(l.x) < 55.0 && std::fabs(l.y) < 90.0 && l.z > 80.0 && l.z < 130.0) table = true;
+            }
+            if (table) ++on_tables;
+            else if (at.z < floor_z + 30.0 && hsvr::length(at - g_room.origin) < 600.0) ++on_floor;
+            if (mark) g_room_marks[wp] = at;
+            else
+            {
+                auto it = g_room_marks.find(wp);
+                if (it != g_room_marks.end() && hsvr::length(at - it->second) > 3.0) ++moved;
+            }
+        }
+        if (mark) { value = (double)g_room_marks.size(); return true; }
+        if (w == "room_on_tables") value = on_tables;
+        else if (w == "room_on_floor") value = on_floor;
+        else if (w == "room_lost") value = lost;
+        else if (w == "room_moved") value = moved;
+        else return false;
+        return true;
+    }
+
     bool script_value(const std::string& w, double& value)
     {
         UObject* pawn = nullptr;
@@ -24890,6 +24979,7 @@ namespace
             if (!g_pose.mesh) known = false;
         }
         else if (w == "held_l") value = object_property(pawn, STR("Weapon L")) ? 1.0 : 0.0;
+        else if (w.rfind("room_", 0) == 0) known = room_value(w, value);
         else if (w == "grabbed_r") value = bool_property(pawn, STR("Grabbed R")) ? 1.0 : 0.0;
         else if (w == "grabbed_l") value = bool_property(pawn, STR("Grabbed L")) ? 1.0 : 0.0;
         else if (w == "letgo") value = g_count_letgo.load();
@@ -25261,8 +25351,10 @@ namespace
                          dropped ? " (steps left from the case before dropped)" : "");
                 if (g_room.booted && !g_room.failed && !g_room.done)
                 {
+                    g_room_marks.clear();
                     room_apply_values(); // a case may have changed the game instance's mode values
                     input_to_game();
+                    room_blackout(true);
                     run_console_command(std::string("open ") + cfg.test_room_map);
                 }
                 else HSVR_LOG("Case: no test room this launch (test_room=1 is needed); not reopened");
