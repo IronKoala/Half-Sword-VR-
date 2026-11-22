@@ -173,7 +173,10 @@ def hafted_points(pos, numbers, over):
             far = x1 if abs(x1) >= abs(x0) else x0
             edge_band = head[np.abs(head[:, 0] - far) < 1.0]
             thin = float(np.ptp(edge_band[:, 1])) if len(edge_band) > 1 else 99.0
-            kind = "axe" if abs(far) > 4.0 and thin < 1.2 else "blunt"
+            # A flat head is a blade even when the model gives it no thin edge (stylised and low-poly
+            # axes are slabs): maces and hammers are about as thick as they are wide.
+            flat = float(np.ptp(head[:, 1])) <= 0.3 * width
+            kind = "axe" if abs(far) > 4.0 and (thin < 1.2 or flat) else "blunt"
     info = dict(kind=kind)
     if kind == "spear":
         pr = PRESETS["spear"]

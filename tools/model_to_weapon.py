@@ -228,175 +228,63 @@ def load_nif(path):
     return out
 
 
-def fbx_file_info(path):
-    """What assimp does not give from an .fbx: the file's unit (GlobalSettings UnitScaleFactor, cm per file
-    unit) and the textures embedded in it (Video nodes' Content, by file name). Reads the binary FBX node
-    tree (header "Kaydara FBX Binary", nodes of name + typed properties + children; 64-bit offsets from
-    version 7500) or, for text FBX, just the unit."""
-    import zlib
-    data = open(path, "rb").read()
-    unit_cm, embedded = 1.0, {}
-    if not data.startswith(b"Kaydara FBX Binary"):
-        import base64
-        m = re.search(rb'"UnitScaleFactor"\s*,[^,]*,[^,]*,[^,]*,\s*([-0-9.eE+]+)', data)
-        # Text FBX embeds a texture as base64 in quoted chunks after "Content: ," in its Video block.
-        for v in re.finditer(rb'\n\s*Video:[^{]*\{', data):
-            block = data[v.end():v.end() + 64 * 1024 * 1024]
-            nm = re.search(rb'(?:RelativeFilename|Filename):\s*"([^"]*)"', block[:4096])
-            c = re.match(rb'(?s).*?Content:\s*,?\s*((?:"[^"]*"\s*,?\s*)+)', block[:block.find(b"\n\t}") + 1 or None])
-            if nm and c:
-                try:
-                    # each chunk is its own base64 (with its own padding)
-                    raw = b"".join(base64.b64decode(ch) for ch in re.findall(rb'"([^"]*)"', c.group(1)))
-                except ValueError:
-                    continue
-                if raw:
-                    embedded[os.path.basename(nm.group(1).decode("utf-8", "replace").replace("\\", "/")).lower()] = raw
-        return (float(m.group(1)) if m else 1.0), embedded
-    version = struct.unpack_from("<I", data, 23)[0]
-    wide = version >= 7500
-    head = "<QQQ" if wide else "<III"
-    head_len = 25 if wide else 13
-
-    def props(pos, count):
-        out = []
-        for _ in range(count):
-            t = data[pos:pos + 1]
-            pos += 1
-            if t in b"YCIFDL":
-                fmt = {b"Y": "<h", b"C": "<?", b"I": "<i", b"F": "<f", b"D": "<d", b"L": "<q"}[t]
-                out.append(struct.unpack_from(fmt, data, pos)[0])
-                pos += struct.calcsize(fmt)
-            elif t in b"fdlib":
-                n, enc, clen = struct.unpack_from("<III", data, pos)
-                pos += 12
-                raw = data[pos:pos + clen]
-                pos += clen
-                out.append((t, n, zlib.decompress(raw) if enc == 1 else raw))
-            elif t in b"SR":
-                n = struct.unpack_from("<I", data, pos)[0]
-                pos += 4
-                out.append(data[pos:pos + n])
-                pos += n
-            else:
-                raise ValueError(f"unknown FBX property type {t!r}")
-        return out
-
-    def nodes(pos, end, path_names):
-        while pos < end:
-            stop, count, _plen = struct.unpack_from(head, data, pos)
-            if stop == 0:
-                return
-            nlen = data[pos + head_len - 1]
-            name = data[pos + head_len:pos + head_len + nlen]
-            ppos = pos + head_len + nlen
-            pv = None
-            if name in (b"P", b"Video", b"Content", b"RelativeFilename", b"Filename") or path_names[-1:] == [b"Video"]:
-                pv = props(ppos, count)
-            yield name, path_names, pv
-            # children start after the properties
-            cpos = ppos + _plen
-            if cpos < stop:
-                yield from nodes(cpos, stop, path_names + [name])
-            pos = stop
-
-    video = None
-    try:
-        for name, parents, pv in nodes(27, len(data), []):
-            if name == b"P" and pv and pv[0] == b"UnitScaleFactor" and parents[-1:] == [b"Properties70"] \
-                    and b"GlobalSettings" in parents:
-                unit_cm = float(pv[-1])
-            elif name == b"Video":
-                video = {}
-            elif video is not None and parents[-1:] == [b"Video"] and pv:
-                if name in (b"RelativeFilename", b"Filename") and isinstance(pv[0], bytes):
-                    video.setdefault("names", []).append(pv[0].decode("utf-8", "replace"))
-                elif name == b"Content" and isinstance(pv[0], bytes) and len(pv[0]) > 4:
-                    video["content"] = pv[0]
-                if video.get("content") and video.get("names"):
-                    for nm in video["names"]:
-                        embedded[os.path.basename(nm.replace("\\", "/")).lower()] = video["content"]
-    except (struct.error, ValueError, zlib.error) as e:
-        print(f"note: could not read everything in the .fbx file itself ({e}); its embedded textures may be missing")
-    return unit_cm, embedded
-
-
 def load_fbx(path):
-    """Autodesk .fbx (binary or text): geometry, transforms and materials through assimp (every mesh moved
-    to where its node puts it, polygons split into triangles), in metres from the file's own unit; textures
-    embedded in the file are used, others are looked for next to it. Normal maps are taken as OpenGL style
-    (Blender, Maya, Substance's default); a model whose bumps look inverted came with DirectX maps."""
+    """Autodesk .fbx (binary or text) through tools/fbx_reader.py: every mesh where its node puts it, in
+    metres from the file's own unit, one Trimesh per mesh and material, with the colour and normal maps
+    the material names (embedded in the file, or files found next to it). Normal maps are taken as
+    OpenGL style (Blender, Maya, Substance's default); a model whose bumps look inverted came with
+    DirectX maps."""
     import io
-    import assimp_py
     import trimesh
     from PIL import Image
-    unit_cm, embedded = fbx_file_info(path)
-    to_m = unit_cm / 100.0
-    print(f"fbx: 1 file unit = {unit_cm:g} cm; {len(embedded)} embedded textures")
-    scene = assimp_py.import_file(path, assimp_py.Process_Triangulate | assimp_py.Process_PreTransformVertices
-                                  | assimp_py.Process_GenSmoothNormals)
+    import fbx_reader
+    parts, unit_cm = fbx_reader.load(path)
+    print(f"fbx: 1 file unit = {unit_cm:g} cm, {len(parts)} mesh parts")
     cache = {}
 
-    def image(names):
-        for name in names or []:
-            key = name.replace("\\", "/")
-            if key in cache:
-                return cache[key]
-            im = None
-            base = os.path.basename(key).lower()
-            if key.startswith("*"):  # assimp's "*N" = the N-th embedded texture, in file order
+    def image(entry):
+        if not entry:
+            return None
+        names, content = entry
+        key = (tuple(names), content is not None)
+        if key in cache:
+            return cache[key]
+        im, how = None, "NOT FOUND (the mesh keeps the game's material colour)"
+        if content:
+            try:
+                im, how = Image.open(io.BytesIO(content)).convert("RGBA"), "embedded"
+            except OSError:
+                im = None
+        for name in ([] if im is not None else names):
+            f = find_texture(path, name)
+            if f:
                 try:
-                    im = Image.open(io.BytesIO(list(embedded.values())[int(key[1:])])).convert("RGBA")
-                except (ValueError, IndexError, OSError):
-                    im = None
-            elif base in embedded:
-                try:
-                    im = Image.open(io.BytesIO(embedded[base])).convert("RGBA")
+                    im, how = Image.open(f).convert("RGBA"), "found"
+                    break
                 except OSError:
-                    im = None
-            if im is None:
-                f = find_texture(path, key)
-                if f:
-                    try:
-                        im = Image.open(f).convert("RGBA")
-                    except OSError:
-                        im = None
-            print(f"texture {os.path.basename(key)}: " + ("embedded" if base in embedded and im is not None else
-                                                         "found" if im is not None else
-                                                         "NOT FOUND (the mesh keeps the game's material colour)"))
-            cache[key] = im
-            return im
-        return None
+                    pass
+        print(f"texture {os.path.basename((names[0] if names else '?').replace(chr(92), '/'))}: {how}")
+        cache[key] = im
+        return im
 
-    mats = []
-    for m in scene.materials:
-        tex = m.get("TEXTURES", {}) or {}
-        base = image(tex.get(assimp_py.TextureType_DIFFUSE))
-        normal = image(tex.get(assimp_py.TextureType_NORMALS) or tex.get(assimp_py.TextureType_HEIGHT))
-        colour = None
-        if base is None and m.get("COLOR_DIFFUSE"):
-            colour = [float(v) for v in m["COLOR_DIFFUSE"][:3]] + [1.0]
-        mats.append((m.get("NAME", ""), trimesh.visual.material.PBRMaterial(
-            name=m.get("NAME", ""), baseColorTexture=base, normalTexture=normal.convert("RGB") if normal else None,
-            baseColorFactor=colour)))
+    def material(m):
+        if m is None:
+            return None
+        tex = m["textures"]
+        base = image(tex.get("DiffuseColor") or tex.get("Diffuse") or tex.get("Maya|baseColor") or tex.get("base_color"))
+        normal = image(tex.get("NormalMap") or tex.get("Bump") or tex.get("Maya|normalCamera"))
+        colour = None if base is not None or m["diffuse"] is None else list(m["diffuse"]) + [1.0]
+        return trimesh.visual.material.PBRMaterial(
+            name=m["name"], baseColorTexture=base, normalTexture=normal.convert("RGB") if normal else None,
+            baseColorFactor=colour)
+
     out = []
-    for mesh in scene.meshes:
-        pos = np.frombuffer(mesh.vertices, np.float32).reshape(-1, 3).astype(np.float64) * to_m
-        idx = np.frombuffer(mesh.indices, np.uint32).astype(np.int64)
-        if len(idx) < 3 or len(pos) == 0:
+    for names, pos, nrm, uv, tris, mat in parts:
+        if len(tris) == 0:
             continue
-        faces = idx[: len(idx) // 3 * 3].reshape(-1, 3)
-        nrm = (np.frombuffer(mesh.normals, np.float32).reshape(-1, 3).astype(np.float64)
-               if mesh.normals is not None else None)
-        uv = np.zeros((len(pos), 2))
-        if mesh.texcoords:
-            k = mesh.num_uv_components[0] if mesh.num_uv_components else 2
-            t = np.frombuffer(mesh.texcoords[0], np.float32).reshape(len(pos), -1)
-            uv = t[:, :2].astype(np.float64) if k >= 2 else uv
-        mname, mat = mats[mesh.material_index] if 0 <= mesh.material_index < len(mats) else ("", None)
-        g = trimesh.Trimesh(vertices=pos, faces=faces, vertex_normals=nrm, process=False,
-                            visual=trimesh.visual.TextureVisuals(uv=uv, material=mat))
-        out.append(([mesh.name or "mesh", mname], g))
+        g = trimesh.Trimesh(vertices=pos, faces=tris, vertex_normals=nrm, process=False,
+                            visual=trimesh.visual.TextureVisuals(uv=uv, material=material(mat)))
+        out.append((names, g))
     return drop_scenery(out)
 
 
@@ -589,7 +477,7 @@ def main(argv=None):
           f"length {raw_len * scale:.1f} cm ({scale_note})")
     if len(tris) > MANY_TRIANGLES:
         print(f"note: {len(tris)} triangles is a lot for a game weapon (Half Sword's are a few thousand); "
-              f"it works, but pressing F9 takes a moment longer")
+              f"it works, but each spawn of the weapon in the game takes a moment longer")
     t = (positions - centre) @ axis
 
     shield = args.type == "shield"

@@ -14,7 +14,7 @@ The log is `CustomWeapon.log` in this folder; settings are in `CustomWeapon.ini`
 
 ## Not yet
 
-Progression (merchant), own damage stats per weapon, scabbard choice, double-ended weapons, flails, shields, .fbx and the crossbow are the next steps.
+Progression (merchant), scabbard choice, flails, shields in the game (the converter already makes them) and the crossbow are the next steps. Done: own damage points per weapon (edges, point, blunt, rigidity, hit boxes, Base), balance by part masses, mass/centre of mass/lengths measured again after the swap, double-ended weapons, .fbx import (tools/fbx_reader.py, no extra packages).
 
 ## Install
 
