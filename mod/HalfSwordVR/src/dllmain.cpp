@@ -16609,6 +16609,42 @@ namespace
         return true;
     }
 
+    // The game's stuck-hand rule (ExecuteUbergraph_Willie_BP @474346-474446, then left @475366-476198, right
+    // @474461-475313): with a two-handed grip in the right hand (R_GripType_Current 10 or 11) and a hand
+    // in this zone of spine_02 (|X| <= 10, Y < 0, Z <= 50), "Weapon UnSheathing <that hand>" makes it Set
+    // Up that Hand Weapon(None). Across the body that flag is the slot side's, so the OTHER hand's item
+    // would be dropped. True when it would, 5 cm early (the game reads the hand a little later in the tick).
+    bool stuck_rule_would_drop(UObject* pawn, int ts)
+    {
+        using namespace hsvr;
+        double grip = read_number_variable(pawn, STR("R_GripType_Current"));
+        if (grip != 10.0 && grip != 11.0) return false;
+        UObject* held = object_property(pawn, ts == 0 ? STR("Weapon L") : STR("Weapon R"));
+        if (!held || is_fist(held)) return false;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        if (!mesh) return false;
+        static const FName spine = bone_fname("spine_02"), hand_l = bone_fname("hand_l"), hand_r = bone_fname("hand_r");
+        Vec3 p = socket_rotation(mesh, spine).inverse().rotate(socket_location(mesh, ts == 0 ? hand_l : hand_r) - socket_location(mesh, spine));
+        double scale = component_scale_z(mesh); // the game's InverseTransformLocation divides by it
+        if (scale > 0.01) p = p * (1.0 / scale);
+        const double early = 5.0;
+        return std::fabs(p.x) <= 10.0 + early && p.y < early && p.z <= 50.0 + early;
+    }
+
+    // The stuck rule is about to take the other hand's item mid sheathe: the game's Check <T> ends the
+    // sheathe first, with the blade length read below 0 and Block off, Sheathing left on: at most 20 cm
+    // out it seats it (L @485-681, R @730-926), else its break runs (L @3449-3727, R @4099-4377: the slot,
+    // weights, tags, save entry, concretes and flags). Either way "Weapon UnSheathing <T>" is off.
+    bool end_cross_sheathe(UObject* pawn, int ts, int slot, bool block_cleared)
+    {
+        const TCHAR* block = ts == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing");
+        set_bool_property(pawn, block, false);
+        run_slot_check(pawn, ts, slot, -10000.0);
+        if (!bool_property(pawn, ts == 0 ? STR("Weapon UnSheathing L") : STR("Weapon UnSheathing R"))) return true;
+        set_bool_property(pawn, block, !block_cleared);
+        return false;
+    }
+
     // Across the body (Matthew's playtest 11:25: the rondel drawn by the right hand from the left hip
     // could not go back): the game's own cross path (cross_sheathe.md). Check Scabbard Unsheath State
     // <slot side> already handles "Cross Unsheath": it reads the HAND's concrete and grip, and seats
@@ -16640,6 +16676,11 @@ namespace
         if (hafted != 0.0 && hafted != 1.0)
         {
             HSVR_LOG_EVERY(2.0, "Sheathe: %ls has sheath slot type %.0f; only belt slots sheathe across", w->GetName().c_str(), hafted);
+            return false;
+        }
+        if (stuck_rule_would_drop(pawn, ss))
+        {
+            HSVR_LOG_EVERY(2.0, "Sheathe: %s hand waits to sheathe across: the game's stuck-hand rule would drop the other hand's item (that hand is by his body and the right hand has a two-handed grip)", hand);
             return false;
         }
         UObject* scab = fit.scab;
@@ -16711,6 +16752,11 @@ namespace
         if (bool_property(pawn, ts == 0 ? STR("Grabbed L") : STR("Grabbed R")))
         {
             HSVR_LOG_EVERY(2.0, "Sheathe: %s hand waits to sheathe across: the other hand is holding on to someone or something", hand);
+            return false;
+        }
+        if (stuck_rule_would_drop(pawn, ts)) // before Assign moves the scabbard
+        {
+            HSVR_LOG_EVERY(2.0, "Sheathe: %s hand waits to sheathe across: the game's stuck-hand rule would drop the other hand's item (that hand is by his body and the right hand has a two-handed grip)", hand);
             return false;
         }
         UObject* other_held = object_property(pawn, ts == 0 ? STR("Weapon L") : STR("Weapon R"));
@@ -16882,6 +16928,17 @@ namespace
                     HSVR_LOG("Draw: %s hand let go mid-draw after %.2f s (the game seats it again)", side == 0 ? "left" : "right", now - d.t0);
                 d = DrawState{};
                 continue;
+            }
+            if (d.sheathing && d.slot_side != side && stuck_rule_would_drop(pawn, d.slot_side))
+            {
+                if (end_cross_sheathe(pawn, d.slot_side, d.slot, d.block_cleared))
+                {
+                    HSVR_LOG("Sheathe: %s hand's sheathe across ended by the game's Check: the other hand came by his body, where the game's stuck-hand rule would have dropped what it holds",
+                             side == 0 ? "left" : "right");
+                    if (object_property(pawn, hand) != d.weapon) continue; // seated: noticed next tick
+                }
+                else
+                    HSVR_LOG_EVERY(2.0, "Sheathe: the game's Check would not end the sheathe across; its stuck-hand rule may drop the other hand's item");
             }
             const TCHAR* S = d.slot_side == 0 ? STR("L") : STR("R");
             bool unsheathing = bool_property(pawn, d.slot_side == 0 ? STR("Weapon UnSheathing L") : STR("Weapon UnSheathing R"));
