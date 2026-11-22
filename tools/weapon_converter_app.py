@@ -54,6 +54,8 @@ PARTS = ("pommel", "grip", "guard", "blade")
 # Damage stats (tools/damage_points.py): "Detect" lets the converter read them from the model's shape.
 EDGES = [("Detect", None), ("Both edges", "double"), ("One edge (side from the model)", "single"),
          ("One edge (the other side)", "single_other"), ("No edge (blunt)", "none")]
+HELD = [("Detect (by length)", None), ("One hand (like a mace)", "one"), ("Two hands (like a great axe)", "two"),
+        ("Spear grip", "spear")]
 HEADS = [("Detect", None), ("Spear point", "spear"), ("Axe blade", "axe"), ("Blunt (mace, hammer)", "blunt")]
 # Swords' scabbards (pack.txt scabbard=): one of the game's 8 (by blade length: short sword 25 .. long sword 110),
 # the best-fitting of them, the user's own model (tools/scabbard.py), or none (worn on the belt).
@@ -410,7 +412,13 @@ class App:
         ttk.Label(dmg, text="Head").pack(side="left", padx=(0, 3))
         self.head_var = tk.StringVar(value=HEADS[0][0])
         ttk.Combobox(dmg, textvariable=self.head_var, values=[t for t, _ in HEADS], state="readonly",
-                     width=20).pack(side="left")
+                     width=20).pack(side="left", padx=(0, 10))
+        ttk.Label(dmg, text="Held with").pack(side="left", padx=(0, 3))
+        self.held_var = tk.StringVar(value=HELD[0][0])
+        ttk.Combobox(dmg, textvariable=self.held_var, values=[t for t, _ in HELD], state="readonly",
+                     width=26).pack(side="left", padx=(0, 6))
+        self.turn_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(dmg, text="head faces the other way", variable=self.turn_var).pack(side="left")
         dmg2 = ttk.Frame(form)
         dmg2.grid(row=13, column=1, columnspan=2, sticky="w", **pad)
         self.stat_vars = {}
@@ -437,7 +445,7 @@ class App:
                      width=28).grid(row=3, column=1, columnspan=2, sticky="w", **pad)
         self.units_var.trace_add("write", lambda *_: self.units_changed())
         self.show_unit_labels()
-        for var in (self.length_var, self.mass_var, self.type_var, self.slide_var, self.edges_var, self.head_var,
+        for var in (self.length_var, self.mass_var, self.type_var, self.slide_var, self.edges_var, self.head_var, self.held_var, self.turn_var,
                     self.balance_var, *self.stat_vars.values()):
             var.trace_add("write", lambda *_: self.inputs_changed())
 
@@ -629,6 +637,8 @@ class App:
         st = it.get("stats", {})
         self.edges_var.set(next(t for t, v in EDGES if v == st.get("edges")))
         self.head_var.set(next(t for t, v in HEADS if v == st.get("head")))
+        self.held_var.set(next((t for t, v in HELD if v == st.get("held")), HELD[0][0]))
+        self.turn_var.set(bool(st.get("turn")))
         for key, v in self.stat_vars.items():
             v.set("" if st.get(key) is None else f"{st[key]:g}")
         self.balance_var.set("" if st.get("balance_cm") is None else
@@ -787,7 +797,8 @@ class App:
     def read_stats(self):
         """The damage settings typed in the editor: ({key: value or None}, problem)."""
         lu, lk, _, _ = self.units()
-        st = {"edges": dict(EDGES)[self.edges_var.get()], "head": dict(HEADS)[self.head_var.get()]}
+        st = {"edges": dict(EDGES)[self.edges_var.get()], "head": dict(HEADS)[self.head_var.get()],
+              "held": dict(HELD)[self.held_var.get()], "turn": bool(self.turn_var.get())}
         for key, label in STAT_FIELDS:
             t = self.stat_vars[key].get().strip().replace(",", ".")
             if not t:
@@ -812,7 +823,7 @@ class App:
     @staticmethod
     def stats_key(st):
         st = st or {}
-        return tuple(st.get(k) for k in ("edges", "head", "edge_sharp", "tip_sharp", "rigidity", "balance_cm"))
+        return tuple(st.get(k) for k in ("edges", "head", "edge_sharp", "tip_sharp", "rigidity", "balance_cm", "held", "turn"))
 
     def inputs(self):
         """(length cm, mass kg text or "", type, flip): always metric inside, whatever is shown."""
@@ -894,7 +905,12 @@ class App:
             argv += ["--splits", ",".join(f"{v * length:.2f}" for v in splits)]  # shares of the length -> cm
         if any(lens):
             argv += ["--part-lengths", ",".join(f"{v:.2f}" if v else "" for v in lens)]
-        edges, head, edge_sharp, tip_sharp, rig, balance = stats
+        edges, head, edge_sharp, tip_sharp, rig, balance = stats[:6]
+        held, turn = (stats[6], stats[7]) if len(stats) >= 8 else (None, False)
+        if held:
+            argv += ["--held", held]
+        if turn:
+            argv.append("--turn")
         for flag, v in (("--edges", edges), ("--head-kind", head)):
             if v:
                 argv += [flag, v]

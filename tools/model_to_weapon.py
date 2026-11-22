@@ -580,6 +580,9 @@ def main(argv=None):
                          "hammer, spear); double: a blade or head on both ends of a haft. Default: detected "
                          "(sword or hafted)")
     ap.add_argument("--handle-bottom-cm", type=float)
+    ap.add_argument("--turn", action="store_true", help="hafted: the head faces the other way (front and back swapped)")
+    ap.add_argument("--held", choices=["one", "two", "spear"], help="hafted: the game weapon that carries it (one hand: "
+                    "mace, two hands: great axe, spear); default from the length")
     ap.add_argument("--splits", help="where the parts meet, chosen by hand: 'A,B,C' = cm up from the pommel end to "
                                      "the grip's start, the guard's start and the blade's start (A<=B<=C)")
     ap.add_argument("--part-lengths", help="'pommel,grip,guard,blade' new lengths in cm; empty or 0 keeps that part "
@@ -963,6 +966,22 @@ def main(argv=None):
             names_ = ("pommel", "grip", "guard", "blade")
             print("part lengths: " + ", ".join(f"{n} {l:.1f} -> {nl:.1f} cm" for n, l, nl in zip(names_, lens, new_lens)))
 
+    # ---- which way a hafted head faces ----------------------------------------------------------------
+    # An axe's bit (or a hammer's beak/face, the side reaching further out) goes on +x: the front when the
+    # game holds it (Matthew's test 2026-11-22: a bit on -x was held facing backwards). --turn turns it round.
+    if hafted and not shield and args.type not in ("flail", "crossbow"):
+        hd = frame_pos[frame_pos[:, 2] > guard_top]
+        if len(hd):
+            reach_pos, reach_neg = float(hd[:, 0].max()), float(-hd[:, 0].min())
+            turn = reach_neg > 1.15 * reach_pos and reach_neg > 2.0
+            if args.turn:
+                turn = not turn
+            if turn:  # half a turn round z: x and y change sign, the winding stays
+                frame_pos[:, :2] *= -1
+                frame_nrm[:, :2] *= -1
+                print(f"head turned round so its long side ({max(reach_pos, reach_neg):.1f} cm out) faces the front"
+                      + (" (--turn)" if args.turn else ""))
+
     # ---- collision pieces -----------------------------------------------------------------------------
     if shield:
         pieces = wp.build_pieces_grid(frame_pos, tris, 3, 3)
@@ -1132,6 +1151,8 @@ def main(argv=None):
                "tip": round(top, 2), "hafted": 1 if hafted else 0, "double": 1 if args.type == "double" else 0,
                "hand_slide": 1 if args.hand_slide else 0, "shield": 1 if shield else 0,
                "flail": 1 if args.type == "flail" else 0, "crossbow": 1 if args.type == "crossbow" else 0}
+    if args.held:
+        numbers["held"] = {"one": 1, "two": 2, "spear": 3}[args.held]
     if shield:
         w_, t_, h_ = np.ptp(frame_pos, axis=0)
         numbers.update(width=round(float(w_), 2), thickness=round(float(t_), 2), height=round(float(h_), 2))

@@ -2041,11 +2041,13 @@ namespace
 
         UObject* base_mesh = object_property(weapon, STR("BaseMesh"));
         double parts_before = 0;
+        std::vector<double> game_kg;
         for (Part& pt : parts)
         {
             float kg = 0;
             body_mass(pt.comp, false, kg);
             parts_before += kg;
+            game_kg.push_back(kg);
             V3 lo{}, hi{};
             mesh_box(object_property(pt.comp, STR("StaticMesh")), lo, hi);
             log("  part %s: mesh %s, own mass setting %.3f kg, mesh z %.1f to %.1f", pt.name,
@@ -2145,6 +2147,19 @@ namespace
                             wz += w * hull_centroid_z(h);
                         }
                 if (weight[i] > 0) zc[i] = wz / weight[i];
+            }
+            // Swords: the weight shared between the parts as the carrier sword shares it (Matthew's test
+            // 2026-11-22: by volume the guard got 4x the game's and throws felt wrong), then balanced below.
+            if (!model_hafted && !one_piece)
+            {
+                double game_sum = 0;
+                for (size_t i = 0; i < parts.size(); ++i)
+                    if (weight[i] > 0) game_sum += game_kg[i];
+                bool all = game_sum > 0.05;
+                if (all)
+                    for (size_t i = 0; i < parts.size(); ++i)
+                        if (weight[i] > 0) weight[i] = (std::max)(game_kg[i], 1e-4);
+                log("  part weights: %s", all ? "the carrier sword's spread" : "by volume (the carrier's parts have no mass settings)");
             }
             double wsum = 0, wz = 0;
             for (size_t i = 0; i < parts.size(); ++i)
@@ -2409,6 +2424,10 @@ namespace
             if (grip < g_settings.two_hand_grip_cm) return K_ARMING;
             return grip < 20 ? K_BASTARD : K_LONGSWORD;
         }
+        int held = (int)std::lround(num("held")); // the converter's "Held with" choice
+        if (held == 1) return K_MACE;
+        if (held == 2) return K_AXE2H;
+        if (held == 3) return K_SPEAR;
         if (num("double") > 0.5) return total < 90 ? K_MACE : K_SPEAR; // the lower head rides on the haft part
         if (total < 90) return K_MACE;
         return total < 160 ? K_AXE2H : K_SPEAR;
@@ -2575,13 +2594,13 @@ namespace
                                                         : -1;
             if (k >= 0 && g_tmpl[k].empty()) g_tmpl[k].assign(pp, pp + g_pp.size);
         }
-        if (UObject* knife = load_asset(L"/Game/Assets/Weapons/Built_Weapons/Tools/BP_Weapon_Tool_Knife_A.BP_Weapon_Tool_Knife_A_C"))
+        if (UObject* knife = load_asset(L"/Game/Assets/Weapons/Blueprints/Built_Weapons/Tools/BP_Weapon_Tool_Knife_A.BP_Weapon_Tool_Knife_A_C"))
         {
             g_tmpl[K_DAGGER].assign(g_pp.size, 0);
             *reinterpret_cast<UObject**>(g_tmpl[K_DAGGER].data() + g_pp.weapon_class) = knife;
         }
         // The crossbow is in neither free mode list: a grip-less carrier, so a zero passport with its class.
-        if (UObject* xbow = load_asset(L"/Game/Assets/Weapons/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C"))
+        if (UObject* xbow = load_asset(L"/Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C"))
         {
             g_tmpl[K_CROSSBOW].assign(g_pp.size, 0);
             *reinterpret_cast<UObject**>(g_tmpl[K_CROSSBOW].data() + g_pp.weapon_class) = xbow;
@@ -2590,7 +2609,7 @@ namespace
         // no part classes, add_new_weapons.md §7).
         const std::vector<uint8_t>& shield = !g_tmpl[K_PAVISE].empty() ? g_tmpl[K_PAVISE] : g_tmpl[K_BUCKLER];
         if (!shield.empty())
-            if (UObject* targe = load_asset(L"/Game/Assets/Weapons/Built_Weapons/Shield_Tagre.Shield_Tagre_C"))
+            if (UObject* targe = load_asset(L"/Game/Assets/Weapons/Blueprints/Built_Weapons/Shield_Tagre.Shield_Tagre_C"))
             {
                 g_tmpl[K_TARGE] = shield;
                 *reinterpret_cast<UObject**>(g_tmpl[K_TARGE].data() + g_pp.weapon_class) = targe;
@@ -3072,6 +3091,21 @@ namespace
     // one visual per part (<model>_flail_Grip/Link/Head.obj). The model's staff top goes on the first joint,
     // so that joint stays; the second joint is moved to the model's chain end and both are re-initialised
     // (SetConstrainedComponents) because a mesh swap recreates the bodies.
+    void flail_rejoin(UObject* actor)
+    {
+        UObject* grip = object_property(actor, STR("Grip"));
+        UObject* link = object_property(actor, STR("Link 1"));
+        UObject* headc = object_property(actor, STR("Head"));
+        UObject* pc0 = object_property(actor, STR("PhysicsConstraint"));
+        UObject* pc1 = object_property(actor, STR("PhysicsConstraint1"));
+        if (!grip || !link || !headc || !pc0 || !pc1) return;
+        Call j0(pc0, STR("SetConstrainedComponents"));
+        j0.object(STR("Component1"), link).object(STR("Component2"), grip).run();
+        Call j1(pc1, STR("SetConstrainedComponents"));
+        j1.object(STR("Component1"), headc).object(STR("Component2"), link).run();
+        log("  flail joints made again after the weld");
+    }
+
     bool apply_flail(UObject* actor, const Pack& pk)
     {
         UObject* grip = object_property(actor, STR("Grip"));
@@ -3100,8 +3134,14 @@ namespace
         Xf gxf = world_transform(grip);
         if (gxf.bytes.empty()) return false;
         Affine G = affine_of(gxf, false), Ginv = affine_of(gxf, true);
+        // The model's staff bottom on the game staff's bottom (the game's hand spots stay on it: Matthew's test
+        // 2026-11-22 had all five clamped to the bottom when the top was put on the joint); the first joint
+        // moves to the model's staff top.
         V3 pl = Ginv.apply(world_location(pc0));
-        V3 off{pl.x * gs.x, pl.y * gs.y, pl.z * gs.z}; // model cm + off = Grip local cm
+        V3 glo{}, ghi{};
+        bool have_box = mesh_box(object_property(grip, STR("StaticMesh")), glo, ghi);
+        double off_z = have_box ? glo.z * gs.z - numbers["pommel_end"] : pl.z * gs.z;
+        V3 off{pl.x * gs.x, pl.y * gs.y, off_z}; // model cm + off = Grip local cm
         auto world = [&](V3 p) { return G.apply(V3{(p.x + off.x) / gs.x, (p.y + off.y) / gs.y, (p.z + off.z) / gs.z}); };
         log("Flail %s: staff %.1f cm, chain %.1f cm, head to %.1f cm; staff top on the first joint (Grip z %.1f)", narrow(pk.id).c_str(),
             -numbers["pommel_end"], chain, numbers["tip"] - chain, pl.z);
@@ -3186,16 +3226,15 @@ namespace
                 hide(headc);
             }
         }
-        // The joints: the second one onto the chain's end, both re-initialised from their components' places.
+        // The joints: onto the staff's top and the chain's end. They are made again in flail_rejoin, after
+        // measure_weapon's weld (a weld drops a joint made before it: Matthew's test 2026-11-22).
         {
-            V3 e = world(V3{0, 0, chain});
+            V3 t = world(V3{0, 0, 0}), e = world(V3{0, 0, chain});
+            Call mv0(pc0, STR("K2_SetWorldLocation"));
+            mv0.three(STR("NewLocation"), t.x, t.y, t.z).flag(STR("bTeleport"), true).run();
             Call mv(pc1, STR("K2_SetWorldLocation"));
             mv.three(STR("NewLocation"), e.x, e.y, e.z).flag(STR("bTeleport"), true).run();
-            Call j1(pc1, STR("SetConstrainedComponents"));
-            j1.object(STR("Component1"), headc).object(STR("Component2"), link).run();
-            Call j0(pc0, STR("SetConstrainedComponents"));
-            j0.object(STR("Component1"), link).object(STR("Component2"), grip).run();
-            log("  joints: chain end at (%.1f %.1f %.1f), both re-initialised", e.x, e.y, e.z);
+            log("  joints placed: staff top (%.1f %.1f %.1f), chain end (%.1f %.1f %.1f)", t.x, t.y, t.z, e.x, e.y, e.z);
         }
         // Damage points: the carrier's untagged on every part, the model's added (Head -> Blade1, Grip -> Grip).
         if (!data->points.empty())
@@ -3371,69 +3410,17 @@ namespace
         double tip_z = base_of(V3{0, 0, num("tip")}).z, blade_cm = num("tip") - num("guard_top");
         float kg = (float)(0.005 * (std::max)(10.0, blade_cm));
 
+        // Own model (Matthew's test 2026-11-22: a solid hull round the blade blocked drawing and sheathing): the
+        // body is the best-fitting game scabbard (its collision lets the blade in), the model is only the look.
+        Model own;
+        bool have_own = false;
+        std::wstring sb = pk.dir + pk.model + L"_scabbard";
         if (want == "own")
         {
-            std::wstring sb = pk.dir + pk.model + L"_scabbard";
-            Model m;
-            std::vector<Hull> hulls = load_hulls(sb + L"_collision.obj");
-            if (hulls.empty() || !load_obj(sb + L".obj", m))
-            {
-                log("  ! scabbard: %s_scabbard.obj / _collision.obj missing; using the best-fitting game scabbard", narrow(pk.model).c_str());
-                want = "fit";
-            }
-            else
-            {
-                V3 ss{1, 1, 1};
-                {
-                    Call sc(scab, STR("K2_GetComponentScale"));
-                    FProperty* r = sc.run() ? sc.param(STR("ReturnValue")) : nullptr;
-                    if (r) ss = read_three(sc.buffer.data() + r->GetOffset_Internal(), r);
-                    if (ss.x == 0 || ss.y == 0 || ss.z == 0) ss = {1, 1, 1};
-                }
-                auto local = [&](V3 p) {
-                    V3 l = base_of(p);
-                    return V3{l.x / ss.x, l.y / ss.y, l.z / ss.z};
-                };
-                std::vector<std::vector<V3>> pieces;
-                for (const Hull& h : hulls)
-                {
-                    std::vector<V3> pts;
-                    for (V3 p : h.points) pts.push_back(local(p));
-                    pieces.push_back(pts);
-                }
-                UObject* mesh = build_part_mesh(actor, scab, pieces);
-                Call get_mat(scab, STR("GetMaterial"));
-                get_mat.i32(STR("ElementIndex"), 0);
-                UObject* material = get_mat.run() ? get_mat.ret_object() : nullptr;
-                if (!mesh)
-                {
-                    log("  ! scabbard: own collision failed; using the best-fitting game scabbard");
-                    want = "fit";
-                }
-                else
-                {
-                    Call set(scab, STR("SetStaticMesh"));
-                    set.object(STR("NewMesh"), mesh).run();
-                    body_mass(scab, true, kg);
-                    hide(scab);
-                    // Normals: inverse transpose of the point map (rotation x 1/head scale, then 1/scabbard scale).
-                    for (V3& p : m.positions) p = local(p);
-                    V3 o = base_of(V3{0, 0, -b.shift});
-                    for (V3& n : m.normals)
-                    {
-                        V3 w = sub(base_of(V3{n.x * b.hs.x * b.hs.x, n.y * b.hs.y * b.hs.y, n.z * b.hs.z * b.hs.z - b.shift}), o);
-                        n = unit(V3{w.x * ss.x, w.y * ss.y, w.z * ss.z});
-                    }
-                    UObject* proc = build_visual(actor, scab, m, material);
-                    if (proc) apply_own_textures(actor, proc, material, sb);
-                    uint8_t zero = 0;
-                    byte_property(actor, STR("SheathSlot"), true, zero);
-                    log("  scabbard: own model (%zu collision pieces, %.2f kg), SheathSlot %d -> 0", pieces.size(), kg, slot);
-                    return;
-                }
-            }
+            have_own = load_obj(sb + L".obj", own);
+            if (!have_own) log("  ! scabbard: %s_scabbard.obj missing; the game scabbard is shown", narrow(pk.model).c_str());
+            want = "fit";
         }
-
         // A game scabbard: the named one, or the shortest whose end is at least 4 cm past the blade's tip.
         const GameScabbard* pick = nullptr;
         for (const GameScabbard& g : g_scabbards)
@@ -3470,6 +3457,34 @@ namespace
         byte_property(actor, STR("SheathSlot"), true, zero);
         log("  scabbard: game %s (end z %.1f, blade tip z %.1f%s), %.2f kg, SheathSlot %d -> 0", pick->name, pick->end_z * zscale, tip_z,
             zscale != 1.0 ? ", stretched" : "", kg, slot);
+        if (have_own)
+        {
+            V3 ss{1, 1, 1};
+            {
+                Call sc(scab, STR("K2_GetComponentScale"));
+                FProperty* r = sc.run() ? sc.param(STR("ReturnValue")) : nullptr;
+                if (r) ss = read_three(sc.buffer.data() + r->GetOffset_Internal(), r);
+                if (ss.x == 0 || ss.y == 0 || ss.z == 0) ss = {1, 1, 1};
+            }
+            auto local = [&](V3 p) {
+                V3 l = base_of(p);
+                return V3{l.x / ss.x, l.y / ss.y, l.z / ss.z};
+            };
+            V3 o = base_of(V3{0, 0, -b.shift});
+            for (V3& n : own.normals)
+            {
+                V3 w = sub(base_of(V3{n.x * b.hs.x * b.hs.x, n.y * b.hs.y * b.hs.y, n.z * b.hs.z * b.hs.z - b.shift}), o);
+                n = unit(V3{w.x * ss.x, w.y * ss.y, w.z * ss.z});
+            }
+            for (V3& p : own.positions) p = local(p);
+            Call get_mat(scab, STR("GetMaterial"));
+            get_mat.i32(STR("ElementIndex"), 0);
+            UObject* material = get_mat.run() ? get_mat.ret_object() : nullptr;
+            hide(scab);
+            UObject* proc = build_visual(actor, scab, own, material);
+            if (proc) apply_own_textures(actor, proc, material, sb);
+            log("  scabbard: own model shown on it (%s)", proc ? "ok" : "FAILED");
+        }
     }
 
     // Every ModularWeaponBP after its BeginPlay (which built the parts from the passport).
@@ -3514,6 +3529,7 @@ namespace
         if (FName* n = actor->GetValuePtrByPropertyNameInChain<FName>(STR("Name"))) *n = FName(pk->title.c_str(), FNAME_Add);
         // Values the game measured from the old parts in BeginPlay (carrier_passport_impl.md b2).
         measure_weapon(actor, pk->dir + pk->model);
+        if (pk->kind == K_FLAIL) flail_rejoin(actor);
         if (pk->kind <= K_LONGSWORD) apply_scabbard(actor, *pk);
         // The damage tags are scaled by the weapon's Quality (0 good x1.25, 1 x1, 2 low x0.85): 1 keeps the
         // converter's numbers as they are (weapon_damage_points.md).
