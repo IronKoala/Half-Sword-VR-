@@ -14,6 +14,9 @@
 #include <cwctype>
 #include <functional>
 #include <map>
+#include <memory>
+#include <thread>
+#include <share.h>
 #include <mutex>
 #include <unordered_set>
 #include <unordered_map>
@@ -20046,6 +20049,461 @@ namespace
         }
     }
 
+
+    // ---- Bug-marker replay (replay_capture) --------------------------------------------------------
+    // Every tick of his (after the game's tick) one fixed-size frame goes into a ring held in memory:
+    // headset, both controllers (pose, trigger, grip, stick, buttons, finger curls), the mod's hand
+    // targets, his posed hand bones, both held weapons (name, pose and hold numbers), his capsule and
+    // every physics-body bone of his visible mesh. Nothing is written to disk until he holds left Y
+    // (left B on Index) for replay_hold_s: then three strong pulses play on both controllers, a
+    // "Replay: MARK" line goes into the log, recording goes on for replay_after_s, and a helper thread
+    // writes replays\replay-<time>.csv (replay_before_s before the press .. replay_after_s after) with
+    // the log lines of that window. Read one with tools/replay/replay.py.
+    // Per tick: pointer compares, cached property reads and one engine call per bone (reused call
+    // buffers, no allocation, no names; a weapon's name is read only when the slot's pointer changes).
+    namespace replay
+    {
+        constexpr int kMaxBones = 40;
+        constexpr int kRing = 4096; // 15 s at up to 270 ticks a second
+        struct Pose7
+        {
+            float p[3];
+            float q[4];
+        };
+        struct Hand
+        {
+            Pose7 ctl;          // controller grip, world
+            float trigger, squeeze, stick_x, stick_y;
+            uint8_t buttons;    // 1 A/X, 2 B/Y, 4 stick click, 8 menu, 16 trigger touch, 32 thumb touch
+            uint8_t valid;      // 1 controller pose, 2 hand bone, 4 weapon pose, 8 finger skeleton
+            uint8_t hold;       // 1 force capped, 2 torque capped, 4 sliding, 8 drawing, 16 sheathing, 32 scabbard held, 64 free grip, 128 flipped
+            float curl[5];
+            float target[3];    // where the mod sends his hand bone (from the controller)
+            Pose7 hand;         // his posed hand bone (driver), world
+            int16_t slot_item;  // the game's Weapon L / Weapon R (name index, -1 none)
+            int16_t hold_item;  // what the mod's hold has (name index, -1 none)
+            Pose7 item;         // that item's BaseMesh, world
+            float lag_cm, turn_deg, force_n, torque_nm, on_item, slide_cm, strength, blocked_cm;
+        };
+        struct Frame
+        {
+            double t;
+            float dt;
+            uint32_t flags;     // 1 head valid, 2 two hands, 4 slow-mo, 8 fallen, 16 kicking L, 32 kicking R, 64 button crouch, 128 menu/panel focus lost
+            Pose7 head;
+            Hand hand[2];
+            Pose7 actor;
+            float crouch_cm, button_crouch_cm, stamina, consciousness;
+            uint8_t bones;
+            Pose7 bone[kMaxBones];
+        };
+
+        std::vector<Frame> g_ring;     // allocated on the first recorded tick
+        int g_head = 0, g_count = 0;   // next slot, frames held
+        std::vector<std::string> g_names{"-"}; // item names by index (game thread)
+        std::vector<std::string> g_bone_names;
+        UObject* g_bone_mesh = nullptr;
+        std::vector<FName> g_bone_fnames;
+        // A pressed marker: recording goes on until `until`, then the window is written.
+        std::vector<double> g_marks;
+        double g_until = -1.0;
+        std::string g_mark_why;
+        std::atomic<bool> g_fake_mark{false}; // test: hsvr.replay_mark
+        std::atomic<int> g_writing{0};
+
+        // A reflected engine call kept between ticks (no allocation per call); rebuilt when the target changes.
+        struct Kept
+        {
+            UObject* target = nullptr;
+            UStruct* cls = nullptr;
+            const TCHAR* fn_name = nullptr;
+            std::unique_ptr<Call> call;
+            FProperty* ret = nullptr;
+            FProperty* name_param = nullptr;
+            FProperty* space_param = nullptr;
+            Call* get(UObject* t, const TCHAR* fn)
+            {
+                if (!t) return nullptr;
+                if (t != target || !call || fn != fn_name || t->GetClassPrivate() != cls)
+                {
+                    target = t;
+                    cls = t->GetClassPrivate();
+                    fn_name = fn;
+                    call = std::make_unique<Call>(t, fn);
+                    ret = call->param(STR("ReturnValue"));
+                    name_param = call->param(STR("InSocketName"));
+                    space_param = call->param(STR("TransformSpace"));
+                    if (!call->fn || !ret || ret->GetSize() != (int)sizeof(XForm96)) call->fn = nullptr;
+                }
+                return call->fn ? call.get() : nullptr;
+            }
+        };
+        Kept g_bone_call, g_item_call[2], g_hand_call[2];
+
+        void put(Pose7& out, const hsvr::Vec3& p, const hsvr::Quat& q)
+        {
+            out.p[0] = (float)p.x, out.p[1] = (float)p.y, out.p[2] = (float)p.z;
+            out.q[0] = (float)q.x, out.q[1] = (float)q.y, out.q[2] = (float)q.z, out.q[3] = (float)q.w;
+        }
+        bool put_xform(Pose7& out, Kept& k)
+        {
+            if (!k.call || !k.call->fn) return false;
+            if (!k.call->run()) return false;
+            const XForm96* x = reinterpret_cast<const XForm96*>(k.call->buffer.data() + k.ret->GetOffset_Internal());
+            out.p[0] = (float)x->tx, out.p[1] = (float)x->ty, out.p[2] = (float)x->tz;
+            out.q[0] = (float)x->qx, out.q[1] = (float)x->qy, out.q[2] = (float)x->qz, out.q[3] = (float)x->qw;
+            return true;
+        }
+        // A bone's world transform (GetSocketTransform, RTS_World) through a kept call.
+        bool bone_world(Kept& k, UObject* mesh, FName bone, Pose7& out)
+        {
+            if (!k.get(mesh, STR("GetSocketTransform")) || !k.name_param) return false;
+            *reinterpret_cast<FName*>(k.call->buffer.data() + k.name_param->GetOffset_Internal()) = bone;
+            if (k.space_param) *(k.call->buffer.data() + k.space_param->GetOffset_Internal()) = 0; // RTS_World
+            return put_xform(out, k);
+        }
+        // A number variable read through its property, looked up once per class.
+        struct NumVar
+        {
+            UStruct* cls = nullptr;
+            FProperty* p = nullptr;
+            int kind = 0; // 1 float, 2 double, 3 int, 4 byte
+        };
+        float number(UObject* o, const TCHAR* name, NumVar& c)
+        {
+            if (!o) return -1.0f;
+            UStruct* cls = o->GetClassPrivate();
+            if (cls != c.cls)
+            {
+                c.cls = cls;
+                c.p = prop_chain(o, name);
+                c.kind = 0;
+                if (c.p)
+                {
+                    auto k = c.p->GetClass().GetName();
+                    c.kind = k == STR("FloatProperty") ? 1 : k == STR("DoubleProperty") ? 2 : k == STR("IntProperty") ? 3 : (k == STR("ByteProperty") || k == STR("EnumProperty")) ? 4 : 0;
+                }
+            }
+            if (!c.p || !c.kind) return -1.0f;
+            const uint8_t* at = reinterpret_cast<const uint8_t*>(o) + c.p->GetOffset_Internal();
+            switch (c.kind)
+            {
+            case 1: return *reinterpret_cast<const float*>(at);
+            case 2: return (float)*reinterpret_cast<const double*>(at);
+            case 3: return (float)*reinterpret_cast<const int32_t*>(at);
+            default: return (float)*at;
+            }
+        }
+        // A slot's item as a name index; the name is read only when the slot's pointer changes.
+        int16_t item_index(UObject* item, UObject*& last_ptr, int16_t& last_index)
+        {
+            if (item == last_ptr) return last_index;
+            last_ptr = item;
+            if (!item) return last_index = -1;
+            std::string n = narrow(item->GetName());
+            for (char& ch : n)
+                if (ch == ',') ch = ';';
+            for (size_t i = 0; i < g_names.size(); ++i)
+                if (g_names[i] == n) return last_index = (int16_t)i;
+            if (g_names.size() >= 30000) return last_index = 0;
+            g_names.push_back(n);
+            return last_index = (int16_t)(g_names.size() - 1);
+        }
+
+        // The marker's buzz: three 0.1 s full-strength pulses with 0.12 s gaps, both hands together
+        // (every other buzz in the mod is one pulse or one hit envelope on one hand).
+        const float kPulseT[] = {0.0f, 0.001f, 0.143f, 0.144f, 0.314f, 0.315f, 0.457f, 0.458f, 0.629f, 0.63f, 0.771f, 0.772f, 1.0f};
+        const float kPulseV[] = {1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f};
+        void pulse_both()
+        {
+            for (int h = 0; h < 2; ++h) hsvr::controllers_hit(h, kPulseT, kPulseV, (int)(sizeof(kPulseT) / sizeof(kPulseT[0])), 0.7, 1.0f);
+        }
+
+        std::string csv_header(const std::vector<std::string>& bones)
+        {
+            std::string h = "t,dt,flags,head_x,head_y,head_z,head_qx,head_qy,head_qz,head_qw";
+            for (const char* s : {"l", "r"})
+            {
+                std::string p = std::string(",") + s + "_";
+                for (const char* c : {"ctl_x", "ctl_y", "ctl_z", "ctl_qx", "ctl_qy", "ctl_qz", "ctl_qw", "trigger", "squeeze", "stick_x", "stick_y", "buttons", "valid",
+                                      "hold", "curl_thumb", "curl_index", "curl_middle", "curl_ring", "curl_pinky", "target_x", "target_y", "target_z", "hand_x",
+                                      "hand_y", "hand_z", "hand_qx", "hand_qy", "hand_qz", "hand_qw", "slot_item", "hold_item", "item_x", "item_y", "item_z",
+                                      "item_qx", "item_qy", "item_qz", "item_qw", "lag_cm", "turn_deg", "force_n", "torque_nm", "on_item", "slide_cm", "strength",
+                                      "blocked_cm"})
+                    h += p + c;
+            }
+            h += ",actor_x,actor_y,actor_z,actor_qx,actor_qy,actor_qz,actor_qw,crouch_cm,button_crouch_cm,stamina,consciousness";
+            for (const std::string& b : bones)
+                for (const char* c : {"_x", "_y", "_z", "_qx", "_qy", "_qz", "_qw"}) h += "," + b + c;
+            return h + "\n";
+        }
+
+        void write_pose(std::string& row, const Pose7& p, bool valid)
+        {
+            char b[128];
+            if (!valid)
+            {
+                row += ",,,,,,,";
+                return;
+            }
+            snprintf(b, sizeof b, ",%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f", p.p[0], p.p[1], p.p[2], p.q[0], p.q[1], p.q[2], p.q[3]);
+            row += b;
+        }
+
+        // Helper thread: the CSV, then the log lines of the window.
+        void write_file(std::vector<Frame> frames, std::vector<std::string> names, std::vector<std::string> bones, std::vector<double> marks, std::string why,
+                        std::string meta, std::wstring path)
+        {
+            FILE* f = _wfopen(path.c_str(), L"wb");
+            if (!f)
+            {
+                HSVR_LOG("Replay: could not write %ls", path.c_str());
+                --g_writing;
+                return;
+            }
+            fprintf(f, "# Half Sword VR replay capture v1\n");
+            fputs(meta.c_str(), f);
+            fprintf(f, "# trigger: %s\n", why.c_str());
+            for (double m : marks) fprintf(f, "# mark_t: %.4f\n", m);
+            fprintf(f, "# frames: %d, from t %.4f to %.4f\n", (int)frames.size(), frames.empty() ? 0.0 : frames.front().t, frames.empty() ? 0.0 : frames.back().t);
+            fprintf(f, "# items: ");
+            for (size_t i = 0; i < names.size(); ++i) fprintf(f, "%s%d=%s", i ? "|" : "", (int)i, names[i].c_str());
+            fprintf(f, "\n# units: cm, Unreal world axes (X forward, Y right, Z up), quaternions x y z w; t = log seconds\n");
+            fputs(csv_header(bones).c_str(), f);
+            std::string row;
+            row.reserve(8192);
+            char b[256];
+            for (const Frame& fr : frames)
+            {
+                snprintf(b, sizeof b, "%.4f,%.4f,%u", fr.t, fr.dt, fr.flags);
+                row = b;
+                write_pose(row, fr.head, (fr.flags & 1) != 0);
+                for (const Hand& h : fr.hand)
+                {
+                    write_pose(row, h.ctl, (h.valid & 1) != 0);
+                    snprintf(b, sizeof b, ",%.3f,%.3f,%.3f,%.3f,%u,%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f", h.trigger, h.squeeze, h.stick_x, h.stick_y,
+                             (unsigned)h.buttons, (unsigned)h.valid, (unsigned)h.hold, h.curl[0], h.curl[1], h.curl[2], h.curl[3], h.curl[4], h.target[0], h.target[1],
+                             h.target[2]);
+                    row += b;
+                    write_pose(row, h.hand, (h.valid & 2) != 0);
+                    snprintf(b, sizeof b, ",%d,%d", (int)h.slot_item, (int)h.hold_item);
+                    row += b;
+                    write_pose(row, h.item, (h.valid & 4) != 0);
+                    snprintf(b, sizeof b, ",%.2f,%.2f,%.1f,%.1f,%.3f,%.2f,%.3f,%.2f", h.lag_cm, h.turn_deg, h.force_n, h.torque_nm, h.on_item, h.slide_cm, h.strength,
+                             h.blocked_cm);
+                    row += b;
+                }
+                write_pose(row, fr.actor, true);
+                snprintf(b, sizeof b, ",%.2f,%.2f,%.3f,%.2f", fr.crouch_cm, fr.button_crouch_cm, fr.stamina, fr.consciousness);
+                row += b;
+                for (size_t i = 0; i < bones.size(); ++i) write_pose(row, fr.bone[i], i < fr.bones);
+                row += "\n";
+                fputs(row.c_str(), f);
+            }
+            // The log lines of the window (the log's own clock is t).
+            double from = frames.empty() ? 0.0 : frames.front().t - 0.5, to = frames.empty() ? 0.0 : frames.back().t + 0.5;
+            int lines = 0;
+            if (FILE* lf = _wfsopen((hsvr::mod_dir() + L"HalfSwordVR.log").c_str(), L"rb", _SH_DENYNO))
+            {
+                static char line[16384];
+                while (fgets(line, sizeof line, lf))
+                {
+                    double lt = 0.0;
+                    if (line[0] != '[' || sscanf_s(line + 1, "%lf", &lt) != 1 || lt < from || lt > to) continue;
+                    fputs("#log ", f);
+                    fputs(line, f);
+                    ++lines;
+                }
+                fclose(lf);
+            }
+            long size = ftell(f);
+            fclose(f);
+            HSVR_LOG("Replay: saved %ls (%d frames, %.1f s, %d log lines, %.1f MB)", path.c_str(), (int)frames.size(),
+                     frames.empty() ? 0.0 : frames.back().t - frames.front().t, lines, size / 1048576.0);
+            --g_writing;
+        }
+
+        // The window is complete: copy it out of the ring and hand it to a helper thread.
+        void save(UObject* pawn)
+        {
+            const hsvr::Config& cfg = hsvr::config();
+            double from = g_marks.front() - (std::max)(0.0, cfg.replay_before_s), to = g_until;
+            std::vector<Frame> out;
+            out.reserve(g_count);
+            for (int i = 0; i < g_count; ++i)
+            {
+                const Frame& fr = g_ring[(g_head - g_count + i + kRing) % kRing];
+                if (fr.t >= from && fr.t <= to) out.push_back(fr);
+            }
+            SYSTEMTIME st;
+            GetLocalTime(&st);
+            wchar_t name[96];
+            swprintf(name, 96, L"replay-%04u-%02u-%02u_%02u-%02u-%02u.csv", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+            std::wstring dir = hsvr::mod_dir() + L"replays";
+            CreateDirectoryW(dir.c_str(), nullptr);
+            std::wstring path = dir + L"\\" + name;
+            char meta[1024];
+            std::string map = "?";
+            if (pawn)
+                if (UObject* level = pawn->GetOuterPrivate())
+                    if (UObject* world = level->GetOuterPrivate()) map = narrow(world->GetName());
+            hsvr::ControllerState cs = hsvr::controllers_state();
+            snprintf(meta, sizeof meta,
+                     "# saved_local: %04u-%02u-%02u %02u:%02u:%02u\n# mod_built: %s %s\n# map: %s\n# vr: %s, controllers %s\n# before_s: %.2f, after_s: %.2f\n",
+                     st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, __DATE__, __TIME__, map.c_str(),
+                     hsvr::config().dev_fake_headset ? "pretend headset (test)" : "headset", cs.active ? "active" : "not active", cfg.replay_before_s,
+                     cfg.replay_after_s);
+            HSVR_LOG("Replay: window done (%.2f .. %.2f, %d frames, %d mark%s): writing replays\\%ls on a helper thread", from, to, (int)out.size(),
+                     (int)g_marks.size(), g_marks.size() == 1 ? "" : "s", name);
+            ++g_writing;
+            std::thread(write_file, std::move(out), g_names, g_bone_names, g_marks, g_mark_why, std::string(meta), path).detach();
+            g_marks.clear();
+            g_until = -1.0;
+        }
+
+        void mark(const char* why)
+        {
+            const hsvr::Config& cfg = hsvr::config();
+            double now = hsvr::now_seconds();
+            pulse_both();
+            if (g_marks.empty()) g_mark_why = why;
+            g_marks.push_back(now);
+            g_until = now + (std::max)(0.0, cfg.replay_after_s);
+            // The ring holds about kRing ticks; a window longer than that loses its start.
+            HSVR_LOG("Replay: MARK %d at t %.3f (%s): saving %.0f s before and recording %.0f s more", (int)g_marks.size(), now, why, cfg.replay_before_s,
+                     cfg.replay_after_s);
+        }
+
+        // Left Y (left secondary) held replay_hold_s with right B never down meanwhile (both held is
+        // the arm measure); one marker per hold.
+        void button(const hsvr::ControllerState& state, double now)
+        {
+            const hsvr::Config& cfg = hsvr::config();
+            static double down_since = -1.0;
+            static bool spent = false, other = false;
+            bool y = state.active && state.focused && state.hand[0].secondary;
+            if (!y)
+            {
+                down_since = -1.0;
+                spent = other = false;
+            }
+            else
+            {
+                if (down_since < 0.0) down_since = now;
+                if (state.hand[1].secondary) other = true;
+                if (!spent && !other && now - down_since >= cfg.replay_hold_s)
+                {
+                    spent = true;
+                    mark("left Y held");
+                }
+            }
+            if (g_fake_mark.exchange(false)) mark("script hsvr.replay_mark");
+        }
+
+        void tick(UObject* pawn)
+        {
+            using namespace hsvr;
+            const Config& cfg = config();
+            if (!cfg.replay_capture || !pawn || !g_pose.driver)
+            {
+                if (!cfg.replay_capture) g_count = 0, g_marks.clear(), g_until = -1.0;
+                return;
+            }
+            if (g_ring.empty())
+            {
+                g_ring.resize(kRing);
+                HSVR_LOG("Replay: recording into memory (%d ticks, %.1f MB); hold left Y %.1f s to save the last %.0f s + next %.0f s", kRing,
+                         kRing * sizeof(Frame) / 1048576.0, cfg.replay_hold_s, cfg.replay_before_s, cfg.replay_after_s);
+            }
+            double now = now_seconds();
+            ControllerState st = controllers_state();
+            button(st, now);
+
+            UObject* mesh = g_pose.mesh ? g_pose.mesh : g_pose.driver;
+            if (mesh != g_bone_mesh)
+            {
+                if (!g_marks.empty() && g_count > 0)
+                {
+                    HSVR_LOG("Replay: his body changed (respawn or new level) during a marker: saving what was recorded so far");
+                    g_until = now;
+                    save(pawn);
+                }
+                g_bone_mesh = mesh;
+                g_bone_fnames = physics_body_bones(mesh);
+                if ((int)g_bone_fnames.size() > kMaxBones) g_bone_fnames.resize(kMaxBones);
+                g_bone_names.clear();
+                for (FName n : g_bone_fnames) g_bone_names.push_back(narrow(n.ToString()));
+                g_count = 0; // a new body: the old frames' bone columns no longer match
+                HSVR_LOG("Replay: %d bones of his mesh recorded", (int)g_bone_fnames.size());
+            }
+
+            Frame& fr = g_ring[g_head];
+            static double last_t = -1.0;
+            fr.t = now;
+            fr.dt = last_t > 0.0 ? (float)(now - last_t) : 0.0f;
+            last_t = now;
+            fr.flags = 0;
+            Vec3 p;
+            Quat q;
+            if (st.head_valid && stereo_tracking_to_world(st.head, p, q)) put(fr.head, p, q), fr.flags |= 1;
+            if (g_two.active) fr.flags |= 2;
+            if (bool_property(pawn, STR("Slomo Active"))) fr.flags |= 4;
+            if (bool_property(pawn, STR("Fallen"))) fr.flags |= 8;
+            if (bool_property(pawn, STR("Kicking L"))) fr.flags |= 16;
+            if (bool_property(pawn, STR("Kicking R"))) fr.flags |= 32;
+            if (g_button_crouch_on) fr.flags |= 64;
+            if (st.active && !st.focused) fr.flags |= 128;
+            static UObject* slot_ptr[2] = {nullptr, nullptr};
+            static UObject* hold_ptr[2] = {nullptr, nullptr};
+            static int16_t slot_idx[2] = {-1, -1}, hold_idx[2] = {-1, -1};
+            for (int side = 0; side < 2; ++side)
+            {
+                Hand& h = fr.hand[side];
+                const HandState& hs = st.hand[side];
+                h.valid = 0;
+                if (hs.grip_valid && stereo_tracking_to_world(hs.grip, p, q)) put(h.ctl, p, q), h.valid |= 1;
+                h.trigger = hs.trigger, h.squeeze = hs.squeeze, h.stick_x = hs.stick_x, h.stick_y = hs.stick_y;
+                h.buttons = (uint8_t)((hs.primary ? 1 : 0) | (hs.secondary ? 2 : 0) | (hs.stick_click ? 4 : 0) | (hs.menu ? 8 : 0) | (hs.trigger_touch ? 16 : 0) |
+                                      (hs.thumb_touch ? 32 : 0));
+                if (hs.joints_valid) h.valid |= 8;
+                for (int f = 0; f < 5; ++f) h.curl[f] = hs.curl[f];
+                h.target[0] = (float)g_pose.target[side].x, h.target[1] = (float)g_pose.target[side].y, h.target[2] = (float)g_pose.target[side].z;
+                static FName hand_bone[2] = {bone_fname("hand_l"), bone_fname("hand_r")};
+                if (bone_world(g_hand_call[side], g_pose.driver, hand_bone[side], h.hand)) h.valid |= 2;
+                UObject* slot = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+                const HoldState& hold = g_hold[side];
+                h.slot_item = item_index(slot, slot_ptr[side], slot_idx[side]);
+                h.hold_item = item_index(hold.weapon, hold_ptr[side], hold_idx[side]);
+                UObject* item = hold.weapon ? hold.weapon : slot;
+                UObject* base = item ? object_property(item, STR("BaseMesh")) : nullptr;
+                if (g_item_call[side].get(base, STR("K2_GetComponentToWorld")) && put_xform(h.item, g_item_call[side])) h.valid |= 4;
+                h.hold = (uint8_t)((hold.force_capped ? 1 : 0) | (hold.torque_capped ? 2 : 0) | (hold.handle_slide ? 4 : 0) | (g_draw[side].active ? 8 : 0) |
+                                   (g_draw[side].active && g_draw[side].sheathing ? 16 : 0) | (g_scab[side].active ? 32 : 0) | (hold.free.set ? 64 : 0) |
+                                   (hold.flipped ? 128 : 0));
+                h.lag_cm = (float)hold.lag, h.turn_deg = (float)hold.turn_deg, h.force_n = (float)hold.force_n, h.torque_nm = (float)hold.torque_nm;
+                h.on_item = (float)hold.on_weapon, h.slide_cm = (float)hold.slide, h.strength = (float)hold.body_strength, h.blocked_cm = (float)hold.blocked_cm;
+            }
+            {
+                static Kept actor_call;
+                UObject* root = object_property(pawn, STR("RootComponent"));
+                if (!(actor_call.get(root, STR("K2_GetComponentToWorld")) && put_xform(fr.actor, actor_call))) put(fr.actor, actor_location(pawn), Quat{});
+            }
+            fr.crouch_cm = (float)g_crouch_drop, fr.button_crouch_cm = (float)g_button_crouch;
+            static NumVar stamina, consciousness;
+            fr.stamina = number(pawn, STR("Stamina"), stamina);
+            fr.consciousness = number(pawn, STR("Consciousness"), consciousness);
+            int n = 0;
+            for (FName b : g_bone_fnames)
+                if (bone_world(g_bone_call, mesh, b, fr.bone[n])) ++n;
+                else break;
+            fr.bones = (uint8_t)n;
+            g_head = (g_head + 1) % kRing;
+            g_count = (std::min)(g_count + 1, kRing);
+
+            if (g_until > 0.0 && now >= g_until) save(pawn);
+        }
+    } // namespace replay
+
     // Pointers kept to the old pawn's weapons, scabbards and thrown items are dropped when the pawn
     // changes (a map change frees them; the old pawn's holds end with it).
     void forget_level_objects()
@@ -20104,6 +20562,7 @@ namespace
             { HSVR_SUB("after:dismember_watch_tick"); dismember_watch_tick(context); }
             { HSVR_SUB("after:thrown_tick"); thrown_tick(context); }
             { HSVR_SUB("after:frames_tick"); frames_tick(context); }
+            { HSVR_SUB("after:replay_tick"); replay::tick(context); }
         }
         { HSVR_SUB("after:install_player_damage"); install_player_damage(true); }
         { HSVR_SUB("after:install_muscle_hooks"); install_muscle_hooks(); }
@@ -25218,6 +25677,12 @@ namespace
                 g_fake_stick[0].store(fx);
                 g_fake_stick[1].store(fy);
                 HSVR_LOG("Script: hsvr.stick %.2f %.2f%s", fx, fy, fx <= -5.0 ? " (off)" : "");
+                continue;
+            }
+            if (entry.command.rfind("hsvr.replay_mark", 0) == 0)
+            {
+                replay::g_fake_mark.store(true);
+                HSVR_LOG("Script: hsvr.replay_mark");
                 continue;
             }
             if (entry.command.rfind("hsvr.stick_click ", 0) == 0)

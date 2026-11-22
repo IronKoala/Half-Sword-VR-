@@ -589,6 +589,10 @@ namespace hsvr
         num("pose_throw_speed", c.pose_throw_speed);
         flag("pose_holster_snap", c.pose_holster_snap);
         flag("log_frames", c.log_frames);
+        flag("replay_capture", c.replay_capture);
+        num("replay_hold_s", c.replay_hold_s);
+        num("replay_before_s", c.replay_before_s);
+        num("replay_after_s", c.replay_after_s);
         flag("pose_keep_scabbard_on_drop", c.pose_keep_scabbard_on_drop);
         flag("crossbow", c.crossbow);
         num("crossbow_string_reach_cm", c.crossbow_string_reach_cm);

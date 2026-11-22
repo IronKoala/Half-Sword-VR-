@@ -126,6 +126,15 @@ namespace hsvr
         // headset, both controllers and their buttons, his drawn hands, head, pelvis and feet, each held
         // item and its hold, crouch and the game's own state; logs\frames-<time>.csv (Matthew 2026-11-19).
         bool log_frames = true;
+        // Bug-marker replay (Matthew 2026-11-22): the mod keeps the last seconds of his head, hands,
+        // controllers, body bones and held weapons in memory (no disk writes); holding the left Y button
+        // (left B on Index) for replay_hold_s saves replay_before_s before the press and replay_after_s
+        // after it to Mods\HalfSwordVR\replays\replay-<time>.csv, with the log lines of that window.
+        // The press plays three strong pulses on both controllers (no other buzz in the mod repeats).
+        bool replay_capture = true;
+        double replay_hold_s = 0.8;
+        double replay_before_s = 10.0;
+        double replay_after_s = 5.0;
         // Write "Input:" lines to the log: which window has the keyboard, Esc and menu clicks,
         // gamepad sticks, and how fast the view is turning.
         bool log_input = true;
