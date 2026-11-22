@@ -226,6 +226,8 @@ LAYOUT = [
         ('pose_hand_world_radius_cm', 'pose_hand_world_stop: radius of the sphere at the middle of the palm that stops on walls (cm).'),
         ('pose_hand_world_reach_cm', 'pose_hand_world_stop: that sphere sits this far past the wrist along the fingers (cm).'),
         ('pose_arm_fresh_shoulder', '1 = an empty hand does not bob with your steps while walking (its arm is re-aimed from this frame\'s shoulder after his body is evaluated).'),
+        ('pose_arm_fresh_shoulder_held', "pose_arm_fresh_shoulder for a hand holding a weapon too (two hands, scabbard): 0 = empty hands only."),
+        ('pose_no_fall_arms', "1 = walking fast doesn't swap his arms into the game's falling-backwards swing (that opened the weapon hand)."),
         ('pose_body_wall_stop', '1 = you stop at walls, posts and scenery instead of walking through them (stick and room walking).'),
         ('pose_body_wall_step_cm', 'pose_body_wall_stop: things lower than this above your feet (steps, the floor) do not stop you (cm).'),
         ('pose_body_wall_radius_share', "pose_body_wall_stop: how wide you are, as a share of the game's capsule (1 = the capsule)."),

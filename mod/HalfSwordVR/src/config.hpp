@@ -829,6 +829,9 @@ namespace hsvr
         // 1 = an empty hand's arm is corrected after his body is evaluated, from this frame's shoulder
         // (the solve only has last frame's, so the hand bobbed with each step while walking).
         bool pose_arm_fresh_shoulder = true;
+        // 1 = walking fast doesn't swap his arms into the game's falling-backwards swing (it opened the weapon hand).
+        bool pose_no_fall_arms = true;
+        bool pose_arm_fresh_shoulder_held = true; // ... and a hand holding a weapon, two-handing or on a scabbard
         // He stops at walls and scenery when walking (stick or room): his capsule, from this far above his
         // feet (so steps and the floor don't stop him) to his head, radius = his capsule's x share.
         bool pose_body_wall_stop = true;

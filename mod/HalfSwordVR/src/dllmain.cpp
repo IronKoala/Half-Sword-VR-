@@ -1322,6 +1322,9 @@ namespace
     bool ground_below(UObject* pawn, double x, double y, double from_z, double& ground_z);
     double number_property(UObject* owner, FProperty* p);
 
+    hsvr::Vec3 g_wall_ok;          // where his capsule last stood legally (pose_body_wall_stop)
+    bool g_wall_ok_have = false;
+    UObject* g_wall_pawn = nullptr; // whose (a respawn starts over)
     void pose_release()
     {
         for (auto& [bone, n] : g_pose.chain) node_release(n);
@@ -1333,6 +1336,7 @@ namespace
         g_pose = PoseState{};
         g_pose_anchor_fixed = false;
         g_pose_room_moved_local = {};
+        g_wall_ok_have = false;
         feet_reset();
     }
 
@@ -1543,57 +1547,83 @@ namespace
         return false;
     }
 
-    // A free hand stops at the world (Matthew 2026-11-22 03:56: "my hand defies the laws of physics…
-    // I can just put my hand inside of the post"; nothing stopped it, it went wherever the controller
-    // was). A sphere swept from his shoulder to his palm on the Visibility channel, complex collision
-    // (the Yard fence is triangles only); creatures and weapons are looked through. `stop`: where the
-    // sphere's centre stops. False when nothing is in the way.
     // One sweep on the Visibility channel, simple collision unless `complex`: a sphere (half 0) or an
     // upright capsule. Looks through him, creatures, weapons and anything simulating physics (loose
-    // items get pushed, not walked into). `stop`: the shape's centre where it stops, `normal`: the
-    // surface's. False when nothing is in the way, or the shape starts inside something.
-    bool world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, double half, bool complex, hsvr::Vec3& stop, hsvr::Vec3* normal = nullptr)
+    // items get pushed, not walked into): those are ignored and the sweep is run again, up to 6 times,
+    // so a weapon in front of a wall doesn't hide the wall. Returns 0 when nothing is in the way, 1 on a
+    // hit (`stop`: the shape's centre there, `normal`: the surface's), 2 when the shape starts inside
+    // something (`normal`: the way out). `hit_name`: what it hit.
+    int world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, double half, bool complex, hsvr::Vec3& stop, hsvr::Vec3* normal = nullptr,
+                    std::wstring* hit_name = nullptr)
     {
         static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
         static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
-        if (!cdo || !gs || !g_pose.pawn) return false;
-        Call trace(cdo, half > 0.0 ? STR("CapsuleTraceSingle") : STR("SphereTraceSingle"));
-        if (!trace.fn) return false;
-        trace.object(STR("WorldContextObject"), g_pose.pawn);
-        trace.three(STR("Start"), from.x, from.y, from.z);
-        trace.three(STR("End"), to.x, to.y, to.z);
-        trace.number(STR("Radius"), radius);
-        if (half > 0.0) trace.number(STR("HalfHeight"), half);
-        trace.flag(STR("bTraceComplex"), complex);
-        trace.flag(STR("bIgnoreSelf"), true);
-        if (!trace.run()) return false;
-        FProperty* ret = trace.param(STR("ReturnValue"));
-        if (!ret || !(*(trace.buffer.data() + ret->GetOffset_Internal()) & 1)) return false;
-        FProperty* hit = trace.param(STR("OutHit"));
-        if (!hit) return false;
-        Call b(gs, STR("BreakHitResult"));
-        FProperty* hp = b.param(STR("Hit"));
-        if (!hp) return false;
-        std::memcpy(b.buffer.data() + hp->GetOffset_Internal(), trace.buffer.data() + hit->GetOffset_Internal(), (std::min)(hp->GetSize(), hit->GetSize()));
-        b.run();
-        UObject* actor = b.object_result(STR("HitActor"));
-        if (actor && (actor == g_pose.pawn || is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")))) return false;
-        FProperty* ip = b.param(STR("bInitialOverlap"));
-        if (ip && *(b.buffer.data() + ip->GetOffset_Internal()) != 0) return false; // already in it: leave it be
-        if (UObject* comp = b.object_result(STR("HitComponent")))
+        if (!cdo || !gs || !g_pose.pawn) return 0;
+        UObject* ignore[8] = {};
+        int ignored = 0;
+        for (int attempt = 0; attempt < 6; ++attempt)
         {
-            Call sim(comp, STR("IsSimulatingPhysics"));
-            if (sim.fn)
+            Call trace(cdo, half > 0.0 ? STR("CapsuleTraceSingle") : STR("SphereTraceSingle"));
+            if (!trace.fn) return 0;
+            trace.object(STR("WorldContextObject"), g_pose.pawn);
+            trace.three(STR("Start"), from.x, from.y, from.z);
+            trace.three(STR("End"), to.x, to.y, to.z);
+            trace.number(STR("Radius"), radius);
+            if (half > 0.0) trace.number(STR("HalfHeight"), half);
+            trace.flag(STR("bTraceComplex"), complex);
+            trace.flag(STR("bIgnoreSelf"), true);
+            // ActorsToIgnore (const TArray<AActor*>&): pointed at our own list, read only by the trace.
+            if (FProperty* ip = trace.param(STR("ActorsToIgnore")); ip && ignored > 0)
             {
-                static const FName none_name = FName(STR("None"), FNAME_Add);
-                sim.name(STR("BoneName"), none_name);
-                if (sim.run())
-                    if (FProperty* r = sim.param(STR("ReturnValue")); r && *(sim.buffer.data() + r->GetOffset_Internal()) != 0) return false;
+                struct RawArray { UObject** data; int32_t num, max; };
+                auto* arr = reinterpret_cast<RawArray*>(trace.buffer.data() + ip->GetOffset_Internal());
+                arr->data = ignore, arr->num = ignored, arr->max = ignored;
             }
+            bool ran = trace.run();
+            if (FProperty* ip = trace.param(STR("ActorsToIgnore")))
+                std::memset(trace.buffer.data() + ip->GetOffset_Internal(), 0, ip->GetSize()); // never ours to free
+            if (!ran) return 0;
+            FProperty* ret = trace.param(STR("ReturnValue"));
+            if (!ret || !(*(trace.buffer.data() + ret->GetOffset_Internal()) & 1)) return 0;
+            FProperty* hit = trace.param(STR("OutHit"));
+            if (!hit) return 0;
+            Call b(gs, STR("BreakHitResult"));
+            FProperty* hp = b.param(STR("Hit"));
+            if (!hp) return 0;
+            std::memcpy(b.buffer.data() + hp->GetOffset_Internal(), trace.buffer.data() + hit->GetOffset_Internal(), (std::min)(hp->GetSize(), hit->GetSize()));
+            b.run();
+            UObject* actor = b.object_result(STR("HitActor"));
+            bool look_through = actor && (actor == g_pose.pawn || is_a(actor, STR("ModularWeaponBP_C")) || is_a(actor, STR("Pawn")));
+            if (!look_through)
+                if (UObject* comp = b.object_result(STR("HitComponent")))
+                {
+                    Call sim(comp, STR("IsSimulatingPhysics"));
+                    if (sim.fn)
+                    {
+                        static const FName none_name = FName(STR("None"), FNAME_Add);
+                        sim.name(STR("BoneName"), none_name);
+                        if (sim.run())
+                            if (FProperty* r = sim.param(STR("ReturnValue")); r && *(sim.buffer.data() + r->GetOffset_Internal()) != 0) look_through = true;
+                    }
+                }
+            if (look_through)
+            {
+                if (!actor || ignored >= 8) return 0;
+                ignore[ignored++] = actor;
+                continue;
+            }
+            if (hit_name) *hit_name = actor ? actor->GetName() : std::wstring(STR("?"));
+            if (normal) *normal = b.vec(STR("Normal"));
+            FProperty* ov = b.param(STR("bInitialOverlap"));
+            if (ov && *(b.buffer.data() + ov->GetOffset_Internal()) != 0)
+            {
+                stop = from;
+                return 2;
+            }
+            stop = b.vec(STR("Location"));
+            return 1;
         }
-        stop = b.vec(STR("Location"));
-        if (normal) *normal = b.vec(STR("Normal"));
-        return true;
+        return 0;
     }
 
     // A free hand stops at the world (Matthew 2026-11-22 03:56: "my hand defies the laws of physics…
@@ -1602,11 +1632,9 @@ namespace
     // triangles only).
     bool hand_world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, hsvr::Vec3& stop)
     {
-        return world_sweep(from, to, radius, 0.0, true, stop);
+        return world_sweep(from, to, radius, 0.0, true, stop) == 1; // his shoulder already in it: leave the hand be
     }
 
-    hsvr::Vec3 g_wall_ok;          // where his capsule last stood legally (pose_body_wall_stop)
-    bool g_wall_ok_have = false;
     // He stops at walls (pose_body_wall_stop). Matthew 2026-11-22 04:00: "I can just walk through the
     // post as if it's not even there. Can I walk through walls?" Yes: Willie's CollisionCylinder ignores
     // WorldStatic (the game's ragdoll body pushed him back off walls; the posed body doesn't). His
@@ -1619,7 +1647,7 @@ namespace
         const Config cfg = config();
         Vec3 move{to.x - from.x, to.y - from.y, 0.0};
         double len = length(move);
-        if (!cfg.pose_body_wall_stop || len < 0.05 || len > 100.0) return to; // over 1 m in a tick: a teleport
+        if (!cfg.pose_body_wall_stop || len < 1e-4 || len > 100.0) return to; // over 1 m in a tick: a teleport
         UObject* cyl = object_property(pawn, STR("CapsuleComponent"));
         if (!cyl) return to;
         double r = 34.0, h = 90.0;
@@ -1629,25 +1657,41 @@ namespace
         double lift = (std::min)(cfg.pose_body_wall_step_cm, h); // the bottom: this far above his feet
         double half = (std::max)(r, h - lift * 0.5);
         double dz = lift * 0.5;
+        auto flat = [](Vec3 v) { v.z = 0.0; double l = length(v); return l > 1e-6 ? v * (1.0 / l) : Vec3{}; };
+        // Already touching or inside something: only the part of the move out of it is allowed.
+        auto out_of = [&](const Vec3& m, const Vec3& n_raw) {
+            Vec3 n = flat(n_raw);
+            double into = dot(m, n);
+            return into < 0.0 ? m - n * into : m;
+        };
         Vec3 a{from.x, from.y, to.z + dz}, b{to.x, to.y, to.z + dz};
         Vec3 at, n;
-        if (!world_sweep(a, b, r, half, false, at, &n)) return to;
+        std::wstring what;
+        int r1 = world_sweep(a, b, r, half, false, at, &n, &what);
+        if (r1 == 0) return to;
         blocked = true;
-        n.z = 0.0;
-        if (length(n) < 1e-3) n = normalized(a - b);
-        n = normalized(n);
-        Vec3 stop = at + n * 0.1;
-        // Slide along it with what is left.
-        Vec3 rest = b - stop;
-        rest = rest - n * dot(rest, n);
-        rest.z = 0.0;
-        if (length(rest) > 0.05)
+        Vec3 stop;
+        if (r1 == 2)
+            stop = a + out_of(b - a, n);
+        else
         {
-            Vec3 at2, n2;
-            Vec3 end = stop + rest;
-            stop = world_sweep(stop, end, r, half, false, at2, &n2) ? at2 + normalized(Vec3{n2.x, n2.y, 0.0}) * 0.1 : end;
+            Vec3 nf = flat(n);
+            if (length(nf) < 0.5) nf = flat(a - b);
+            stop = at + nf * 0.1;
+            // Slide along it with what is left.
+            Vec3 rest = b - stop;
+            rest = rest - nf * dot(rest, nf);
+            rest.z = 0.0;
+            if (length(rest) > 1e-3)
+            {
+                Vec3 at2, n2, end = stop + rest;
+                int r2 = world_sweep(stop, end, r, half, false, at2, &n2);
+                stop = r2 == 0 ? end : r2 == 1 ? at2 + flat(n2) * 0.1 : stop;
+            }
         }
-        HSVR_LOG_EVERY(1.0, "Wall: he stopped at a wall %.1f cm short of where he was going (radius %.0f, capsule %.0f)", length(b - stop), r, h);
+        static std::wstring last_what;
+        if (what != last_what) { last_what = what; HSVR_LOG("Wall: he walks into %ls (%s)", what.c_str(), r1 == 2 ? "already touching it" : "swept"); }
+        HSVR_LOG_EVERY(1.0, "Wall: he stopped at %ls %.1f cm short of where he was going (radius %.0f, capsule half height %.0f)", what.c_str(), length(b - stop), r, h);
         return {stop.x, stop.y, to.z};
     }
 
@@ -1866,6 +1910,45 @@ namespace
     // which shook the hand on a steady sword. The engine tick still runs it when this has not fired.
     void pose_body(const hsvr::Config& cfg);
     std::atomic<double> g_pose_in_anim_at{-1.0};
+    double number_property(UObject* owner, FProperty* p);
+    bool write_three(uint8_t* field, FProperty* property, double a, double b, double c);
+    void read_three(const uint8_t* field, FProperty* property, double out[3]);
+
+    // pose_no_fall_arms: walking fast his feet run 36-47 cm ahead of his head, and ABP_Willie takes
+    // that for falling backwards: past 25 cm (its "Shoulders Dislocation", head minus mid-feet, turned
+    // into his hips' frame by "Ass Rotation Z", X < -25) each arm blends over 1 s into
+    // Anim_Fall_Backward_ArmsSwing, which drops the weapon grip pose (ABP @147915 right, @167150 left;
+    // Matthew 2026-11-22 03:50: "my player model's hand started opening up"). After his animation
+    // update (the node reads it later in the same update), the player's copy is held at -24.9 cm along
+    // that axis. Its other readers (bend AO, the spine_02 aim fade) only change past 25 cm; the pawn's
+    // own balance keeps its own value.
+    void no_fall_arms(UObject* abp)
+    {
+        static FProperty* sd = nullptr;
+        static FProperty* ass = nullptr;
+        static UObject* looked_on = nullptr;
+        if (looked_on != abp)
+        {
+            looked_on = abp;
+            sd = prop_chain(abp, STR("Shoulders Dislocation"));
+            ass = prop_chain(abp, STR("Ass Rotation Z"));
+            HSVR_LOG("Pose: falling-arms guard: Shoulders Dislocation %s, Ass Rotation Z %s", sd ? "found" : "MISSING", ass ? "found" : "MISSING");
+        }
+        if (!sd || !ass || sd->GetClass().GetName() != STR("StructProperty")) return;
+        uint8_t* field = reinterpret_cast<uint8_t*>(abp) + sd->GetOffset_Internal();
+        double v[3] = {0, 0, 0};
+        read_three(field, sd, v);
+        double yaw = number_property(abp, ass) * 3.14159265358979323846 / 180.0;
+        double c = std::cos(yaw), s = std::sin(yaw);
+        // UnrotateVector by yaw: into his hips' frame.
+        double x = c * v[0] + s * v[1], y = -s * v[0] + c * v[1];
+        const double limit = -24.9;
+        if (x >= limit) return;
+        double was = x;
+        x = limit;
+        write_three(field, sd, c * x - s * y, s * x + c * y, v[2]);
+        HSVR_LOG_EVERY(2.0, "Pose: his feet %.0f cm ahead of his head: kept out of the game's falling-backwards arms", -was);
+    }
     void pose_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         gc_sync();
@@ -1886,6 +1969,7 @@ namespace
             HSVR_LOG("Pose: written inside his animation update (pose_in_anim_update)");
         }
         g_pose_in_anim_at.store(hsvr::now_seconds());
+        if (cfg.pose_no_fall_arms && g_pose_active.load()) no_fall_arms(context);
         HSVR_SUB("anim:pose_body");
         pose_body(cfg);
     }
@@ -2136,7 +2220,7 @@ namespace
     bool hand_on_grab(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool hand_rides_grab(int side);
     bool hand_on_scenery(int side); // the hand is pinned on fixed scenery (a world grab)
-    bool hand_has_weapon(int side); // the game's hold has a weapon (or fist) in this hand
+    bool hand_has_weapon(int side); // the game's hold has a weapon in this hand (his fist doesn't count)
     bool g_wrap_on_side(int side);
     bool hand_world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, hsvr::Vec3& stop);
     bool stuck_is_thrust(UObject* weapon);
@@ -2305,11 +2389,11 @@ namespace
     struct ArmFix
     {
         bool want = false;
-        hsvr::Vec3 reach_cs;  // the shoulder's own reach (shoulder_reach) on top of last frame's, component space
+        hsvr::Vec3 S_cs;      // the shoulder the solve used, in the driver's component space
         unsigned seq = 0;     // one per solve
     };
     ArmFix g_arm_fix[2];
-    std::atomic<bool> g_arm_fix_on{true};
+    std::atomic<bool> g_arm_fix_on{true}, g_arm_fix_held{true};
     bool wrap_active(int side);
     // ---- Your injuries (Matthew 2026-11-21) -----------------------------------------------------
     // The game's own limb values (Willie_BP, extracted 2026-11-19; HalfSwordDecomp\defaults\injuries.md):
@@ -3298,8 +3382,13 @@ namespace
         g_solved_S[side] = S, g_solved_E[side] = E, g_solved_H[side] = H;
         {
             ArmFix& f = g_arm_fix[side];
-            f.want = g_arm_fix_on.load() && g_solved_on[side] == 0 && !hand_has_weapon(side) && !wrap_active(side) && !hand_on_scenery(side);
-            f.reach_cs = component_inv.rotate(S - S_chest);
+            // Empty hands and fists; held weapons, two hands and scabbards with pose_arm_fresh_shoulder_held.
+            // Not a grab (the hand is pinned where the game's joint holds it) or a wrap.
+            bool held = (g_solved_on[side] & 8) == 0 && (g_solved_on[side] != 0 || hand_has_weapon(side));
+            f.want = g_arm_fix_on.load() && (held ? g_arm_fix_held.load() : true) && (g_solved_on[side] & 8) == 0 && !wrap_active(side) && !hand_on_scenery(side);
+            double sc = component_scale_z(g_pose.driver);
+            if (!(sc > 1e-3)) sc = 1.0;
+            f.S_cs = component_inv.rotate(S - component_location(g_pose.driver)) * (1.0 / sc);
             ++f.seq;
         }
         node_set_rotation(*chain_node("upperarm" + sx), component_inv * Wu);
@@ -3901,7 +3990,16 @@ namespace
                     Vec3 want = actor + base.rotate(follow);
                     // Not into a wall (his capsule doesn't block on scenery; the sweep below doesn't stop it).
                     bool walled = false;
+                    Vec3 asked = want;
                     want = body_wall_sweep(pawn, actor, want, walled);
+                    // What the wall held back is taken as walked: the view stays with him at the wall
+                    // instead of going on into it and snapping back at the 50 cm recentre below.
+                    if (walled)
+                    {
+                        Vec3 held = base.inverse().rotate(Vec3{asked.x - want.x, asked.y - want.y, 0.0});
+                        held.z = 0.0;
+                        g_pose_room_moved_local = g_pose_room_moved_local + held;
+                    }
                     Call move(pawn, STR("K2_SetActorLocation"));
                     move.three(STR("NewLocation"), want.x, want.y, want.z);
                     move.flag(STR("bSweep"), true);
@@ -4767,6 +4865,7 @@ namespace
         if (!is_receive_tick(context, function)) return;
         g_hold_location = actor_location(context);
         // The character movement (your stick) has moved him since the last tick: not into a wall.
+        if (context != g_wall_pawn) g_wall_pawn = context, g_wall_ok_have = false;
         if (g_pose_active.load() && g_wall_ok_have)
         {
             bool blocked = false;
@@ -5832,7 +5931,7 @@ namespace
         double far_since = -1.0, far_logged = 0.0;
     };
     HoldState g_hold[2];
-    bool hand_has_weapon(int side) { return g_hold[side].weapon != nullptr; }
+    bool hand_has_weapon(int side) { return g_hold[side].weapon != nullptr && !is_fist(g_hold[side].weapon); }
 
     // The game's off-hand search: with a two-handed weapon (longswords) in one hand and the other
     // free, about once a second the game drops "Block <other> OffHand Grab", and on the next tick
@@ -11636,14 +11735,12 @@ namespace
     // pose_arm_fresh_shoulder: in the copy's snapshot (this frame's evaluated driver, component space),
     // the hand sits off where the solve aimed it by (this frame's shoulder - the shoulder the solve
     // used). Bend the elbow and turn the upper arm about this frame's shoulder so the hand is back on
-    // its target, and keep the hand's own rotation. Only the drawn body: his physics hand is the
-    // driver's, so held things and grabs are left out (they ride the physics hand).
+    // its target, and keep the hand's own rotation. (The hand's physics bodies are on the visible body,
+    // CharacterMesh0, so they follow this too.)
     void arm_fresh_shoulder(XForm96* B)
     {
         using namespace hsvr;
         FingerRig& R = g_frig;
-        static Vec3 prev_S[2];
-        static bool have_prev[2] = {false, false};
         static unsigned used[2] = {0, 0};
         for (int side = 0; side < 2; ++side)
         {
@@ -11653,11 +11750,8 @@ namespace
             const ArmFix f = g_arm_fix[side];
             bool fresh = f.seq != used[side];
             used[side] = f.seq;
-            Vec3 old = prev_S[side];
-            bool had = have_prev[side];
-            prev_S[side] = S, have_prev[side] = true;
-            if (!fresh || !f.want || !had) continue;
-            Vec3 shift = S - (old + f.reach_cs);
+            if (!fresh || !f.want) continue;
+            Vec3 shift = S - f.S_cs;
             double m = length(shift);
             if (m < 0.01 || m > 5.0) continue; // over 5 cm: a teleport or recentre, not a step
             Vec3 E = xf_pos(B[l]), H = xf_pos(B[h]);
@@ -12014,6 +12108,7 @@ namespace
         g_finger_joint_scale[2].store(cfg.pose_finger_scale_dip);
         g_finger_pivot_on.store(cfg.pose_finger_pivot_fix);
         g_arm_fix_on.store(cfg.pose_arm_fresh_shoulder);
+        g_arm_fix_held.store(cfg.pose_arm_fresh_shoulder_held);
         g_wrap_untouched.store(cfg.pose_wrap_untouched_curl);
         if (pawn && g_pose_active.load()) wrap_tick(cfg, pawn);
         if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);

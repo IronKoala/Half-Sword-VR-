@@ -684,6 +684,8 @@ namespace hsvr
         num("pose_hand_world_radius_cm", c.pose_hand_world_radius_cm);
         num("pose_hand_world_reach_cm", c.pose_hand_world_reach_cm);
         flag("pose_arm_fresh_shoulder", c.pose_arm_fresh_shoulder);
+        flag("pose_arm_fresh_shoulder_held", c.pose_arm_fresh_shoulder_held);
+        flag("pose_no_fall_arms", c.pose_no_fall_arms);
         flag("pose_body_wall_stop", c.pose_body_wall_stop);
         num("pose_body_wall_step_cm", c.pose_body_wall_step_cm);
         num("pose_body_wall_radius_share", c.pose_body_wall_radius_share);
