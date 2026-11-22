@@ -1,0 +1,9 @@
+# A strength gain mid-fight (strength thread): bank more than the 0.01 the game needs, the game runs
+# Gain Muscle (log 'Strength: Gain Muscle ran on him'), and his body must stay posed: the log line
+# 'Strength: the game switched his physics on N ms after the gain; switched off this tick' or none at all,
+# and no 'Pose: the game switched physics on again' line after the gain.
+1.0:hsvr.player_immortal
+2.0:hsvr.pawn_set Muscle Growth Due 0.02
+2.1:hsvr.wait var:Muscle_Growth_Due < 0.005 15 0 the game moved the banked growth into his strength
+4.0:hsvr.expect var:Muscle_Growth_Due < 0.005 gain applied
+4.1:hsvr.expect var:Muscle_Rate > 0.505 strength went up

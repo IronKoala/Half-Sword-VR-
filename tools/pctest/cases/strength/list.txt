@@ -1,0 +1,3 @@
+# strength thread: rest and strength-gain checks
+rest_idle|steps-rest_idle.txt
+strength_gain|steps-strength_gain.txt
