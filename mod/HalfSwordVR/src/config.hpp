@@ -811,6 +811,9 @@ namespace hsvr
         double pose_finger_scale_mcp = 1.0;
         double pose_finger_scale_pip = 1.0;
         double pose_finger_scale_dip = 1.0;
+        // 1 = finger joints turn about the finger's middle, not about Willie's bones (they sit on the
+        // palm-side skin, so closing the hand rolled the fingers into loops).
+        bool pose_finger_pivot_fix = true;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
@@ -820,6 +823,12 @@ namespace hsvr
         double pose_wrap_ease_s = 0.12;
         double pose_wrap_refresh_s = 0.5;
         double pose_wrap_finger_radius_cm = 0.0;
+        // Fingers stop at a Willie's skin, not his collision (measured per body: neck, clavicles, upper
+        // spine stand out of it); hand armour makes the fingers this much thicker on the palm side (full gauntlets/gloves:
+        // every segment; half gauntlets: the first).
+        bool pose_wrap_body_pad = true;
+        double pose_wrap_gauntlet_pad_cm = 0.85;
+        double pose_wrap_halfgauntlet_pad_cm = 1.0;
         bool pose_wrap_open_base = true;
         // What the game's grab holds is pulled onto the palm (the spot on it nearest the palm), not into
         // the fist: palm = hand bone + along x (middle knuckle - hand bone) + palm_cm toward the palm.
