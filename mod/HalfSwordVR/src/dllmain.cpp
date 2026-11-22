@@ -13115,6 +13115,7 @@ namespace
         hsvr::Vec3 prev_grip{0, 0, 0};   // where the point held actually was last tick (world)
         double fade_until = -1.0;        // the ease to B&S's cap stays allowed until then (it must also brake)
         bool fresh = false;              // made this tick: the weapon is given the old hold's velocity once
+        bool mod_turn = false;           // this tick the old hold's turn is set on the weapon, the joint only pulls
         int drives = -1; // which angular drives are on: bit 0 twist, bit 1 swing (-1 = not set yet)
     };
     JointHand g_jh[2][2]; // [side][0 = the hand's own joint, 1 = its joint as the second hand on the other's weapon]
@@ -13503,7 +13504,14 @@ namespace
             }
         }
         set_component_transform(m.sphere, s_pos, s_rot, false);
-        jh_drive(m, k, c, fcap, ka, ca, tcap, true);
+        // One hand: the turn is the old hold's (its implicit solve with the wrist stop, set as the weapon's spin in
+        // hold_weapon); the joint only pulls. Chaos's acceleration-mode angular drive scales by the inertia about
+        // each axis after conditioning (MaxInertiaRatio 5), and the game's tensors can be far from a rod's
+        // (polehammer 6784 / 779 / 818 kg cm^2): one number per drive got ~1/5 of the turn on the small axes and
+        // the polehammer hung backwards (sanity c238662). UE 5.4 hard-codes acceleration mode (PhysInterface_Chaos).
+        m.mod_turn = !two && cfg.pose_hold_joint_mod_turn;
+        if (m.mod_turn) jh_drive(m, k, c, fcap, 0.0, 0.0, 0.0, true);
+        else jh_drive(m, k, c, fcap, ka, ca, tcap, true);
         if (two)
         {
             JointHand& o = g_jh[g_two.second][1];
@@ -14581,6 +14589,20 @@ namespace
             // of physics speed, which the joint inherited and threw it 224 cm).
             JointHand& jm = g_jh[side][0];
             bool fresh = by_joint && jm.fresh;
+            if (by_joint && !fresh && jm.mod_turn)
+            {
+                // The turn about the GRIP: the grip's own velocity is kept (the joint pulls it), only the spin changes.
+                Vec3 ev = lv.vec(), ew = av.vec();
+                Vec3 nv = ev + cross(ew - w_next, pivot_now - com);
+                Call slv(base, STR("SetPhysicsLinearVelocity"));
+                slv.three(STR("NewVel"), nv.x, nv.y, nv.z);
+                slv.flag(STR("bAddToCurrent"), false);
+                slv.run();
+                Call sav(base, STR("SetPhysicsAngularVelocityInRadians"));
+                sav.three(STR("NewAngVel"), w_next.x, w_next.y, w_next.z);
+                sav.flag(STR("bAddToCurrent"), false);
+                sav.run();
+            }
             if (fresh)
             {
                 jm.fresh = false;

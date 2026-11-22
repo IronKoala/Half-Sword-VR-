@@ -498,6 +498,7 @@ namespace hsvr
         double pose_hold_joint_fade_keep_s = 0.4; // s: once allowed, the ease to B&S's cap stays allowed this long (so it brakes what it started)
         double pose_hold_joint_fade_after_s = 0.0;  // s: no ease to B&S's cap this soon after a joint is made (was 0.3 before the grab's speed was zeroed)
         bool pose_hold_joint_slerp = true; // 1 = the joint turns the weapon by one SLERP drive (0 = twist and swing drives)
+        bool pose_hold_joint_mod_turn = true; // one hand: 1 = the old hold's turn (spin set each tick), the joint only pulls; 0 = the joint's turn drive
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
