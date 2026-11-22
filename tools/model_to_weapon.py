@@ -1181,6 +1181,9 @@ def main(argv=None):
               open(os.path.join(args.out, name + ".json"), "w"), indent=2)
     if shield:
         print(f"shield {numbers['width']:.1f} x {numbers['height']:.1f} cm; {len(pieces)} collision pieces")
+    elif args.type == "crossbow":
+        print(f"crossbow {top - end:.1f} cm long (butt {end:.1f}, bow at 0, front {top:.1f} cm); {len(pieces)} pieces; "
+              "in the game the crossbow's own body, weight and string are used (the mass above is not)")
     elif hafted:
         print(f"length {top - end:.1f} cm: butt end {end:.1f}, haft {handle_bottom:.1f}..0, head 0..{top:.1f} cm; "
               f"{len(pieces)} collision pieces")
