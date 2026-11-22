@@ -2477,6 +2477,59 @@ float4 PSMain(VSOut i) : SV_Target
         std::thread(install_hook_thread).detach();
     }
 
+    namespace
+    {
+        // The head's rotation: midway between the eyes' (like eye_for_view(-1)). It was the left eye's, which
+        // is only the head's when the two displays are exactly parallel.
+        void centre_rotation(const XrEyeRaw& a, const XrEyeRaw& b, float& x, float& y, float& z, float& w)
+        {
+            float sign = a.qx * b.qx + a.qy * b.qy + a.qz * b.qz + a.qw * b.qw < 0.0f ? -1.0f : 1.0f;
+            x = a.qx + sign * b.qx;
+            y = a.qy + sign * b.qy;
+            z = a.qz + sign * b.qz;
+            w = a.qw + sign * b.qw;
+            float n = std::sqrt(x * x + y * y + z * z + w * w);
+            if (n > 1e-6f)
+            {
+                x /= n;
+                y /= n;
+                z /= n;
+                w /= n;
+            }
+            else
+            {
+                x = a.qx;
+                y = a.qy;
+                z = a.qz;
+                w = a.qw;
+            }
+        }
+
+        // What the runtime says about the two eyes against each other: at the first pose and when it changes.
+        // (Game thread, from vr_latch_frame_pose.)
+        void log_eye_geometry(const XrEyeRaw& a, const XrEyeRaw& b)
+        {
+            Quat qa = xr_to_ue_rotation(a.qx, a.qy, a.qz, a.qw);
+            Quat rel = (qa.inverse() * xr_to_ue_rotation(b.qx, b.qy, b.qz, b.qw)).normalized();
+            Rot r = quat_to_rot(rel);
+            float cx, cy, cz, cw;
+            centre_rotation(a, b, cx, cy, cz, cw);
+            Quat centre = xr_to_ue_rotation(cx, cy, cz, cw);
+            Vec3 gap = centre.inverse().rotate(xr_to_ue_position(b.px, b.py, b.pz, 100.0) - xr_to_ue_position(a.px, a.py, a.pz, 100.0));
+            static bool have = false;
+            static double last[4] = {0, 0, 0, 0};
+            double now[4] = {r.yaw, r.pitch, r.roll, gap.y};
+            bool changed = !have;
+            for (int i = 0; i < 4; ++i)
+                if (std::fabs(now[i] - last[i]) > (i == 3 ? 0.1 : 0.05)) changed = true;
+            if (!changed) return;
+            have = true;
+            for (int i = 0; i < 4; ++i) last[i] = now[i];
+            HSVR_LOG("OpenXR: eyes: the right is turned yaw %.3f pitch %.3f roll %.3f deg from the left; right minus left in the head's axes (%.2f, %.2f, %.2f) cm (forward, right, up)",
+                     r.yaw, r.pitch, r.roll, gap.x, gap.y, gap.z);
+        }
+    } // namespace
+
     bool vr_latch_frame_pose(FramePose& out)
     {
         FramePose pose;
@@ -2501,10 +2554,8 @@ float4 PSMain(VSOut i) : SV_Target
                 head.px = (a.px + b.px) * 0.5f;
                 head.py = (a.py + b.py) * 0.5f;
                 head.pz = (a.pz + b.pz) * 0.5f;
-                head.qx = a.qx;
-                head.qy = a.qy;
-                head.qz = a.qz;
-                head.qw = a.qw;
+                centre_rotation(a, b, head.qx, head.qy, head.qz, head.qw);
+                log_eye_geometry(a, b);
             }
             controllers_update(xr, g_session.load(), g_local_space.load(), time, located ? &head : nullptr);
         }
@@ -2537,7 +2588,9 @@ float4 PSMain(VSOut i) : SV_Target
         const XrEyeRaw& a = pose.eye[0];
         const XrEyeRaw& b = pose.eye[1];
         float cx = (a.px + b.px) * 0.5f, cy = (a.py + b.py) * 0.5f, cz = (a.pz + b.pz) * 0.5f;
-        Quat q = xr_to_ue_rotation(a.qx, a.qy, a.qz, a.qw);
+        float qx, qy, qz, qw;
+        centre_rotation(a, b, qx, qy, qz, qw);
+        Quat q = xr_to_ue_rotation(qx, qy, qz, qw);
         // Heading in OpenXR terms: angle about +Y, positive to the left.
         Vec3 fwd_ue = q.rotate({1, 0, 0}); // Unreal forward = OpenXR -Z, Unreal right = OpenXR +X
         float xr_yaw = (float)std::atan2(-fwd_ue.y, fwd_ue.x);
