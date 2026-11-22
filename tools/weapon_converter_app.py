@@ -338,13 +338,13 @@ class App:
                 return
             self.fit_size = key
             # The window asks for the whole panel (so it opens as big as before), up to the screen's height.
-            # Less the weapon list's height when it shows, and the window is moved up if it would end below the
-            # screen (Matthew's 1440 screen: two previews opened it to y 1647, under the taskbar).
+            # Less the weapon list's height when it shows, the title bar, the taskbar and room for where
+            # Windows places a new window (Matthew's 1440 screen: two previews opened it to y 1647, under the
+            # taskbar). The window itself is never moved: that broke snapping (PC test of 7e2d5cd).
             sh = root.winfo_screenheight()
             listed = self.batch.winfo_reqheight() if self.batch.winfo_ismapped() else 0
-            cap = max(min_h, sh - 160 - listed)
+            cap = max(min_h, sh - 300 - listed)
             canvas.configure(width=rw, height=min(rh, cap))
-            root.after_idle(keep_on_screen)
             h = max(ch, rh)
             canvas.itemconfigure(win, width=max(cw, 1), height=h)
             canvas.configure(scrollregion=(0, 0, max(cw, 1), h))
@@ -354,12 +354,6 @@ class App:
             elif vbar.winfo_ismapped():
                 vbar.pack_forget()
                 canvas.yview_moveto(0)
-
-        def keep_on_screen():
-            root.update_idletasks()
-            sh, top, h = root.winfo_screenheight(), root.winfo_rooty(), root.winfo_height()
-            if top + h > sh - 60 and top > 0:
-                root.geometry(f"+{max(0, root.winfo_rootx())}+{max(0, sh - 60 - h)}")
 
         def keep_fitting():
             try:
@@ -389,15 +383,15 @@ class App:
 
         def touch(e):
             # Tk 9: a touchpad or fine-step wheel comes as TouchpadScroll, its delta holding dx (high 16 bits)
-            # and dy (low 16 bits, signed); a step of the panel per 30 of dy.
+            # and dy (low 16 bits, signed); a step of the panel per 60 of dy (a wheel notch is 120: 3 steps).
             dy = e.delta & 0xFFFF
             dy = dy - 0x10000 if dy >= 0x8000 else dy
             if not vbar.winfo_ismapped() or not over_panel(e) or dy == 0:
                 return
             self.touch_acc += dy
-            steps = int(self.touch_acc / 30)
+            steps = int(self.touch_acc / 60)
             if steps:
-                self.touch_acc -= steps * 30
+                self.touch_acc -= steps * 60
                 canvas.yview_scroll(-steps, "units")
             return "break"
         for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<Alt-MouseWheel>", "<TouchpadScroll>"):
