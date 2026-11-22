@@ -23871,9 +23871,9 @@ namespace
     }
 
     // A weapon spot is free when no loose weapon's bounds take in any of 3 points along it.
-    bool room_spot_free(const TestRoom::WeaponSpot& s, const std::vector<RoomFoot>& feet)
+    bool room_spot_free(const TestRoom::WeaponSpot& s, const std::vector<RoomFoot>& feet, bool along_forward = false)
     {
-        hsvr::Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+        hsvr::Vec3 right = along_forward ? g_room.forward : hsvr::Vec3{-g_room.forward.y, g_room.forward.x, 0.0};
         for (double along : {-30.0, 0.0, 30.0})
         {
             hsvr::Vec3 p = s.at + right * along;
@@ -23959,6 +23959,25 @@ namespace
         return tilt > 8.0 && tilt < 70.0;
     }
 
+    // How far the lectern comes through the page (cm in front of the page's face, the largest over a 7 x 7
+    // grid of the page; 0 or less = none of it does). Complex traces against the lectern alone, from 30 cm
+    // in front of the page back through it.
+    double room_page_clip(UObject* lectern_mesh, const hsvr::Vec3& centre, const hsvr::Vec3& normal, const hsvr::Vec3& up, const hsvr::Vec3& right, double half_w,
+                          double half_h)
+    {
+        double worst = -1e9;
+        if (!lectern_mesh) return worst;
+        for (int i = 0; i <= 6; ++i)
+            for (int j = 0; j <= 6; ++j)
+            {
+                hsvr::Vec3 p = centre + right * (half_w * (i / 3.0 - 1.0)) + up * (half_h * (j / 3.0 - 1.0));
+                hsvr::Vec3 h, n;
+                if (!trace_component(lectern_mesh, p + normal * 30.0, p - normal * 10.0, h, n)) continue;
+                worst = (std::max)(worst, hsvr::dot(h - p, normal));
+            }
+        return worst;
+    }
+
     void room_place_book(UObject* player, int kind, const hsvr::Vec3& at)
     {
         using hsvr::Vec3;
@@ -24010,6 +24029,16 @@ namespace
         book.half_w = 26.0;
         book.half_h = 21.0;
         book.centre = centre + book.normal * 1.0 + book.up * (book.half_h * 0.35); // the page rests on the slope's lower lip
+        // Out along its face until no part of the lectern comes through it (the page sat inside the
+        // stand, so he could neither read nor point at it: Matthew 2026-11-22 22:15). The slab is 0.8 cm
+        // thick behind the face.
+        {
+            double clip = room_page_clip(comp, book.centre, book.normal, book.up, book.right, book.half_w, book.half_h);
+            double out = clip > -1.5 ? (std::min)(clip + 1.5, 25.0) : 0.0;
+            book.centre = book.centre + book.normal * out;
+            HSVR_LOG("TestRoom: %s page: the lectern came %.1f cm through it; moved %.1f cm out along its face, now %.1f", kind == 0 ? "weapon" : "Willie", clip, out,
+                     room_page_clip(comp, book.centre, book.normal, book.up, book.right, book.half_w, book.half_h));
+        }
         hsvr::Quat q = hsvr::quat_from_axes(book.normal, hsvr::cross(book.up, book.normal), book.up);
         // The page: a thin parchment-coloured slab, and a small warm light over it so it can be read.
         room_shape(lectern, STR("/Engine/BasicShapes/Cube.Cube"), book.centre - book.normal * 0.4, q, Vec3{0.008, book.half_w / 50.0, book.half_h / 50.0}, 0.78f, 0.66f, 0.45f);
@@ -24173,12 +24202,17 @@ namespace
                 // On the floor between the book and where you started, 20 cm along for each one there.
                 hsvr::Vec3 toward = hsvr::normalized(hsvr::Vec3{b.centre.x - g_room.origin.x, b.centre.y - g_room.origin.y, 0.0});
                 double floor_z = room_floor_z(player);
-                // 4 rows of 6, 25 cm apart (a pile from one point crept for seconds: test 2026-11-22 22:11).
+                // 3 rows of 8, 25 cm apart (a pile from one point crept for seconds: test 2026-11-22 22:11),
+                // never within 80 cm of where he stands (two dropped against his legs were pushed away:
+                // test 2026-11-22 22:14).
+                hsvr::Vec3 me = actor_location(player);
                 for (int i = 0; i < 24 && !spot; ++i)
                 {
-                    floor_spot.at = hsvr::Vec3{b.centre.x, b.centre.y, floor_z + 30.0} - toward * (60.0 + (i / 6) * 25.0) + g_room.forward * ((i % 6) * 20.0 - 50.0);
-                    floor_spot.q = hsvr::quat_from_axes(hsvr::Vec3{0, 0, 1}, hsvr::cross(right, hsvr::Vec3{0, 0, 1}), right);
-                    if (room_spot_free(floor_spot, boxes)) spot = &floor_spot;
+                    floor_spot.at = hsvr::Vec3{b.centre.x, b.centre.y, floor_z + 30.0} - toward * (45.0 + (i / 8) * 25.0) + g_room.forward * ((i % 8) * 20.0 - 70.0);
+                    if (std::hypot(floor_spot.at.x - me.x, floor_spot.at.y - me.y) < 80.0) continue;
+                    // Along his forward, not pointing at him (a polearm laid toward him reached his feet).
+                    floor_spot.q = hsvr::quat_from_axes(hsvr::Vec3{0, 0, 1}, hsvr::cross(g_room.forward, hsvr::Vec3{0, 0, 1}), g_room.forward);
+                    if (room_spot_free(floor_spot, boxes, true)) spot = &floor_spot;
                 }
                 if (!spot) spot = &floor_spot;
             }
@@ -24995,6 +25029,15 @@ namespace
             UObject* gm = room_game_mode();
             value = gm && (bool_property(gm, STR("Match Won")) || bool_property(gm, STR("All Enemies Dead"))) ? 1.0 : 0.0;
             return gm != nullptr;
+        }
+        if (w == "room_page_clip")
+        {
+            // The most any lectern comes through its page, cm (0 or less: clear).
+            if (g_room.books.empty()) return false;
+            value = -1e9;
+            for (const TestRoom::Book& b : g_room.books)
+                value = (std::max)(value, room_page_clip(b.actor && object_alive(b.actor) ? room_mesh_of(b.actor) : nullptr, b.centre, b.normal, b.up, b.right, b.half_w, b.half_h));
+            return true;
         }
         if (w == "room_page_z" || w == "room_page_up")
         {
