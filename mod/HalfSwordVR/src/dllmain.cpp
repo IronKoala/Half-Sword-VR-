@@ -3,6 +3,7 @@
 // the running engine, and tells it where the player's head is each frame.
 
 #include <algorithm>
+#include <cstdlib>
 #include <atomic>
 #include <cmath>
 #include <initializer_list>
@@ -21161,6 +21162,21 @@ namespace
         installed = true;
         UObjectGlobals::RegisterHook(fn, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, &room_load_game_post, nullptr);
         HSVR_LOG("TestRoom: watching %ls", fn->GetFullName().c_str());
+        // Every save the game makes while the room is up is undone the moment the call returns, not
+        // only by the 0.25 s file check (an unattended run 2026-11-22 with scripted kills left
+        // GameProgress.sav changed: a write after the last check). And once more when the game exits.
+        auto undo = [](Unreal::UnrealScriptFunctionCallableContext&, void*) {
+            if (g_room.armed && !g_room.done) room_restore_save("a save call returned");
+        };
+        for (const TCHAR* path : {STR("/Script/Engine.GameplayStatics:SaveGameToSlot"), STR("/Script/Engine.GameplayStatics:AsyncSaveGameToSlot")})
+            if (UFunction* f = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, path))
+                UObjectGlobals::RegisterHook(f, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, undo, nullptr);
+        if (UFunction* sg = func_chain(gi, STR("Save Game")))
+            UObjectGlobals::RegisterHook(sg, [](Unreal::UnrealScriptFunctionCallableContext&, void*) {}, undo, nullptr);
+        std::atexit([] {
+            // No logging here: the log may already be closed.
+            if (g_room.armed && !g_room.done && !g_room.backup_path.empty()) CopyFileW(g_room.backup_path.c_str(), g_room.save_path.c_str(), FALSE);
+        });
     }
 
     // Boot step (M+2 after the first menu): copy the save, set Free Mode in the game instance.
