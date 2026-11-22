@@ -580,6 +580,8 @@ def main(argv=None):
                          "hammer, spear); double: a blade or head on both ends of a haft. Default: detected "
                          "(sword or hafted)")
     ap.add_argument("--handle-bottom-cm", type=float)
+    ap.add_argument("--preview", action="store_true", help="quick: parts, collision and numbers only (no textures, "
+                    "no damage points, mass from the convex pieces); the converter's picture before Install")
     ap.add_argument("--turn", action="store_true", help="hafted: the head faces the other way (front and back swapped)")
     ap.add_argument("--held", choices=["one", "two", "spear"], help="hafted: the game weapon that carries it (one hand: "
                     "mace, two hands: great axe, spear); default from the length")
@@ -1048,7 +1050,7 @@ def main(argv=None):
             mats.append(m)
         material_of_mesh.append(keys.index(k))
     texture_set = None
-    if any(m is not None for m in mats):
+    if any(m is not None for m in mats) and not args.preview:
         def tex_size(m):
             for a in ("baseColorTexture", "image", "normalTexture", "metallicRoughnessTexture"):
                 im = getattr(m, a, None)
@@ -1127,7 +1129,7 @@ def main(argv=None):
         grip_density = HAFT if hafted else GRIP
         grams = sum(v * (WOOD if shield else grip_density if s == "Grip" else STEEL) for s, v in volume.items())
         enclosed = 0.0
-        for _, g in meshes:
+        for _, g in ([] if args.preview else meshes):
             gm = g.copy()
             gm.merge_vertices(merge_tex=True, merge_norm=True)
             enclosed += abs(float(gm.volume))
@@ -1194,7 +1196,9 @@ def main(argv=None):
     ab[flipab] = 1 - ab[flipab]
     tv = tri_v[pick]
     samples = tv[:, 0] + ab[:, :1] * (tv[:, 1] - tv[:, 0]) + ab[:, 1:] * (tv[:, 2] - tv[:, 0])
-    if args.type == "crossbow":
+    if args.preview:
+        dpts, dinfo = [], dict(kind="preview")  # worked out at Install
+    elif args.type == "crossbow":
         dpts, dinfo = [], dict(kind="crossbow")  # like the game's: no Tip points, a bash is blunt
     elif args.type == "flail":
         head_sel = np.concatenate([flail_label == "Head", flail_label[tris[pick, 0]] == "Head"])
@@ -1208,7 +1212,7 @@ def main(argv=None):
     wp.write_numbers(os.path.join(args.out, name + ".txt"), f"{name}: written by tools/model_to_weapon.py", numbers)
     json.dump({"source": os.path.basename(args.model), "scale": scale_note, "mass_kg": mass, "mass_note": mass_note,
                "zones_cm": numbers, "volumes_cm3": {s: round(v, 1) for s, v in volume.items()},
-               "parts_by_name": named, "lengths_before_stretch_cm": lens_before,
+               "parts_by_name": named, "lengths_before_stretch_cm": lens_before, "preview": bool(args.preview),
                "type": "shield" if shield else args.type if args.type in ("flail", "crossbow") else "hafted" if hafted else "sword", "damage": dinfo, "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
               open(os.path.join(args.out, name + ".json"), "w"), indent=2)
     if shield:

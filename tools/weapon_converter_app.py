@@ -1,7 +1,7 @@
 """Weapon Converter: the end-user window around tools/model_to_weapon.py (built into WeaponConverter.exe).
 
 Pick a weapon model (GLB, glTF, OBJ, ...), or drop it on the window or on WeaponConverter.exe. Type its
-real length (and weight, if known), press Convert, check the picture, then Install. Install copies the
+real length (and weight, if known), press Preview, check the picture, then Install (the full conversion runs then). Install copies the
 converted files into the HalfSwordCustomWeapon mod folder of your Half Sword install and makes it the
 model the mod uses (model= in CustomWeapon.ini). Nothing reaches the mod folder before Install.
 """
@@ -206,6 +206,10 @@ def render_view(pos, nrm, uv, tris, colour_img, zones, view, width, height, s, f
     zmin = float(z.min())
     px = 10 + (z - zmin) * s
     py = height / 2 - pos[:, up] * s
+    if len(tris) > 80000:  # a preview of a huge model: its 80000 biggest triangles (drawing each one is slow)
+        tv = pos[tris]
+        ar = np.linalg.norm(np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0]), axis=1)
+        tris = tris[np.argsort(-ar)[:80000]]
     img = Image.new("RGB", (width, height), (34, 36, 40))
     draw = ImageDraw.Draw(img)
     # Colour per triangle: the texture at its centre, else its zone's colour; simple light from the viewer.
@@ -299,7 +303,7 @@ class App:
         ttk.Button(bb, text="Remove", command=self.remove_item).pack(side="left", padx=6)
         self.install_all_btn = ttk.Button(bb, text="Install all converted", command=self.install_all)
         self.install_all_btn.pack(side="right")
-        self.convert_all_btn = ttk.Button(bb, text="Convert all", command=self.convert_all)
+        self.convert_all_btn = ttk.Button(bb, text="Preview all", command=self.convert_all)
         self.convert_all_btn.pack(side="right", padx=6)
         main = ttk.Frame(root, padding=10)
         main.pack(fill="both", expand=True)
@@ -457,7 +461,7 @@ class App:
         self.mod_info.grid(row=5, column=1, columnspan=2, sticky="w", padx=8)
         self.check_mod()
 
-        self.convert_btn = ttk.Button(main, text="Convert", command=self.convert)
+        self.convert_btn = ttk.Button(main, text="Preview", command=self.convert)
         self.convert_btn.grid(row=6, column=0, columnspan=3, pady=8)
 
         self.preview = ttk.Label(main, anchor="center")
@@ -869,7 +873,7 @@ class App:
             self.save_editor()
         if self.result is not None and not self.same_inputs(self.inputs()[0], self.result_inputs):
             self.install_btn.config(state="disabled")
-            self.status.config(text="Changed: press Convert again before installing.")
+            self.status.config(text="Changed: press Preview again before installing.")
 
     # ---- converting ------------------------------------------------------------------------------------
     def convert(self):
@@ -884,11 +888,13 @@ class App:
             return
         self.clear_result()
         self.log.delete("1.0", "end")
-        self.status.config(text="Converting... (big models take a little while)")
+        self.status.config(text="Making the preview...")
         it = self.cur
-        it["status"] = "converting..."
+        it["status"] = "previewing..."
         self.refresh_row(it)
-        self.run(self.convert_worker, self.argv_for(it, values), values, it)
+        # A quick pass (parts, collision, numbers; no textures or damage points): change things and preview
+        # again as often as needed; the full conversion runs once, at Install (Matthew 2026-11-22).
+        self.run(self.convert_worker, self.argv_for(it, values) + ["--preview"], values, it)
 
     def argv_for(self, it, values):
         length, mass, kind, flip, slide, splits, lens, stats = values
@@ -960,7 +966,7 @@ class App:
         for n, (it, values) in enumerate(todo, 1):
             self.events.put(("progress", it, f"converting ({n} of {len(todo)})..."))
             try:
-                self.convert_worker(self.argv_for(it, values), values, it)
+                self.convert_worker(self.argv_for(it, values) + ["--preview"], values, it)
             except Exception as e:
                 self.events.put(("item_failed", it, f"{e}"))
                 self.events.put(("log", traceback.format_exc(), None))
@@ -1166,7 +1172,7 @@ class App:
         it.pop("pending_b", None)
         self.show_part_lengths()
         self.inputs_changed()
-        self.status.config(text="Parts back to what the converter found. Press Convert.")
+        self.status.config(text="Parts back to what the converter found. Press Preview.")
 
     def boundaries(self):
         """The part boundaries of the picture shown, cm along the weapon: pommel|grip, grip|guard, guard|blade."""
@@ -1230,10 +1236,10 @@ class App:
         it["splits"] = tuple(round((v - p0) / span, 5) for v in b)
         self.show_part_lengths()
         # No Convert per line (Matthew 2026-11-22: moving pommel and guard took two waits): move them all, then
-        # press Convert once.
+        # press Preview once.
         self.redraw_result()
         self.inputs_changed()
-        self.status.config(text="Line moved. Move any others, then press Convert.")
+        self.status.config(text="Line moved. Move any others, then press Preview.")
 
     def short_summary(self, info):
         zn = info["zones_cm"]
@@ -1247,6 +1253,8 @@ class App:
         if not dm:
             return ""
         kind = dm.get("kind")
+        if kind == "preview":
+            return "\nDamage: worked out at Install (this is the quick preview: no textures yet)."
         if kind == "sword":
             edges = {"double": "both edges cut", "single+": "one edge cuts", "single-": "one edge cuts",
                      "none": "no edge (blunt)"}.get(dm.get("edges"), "")
@@ -1379,9 +1387,37 @@ class App:
             self.refresh_spot_buttons()
 
     # ---- installing ------------------------------------------------------------------------------------
+    def full_worker(self, todo):
+        """The full conversion (textures, damage points, real volume) of weapons shown as previews."""
+        for n, (it, values) in enumerate(todo, 1):
+            self.events.put(("progress", it, f"converting for the game ({n} of {len(todo)})..."))
+            self.convert_worker(self.argv_for(it, values), values, it)
+
+    def needs_full(self, items):
+        """(item, inputs) to convert for the game: previews, and items changed since (lines moved, ...)."""
+        out = []
+        for it in items:
+            if it["result"] is None:
+                continue
+            values = self.inputs()[0] if it is self.cur else self.item_values(it)[0]
+            values = values or it["result_inputs"]
+            if it["result"][1].get("preview") or not self.same_inputs(values, it["result_inputs"]):
+                out.append((it, values))
+        return out
+
     def install(self):
         if self.result is None or self.busy:
             return
+        self.save_editor()
+        todo = self.needs_full([self.cur])
+        if todo:
+            self.pending_install = ("one", [self.cur])
+            self.status.config(text="Converting for the game (textures, damage)... then it installs.")
+            self.run(self.full_worker, todo)
+            return
+        self.finish_install_one()
+
+    def finish_install_one(self):
         if self.copy_items([self.cur]):
             title = self.cur["title"]
             where = self.where_text(self.cur)
@@ -1399,8 +1435,17 @@ class App:
         self.save_editor()
         done = [it for it in self.items if it["result"] is not None]
         if not done:
-            self.status.config(text="Convert the weapons first (Convert all).")
+            self.status.config(text="Preview the weapons first (Preview all).")
             return
+        todo = self.needs_full(done)
+        if todo:
+            self.pending_install = ("all", done)
+            self.status.config(text=f"Converting {len(todo)} weapons for the game... then they install.")
+            self.run(self.full_worker, todo)
+            return
+        self.finish_install_all(done)
+
+    def finish_install_all(self, done):
         if self.copy_items(done):
             left = len(self.items) - len(done)
             self.status.config(text=f"Installed {len(done)} weapons." + (f" {left} not converted yet." if left else ""))
@@ -1485,6 +1530,16 @@ class App:
             self.convert_btn.config(state="normal")
             self.convert_all_btn.config(state="normal")
             self.install_all_btn.config(state="normal")
+            pend, self.pending_install = getattr(self, "pending_install", None), None
+            if pend:
+                which, items = pend
+                if all(it["result"] is not None and not it["result"][1].get("preview") for it in items):
+                    if which == "one":
+                        self.finish_install_one()
+                    else:
+                        self.finish_install_all(items)
+                else:
+                    self.status.config(text="The conversion for the game did not finish: nothing was installed.")
             if self.batch_running:
                 self.batch_running = False
                 ok = sum(1 for it in self.items if it["result"] is not None)
