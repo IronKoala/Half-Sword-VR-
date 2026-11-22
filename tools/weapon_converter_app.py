@@ -434,6 +434,7 @@ class App:
         self.held_var = tk.StringVar(value=HELD[0][0])
         ttk.Combobox(dmg, textvariable=self.held_var, values=[t for t, _ in HELD], state="readonly",
                      width=26).pack(side="left", padx=(0, 6))
+        self.held_var.trace_add("write", lambda *_: getattr(self, "result", None) and self.redraw_result())
         self.turn_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(dmg, text="head faces the other way", variable=self.turn_var).pack(side="left")
         dmg2 = ttk.Frame(form)
@@ -1289,6 +1290,16 @@ class App:
     def sword_class_text(self, info):
         """For a sword: which game sword carries it (the choice, or what the mod picks by itself: kind_for in
         mod/HalfSwordCustomWeapon/src/main.cpp, 55 cm overall and the 14 cm two_hand_grip_cm default)."""
+        if info.get("type") in ("hafted", "double"):
+            names = {"one": "held in one hand (mace carrier)", "two": "held in two hands (great axe carrier)",
+                     "spear": "spear grip (spear carrier)"}
+            chosen = dict(HELD).get(self.held_var.get())
+            if chosen:
+                return f", {names[chosen]}"
+            zn = info["zones_cm"]
+            total = zn["tip"] - zn["pommel_end"]
+            k = "one" if total < 90 else "spear" if info["type"] == "double" or total >= 160 else "two"
+            return f", {names[k]} (detected by length; change it under Held with)"
         if info.get("type") != "sword":
             return ""
         names = {"dagger": "dagger", "arming": "one-handed sword", "bastard": "bastard sword",
