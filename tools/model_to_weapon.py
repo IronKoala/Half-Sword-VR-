@@ -973,7 +973,18 @@ def main(argv=None):
         hd = frame_pos[frame_pos[:, 2] > guard_top]
         if len(hd):
             reach_pos, reach_neg = float(hd[:, 0].max()), float(-hd[:, 0].min())
-            turn = reach_neg > 1.15 * reach_pos and reach_neg > 2.0
+            # The bit side has more of the head further out: the first moment of the surface along x (area-
+            # weighted triangle centres), not only the furthest point (a near-symmetric axe scored 1.152 on that).
+            ht = tris[(frame_pos[tris, 2] > guard_top).all(axis=1)]
+            if len(ht):
+                tv = frame_pos[ht]
+                ar = 0.5 * np.linalg.norm(np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0]), axis=1)
+                cx = tv[:, :, 0].mean(axis=1)
+                moment = float((ar * cx).sum())
+                spread = float((ar * np.abs(cx)).sum())
+                turn = moment < -0.05 * spread and reach_neg > 2.0
+            else:
+                turn = reach_neg > 1.15 * reach_pos and reach_neg > 2.0
             if args.turn:
                 turn = not turn
             if turn:  # half a turn round z: x and y change sign, the winding stays
