@@ -4359,6 +4359,8 @@ namespace
         bool sheathing = false;      // going in rather than out
         const char* socket = "";     // the slot's socket (where the scabbard belongs)
         int slot = 0;                // and its number on that side (Slot byte)
+        double z_in = 1e9;           // sheathing: the furthest in it has been (cm out)
+        bool pulling_back = false;   // and being pulled back out of it
         double length = 80.0;        // the blade's length (cm)
         bool block_cleared = false;
     };
@@ -4371,6 +4373,7 @@ namespace
     // A blade just drawn still has its tip at the mouth, lined up: no sheathe until it has been taken
     // well away first (playtest 02:44: every draw went straight back into a sheathe, 1 ms after it freed).
     bool g_sheathe_armed[2] = {true, true};
+    double g_sheathe_clear_since[2] = {-1.0, -1.0}; // while not armed: since when the tip has been clear of every mouth
     // Where each drawn weapon's own scabbard really opens, measured when it was drawn (it sat seated):
     // the blade's start (the guard end of its blade zone) and its line, in the scabbard's frame. The
     // belt socket is only where the scabbard hangs from, and moves with it when the off hand angles it.
@@ -16850,14 +16853,30 @@ namespace
             // Clear of every mouth. The own hip's alone re-armed it on the tick after any pull-out on the
             // other hip, the tip still at that mouth: it went straight back in, Block set again, and Check
             // refuses the break until it has been pushed in (Check Scabbard Unsheath State L @2808).
-            const double clear_cm = 2.0 * cfg.pose_sheathe_mouth_cm + 10.0;
+            // For 0.35 s without a break: as the slide joint breaks, the blade flicks and a pulled scabbard
+            // springs back, so for a tick or two the tip reads 30-50 cm clear (test j3 2026-11-22 02:58Z:
+            // armed 26 ms after a draw across, back into the sheathe 0.15 s later).
+            const double clear_cm = 2.0 * cfg.pose_sheathe_mouth_cm + 10.0, clear_s = 0.35;
+            double& since = g_sheathe_clear_since[side];
             double nearest = (std::min)(mouths[0].d, mouths[1].d);
-            if (nearest <= clear_cm) return;
+            if (nearest <= clear_cm)
+            {
+                since = -1.0;
+                return;
+            }
             if (UObject* mesh = object_property(pawn, STR("Mesh")))
                 for (const auto& hip_slots : k_belt)
                     for (const BeltSlot& b : hip_slots)
                         if (!object_property(pawn, b.var)) nearest = (std::min)(nearest, length(tip - socket_location(mesh, bone_fname(b.socket))));
-            if (nearest <= clear_cm) return;
+            if (nearest <= clear_cm)
+            {
+                since = -1.0;
+                return;
+            }
+            const double now = now_seconds();
+            if (since < 0.0) since = now;
+            if (now - since < clear_s) return;
+            since = -1.0;
             g_sheathe_armed[side] = true;
             HSVR_LOG("Sheathe: %s hand's blade is clear of every mouth (tip %.0f cm from the nearest); it can be sheathed again", hand, nearest);
             return;
@@ -16977,6 +16996,23 @@ namespace
                 set_bool_property(pawn, d.slot_side == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
                 d.block_cleared = true;
                 HSVR_LOG("Sheathe: in past the mouth (%.1f cm out)", z);
+            }
+            if (d.sheathing && d.block_cleared)
+            {
+                // Pulled back out: with "<S> Weapon Sheathing" set the game frees it only a whole blade's
+                // length out along the line (Check Scabbard Unsheath State L @3110-3449, R @3657-4099), which
+                // from the other hip the arm cannot reach, though it could start tilted (test j2 2026-11-22
+                // 02:57Z: stuck 33-47 cm out of 57). So once pulled back 8 cm it is a draw (0.85 of the
+                // length, less when swung); pushed in again, a sheathe.
+                d.z_in = (std::min)(d.z_in, z);
+                bool back = d.pulling_back ? z > d.z_in + 2.0 : z > d.z_in + 8.0;
+                if (back != d.pulling_back)
+                {
+                    d.pulling_back = back;
+                    set_bool_property(pawn, d.slot_side == 0 ? STR("L Weapon Sheathing") : STR("R Weapon Sheathing"), !back);
+                    HSVR_LOG("Sheathe: %s hand %s (%.1f cm out)", side == 0 ? "left" : "right",
+                             back ? "pulls it back out: the game frees it as in a draw" : "pushes it in again", z);
+                }
             }
             if (!unsheathing && conc == 11.0)
             {
