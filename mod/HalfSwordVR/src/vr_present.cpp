@@ -1845,6 +1845,99 @@ float4 PSMain(VSOut i) : SV_Target
                     shared().frames_without_image.fetch_add(1);
                 }
 
+                // ---- pointing at the panel with a controller ----
+                // While a menu is up, the controller's pointing ray (its aim pose) is met with the
+                // panel; where it lands moves the Windows mouse pointer to that spot in the game
+                // window, and the trigger is the left mouse button there (held = drag, for sliders).
+                // The game's menus take only the mouse (menus_and_prompts.md), so this is how they
+                // are used from VR. The right hand points unless only the left one is on the panel.
+                float pointer_uv[2] = {-1.0f, -1.0f};
+                {
+                    static bool pressed = false;
+                    static int pressed_hand = -1;
+                    DXGI_SWAP_CHAIN_DESC scd{};
+                    swapchain->GetDesc(&scd);
+                    HWND game_window = scd.OutputWindow;
+                    bool active = cfg.ui_pointer && want_ui && menu_showing && game_window && g.ui_copy_width > 0;
+                    int hit_hand = -1;
+                    float hit_u = 0, hit_v = 0;
+                    ControllerState cs = controllers_state();
+                    if (active && cs.focused)
+                    {
+                        float pos0[3];
+                        float yaw;
+                        {
+                            std::lock_guard<std::mutex> lock(g_recenter_mutex);
+                            memcpy(pos0, g_recenter_xr_pos, sizeof(pos0));
+                            yaw = g_recenter_xr_yaw;
+                        }
+                        float d = (float)cfg.ui_distance_m;
+                        float P[3] = {pos0[0] - d * std::sin(yaw), pos0[1] + (float)cfg.ui_height_offset_m, pos0[2] - d * std::cos(yaw)};
+                        float aspect = (float)g.ui_copy_height / (float)std::max<UINT>(1, g.ui_copy_width);
+                        float W = (float)cfg.ui_width_m, H = W * aspect;
+                        // The quad turned by yaw about +Y: its right, up and facing (+Z) directions.
+                        float right[3] = {std::cos(yaw), 0.0f, -std::sin(yaw)};
+                        float up[3] = {0.0f, 1.0f, 0.0f};
+                        float n[3] = {std::sin(yaw), 0.0f, std::cos(yaw)};
+                        int order[2] = {1, 0};
+                        for (int k = 0; k < 2 && hit_hand < 0; ++k)
+                        {
+                            int h = pressed ? pressed_hand : order[k]; // a held click stays with its hand
+                            if (pressed && k > 0) break;
+                            const HandState& hs = cs.hand[h];
+                            if (!hs.aim_valid) continue;
+                            const XrPoseRaw& a = hs.aim;
+                            // Forward of the aim pose is its -Z.
+                            float qx = a.qx, qy = a.qy, qz = a.qz, qw = a.qw;
+                            float dir[3] = {-(2.0f * (qx * qz + qw * qy)), -(2.0f * (qy * qz - qw * qx)), -(1.0f - 2.0f * (qx * qx + qy * qy))};
+                            float denom = dir[0] * n[0] + dir[1] * n[1] + dir[2] * n[2];
+                            if (std::fabs(denom) < 1e-4f) continue;
+                            float t = ((P[0] - a.px) * n[0] + (P[1] - a.py) * n[1] + (P[2] - a.pz) * n[2]) / denom;
+                            if (t <= 0.0f) continue;
+                            float hp[3] = {a.px + dir[0] * t - P[0], a.py + dir[1] * t - P[1], a.pz + dir[2] * t - P[2]};
+                            float u = (hp[0] * right[0] + hp[1] * right[1] + hp[2] * right[2]) / W + 0.5f;
+                            float v = 0.5f - (hp[0] * up[0] + hp[1] * up[1] + hp[2] * up[2]) / H;
+                            if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) continue;
+                            hit_hand = h;
+                            hit_u = u;
+                            hit_v = v;
+                        }
+                    }
+                    RECT client{};
+                    if (hit_hand >= 0 && GetClientRect(game_window, &client) && client.right > 0 && client.bottom > 0)
+                    {
+                        POINT p{(LONG)(hit_u * client.right), (LONG)(hit_v * client.bottom)};
+                        LPARAM at = MAKELPARAM(p.x, p.y);
+                        POINT screen = p;
+                        ClientToScreen(game_window, &screen);
+                        SetCursorPos(screen.x, screen.y);
+                        PostMessageW(game_window, WM_MOUSEMOVE, pressed ? MK_LBUTTON : 0, at);
+                        pointer_uv[0] = hit_u;
+                        pointer_uv[1] = hit_v;
+                        float trig = cs.hand[hit_hand].trigger;
+                        if (!pressed && trig > 0.7f)
+                        {
+                            pressed = true;
+                            pressed_hand = hit_hand;
+                            PostMessageW(game_window, WM_LBUTTONDOWN, MK_LBUTTON, at);
+                            controllers_buzz(hit_hand, 0.3f);
+                            HSVR_LOG("Pointer: %s hand clicks the panel at (%ld, %ld) of %ld x %ld", hit_hand == 0 ? "left" : "right", (long)p.x, (long)p.y,
+                                     (long)client.right, (long)client.bottom);
+                        }
+                        else if (pressed && trig < 0.3f)
+                        {
+                            pressed = false;
+                            PostMessageW(game_window, WM_LBUTTONUP, 0, at);
+                        }
+                    }
+                    else if (pressed)
+                    {
+                        // Off the panel or the menu closed while held: let the button go.
+                        pressed = false;
+                        if (game_window) PostMessageW(game_window, WM_LBUTTONUP, 0, 0);
+                    }
+                }
+
                 // ---- flat UI panel ----
                 if (render && want_ui && ui_srv.ptr)
                 {
@@ -1857,6 +1950,15 @@ float4 PSMain(VSOut i) : SV_Target
                     c.params[1] = cfg.ui_use_alpha ? 2.0f : 1.0f;
                     c.params[2] = (float)cfg.ui_opacity_gain;
                     c.cursor[0] = -1.0f;
+                    if (pointer_uv[0] >= 0.0f)
+                    {
+                        // Where the controller points, drawn on the panel (the game's own pointer
+                        // follows, but may be hidden in some menus).
+                        c.cursor[0] = pointer_uv[0];
+                        c.cursor[1] = pointer_uv[1];
+                        c.cursor[2] = (float)g.ui_copy_width / (float)std::max<UINT>(1, g.ui_copy_height);
+                        c.cursor[3] = 0.012f;
+                    }
                     // A menu (the game is paused or wants a mouse pointer): put a dark sheet behind
                     // the panel so every button can be read whatever is behind it.
                     if (pointer_showing || game_pointer || shared().game_paused.load()) c.params[3] = (float)cfg.ui_menu_backdrop;
@@ -2253,13 +2355,42 @@ float4 PSMain(VSOut i) : SV_Target
             HSVR_LOG("TEST MODE: pretend headset (dev_fake_headset=1). No SteamVR is used; both eye views show in the game window.");
             return true;
         }
-        if (cfg.require_steamvr_running && !process_running(L"vrserver.exe") && !process_running(L"vrmonitor.exe"))
+        // Decided once, here, before anything of OpenXR is loaded: opening an OpenXR instance is what
+        // starts SteamVR when it is closed (the game itself has no XR plugin).
+        if (cfg.vr_auto != 0 && cfg.require_steamvr_running)
         {
-            HSVR_LOG("SteamVR is not running, so the game starts flat. Start SteamVR first to play in VR.");
-            return false;
+            std::string found;
+            const std::string& list = cfg.vr_auto_processes;
+            size_t start = 0;
+            while (found.empty())
+            {
+                size_t comma = list.find(',', start);
+                std::string name = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                size_t a = name.find_first_not_of(" \t"), b = name.find_last_not_of(" \t");
+                if (a != std::string::npos)
+                {
+                    name = name.substr(a, b - a + 1);
+                    std::wstring wide(name.begin(), name.end());
+                    if (process_running(wide.c_str())) found = name;
+                }
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+            if (found.empty())
+            {
+                HSVR_LOG("SteamVR is not running (none of %s), so the game starts flat and the mod stays off this session "
+                         "(vr_auto=1). Start SteamVR before the game to play in VR.", list.c_str());
+                return false;
+            }
+            HSVR_LOG("SteamVR is running (%s), so the game starts in VR (vr_auto=1)", found.c_str());
+        }
+        else
+        {
+            HSVR_LOG("vr_auto=0: starting VR whether or not SteamVR is running (OpenXR opens SteamVR if it is closed)");
         }
         if (!xr_load_runtime(xr)) return false;
 
+        std::vector<std::string> offered_extensions;
         if (xr.EnumerateInstanceExtensionProperties)
         {
             uint32_t count = 0;
@@ -2270,6 +2401,7 @@ float4 PSMain(VSOut i) : SV_Target
             for (auto& e : exts)
             {
                 if (strcmp(e.extensionName, XR_KHR_D3D12_ENABLE_EXTENSION_NAME) == 0) has_d3d12 = true;
+                offered_extensions.push_back(e.extensionName);
             }
             if (!has_d3d12)
             {
@@ -2278,14 +2410,15 @@ float4 PSMain(VSOut i) : SV_Target
             }
         }
 
-        const char* extensions[] = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
+        std::vector<const char*> extensions = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
+        for (const char* e : controllers_wanted_extensions(offered_extensions)) extensions.push_back(e);
         XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
         strncpy(ici.applicationInfo.applicationName, "Half Sword VR", XR_MAX_APPLICATION_NAME_SIZE - 1);
         ici.applicationInfo.applicationVersion = 1;
         strncpy(ici.applicationInfo.engineName, "HalfSwordVR mod", XR_MAX_ENGINE_NAME_SIZE - 1);
         ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
-        ici.enabledExtensionCount = 1;
-        ici.enabledExtensionNames = extensions;
+        ici.enabledExtensionCount = (uint32_t)extensions.size();
+        ici.enabledExtensionNames = extensions.data();
         XrResult r = xr.CreateInstance(&ici, &g_instance);
         if (XR_FAILED(r))
         {
@@ -2309,7 +2442,10 @@ float4 PSMain(VSOut i) : SV_Target
             return false;
         }
         XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
+        XrSystemHandTrackingPropertiesEXT hand_props{XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT};
+        if (extensions.size() > 1) sp.next = &hand_props;
         if (XR_SUCCEEDED(xr.GetSystemProperties(g_instance, g_system, &sp))) HSVR_LOG("OpenXR: headset %s", sp.systemName);
+        controllers_system_hand_tracking(extensions.size() > 1 && hand_props.supportsHandTracking);
         controllers_create(xr, g_instance);
 
         uint32_t view_count = 0;
