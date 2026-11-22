@@ -12780,7 +12780,7 @@ namespace
         j.weapon = weapon;
         j.made_at = at_local;
         j.turns = turns;
-        j.made_t = now_seconds();
+        j.made_t = hsvr::now_seconds();
         HSVR_LOG("Joint hold: %s hand %s joint made on %ls at (%.1f, %.1f, %.1f) on it", side == 0 ? "left" : "right", turns ? "turning" : "pull-only",
                  weapon->GetName().c_str(), at_local.x, at_local.y, at_local.z);
         return true;
@@ -12870,9 +12870,12 @@ namespace
         // stopped by something (r5: the staff propped on its head went past the fade and was pressed into
         // the ground at 2-3 kN) or just handed over (r5: thrown up at 25 m/s). So: only while the point held
         // still moves (>= pose_hold_joint_fade_min_speed cm/s) and not in the first 0.3 s of a joint.
+        // The speed is the HAND's (where it wants the point held), not the grip's: a grip shaking against
+        // the ease kept itself over the threshold and the cap pumped at 18 Hz (r6).
         double now = now_seconds();
-        double speed = (m.prev_t > 0.0 && now - m.prev_t > 1e-4) ? length(pivot_world - m.prev_p) / (now - m.prev_t) : 0.0;
-        m.prev_p = pivot_world;
+        Vec3 want_pivot = target_pos + target_rot.rotate(pivot);
+        double speed = (m.prev_t > 0.0 && now - m.prev_t > 1e-4) ? length(want_pivot - m.prev_p) / (now - m.prev_t) : 0.0;
+        m.prev_p = want_pivot;
         m.prev_t = now;
         bool may_fade = speed >= cfg.pose_hold_joint_fade_min_speed && now - m.made_t > 0.3;
         auto hand_cap = [&](double bs_n, double err_cm) {
@@ -12938,10 +12941,24 @@ namespace
         {
             int n = (two && g_jh[g_two.second][1].con) ? 2 : 1;
             Vec3 at[2] = {pivot_world, pos + rot.rotate(g_two.bs_local)};
+            double share[2] = {1.0, 0.0};
+            if (n == 2)
+            {
+                // Two hands carry it like two supports on a beam: each takes the weight by the other's
+                // lever to the centre of mass along the line between them (one pushes down when the
+                // centre is past the other). With twist-only turning nothing else holds that lever, and
+                // the shoulder-capped pulls (~29 N a hand) let a staff's head sink to the ground (r6).
+                Vec3 d = at[1] - at[0];
+                double L2 = dot(d, d);
+                double t = L2 > 25.0 ? dot(com - at[0], d) / L2 : 0.5;
+                t = (std::min)(3.0, (std::max)(-2.0, t)); // far past the hands it is a long lever; keep it sane
+                share[0] = 1.0 - t;
+                share[1] = t;
+            }
             for (int i = 0; i < n; ++i)
             {
                 Call f(base, STR("AddForceAtLocation"));
-                f.three(STR("Force"), 0.0, 0.0, mass * 980.0 / n); // kg cm/s^2
+                f.three(STR("Force"), 0.0, 0.0, mass * 980.0 * share[i]); // kg cm/s^2
                 f.three(STR("Location"), at[i].x, at[i].y, at[i].z);
                 f.name(STR("BoneName"), FName());
                 f.run();
