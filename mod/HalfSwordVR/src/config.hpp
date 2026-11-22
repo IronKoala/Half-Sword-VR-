@@ -161,7 +161,14 @@ namespace hsvr
         // 1 = in Free Mode the fencer's dialog (the tavern's "Train") gets a Train button that takes
         // you into the test room instead of the cellar (progression's Train is not changed).
         bool test_room_button = true;
-        std::string test_room_map = "/Game/Maps/Arenas/Map_Arena_Yard";
+        // The level the room opens: the game's cellar (Matthew 2026-11-22; the Yard before).
+        std::string test_room_map = "/Game/Maps/Arenas/Map_Arena_Cellar";
+        // The headset shows black while the room is put up and fades in once it is ready, so nothing
+        // is seen popping in. 0 = see the level as it loads.
+        bool test_room_blackout = true;
+        // Two Blade & Sorcery style spawn books on lecterns beside the tables (weapons left, Willies
+        // right): point at a line with an empty hand and pull the trigger.
+        bool test_room_books = true;
         int test_room_foes = 4;
         // The foes' tier (armour and weapons): -1 = a random tier each, 0 Beggar .. 8 Lord.
         int test_room_tier = -1;

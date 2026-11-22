@@ -385,6 +385,8 @@ namespace hsvr
         flag("test_room", c.test_room);
         flag("test_room_button", c.test_room_button);
         text("test_room_map", c.test_room_map);
+        flag("test_room_blackout", c.test_room_blackout);
+        flag("test_room_books", c.test_room_books);
         integer("test_room_foes", c.test_room_foes);
         integer("test_room_tier", c.test_room_tier);
         integer("test_room_weapon_tier", c.test_room_weapon_tier);

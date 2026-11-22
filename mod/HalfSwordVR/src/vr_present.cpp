@@ -529,6 +529,8 @@ float4 PSMain(VSOut i) : SV_Target
             a = 1.0;
         }
     }
+    // No cursor: cursor.y dims the picture (0 as it is .. 1 black), for the test room being built.
+    if (cursor.x < 0.0 && cursor.y > 0.0) rgb *= 1.0 - saturate(cursor.y);
     if (params.x > 0.5)
     {
         rgb = SrgbToLinear(rgb);
@@ -1824,6 +1826,7 @@ float4 PSMain(VSOut i) : SV_Target
                         c.uv_rect[3] = (float)((y1 - y0) / (double)sd.Height);
                         c.params[0] = decode ? 1.0f : 0.0f;
                         c.cursor[0] = -1.0f;
+                        c.cursor[1] = (std::min)(1.0f, (std::max)(0.0f, shared().blackout.load())); // the test room hides its building
                         eyes_acquired[e] = blit_to_swapchain(g.eye[e], srv, c);
                         const XrEyeRaw& eye = item.pose.eye[e];
                         views[e].pose.position = {eye.px, eye.py, eye.pz};
