@@ -8778,6 +8778,23 @@ namespace
                          cfg.pose_pavise_mount_cm);
             return false;
         }
+        // The shoulder's hung strap is a few cm from where the left forearm is held at the chest: with the
+        // palm on that strap it was mounted on the arm whenever the palm was just on the arm's back side
+        // (test b6_light_right 2026-11-22 19:24Z: strap 0.2 cm, arm 3.2 cm). The nearer wins.
+        const double kind = read_number_variable(w, STR("SheathSlot"));
+        const Handle* strap = pavise_strap(w, base);
+        if (cfg.pose_holster_snap && strap && (kind == 2.0 || kind == 3.0) && !object_property(pawn, STR("Weapon Slot Back")))
+        {
+            Vec3 a, b;
+            hung_strap(mesh, w, *strap, a, b);
+            const int only = back_pavise_hand(mesh, w, (a + b) * 0.5);
+            const double hang = to_segment(palm, a, b);
+            if ((only < 0 || only == side) && hang <= cfg.pose_holster_zone_cm && hang < d)
+            {
+                HSVR_LOG("Pavise: %s hand let go of the strap %.1f cm from where it hangs, nearer than the other forearm (%.1f cm): hung, not mounted", hand, hang, d);
+                return false;
+            }
+        }
         const char* no = nullptr;
         if (g_mount[arm].weapon) no = "that forearm has one";
         else if (bool_property(pawn, arm == 0 ? STR("Hand L Torn Off") : STR("Hand R Torn Off"))) no = "that arm is cut off";
