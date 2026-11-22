@@ -78,7 +78,8 @@ namespace hsvr
                 // the camera trails the aim and shakes on hits, which in a headset would swing
                 // the whole world around.
                 if (cfg.heading == "aim" && player.has_heading) g_view.base_yaw = player.heading_yaw;
-                Vec3 offset = player.head_position - player.actor_position;
+                Vec3 exact = cfg.anchor_room_unsmoothed ? player.exact_offset : Vec3{};
+                Vec3 offset = player.head_position - player.actor_position - exact;
                 if (!g_have_smoothed || cfg.anchor_smoothing <= 0.0)
                 {
                     g_smoothed_offset = offset;
@@ -93,7 +94,19 @@ namespace hsvr
                     g_smoothed_offset = g_smoothed_offset + delta * alpha;
                 }
                 Quat base = quat_from_yaw_deg(g_view.base_yaw);
-                g_view.anchor = player.actor_position + g_smoothed_offset + base.rotate({cfg.eye_forward_cm, 0.0, 0.0}) + Vec3{0.0, 0.0, cfg.eye_up_cm};
+                g_view.anchor = player.actor_position + g_smoothed_offset + exact + base.rotate({cfg.eye_forward_cm, 0.0, 0.0}) + Vec3{0.0, 0.0, cfg.eye_up_cm};
+                // Test aid: the view's own jumps (with the headset still it should stay put while his feet follow).
+                static Vec3 last_anchor, last_actor;
+                static bool have_last = false;
+                if (have_last)
+                {
+                    Vec3 da = g_view.anchor - last_anchor, dc = player.actor_position - last_actor;
+                    double a = std::sqrt(da.x * da.x + da.y * da.y), c = std::sqrt(dc.x * dc.x + dc.y * dc.y);
+                    if (a > 1.0 && a < 150.0) HSVR_LOG_EVERY(0.25, "View: anchor moved %.1f cm this frame (capsule %.1f cm)", a, c);
+                }
+                last_anchor = g_view.anchor;
+                last_actor = player.actor_position;
+                have_last = true;
             }
             else
             {
@@ -253,6 +266,17 @@ namespace hsvr
                 Quat base = quat_from_yaw_deg(g_view.base_yaw);
                 Vec3 location = g_view.anchor + base.rotate(relative);
                 Rot rotation = quat_to_rot((base * relative_rotation).normalized());
+                if (shared().photo_on.load())
+                {
+                    // Test pictures: a fixed camera (hsvr.photo_cam), the eyes 3.2 cm either side of it.
+                    double yaw = shared().photo_yaw.load(), pitch = shared().photo_pitch.load();
+                    Quat q = quat_from_yaw_deg(yaw);
+                    double side = ViewIndex == 0 ? -3.2 : (ViewIndex > 0 ? 3.2 : 0.0);
+                    location = Vec3{shared().photo_x.load(), shared().photo_y.load(), shared().photo_z.load()} + q.rotate({0.0, side, 0.0});
+                    rotation.pitch = pitch;
+                    rotation.yaw = yaw;
+                    rotation.roll = 0.0;
+                }
                 ViewLocation.X = location.x;
                 ViewLocation.Y = location.y;
                 ViewLocation.Z = location.z;
@@ -384,7 +408,8 @@ namespace hsvr
         PlayerAnchor player;
         if (!g_anchor_provider(player) || !player.has_head) return true;
         if (cfg.heading == "aim" && player.has_heading) base_yaw = player.heading_yaw;
-        anchor = player.actor_position + g_smoothed_offset + quat_from_yaw_deg(base_yaw).rotate({cfg.eye_forward_cm, 0.0, 0.0}) + Vec3{0.0, 0.0, cfg.eye_up_cm};
+        Vec3 exact = cfg.anchor_room_unsmoothed ? player.exact_offset : Vec3{};
+        anchor = player.actor_position + g_smoothed_offset + exact + quat_from_yaw_deg(base_yaw).rotate({cfg.eye_forward_cm, 0.0, 0.0}) + Vec3{0.0, 0.0, cfg.eye_up_cm};
         return true;
     }
 
