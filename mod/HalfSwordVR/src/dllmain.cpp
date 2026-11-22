@@ -13535,7 +13535,11 @@ namespace
         if (cfg.pose_hold_joint_carry_weight)
         {
             int n = (two && g_jh[g_two.second][1].con) ? 2 : 1;
-            Vec3 at[2] = {pivot_world, pos + rot.rotate(g_two.bs_local)};
+            // With the old hold's turn (one hand) the lift goes at the centre of mass: at the grip it turned the
+            // weapon by m g r inside every physics step, which the spin set once a tick only won back as a standing
+            // tilt (sanity 4a7ec4c: war hammers 9-31 deg, swords 2-4, war staff 51; 1-2 with no lift there). The
+            // old hold's own solve already holds the weight's lever about the grip.
+            Vec3 at[2] = {m.mod_turn ? com : pivot_world, pos + rot.rotate(g_two.bs_local)};
             double share[2] = {1.0, 0.0};
             if (n == 2)
             {
