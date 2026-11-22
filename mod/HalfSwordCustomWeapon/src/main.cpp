@@ -1337,9 +1337,9 @@ namespace
         double dx = head.x - grip.x, dy = head.y - grip.y, dz = head.z - grip.z;
         double d = std::sqrt(dx * dx + dy * dy + dz * dz);
         double need = g_settings.swing_slide_min_target_cm > 0 ? g_settings.swing_slide_min_target_cm : s.reach + g_settings.swing_slide_arm_cm;
-        bool far = d > need;
-        log("Swing slide: target's head %.0f cm from the grip (slides beyond %.0f cm): %s", d, need, far ? "slide" : "too close, no slide");
-        return far;
+        bool is_far = d > need;
+        log("Swing slide: target's head %.0f cm from the grip (slides beyond %.0f cm): %s", d, need, is_far ? "slide" : "too close, no slide");
+        return is_far;
     }
 
     void slide_tick(float dt)
