@@ -5034,6 +5034,29 @@ namespace
         g_arm_ignore[side].weapon = nullptr;
     }
 
+    // A new constraint component of his, at his root, joining nothing yet.
+    UObject* new_constraint(UObject* pawn, UClass* cls)
+    {
+        Call add(pawn, STR("AddComponentByClass"));
+        add.object(STR("Class"), cls);
+        add.flag(STR("bManualAttachment"), false);
+        if (FProperty* t = add.param(STR("RelativeTransform")))
+        {
+            uint8_t* at = add.buffer.data() + t->GetOffset_Internal();
+            UScriptStruct* type = struct_type(t);
+            if (FProperty* r = struct_member(type, STR("Rotation")))
+                if (FProperty* w = struct_member(struct_type(r), STR("W")))
+                {
+                    uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
+                    if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
+                    else *reinterpret_cast<float*>(wat) = 1.0f;
+                }
+            if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
+        }
+        add.flag(STR("bDeferredFinish"), false);
+        return add.run() ? add.object_result() : nullptr;
+    }
+
     void ignore_arm_collision(UObject* pawn, UObject* mesh, UObject* weapon, UObject* base, int side)
     {
         if (g_arm_ignore[side].weapon == weapon) return;
@@ -5052,25 +5075,7 @@ namespace
             // the other hand's call (a second hand on it) adds only its own forearm.
             bool whole = hsvr::config().pose_hold_ignore_body && g_arm_ignore[1 - side].weapon != weapon;
             if ((!hsvr::config().pose_hold_ignore_hand && bone.ToString() == hand.ToString()) || (!whole && !in_forearm(mesh, bone, side))) continue;
-            Call add(pawn, STR("AddComponentByClass"));
-            add.object(STR("Class"), cls);
-            add.flag(STR("bManualAttachment"), false);
-            if (FProperty* t = add.param(STR("RelativeTransform")))
-            {
-                uint8_t* at = add.buffer.data() + t->GetOffset_Internal();
-                UScriptStruct* type = struct_type(t);
-                if (FProperty* r = struct_member(type, STR("Rotation")))
-                    if (FProperty* w = struct_member(struct_type(r), STR("W")))
-                    {
-                        uint8_t* wat = at + r->GetOffset_Internal() + w->GetOffset_Internal();
-                        if (w->GetClass().GetName() == STR("DoubleProperty")) *reinterpret_cast<double*>(wat) = 1.0;
-                        else *reinterpret_cast<float*>(wat) = 1.0f;
-                    }
-                if (FProperty* sc = struct_member(type, STR("Scale3D"))) write_three(at + sc->GetOffset_Internal(), sc, 1.0, 1.0, 1.0);
-            }
-            add.flag(STR("bDeferredFinish"), false);
-            if (!add.run()) continue;
-            UObject* j = add.object_result();
+            UObject* j = new_constraint(pawn, cls);
             if (!j) continue;
             // Free in every direction and no drives: it holds nothing, it only switches off the pair's collision.
             for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
@@ -6318,9 +6323,10 @@ namespace
     WorldGrab g_world[2];
     bool g_wrap_on_side(int side); // (defined with the wrap)
     // The hand holds an object, a body or scenery, or has just asked the game to (its fist must wait).
+    bool mount_gripped(int side);
     bool hand_holds_thing(int side, UObject* pawn)
     {
-        if (g_world[side].on || g_wrap_on_side(side)) return true;
+        if (g_world[side].on || g_wrap_on_side(side) || mount_gripped(side)) return true;
         if (bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R"))) return true;
         const ObjectGrab& g = g_object_grab[side];
         return g.component && !g.fallback_tried && g.since >= 0.0 && hsvr::now_seconds() - g.since < 0.5;
@@ -7061,6 +7067,7 @@ namespace
     // touching it (pose_grab_touch_cm): it holds the nearest handle (grip, blade, a strap) lined up
     // with its grip line, or the spot it touched. The weapon then lies along the line between the two
     // hands' points, the first hand sets its roll, and the hold is pose_two_hand_strength as strong.
+    bool held_by_strap(int side, UObject* w);
     bool try_second_hand(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -7072,6 +7079,8 @@ namespace
         // Not a blade on its way into or out of a scabbard (playtest 02:44: the off hand reaching for
         // the scabbard took the sheathing sword's blade, and the two holds froze it).
         if (g_draw[other].active && g_draw[other].weapon == weapon) return false;
+        // Held by its rear strap a pavise is held in one hand (its strap passes: pavise_pass).
+        if (cfg.pose_pavise_strap && held_by_strap(other, weapon)) return false;
         UObject* base = object_property(weapon, STR("BaseMesh"));
         if (!base) return false;
         Vec3 at = hand_grab_point(mesh, side);
@@ -7978,6 +7987,35 @@ namespace
         return axes[thin];
     }
 
+    // A pavise's rear strap (pose_pavise_strap), and where that pavise sits on each forearm: the point of
+    // its BaseMesh that lands on the game's shield_<s>_socket and the turn there, as Set Up <S> Hand Weapon
+    // places "Grip <S> Hand Default Pos" on it (@3701-4222). The heavy's left and the light's both are the
+    // game's own scenes. The game has none for the heavy on the right: that is the left's mirror image,
+    // still top up, the long strap round the arm by the wrist. Nor for the tower, which has no forearm
+    // strap: the middle of its crossed strap is used, placed as the heavy is.
+    struct PaviseSpec
+    {
+        const wchar_t* shield;
+        const char* strap;
+        struct
+        {
+            double x, y, z, pitch, yaw, roll;
+        } at[2]; // left, right
+    };
+    const PaviseSpec k_pavises[] = {
+        {L"Shield_Pavise_Heavy", "long strap", {{-7, 0, 16, 0, -5, -20}, {17, 0, 16, 0, 5, -20}}},
+        {L"Shield_Pavise_Light", "lower strap", {{0, 0, 6, -90, 0, 0}, {0, 0, 6, 90, 0, 0}}},
+        {L"Shield_Pavise_Tower", "crossed strap's middle", {{-7, 0, 0, 0, -5, -20}, {7, 0, 0, 0, 5, -20}}},
+    };
+    const PaviseSpec* pavise_spec(UObject* item)
+    {
+        if (!item || !class_name_starts(item, STR("Shield_Pavise"))) return nullptr;
+        std::wstring cls = shield_class(item);
+        for (const PaviseSpec& p : k_pavises)
+            if (cls == p.shield) return &p;
+        return nullptr;
+    }
+
     // Pavises start locked to the forearm, like a real pavise (Matthew 2026-11-20). The game already
     // straps a shield to the forearm for grip types 6 (Shield) and 7 (Shield_Heavy): its joint is to
     // lowerarm_x at shield_x_socket (shield_grips.md). Pavise_Light is 6 for both hands (forearm through
@@ -7987,9 +8025,457 @@ namespace
     // grip, kept (not moved into the hand), wherever the game has one for that hand.
     bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg)
     {
+        if (cfg.pose_pavise_strap && pavise_spec(shield)) return false; // held by the strap, mounted by the player
         if (!cfg.pose_pavise_forearm || !shield || !class_name_starts(shield, STR("Shield_Pavise"))) return false;
         double g = read_number_variable(shield, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default"));
         return g == 6.0 || g == 7.0;
+    }
+
+    // ---- Pavises by the rear strap (pose_pavise_strap, Matthew 2026-11-22) ---------------------------
+    // Off the back only the hand across the body from the strap takes one, and holds it in the hand by
+    // the strap. The other hand taking the strap gets it. Let go by the back of the other forearm, it is
+    // mounted there by a joint of the mod's, and that hand stays free: Weapon L/R is NOT the shield. The
+    // game needs it there for nothing a block or a hit reads (ModularWeaponBP tells its user by Last
+    // Parent @62285 / @67069, Sheathed @62363 and Is Held @42700 / @62991 / @65103); Set Weapon Damping
+    // Pick Up gives it Is Held (which also keeps the game's pickups off it, UG @217087 / @224880), its
+    // held mass and the boxes the AI reads a held shield by (My Box Collisions @1132-1544, AI_BP @30683).
+    const Handle* pavise_strap(UObject* w, UObject* base)
+    {
+        const PaviseSpec* spec = base ? pavise_spec(w) : nullptr;
+        if (!spec) return nullptr;
+        for (const Handle& hd : item_handles(w, base))
+            if (hd.name == spec->strap) return &hd;
+        return nullptr;
+    }
+
+    hsvr::Vec3 handle_middle(const Handle& hd) { return (hd.a + hd.b) * 0.5; }
+
+    double to_segment(const hsvr::Vec3& p, const hsvr::Vec3& a, const hsvr::Vec3& b, hsvr::Vec3* on = nullptr)
+    {
+        using namespace hsvr;
+        Vec3 ab = b - a;
+        double len2 = dot(ab, ab);
+        double u = len2 > 1e-6 ? (std::min)(1.0, (std::max)(0.0, dot(p - a, ab) / len2)) : 0.0;
+        Vec3 q = a + ab * u;
+        if (on) *on = q;
+        return length(p - q);
+    }
+
+    // The hand across the body from a strap at this point: spine_05's X is his left. -1: either (a strap
+    // on the spine, as the tower's).
+    int opposite_hand(UObject* mesh, const hsvr::Vec3& strap)
+    {
+        using namespace hsvr;
+        static const FName spine = bone_fname("spine_05");
+        double x = socket_rotation(mesh, spine).inverse().rotate(strap - socket_location(mesh, spine)).x;
+        if (std::fabs(x) < 4.0) return -1;
+        return x > 0.0 ? 1 : 0;
+    }
+
+    const char* pavise_back_socket(UObject* w) { return read_number_variable(w, STR("SheathSlot")) == 2.0 ? "Sheath_Slot_Shoulder_L" : "Sheath_Slot_Back"; }
+
+    // Where a pavise sat when it hung, in its slot socket's frame (kept at each take off the back).
+    struct HungPose
+    {
+        hsvr::Vec3 pos;
+        hsvr::Quat rot;
+    };
+    std::unordered_map<UObject*, HungPose> g_hung;
+
+    void remember_hung(UObject* mesh, UObject* w, const hsvr::Vec3& p, const hsvr::Quat& q)
+    {
+        using namespace hsvr;
+        static bool tracked = on_freed([] { erase_gone_keys(g_hung); });
+        (void)tracked;
+        FName sock = bone_fname(pavise_back_socket(w));
+        Quat iq = socket_rotation(mesh, sock).inverse();
+        g_hung[w] = HungPose{iq.rotate(p - socket_location(mesh, sock)), (iq * q).normalized()};
+    }
+
+    // Where its strap would be, hung again. Never seen hung: the socket's pose, 7 cm down it on the back
+    // (where the heavy rests there, pavise_strap_and_scabbard_hold.md (a)).
+    void hung_strap(UObject* mesh, UObject* w, const Handle& strap, hsvr::Vec3& a, hsvr::Vec3& b)
+    {
+        using namespace hsvr;
+        FName sock = bone_fname(pavise_back_socket(w));
+        HungPose hp{Vec3{0, 0, read_number_variable(w, STR("SheathSlot")) == 3.0 ? -7.0 : 0.0}, Quat{}};
+        auto known = g_hung.find(w);
+        if (known != g_hung.end()) hp = known->second;
+        Vec3 sp = socket_location(mesh, sock);
+        Quat sq = socket_rotation(mesh, sock);
+        a = sp + sq.rotate(hp.pos + hp.rot.rotate(strap.a));
+        b = sp + sq.rotate(hp.pos + hp.rot.rotate(strap.b));
+    }
+
+    bool held_by_strap(int side, UObject* w)
+    {
+        const FreeGrip* g = nullptr;
+        if (g_pending_item[side] == w && g_pending_free[side].set) g = &g_pending_free[side];
+        else if (g_hold[side].weapon == w && g_hold[side].free.set) g = &g_hold[side].free;
+        if (!g) return false;
+        const PaviseSpec* spec = pavise_spec(w);
+        return spec && g->handle == spec->strap;
+    }
+
+    // Into that hand by its strap, from where it is.
+    bool take_by_strap(int side, UObject* pawn, UObject* mesh, UObject* w, UObject* base, const Handle& strap, const hsvr::Vec3& palm)
+    {
+        using namespace hsvr;
+        Vec3 p = component_location(base);
+        Quat q = component_rotation(base);
+        if (!give_hand_weapon(side, pawn, w) || object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != w) return false;
+        FreeGrip g = handle_grip(side, mesh, p, q, palm, strap, 0.5);
+        g.hold_at = hsvr::config().pose_grab_settle_s > 0.0;
+        g.at_pos = p;
+        g.at_rot = q;
+        g.place = !g.hold_at;
+        g_pending_free[side] = g;
+        g_pending_item[side] = w;
+        set_component_transform(base, p, q, true); // back from where the game's set-up snapped it
+        return true;
+    }
+
+    // The other hand on the rear strap of a pavise in a hand: it passes to that hand.
+    bool pavise_pass(int side, UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_pavise_strap || g_two.active) return false;
+        int from = 1 - side;
+        UObject* w = object_property(pawn, from == 0 ? STR("Weapon L") : STR("Weapon R"));
+        if (!w || g_hold[from].weapon != w || in_own_slot(pawn, w)) return false;
+        UObject* base = object_property(w, STR("BaseMesh"));
+        const Handle* strap = pavise_strap(w, base);
+        if (!strap) return false;
+        Vec3 palm = hand_grab_point(mesh, side);
+        double d = to_segment(component_rotation(base).inverse().rotate(palm - component_location(base)), strap->a, strap->b);
+        if (d > cfg.pose_grab_handle_cm) return false;
+        Vec3 p = component_location(base);
+        Quat q = component_rotation(base);
+        drop_weapon(from, pawn, false);
+        clear_arm_ignore(from); // else the new hand's hold would switch off only its forearm against it
+        g_pending_free[from] = FreeGrip{};
+        g_pending_item[from] = nullptr;
+        set_component_transform(base, p, q, true);
+        bool ok = take_by_strap(side, pawn, mesh, w, base, *strap, palm);
+        if (ok) controllers_buzz(side, 0.4f);
+        HSVR_LOG("Pavise: %s hand %s %ls by its %s from the %s hand (%.1f cm from it)", side == 0 ? "left" : "right", ok ? "takes" : "could NOT take",
+                 w->GetName().c_str(), strap->name.c_str(), from == 0 ? "left" : "right", d);
+        return true;
+    }
+
+    // One pavise on each forearm, by that arm's side.
+    struct Mount
+    {
+        UObject* weapon = nullptr;
+        UObject* base = nullptr;
+        UObject* mesh = nullptr;
+        UObject* pawn = nullptr;
+        UObject* joint = nullptr;
+        std::vector<UObject*> no_collide; // against his own bodies
+        UObject* beside = nullptr;        // what that arm's hand holds, not colliding with it either
+        UObject* beside_joint = nullptr;
+        const PaviseSpec* spec = nullptr;
+        bool gripped = false; // that arm's own hand is on its strap
+        bool unstuck = false; // its "Static Mesh Collision Disabled (Unstuck)" as last seen
+        double last_log = -1e9;
+    };
+    Mount g_mount[2];
+    bool g_mount_tracked = on_freed([] {
+        for (Mount& m : g_mount)
+        {
+            erase_gone(m.no_collide);
+            for (UObject** p : {&m.joint, &m.beside, &m.beside_joint})
+                if (gone(*p)) *p = nullptr;
+            if (gone(m.weapon) || gone(m.base) || gone(m.mesh) || gone(m.pawn)) m = Mount{};
+        }
+    });
+
+    bool mount_gripped(int side) { return g_mount[side].gripped; }
+    bool is_mounted(UObject* w) { return w && (w == g_mount[0].weapon || w == g_mount[1].weapon); }
+
+    void destroy_joint(UObject*& j)
+    {
+        if (!j) return;
+        Call d(j, STR("K2_DestroyComponent"));
+        d.object(STR("Object"), j);
+        d.run();
+        j = nullptr;
+    }
+
+    // motion 0 free (it only switches the pair's collision off), 2 locked.
+    UObject* pair_joint(UObject* pawn, UObject* a, UObject* b, FName bone, uint8_t motion, UObject* attach_to = nullptr, const FName* socket = nullptr)
+    {
+        static UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+        if (!cls) return nullptr;
+        UObject* j = new_constraint(pawn, cls);
+        if (!j) return nullptr;
+        if (attach_to && socket)
+        {
+            // The game's hand joint sits on the socket too (Set Up Left Hand Weapon @6276).
+            Call at(j, STR("K2_AttachToComponent"));
+            at.object(STR("Parent"), attach_to);
+            at.name(STR("SocketName"), *socket);
+            at.byte(STR("LocationRule"), 2); // SnapToTarget
+            at.byte(STR("RotationRule"), 2);
+            at.byte(STR("ScaleRule"), 2);
+            at.flag(STR("bWeldSimulatedBodies"), false);
+            at.run();
+        }
+        for (const TCHAR* fn : {STR("SetLinearXLimit"), STR("SetLinearYLimit"), STR("SetLinearZLimit")})
+        {
+            Call c(j, fn);
+            c.byte(STR("ConstraintType"), motion);
+            c.number(STR("LimitSize"), 0.0);
+            c.run();
+        }
+        for (const TCHAR* fn : {STR("SetAngularSwing1Limit"), STR("SetAngularSwing2Limit"), STR("SetAngularTwistLimit")})
+        {
+            Call c(j, fn);
+            c.byte(STR("MotionType"), motion);
+            c.run();
+        }
+        Call dc(j, STR("SetDisableCollision"));
+        dc.first_flag(true);
+        dc.run();
+        Call join(j, STR("SetConstrainedComponents"));
+        join.object(STR("Component1"), a);
+        join.name(STR("BoneName1"), FName());
+        join.object(STR("Component2"), b);
+        join.name(STR("BoneName2"), bone);
+        join.run();
+        return j;
+    }
+
+    void unjoin_mount(Mount& m)
+    {
+        destroy_joint(m.joint);
+        destroy_joint(m.beside_joint);
+        m.beside = nullptr;
+        for (UObject* j : m.no_collide) destroy_joint(j);
+        m.no_collide.clear();
+    }
+
+    // Where a mount belongs now.
+    void mount_pose(int arm, const Mount& m, hsvr::Vec3& p, hsvr::Quat& q)
+    {
+        using namespace hsvr;
+        static const FName sockets[2] = {bone_fname("shield_l_socket"), bone_fname("shield_r_socket")};
+        const auto& at = m.spec->at[arm];
+        q = (socket_rotation(m.mesh, sockets[arm]) * rot_to_quat(-at.pitch, -at.yaw, -at.roll)).normalized();
+        p = socket_location(m.mesh, sockets[arm]) - q.rotate(Vec3{at.x, at.y, at.z});
+    }
+
+    // Placed on the forearm (one teleport) and jointed to it: at the mount, and again only when the
+    // game's unstick has rebuilt its collision.
+    bool join_mount(int arm, Mount& m)
+    {
+        using namespace hsvr;
+        static const FName sockets[2] = {bone_fname("shield_l_socket"), bone_fname("shield_r_socket")};
+        static const FName lower[2] = {bone_fname("lowerarm_l"), bone_fname("lowerarm_r")};
+        Vec3 p;
+        Quat q;
+        mount_pose(arm, m, p, q);
+        set_component_transform(m.base, p, q, true);
+        // Set Up Left Hand Weapon @14301: BaseMesh to Mesh:lowerarm_l.
+        m.joint = pair_joint(m.pawn, m.base, m.mesh, lower[arm], 2, m.mesh, &sockets[arm]);
+        if (!m.joint) return false;
+        // As held: it touches none of his own bodies (the game's NewFunction_0 @537, UG @97167). What Set Up
+        // <S> Hand Weapon switched off as it was taken (his armour's bodies @16370, his sheathed items
+        // @17145-20157) stays off: only the next taker, or 3 m from Last Parent (ModularWeaponBP @144-302),
+        // switches it back on.
+        for (FName bone : physics_body_bones(m.mesh))
+            if (bone != lower[arm])
+                if (UObject* j = pair_joint(m.pawn, m.base, m.mesh, bone, 0)) m.no_collide.push_back(j);
+        return true;
+    }
+
+    // Off the arm, and loose as a dropped weapon is.
+    void unmount_loose(int arm, const char* why)
+    {
+        Mount m = g_mount[arm];
+        g_mount[arm] = Mount{};
+        unjoin_mount(m);
+        Call(m.weapon, STR("Set Weapon Damping Drop")).run();
+        HSVR_LOG("Pavise: %ls comes off the %s forearm (%s)", m.weapon->GetName().c_str(), arm == 0 ? "left" : "right", why);
+    }
+
+    // Let go of the strap by the back of the other forearm: mounted on it.
+    bool pavise_mount(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.pose_pavise_strap || g_two.active || !held_by_strap(side, w)) return false;
+        const int arm = 1 - side;
+        const char* hand = side == 0 ? "left" : "right";
+        UObject* base = object_property(w, STR("BaseMesh"));
+        const PaviseSpec* spec = pavise_spec(w);
+        if (!base || !spec) return false;
+        static const FName sockets[2] = {bone_fname("shield_l_socket"), bone_fname("shield_r_socket")};
+        static const FName lower[2] = {bone_fname("lowerarm_l"), bone_fname("lowerarm_r")};
+        static const FName wrist[2] = {bone_fname("hand_l"), bone_fname("hand_r")};
+        Vec3 palm = hand_grab_point(mesh, side), on;
+        double d = to_segment(palm, socket_location(mesh, lower[arm]), socket_location(mesh, wrist[arm]), &on);
+        // The socket's +Y is out of the back of the forearm (a shield's face there).
+        double behind = dot(palm - on, socket_rotation(mesh, sockets[arm]).rotate(Vec3{0, 1, 0}));
+        if (d > cfg.pose_pavise_mount_cm || behind < -3.0)
+        {
+            if (d < 40.0)
+                HSVR_LOG("Pavise: %s hand let go of the strap %.1f cm from the other forearm, %.1f cm to its back (needs %.0f cm, on the back): not mounted", hand, d, behind,
+                         cfg.pose_pavise_mount_cm);
+            return false;
+        }
+        const char* no = nullptr;
+        if (g_mount[arm].weapon) no = "that forearm has one";
+        else if (bool_property(pawn, arm == 0 ? STR("Hand L Torn Off") : STR("Hand R Torn Off"))) no = "that arm is cut off";
+        else if (in_own_slot(pawn, w)) no = "still leaving its slot";
+        else if (g_hand_world_v[side] > cfg.pose_holster_max_speed) no = "hand too fast: a throw";
+        if (no)
+        {
+            HSVR_LOG("Pavise: %s hand let go of the strap by the other forearm: not mounted (%s)", hand, no);
+            return false;
+        }
+        drop_weapon(side, pawn, false); // Set Up <S> Hand Weapon(None): that hand's joint goes
+        clear_arm_ignore(side);
+        g_pending_free[side] = FreeGrip{};
+        g_pending_item[side] = nullptr;
+        // What Set Up Left Hand Weapon gives a shield it straps on, bar Weapon L and the hand's grip
+        // (@4418 owner, @4537 Last Parent, @19081 pick-up damping). Its SearchBeacon stays on: the game's
+        // pickups pass over it on Is Held.
+        Call own(w, STR("SetOwner"));
+        own.object(STR("NewOwner"), pawn);
+        own.run();
+        set_variable(w, STR("Last Parent"), 0.0, pawn, nullptr);
+        Call(w, STR("Set Weapon Damping Pick Up")).run();
+        Mount& m = g_mount[arm];
+        m = Mount{};
+        m.weapon = w;
+        m.base = base;
+        m.mesh = mesh;
+        m.pawn = pawn;
+        m.spec = spec;
+        m.unstuck = bool_property(w, STR("Static Mesh Collision Disabled (Unstuck)"));
+        if (!join_mount(arm, m))
+        {
+            unmount_loose(arm, "no joint could be made");
+            return true;
+        }
+        controllers_buzz(side, 0.4f);
+        controllers_buzz(arm, 0.3f);
+        HSVR_LOG("Pavise: %s hand let go of the %s %.1f cm from the back of the %s forearm: %ls mounted there, that hand free", hand, spec->strap, d,
+                 arm == 0 ? "left" : "right", w->GetName().c_str());
+        return true;
+    }
+
+    // The free hand on the strap of the pavise on the other forearm: off the arm, into that hand.
+    bool pavise_unmount(int side, UObject* pawn, UObject* mesh, const hsvr::Vec3& palm, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        const int arm = 1 - side;
+        Mount& m = g_mount[arm];
+        if (!m.weapon || m.pawn != pawn || !object_alive(m.weapon)) return false;
+        const Handle* strap = pavise_strap(m.weapon, m.base);
+        if (!strap) return false;
+        double d = to_segment(component_rotation(m.base).inverse().rotate(palm - component_location(m.base)), strap->a, strap->b);
+        if (d > cfg.pose_grab_handle_cm) return false;
+        UObject* w = m.weapon;
+        UObject* base = m.base;
+        unjoin_mount(m);
+        m = Mount{};
+        bool ok = take_by_strap(side, pawn, mesh, w, base, *strap, palm);
+        if (ok) controllers_buzz(side, 0.4f);
+        else Call(w, STR("Set Weapon Damping Drop")).run();
+        HSVR_LOG("Pavise: %s hand %s %ls off the %s forearm by its %s (%.1f cm from it)", side == 0 ? "left" : "right", ok ? "takes" : "could NOT take",
+                 w->GetName().c_str(), arm == 0 ? "left" : "right", strap->name.c_str(), d);
+        return true;
+    }
+
+    // The mounted arm's own hand, with nothing else in reach.
+    bool mount_grip(int side, UObject* pawn)
+    {
+        Mount& m = g_mount[side];
+        if (!m.weapon || m.pawn != pawn) return false;
+        m.gripped = true;
+        hsvr::controllers_buzz(side, 0.3f);
+        HSVR_LOG("Pavise: %s hand grips the strap of the pavise on its own forearm (nothing else in reach)", side == 0 ? "left" : "right");
+        return true;
+    }
+
+    bool mount_let_go(int side)
+    {
+        if (!g_mount[side].gripped) return false;
+        g_mount[side].gripped = false;
+        set_anim_grip(side, -1);
+        HSVR_LOG("Pavise: %s hand lets go of the strap; it stays mounted", side == 0 ? "left" : "right");
+        return true;
+    }
+
+    // After his tick.
+    void mount_tick(UObject* pawn)
+    {
+        if (!g_mount[0].weapon && !g_mount[1].weapon) return;
+        UObject* in_hand[2] = {object_property(pawn, STR("Weapon L")), object_property(pawn, STR("Weapon R"))};
+        for (int arm = 0; arm < 2; ++arm)
+        {
+            Mount& m = g_mount[arm];
+            if (!m.weapon || m.pawn != pawn) continue;
+            if (!object_alive(m.weapon))
+            {
+                unjoin_mount(m);
+                m = Mount{};
+                continue;
+            }
+            // Someone's set-up took it (Last Parent is whoever took it last, @4537), or the game has given
+            // up on him as its user: 3 m away from him (ModularWeaponBP @144-1155, checked each 0.2 s).
+            UObject* user = object_property(m.weapon, STR("Last Parent"));
+            if (!user)
+            {
+                unmount_loose(arm, "it was 3 m from him");
+                continue;
+            }
+            if (m.weapon == in_hand[0] || m.weapon == in_hand[1] || user != pawn)
+            {
+                unjoin_mount(m);
+                HSVR_LOG("Pavise: the pavise on the %s forearm was taken; its joints removed", arm == 0 ? "left" : "right");
+                m = Mount{};
+                continue;
+            }
+            if (bool_property(pawn, arm == 0 ? STR("Hand L Torn Off") : STR("Hand R Torn Off")))
+            {
+                unmount_loose(arm, "the arm was cut off");
+                continue;
+            }
+            // The game's unstick (ModularWeaponBP @77374-79251) switches its parts' collision off and on,
+            // which makes their shapes again: the joints and the no-collide pairs are made again after it.
+            bool unstuck = bool_property(m.weapon, STR("Static Mesh Collision Disabled (Unstuck)"));
+            if (unstuck != m.unstuck)
+            {
+                m.unstuck = unstuck;
+                unjoin_mount(m);
+                if (!join_mount(arm, m))
+                {
+                    unmount_loose(arm, "its joint could not be made again");
+                    continue;
+                }
+                HSVR_LOG("Pavise: joints on the %s forearm made again after the game's unstick", arm == 0 ? "left" : "right");
+            }
+            if (in_hand[arm] != m.beside)
+            {
+                destroy_joint(m.beside_joint);
+                m.beside = in_hand[arm];
+                if (UObject* other = m.beside ? object_property(m.beside, STR("BaseMesh")) : nullptr) m.beside_joint = pair_joint(pawn, m.base, other, FName(), 0);
+            }
+            if (m.gripped) set_anim_grip(arm, (int)(std::max)(0.0, hsvr::config().pose_shield_hand_grip_type));
+            const double now = hsvr::now_seconds();
+            if (now - m.last_log >= 1.0)
+            {
+                // Once a second: how far the joint lets it off the forearm.
+                m.last_log = now;
+                hsvr::Vec3 p;
+                hsvr::Quat q;
+                mount_pose(arm, m, p, q);
+                HSVR_LOG("Pavise: on the %s forearm: %.1f cm, %.1f deg off its place%s", arm == 0 ? "left" : "right", hsvr::length(component_location(m.base) - p),
+                         hsvr::length(scaled_axis((component_rotation(m.base) * q.inverse()).normalized())) * 57.2958, m.gripped ? " (gripped)" : "");
+            }
+        }
     }
 
     // Away from its straps and handles a shield is taken only by its rim: the point the hand touched
@@ -8086,7 +8572,17 @@ namespace
         Quat w0_rot = component_rotation(base);
         Vec3 local = w0_rot.inverse().rotate(palm - w0_pos), on;
         double d = 0.0;
-        const ShieldFitting* f = nearest_fitting(cls, local, 15.0, side, true, on, d);
+        const ShieldFitting* f = nullptr;
+        if (hsvr::config().pose_pavise_strap)
+            if (const PaviseSpec* spec = pavise_spec(shield))
+                for (const ShieldFitting& sf : k_shield_fittings)
+                    if (cls == sf.shield && std::string(sf.name) == spec->strap)
+                    {
+                        f = &sf;
+                        on = Vec3{sf.cx, sf.cy, sf.cz};
+                        d = length(local - on);
+                    }
+        if (!f) f = nearest_fitting(cls, local, 15.0, side, true, on, d);
         if (!f) f = nearest_fitting(cls, local, 1e9, side, false, on, d);
         if (!f)
         {
@@ -8096,6 +8592,7 @@ namespace
         Vec3 axis = w0_rot.rotate(normalized(Vec3{f->ax, f->ay, f->az}));
         out = make_free_grip(side, mesh, w0_pos, w0_rot, palm, w0_pos + w0_rot.rotate(on), &axis, f->name);
         out.fingers = true;
+        out.handle = f->name;
         HSVR_LOG("Shield: %s hand holds %ls in the hand by its %s (was on the forearm; the hand was %.1f cm from it)", side == 0 ? "left" : "right",
                  shield->GetName().c_str(), f->name, d);
         return true;
@@ -11441,6 +11938,7 @@ namespace
                 scabbard_let_go(side, "grip released");
                 continue;
             }
+            if (!now_held && mount_let_go(side)) continue;
             if (!now_held)
             {
                 if (g_two.active && side == g_two.second)
@@ -11453,6 +11951,7 @@ namespace
                     if (cfg.pose_grab_release_drops && hand_over(pawn)) continue;
                     end_two_hand("the other hand let go");
                 }
+                if (mine && cfg.pose_grab_release_drops && !hurt && pavise_mount(side, pawn, mesh, mine, cfg)) continue;
                 if (mine && cfg.pose_grab_release_drops && !hurt && holster_snap(side, pawn, mesh, mine, cfg)) continue;
                 if (mine && (cfg.pose_grab_release_drops || hurt))
                 {
@@ -11467,6 +11966,7 @@ namespace
             }
             if (!mine && (g_world[side].on || bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")))) continue; // already holds an object
             if (mine || menu_up) continue;
+            if (pavise_pass(side, pawn, mesh, cfg)) continue;
             if (cfg.pose_grab_handles ? try_second_hand(side, pawn, mesh, cfg) : try_two_hand(side, pawn, mesh, cfg)) continue;
             Vec3 at = hand_grab_point(mesh, side);
             // His arm can be too short for where your hand is (reaching to the floor: his crouch stops at
@@ -11485,6 +11985,7 @@ namespace
                              at.y, at.z);
                 }
             }
+            if (pavise_unmount(side, pawn, mesh, palm_drawn, cfg)) continue;
             if (cfg.pose_draw && try_draw(side, pawn, mesh, at, palm_drawn, cfg)) continue;
             if (try_scabbard_grab(side, pawn, mesh, palm_drawn, cfg)) continue;
             std::vector<UObject*> weapons, willies;
@@ -11498,7 +11999,7 @@ namespace
             for (UObject* w : weapons)
             {
                 if (!w || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
-                if (bool_property(w, STR("Is Sheathed")) || is_fist(w) || in_own_slot(pawn, w)) continue;
+                if (bool_property(w, STR("Is Sheathed")) || is_fist(w) || in_own_slot(pawn, w) || is_mounted(w)) continue;
                 bool taken = false;
                 for (UObject* c : willies)
                     if (c && (object_property(c, STR("Weapon R")) == w || object_property(c, STR("Weapon L")) == w)) taken = true;
@@ -11523,6 +12024,7 @@ namespace
                 }
             }
             if (!best && cfg.pose_grab_objects && grab_object(side, pawn, mesh, cfg, at)) continue;
+            if (!best && mount_grip(side, pawn)) continue; // the strap on its own forearm, after everything else
             if (!best)
             {
                 // Nothing to take: the hand closes into a fist (pose_fist_from_fingers: only when the
@@ -14195,7 +14697,7 @@ namespace
     }
     bool hit_is_his_item(UObject* x)
     {
-        return x && (x == g_hitf.weapon[0] || x == g_hitf.weapon[1] || x == g_hold[0].weapon || x == g_hold[1].weapon || (g_two.active && x == g_two.weapon));
+        return x && (x == g_hitf.weapon[0] || x == g_hitf.weapon[1] || x == g_hold[0].weapon || x == g_hold[1].weapon || (g_two.active && x == g_two.weapon) || is_mounted(x));
     }
     // The hooked function's OtherActor, from its locals (offset found once per function).
     UObject* hit_other_actor(Unreal::UnrealScriptFunctionCallableContext& context, UFunction* fn)
@@ -16009,6 +16511,19 @@ namespace
                 misses += buf;
             }
             if (d > need || (scab && !h_best)) continue;
+            if (i == 4 && cfg.pose_pavise_strap)
+                if (const Handle* strap = pavise_strap(w, base))
+                {
+                    int only = opposite_hand(mesh, bp + bq.rotate(handle_middle(*strap)));
+                    if (only >= 0 && only != side)
+                    {
+                        HSVR_LOG_EVERY(1.0, "Pavise: %s hand squeezed on the pavise on his back: its strap is on that side, so only the %s hand takes it",
+                                       side == 0 ? "left" : "right", only == 0 ? "left" : "right");
+                        continue;
+                    }
+                    h_best = strap; // held in the hand by the strap, wherever it was touched
+                    t_best = 0.5;
+                }
             if (d - need < best_d - best_need)
             {
                 best_d = d;
@@ -16067,6 +16582,7 @@ namespace
             UObject* base0 = object_property(w, STR("BaseMesh"));
             Vec3 p0 = component_location(base0);
             Quat q0 = component_rotation(base0);
+            if (best == 4 && cfg.pose_pavise_strap && pavise_spec(w)) remember_hung(mesh, w, p0, q0);
             bool freed = false;
             if (!body_live(base0))
             {
@@ -16419,7 +16935,21 @@ namespace
             }
         }
         if ((kind == 2.0 || kind == 3.0) && !object_property(pawn, STR("Weapon Slot Back")))
-            add(1, kind == 2.0 ? "Sheath_Slot_Shoulder_L" : "Sheath_Slot_Back", 2);
+        {
+            const Handle* strap = cfg.pose_pavise_strap ? pavise_strap(w, object_property(w, STR("BaseMesh"))) : nullptr;
+            if (!strap)
+                add(1, kind == 2.0 ? "Sheath_Slot_Shoulder_L" : "Sheath_Slot_Back", 2);
+            else
+            {
+                // A pavise: let go of its strap where the strap sits when hung, with the hand across from it.
+                if (!held_by_strap(side, w)) return no("a pavise hangs back by its rear strap");
+                Vec3 a, b;
+                hung_strap(mesh, w, *strap, a, b);
+                int only = opposite_hand(mesh, (a + b) * 0.5);
+                if (only >= 0 && only != side) return no("a pavise's strap hangs on that side: only the other hand puts it back");
+                cands.push_back({1, pavise_back_socket(w), 2, to_segment(palm, a, b)});
+            }
+        }
         if (cands.empty())
         {
             HSVR_LOG("Holster: %s hand let go of %ls: no holster (SheathSlot %.0f: no free slot of that kind)", hand, w->GetName().c_str(), kind);
@@ -17704,6 +18234,7 @@ namespace
         keep_pending_in_hand(pawn);
         draw_tick(pawn);
         scabbard_tick(pawn, cfg);
+        mount_tick(pawn);
         for (int side = 0; side < 2; ++side)
         {
             GripLog& log = g_grip_log[side];
@@ -18544,6 +19075,8 @@ namespace
         g_two = TwoHand{};
         g_anim_grip_two_side = -1;
         g_hidden_scab = HiddenScabbard{};
+        for (Mount& m : g_mount) m = Mount{}; // its joints end with the old pawn
+        g_hung.clear();
         g_thrown.clear();
         g_item_track.clear();
         g_sheath_fit.clear();

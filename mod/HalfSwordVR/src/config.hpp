@@ -631,6 +631,12 @@ namespace hsvr
         // forearm strap grip is kept (not moved into the hand) where the game has one for that hand
         // (light pavise both hands, heavy pavise left hand). Overrides pose_shield_in_hand for pavises.
         bool pose_pavise_forearm = true;
+        // Pavises by their rear strap (Matthew 2026-11-22), instead of pose_pavise_forearm: off the back
+        // only with the hand across from the strap and held by it, passed by it, mounted on the other
+        // forearm when let go within pose_pavise_mount_cm of that forearm's back (that hand stays free),
+        // taken off and hung back by it.
+        bool pose_pavise_strap = true;
+        double pose_pavise_mount_cm = 15.0;
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;

@@ -375,7 +375,9 @@ LAYOUT = [
         ("pose_shield_grab_rim", "1 = a shield can also be taken by its rim; 0 = straps and handles only."),
         ("pose_shield_rim_cm", "How near an outer edge the hand must be for a rim grab (cm)."),
         ("pose_shield_grab_face", "1 = a shield can be taken anywhere, flat faces too (old way)."),
-        ("pose_pavise_forearm", "1 = pavises strap onto the forearm (light: either arm; heavy: left arm), not held in the hand."),
+        ("pose_pavise_forearm", "1 = pavises strap onto the forearm (light: either arm; heavy: left arm), not held in the hand. Only with pose_pavise_strap=0."),
+        ("pose_pavise_strap", "1 = a pavise goes by its rear strap: the hand across from it takes it off your back and hangs it back; let go of the strap at the back of your other forearm to mount it there (that hand stays free); grab the strap to take it off or pass it."),
+        ("pose_pavise_mount_cm", "How near the back of the other forearm you let go of the strap to mount a pavise (cm)."),
     ]),
     ("Drawing, sheathing, belt", "", [
         ("pose_draw", ""),
