@@ -2578,16 +2578,19 @@ namespace
                     // Once both hands hold it, the left target stays where it was put (in his body's frame), as
                     // a real hand would: following the weapon's own axis let a drooping weapon pull the hand
                     // down after it (joint-hold test 2026-11-22: the staff fell 87 deg and kept wandering).
+                    // (Kept from when the command came: kept from when two hands took hold, it was the axis
+                    // of a staff already drooping in one hand, 2026-11-22 r2.)
                     static Vec3 kept_along{0, 0, 1};
-                    static bool kept = false;
-                    if (held && two_hands_hold(held))
+                    static int kept_epoch = -1;
+                    static UObject* kept_for = nullptr;
+                    if (kept_epoch != g_fake_arm_epoch.load() || kept_for != held)
                     {
-                        if (!kept) kept_along = along;
-                        kept = true;
-                        along = kept_along;
+                        kept_epoch = g_fake_arm_epoch.load();
+                        kept_for = held;
+                        kept_along = along;
                     }
-                    else
-                        kept = false;
+                    along = kept_along;
+                    (void)two_hands_hold;
                     local = local + along * g_fake_two_up.load();
                     if (mode == 24) local = local + Vec3{0.0, 15.0 * std::sin(now * 3.14159265358979), 0.0};
                 }
@@ -12850,11 +12853,32 @@ namespace
         double ang_scale = 1.5; // p.Chaos.JointConstraint.AngularDriveStiffnessScale / DampingScale default
         double k = pk * st / mm, c = pc * dst / mm, fcap = pf * mx * (std::max)(0.0, body.total) / mm * 100.0;
         double ka = rk * st / I / ang_scale, ca = rc * dst / I / ang_scale, tcap = rf * mx * (std::max)(0.0, two ? 0.5 * (body.total + s2b.total) : body.total) / I;
-        set_component_transform(m.sphere, target_pos, target_rot, false);
-        // Two hands: the main hand only rolls it (pose_two_hand_twist_only, as the old hold); where it
-        // points is the two hands' pulls. One hand: twist and swing, a full turn.
-        bool swing = !(two && cfg.pose_two_hand_twist_only);
-        jh_drive(m, k, c, fcap, ka, ca, tcap, swing);
+        // Two hands: the main hand only rolls it about the line between the hands (pose_two_hand_twist_only,
+        // as the old hold); where it points is the two hands' pulls. The joint's own twist-only drive let
+        // the staff tumble on a wrist roll (r2: 243 deg/s off its axis vs 41 for the old hold): the twist is
+        // measured about the joint's frame, which swings far from the hands' line. So the mod takes the
+        // twist about the line itself and turns the sphere only by that from where the weapon is now; the
+        // drive (full) then has no swing to pull and damps the weapon's turn only against its own.
+        Vec3 s_pos = target_pos;
+        Quat s_rot = target_rot;
+        if (two && cfg.pose_two_hand_twist_only)
+        {
+            Vec3 ax = (pos + rot.rotate(g_two.bs_local)) - pivot_world;
+            if (length(ax) > 5.0)
+            {
+                ax = ax * (1.0 / length(ax));
+                Quat dq = (target_rot * rot.inverse()).normalized();
+                double along = dq.x * ax.x + dq.y * ax.y + dq.z * ax.z;
+                Quat tw{ax.x * along, ax.y * along, ax.z * along, dq.w};
+                double n = std::sqrt(tw.x * tw.x + tw.y * tw.y + tw.z * tw.z + tw.w * tw.w);
+                tw = n > 1e-9 ? Quat{tw.x / n, tw.y / n, tw.z / n, tw.w / n} : Quat{};
+                s_rot = (tw * rot).normalized();
+                Vec3 tp = target_pos + target_rot.rotate(pivot); // where the main hand puts the point held
+                s_pos = tp - s_rot.rotate(pivot);
+            }
+        }
+        set_component_transform(m.sphere, s_pos, s_rot, false);
+        jh_drive(m, k, c, fcap, ka, ca, tcap, true);
         if (two)
         {
             JointHand& o = g_jh[g_two.second][1];
