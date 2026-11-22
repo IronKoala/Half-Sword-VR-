@@ -8417,7 +8417,12 @@ namespace
         for (int arm = 0; arm < 2; ++arm)
         {
             Mount& m = g_mount[arm];
-            if (!m.weapon || m.pawn != pawn) continue;
+            if (!m.weapon) continue;
+            if (m.pawn != pawn)
+            {
+                m = Mount{}; // an old pawn's: its joints end with it
+                continue;
+            }
             if (!object_alive(m.weapon))
             {
                 unjoin_mount(m);
@@ -16498,6 +16503,124 @@ namespace
                  joint ? "broken" : "missing", um ? "run" : "missing", wt ? "removed" : "call missing", saved ? "emptied" : "NOT emptied");
     }
 
+    // ---- A mounted pavise at the save --------------------------------------------------------------
+    // It is no hand's weapon, so the game would save him without it. For the length of GI_Settings
+    // "Override Player Character Equipment" (his death, UI_NextFIght, UI_Lose, UI_DeathDoor, quitting from
+    // pause) the saved equipment has it on his back, or in a hand when the back is taken; the copy is made
+    // inside (@390), and afterwards both maps are put back exactly, as play can go on (the next round
+    // spawns in the same level, UI_NextFIght @7250). Only the passport is touched, not the shield: Create
+    // Sheath Constraint would hang it for real, and could not be undone exactly (it runs Event Reenable
+    // Last Parent Collision @4202, which turns his armour's collision with it back on, and Sheathed Mode @4161).
+    struct SavedMap
+    {
+        EquipMap map;
+        std::vector<uint64_t> copy; // an FScriptMap
+    };
+    struct SaveSwap
+    {
+        UObject* pawn = nullptr;
+        SavedMap maps[2]; // slots, hands
+    };
+    SaveSwap g_save_swap;
+    bool g_save_swap_tracked = track_freed(&g_save_swap.pawn);
+
+    void mount_save_post(Unreal::UnrealScriptFunctionCallableContext&, void*)
+    {
+        if (!g_save_swap.maps[0].map.prop) return; // nothing was written
+        gc_sync();
+        for (SavedMap& s : g_save_swap.maps)
+        {
+            if (!s.map.prop) continue;
+            if (g_save_swap.pawn) s.map.prop->CopyCompleteValue(s.map.at, s.copy.data());
+            s.map.prop->DestroyValue(s.copy.data());
+            s.map = EquipMap{};
+        }
+        if (g_save_swap.pawn) HSVR_LOG("Save: the game has its copy; his equipment is put back as it was, the mount untouched");
+        g_save_swap.pawn = nullptr;
+    }
+
+    void mount_save_pre(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
+    {
+        if (!g_mount[0].weapon && !g_mount[1].weapon) return;
+        gc_sync();
+        mount_save_post(context, custom_data); // (only if a post was missed)
+        UObject* gi = context.Context;
+        // Saved from his passport only in play mode 0 (@15-46) and outside combat modes 10 and 0, where the
+        // game first puts his equipment back from the save (@181-291).
+        if (read_number_variable(gi, STR("Current Play Mode")) != 0.0) return;
+        double combat = read_number_variable(gi, STR("Current Combat Mode"));
+        if (combat == 10.0 || combat == 0.0) return;
+        UObject* pc = find_player_controller();
+        UObject* pawn = pc ? object_property(pc, STR("Pawn")) : nullptr;
+        if (!pawn) return;
+        EquipMap maps[2] = {equipment_map(pawn, k_slots_map), equipment_map(pawn, k_hands_map)};
+        if (!maps[0].prop || !maps[1].prop)
+        {
+            HSVR_LOG("Save: his passport's equipment maps were not found: a mounted pavise is NOT saved");
+            return;
+        }
+        for (int i = 0; i < 2; ++i)
+        {
+            SavedMap& s = g_save_swap.maps[i];
+            s.map = maps[i];
+            s.copy.assign((size_t)maps[i].prop->GetSize() / 8 + 1, 0);
+            maps[i].prop->InitializeValue(s.copy.data());
+            maps[i].prop->CopyCompleteValue(s.copy.data(), maps[i].at);
+        }
+        g_save_swap.pawn = pawn;
+        UObject* on_back = object_property(pawn, STR("Weapon Slot Back"));
+        bool back_free = !object_alive(on_back);
+        bool hand_free[2];
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            hand_free[side] = !object_alive(held) || is_fist(held);
+        }
+        for (int arm = 0; arm < 2; ++arm)
+        {
+            const Mount& m = g_mount[arm];
+            if (!m.weapon || m.pawn != pawn || !object_alive(m.weapon)) continue;
+            FProperty* passport = prop_chain(m.weapon, STR("Weapon Passport"));
+            if (!passport || struct_type(passport) != struct_type(maps[0].prop->GetValueProp()))
+            {
+                HSVR_LOG("Save: %ls has no weapon passport of the maps' kind: NOT saved", m.weapon->GetName().c_str());
+                continue;
+            }
+            const void* value = reinterpret_cast<const uint8_t*>(m.weapon) + passport->GetOffset_Internal();
+            const char* where = "NOWHERE: his back and both hands are full, it is not saved";
+            if (back_free && equipment_set(maps[0], k_slot_keys[4], value)) // Create Sheath Constraint R @5591
+            {
+                back_free = false;
+                where = "on his back";
+            }
+            else
+                for (int side : {arm, 1 - arm}) // that arm's hand, else the other
+                    if (hand_free[side] && equipment_set(maps[1], side == 1 ? 0 : 1, value))
+                    {
+                        hand_free[side] = false;
+                        where = side == 0 ? "in his left hand" : "in his right hand";
+                        break;
+                    }
+            HSVR_LOG("Save: %ls, mounted on the %s forearm, is saved %s", m.weapon->GetName().c_str(), arm == 0 ? "left" : "right", where);
+        }
+    }
+
+    void install_mount_save()
+    {
+        static bool installed = false;
+        static double last_try = -10.0;
+        if (installed) return;
+        double now = hsvr::now_seconds();
+        if (now - last_try < 2.0) return;
+        last_try = now;
+        UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
+            nullptr, nullptr, STR("/Game/Blueprints/GameInstances/GI_Settings.GI_Settings_C:Override Player Character Equipment"));
+        if (!fn) return;
+        installed = true;
+        UObjectGlobals::RegisterHook(fn, &mount_save_pre, &mount_save_post, nullptr);
+        HSVR_LOG("Save: watching Override Player Character Equipment for mounted pavises");
+    }
+
     void slot_take_tick(UObject* pawn)
     {
         using namespace hsvr;
@@ -19146,7 +19269,9 @@ namespace
         g_two = TwoHand{};
         g_anim_grip_two_side = -1;
         g_hidden_scab = HiddenScabbard{};
-        for (Mount& m : g_mount) m = Mount{}; // its joints end with the old pawn
+        // Mounts stay known through a moment without his pawn (an end screen: the save still needs them);
+        // freed ones go with the GC, another pawn's at that pawn's first tick (mount_tick).
+        for (Mount& m : g_mount) m.gripped = false;
         g_hung.clear();
         g_thrown.clear();
         g_item_track.clear();
@@ -19195,6 +19320,7 @@ namespace
         { HSVR_SUB("after:stab_log_tick"); stab_log_tick(context); }
         { HSVR_SUB("after:install_hit_haptics"); install_hit_haptics(); }
         { HSVR_SUB("after:install_body_contact"); install_body_contact(); }
+        { HSVR_SUB("after:install_mount_save"); install_mount_save(); }
         { HSVR_SUB("after:grip_flip_tick"); grip_flip_tick(context); }
         if (!g_hold_have || !g_hold_capsule.load()) return;
         g_hold_have = false;
