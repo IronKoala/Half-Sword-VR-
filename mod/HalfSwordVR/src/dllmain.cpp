@@ -2046,6 +2046,7 @@ namespace
     double g_arm_floor[3] = {45.0, 15.0, 5.0};
     double g_slot_test[5] = {1.0, 4.0, 0.0, 0.0, 0.0}; // test: hsvr.arm_to_slot <hand> <slot 0-4> <along cm> <out cm> [cm/s] (arm mode 22)
     std::atomic<double> g_fake_jitter_cm{0.0};
+    bool two_hands_hold(UObject* weapon); // both hands on this weapon (defined with g_two)
     bool is_fist(UObject* weapon);  // test: hsvr.fake_jitter <cm>: tracking-like noise on the fake hands (rms per axis)  // test: hsvr.arm_floor <fwd> <side> <height> (arm mode 14): right hand near the floor
     std::atomic<float> g_fake_trigger[2] = {-1.0f, -1.0f}; // test: hsvr.trigger <0|1> <value>, -1 = the controller
     std::atomic<float> g_fake_squeeze[2] = {-1.0f, -1.0f}; // test: hsvr.squeeze <0|1> <value>, -1 = the controller
@@ -2574,6 +2575,19 @@ namespace
                     Vec3 along{0, 0, 1};
                     UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
                     if (UObject* wb = held ? object_property(held, STR("BaseMesh")) : nullptr) along = body.inverse().rotate(component_rotation(wb).rotate(Vec3{0, 0, 1}));
+                    // Once both hands hold it, the left target stays where it was put (in his body's frame), as
+                    // a real hand would: following the weapon's own axis let a drooping weapon pull the hand
+                    // down after it (joint-hold test 2026-11-22: the staff fell 87 deg and kept wandering).
+                    static Vec3 kept_along{0, 0, 1};
+                    static bool kept = false;
+                    if (held && two_hands_hold(held))
+                    {
+                        if (!kept) kept_along = along;
+                        kept = true;
+                        along = kept_along;
+                    }
+                    else
+                        kept = false;
                     local = local + along * g_fake_two_up.load();
                     if (mode == 24) local = local + Vec3{0.0, 15.0 * std::sin(now * 3.14159265358979), 0.0};
                 }
@@ -6805,6 +6819,7 @@ namespace
         bool bs_valid = false;
     };
     TwoHand g_two;
+    bool two_hands_hold(UObject* weapon) { return g_two.active && g_two.weapon == weapon; }
 
     // The second hand's fingers: the game curls a hand's fingers from its grip type (ABP_Willie copies
     // L/R_GripType_Current, @153084; 1-4 play the sword grip, hand_pose.md), which it sets only for a
