@@ -23749,6 +23749,29 @@ namespace
             }
             room_make_weapon(player, i, tier, at, q);
         }
+        // The crossbow (test_room_crossbow; it is in no Free Mode list): on the second table along its
+        // depth, string side up, and 20 bolts in his quiver.
+        int xbow_mode = hsvr::config().test_room_crossbow;
+        if (((xbow_mode == 1 && g_room.via_button) || xbow_mode == 2) && !g_room.table_at.empty())
+        {
+            hsvr::Vec3 right{-g_room.forward.y, g_room.forward.x, 0.0};
+            hsvr::Vec3 base = g_room.table_at[g_room.table_at.size() > 1 ? 1 : 0];
+            hsvr::Vec3 at = base - g_room.forward * 25.0 + right * 8.0;
+            at.z = base.z + 112.0;
+            hsvr::Quat flat = hsvr::quat_from_axes(hsvr::Vec3{0, 0, 1}, hsvr::cross(g_room.forward, hsvr::Vec3{0, 0, 1}), g_room.forward);
+            UObject* xb = room_spawn(STR("/Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C"),
+                                     player, at, flat, [](UObject*) {});
+            int added = 0;
+            for (int i = 0; i < 20 && player; ++i)
+            {
+                Call add(player, STR("Add Bolt to Quiver"));
+                if (add.run()) ++added;
+            }
+            UObject* q = player ? object_property(player, STR("Attached Bolt Quiver")) : nullptr;
+            int32_t* c = q ? value_ptr<int32_t>(q, STR("Projectile Count")) : nullptr;
+            HSVR_LOG("TestRoom: crossbow %s at (%.0f, %.0f, %.0f); quiver %ls with %d bolts (Add Bolt to Quiver x%d)", xb ? "spawned" : "NOT spawned", at.x, at.y, at.z,
+                     q ? q->GetName().c_str() : STR("none"), c ? *c : -1, added);
+        }
     }
 
     // A weapon spot is free when no loose weapon's bounds take in any of 3 points along it.
@@ -24213,28 +24236,6 @@ namespace
         {
             HSVR_LOG("TestRoom: still black after 20 s; showing the room as it is");
             g_room.reveal_at = now;
-        }
-        // The crossbow (test_room_crossbow; it is in no Free Mode list): on the second table along its
-        // depth, string side up, and 20 bolts in his quiver.
-        int xbow_mode = hsvr::config().test_room_crossbow;
-        if ((xbow_mode == 1 && g_room.via_button) || xbow_mode == 2)
-        {
-            Vec3 base = g_room.table_at[g_room.table_at.size() > 1 ? 1 : 0];
-            Vec3 at = base - g_room.forward * 25.0 + right * 8.0;
-            at.z = base.z + 112.0;
-            hsvr::Quat flat = hsvr::quat_from_axes(Vec3{0, 0, 1}, hsvr::cross(g_room.forward, Vec3{0, 0, 1}), g_room.forward);
-            UObject* xb = room_spawn(STR("/Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C"),
-                                     player, at, flat, [](UObject*) {});
-            int added = 0;
-            for (int i = 0; i < 20 && player; ++i)
-            {
-                Call add(player, STR("Add Bolt to Quiver"));
-                if (add.run()) ++added;
-            }
-            UObject* q = player ? object_property(player, STR("Attached Bolt Quiver")) : nullptr;
-            int32_t* c = q ? value_ptr<int32_t>(q, STR("Projectile Count")) : nullptr;
-            HSVR_LOG("TestRoom: crossbow %s at (%.0f, %.0f, %.0f); quiver %ls with %d bolts (Add Bolt to Quiver x%d)", xb ? "spawned" : "NOT spawned", at.x, at.y, at.z,
-                     q ? q->GetName().c_str() : STR("none"), c ? *c : -1, added);
         }
     }
 
