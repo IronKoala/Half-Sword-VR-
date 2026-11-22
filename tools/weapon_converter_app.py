@@ -299,10 +299,10 @@ class App:
         cols = ("length", "weight", "status")
         self.tree = ttk.Treeview(self.batch, columns=cols, height=6, selectmode="browse")
         self.tree.heading("#0", text="Model")
-        self.tree.column("#0", width=330)
-        for c, w in zip(cols, (90, 90, 330)):
+        self.tree.column("#0", width=260, stretch=False)
+        for c, w in zip(cols, (80, 80, 560)):
             self.tree.heading(c, text=c.capitalize())
-            self.tree.column(c, width=w, anchor="w")
+            self.tree.column(c, width=w, anchor="w", stretch=(c == "status"))  # the status gets the spare width
         self.tree.pack(fill="x")
         self.tree.bind("<<TreeviewSelect>>", lambda e: self.tree_selected())
         bb = ttk.Frame(self.batch)
@@ -313,8 +313,40 @@ class App:
         self.install_all_btn.pack(side="right")
         self.convert_all_btn = ttk.Button(bb, text="Preview all", command=self.convert_all)
         self.convert_all_btn.pack(side="right", padx=6)
-        main = ttk.Frame(root, padding=10)
-        main.pack(fill="both", expand=True)
+        # The settings, picture and buttons scroll when the window is too short for them (a 1080p screen
+        # with the weapon list open: the status line fell off the bottom). When there is room, the frame
+        # fills the window and the picture takes the spare height as before.
+        self.main_outer = outer = ttk.Frame(root)
+        outer.pack(fill="both", expand=True)
+        self.scroll_canvas = canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        vbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        main = ttk.Frame(canvas, padding=10)
+        win = canvas.create_window(0, 0, window=main, anchor="nw")
+        min_h = 520  # the picture keeps at least this much room for the whole panel before it scrolls
+
+        def fit(_=None):
+            ch, need = canvas.winfo_height(), max(main.winfo_reqheight(), min_h)
+            canvas.itemconfigure(win, width=canvas.winfo_width(), height=max(ch, need))
+            canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), max(ch, need)))
+            if need > ch:
+                if not vbar.winfo_ismapped():
+                    vbar.pack(side="right", fill="y", before=canvas)
+            elif vbar.winfo_ismapped():
+                vbar.pack_forget()
+                canvas.yview_moveto(0)
+        canvas.bind("<Configure>", fit)
+        main.bind("<Configure>", lambda e: canvas.after_idle(fit))
+
+        def wheel(e):
+            if vbar.winfo_ismapped():
+                canvas.yview_scroll(-1 if (getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4) else 1, "units")
+        for w_ in (canvas, main):
+            w_.bind("<Enter>", lambda e: (canvas.bind_all("<MouseWheel>", wheel), canvas.bind_all("<Button-4>", wheel),
+                                          canvas.bind_all("<Button-5>", wheel)))
+            w_.bind("<Leave>", lambda e: (canvas.unbind_all("<MouseWheel>"), canvas.unbind_all("<Button-4>"),
+                                          canvas.unbind_all("<Button-5>")))
         main.columnconfigure(1, weight=1)
         self.main = main
 
@@ -560,7 +592,7 @@ class App:
             self.items.append(item)
             self.tree.insert("", "end", iid=item["iid"], text=os.path.basename(f), values=("", "", item["status"]))
         if len(self.items) > 1 and not self.batch.winfo_ismapped():
-            self.batch.pack(fill="x", before=self.main)
+            self.batch.pack(fill="x", before=self.main_outer)
         self.select(self.items[first])
         self.run(self.measure_all, [it["path"] for it in self.items[first:]])
 
