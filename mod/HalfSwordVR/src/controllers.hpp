@@ -5,6 +5,8 @@
 #include "xr_loader.hpp"
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace hsvr
 {
@@ -21,6 +23,15 @@ namespace hsvr
         bool primary = false;   // A on the right hand, X on the left (or the Index A buttons)
         bool secondary = false; // B / Y
         bool menu = false;
+        bool trigger_touch = false; // index finger on the trigger (touch sensor)
+        bool thumb_touch = false;   // thumb on the stick, a face button or the thumb rest (touch sensors)
+        // Finger curls, thumb .. little, 0 open .. 1 closed.
+        bool joints_valid = false;  // SteamVR's hand skeleton (XR_EXT_hand_tracking) was read this frame
+        float joint_curl[5] = {};   // from the skeleton (when joints_valid)
+        float joint_deg[5] = {};    // the skeleton's summed finger bend, degrees (for calibration)
+        float joint_frac[5][3] = {}; // the skeleton's bend at each finger joint (knuckle, middle, end), 0 straight .. 1 the rig's full bend
+        float sensor_curl[5] = {};  // from the trigger, grip and touch sensors
+        float curl[5] = {};         // what the mod uses: the larger of the two
     };
 
     struct ControllerState
@@ -44,6 +55,19 @@ namespace hsvr
     // The runtime says the controllers or their layout changed: writes down which layout is in use.
     void controllers_profile_changed(const XrApi& xr, XrInstance instance, XrSession session);
 
+    // Before the instance is made: the instance extensions to ask for (hand tracking when offered).
+    // `offered` is the runtime's list. Returns the names to add.
+    std::vector<const char*> controllers_wanted_extensions(const std::vector<std::string>& offered);
+    // After the system is known: whether the headset system says it can track hands.
+    void controllers_system_hand_tracking(bool supported);
+
     // Latest state (copy).
     ControllerState controllers_state();
+    // Asks for a buzz on a hand (0 left, 1 right), strength 0..1, sent with the next input update.
+    // The strongest request since the last update wins.
+    void controllers_buzz(int hand, float amplitude);
+    // A hit felt the way Blade & Sorcery does it: an amplitude envelope (keys of normalised time
+    // 0..1 -> amplitude 0..1) played over `seconds` at `volume`. Every frame each hand gets the sum
+    // of its envelopes playing (clamped to 1), sent as a 1/30 s pulse.
+    void controllers_hit(int hand, const float* key_t, const float* key_v, int keys, double seconds, float volume);
 } // namespace hsvr
