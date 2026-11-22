@@ -7,7 +7,7 @@ With `test_room=1` the game instead goes from the first menu straight into the t
 **No staged loading.** With `test_room_blackout=1` (default) the headset shows black from the moment the room is opened. The level loads, the arena clears and spawns its fighters, and then, in one tick, the foes are stood in their places, the tables and books are put up and every weapon is laid on a table. 1.6 s later (the foes are back on their own physics and at rest) the headset fades in over 0.5 s. If the room is still not up after 20 s the headset shows it anyway. Log: `TestRoom: room put up in N ms`, `TestRoom: the room is ready`.
 
 - The tables are the game's table mesh (`SM_Prop_Furniture_Table_011`, the one the game's weapon table uses) as a plain static mesh: nothing can shove them. (The game's weapon table is a physics body; a swing could push it and what lay on it.)
-- A weapon is never dropped: it is made just above its spot, its colliding bounds are measured, the table top under it is found with 7 straight-down traces along it, and it is moved so that its lowest point is 0.5 cm above the highest hit, with no speed. Log: `TestRoom: <weapon> laid down: surface z .., moved .. cm`.
+- A weapon is never dropped: it is made just above its spot, the box round its visible parts is measured (not the actor's bounds: a weapon with a scabbard carries an invisible mass part 1e15 cm below it, and its AI search beacon is a big sphere), the table top under it is found with 7 straight-down traces along it, and it is moved so that its lowest point is 0.5 cm above the highest hit, with no speed. Log: `TestRoom: <weapon> laid down: surface z .., moved .. cm`.
 
 **Spawn books** (`test_room_books=1`, default), Blade & Sorcery style: two lecterns (the game's `SM_Prop_Furniture_Lectern_001`, static) 1.5 m to your left and right, a page on each, lit by a small warm light.
 - Point at a line with an **empty hand** (nothing held, not grabbing): a yellow dot and a thin beam show where the hand's pointing ray meets the page, and the line turns gold. Pull the **trigger** to pick it (a short buzz).
@@ -30,6 +30,7 @@ With `test_room=1` the game instead goes from the first menu straight into the t
 | `test_room_map` | /Game/Maps/Arenas/Map_Arena_Cellar | The level (any Free Mode arena; the Yard was used before). |
 | `test_room_blackout` | 1 | 1 = black while the room is put up, then a fade in. |
 | `test_room_books` | 1 | 1 = the weapon and Willie spawn books. |
+| `test_room_book_light` | 40 | The small light over each page (0 = none). |
 | `test_room_foes` | 4 | Number of passive Willies (1-10). |
 | `test_room_tier` | -1 | Their tier (armour, weapons): -1 random each, 0 Beggar .. 8 Lord. |
 | `test_room_weapon_tier` | -1 | The table weapons' tier: -1 random 0-7 each, 0 Beggar .. 8 Lord. |

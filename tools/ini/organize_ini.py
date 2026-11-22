@@ -33,6 +33,7 @@ LAYOUT = [
         ('test_room_map', 'The level the test room opens (default the cellar, /Game/Maps/Arenas/Map_Arena_Cellar).'),
         ('test_room_blackout', '1 = the headset shows black while the room is put up, then fades in (nothing seen popping in).'),
         ('test_room_books', '1 = weapon and Willie spawn books on lecterns: point an empty hand at a line, pull the trigger.'),
+        ('test_room_book_light', 'Brightness of the small light over each book page (0 = none). Read when the room is put up.'),
         ('test_room_tier', "Foes' tier: -1 random, 0 Beggar .. 8 Lord."),
         ('test_room_weapon_tier', "Table weapons' tier: -1 random 0-7, 0 Beggar .. 8 Lord."),
         ('test_room_respawn', '1 = a foe out of the fight is replaced.'),

@@ -169,6 +169,8 @@ namespace hsvr
         // Two Blade & Sorcery style spawn books on lecterns beside the tables (weapons left, Willies
         // right): point at a line with an empty hand and pull the trigger.
         bool test_room_books = true;
+        // The small light over each book's page (the engine's unitless light intensity; 0 = none).
+        double test_room_book_light = 40.0;
         int test_room_foes = 4;
         // The foes' tier (armour and weapons): -1 = a random tier each, 0 Beggar .. 8 Lord.
         int test_room_tier = -1;

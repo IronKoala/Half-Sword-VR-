@@ -21780,9 +21780,12 @@ namespace
     void room_respawn_tick(UObject* player)
     {
         const hsvr::Config& cfg = hsvr::config();
-        if (!cfg.test_room_respawn || g_room.slots.empty()) return;
-        double now = hsvr::now_seconds();
+        // The count is held whenever foes respawn, also with no foe left (after "Remove all Willies"
+        // the game called the match won every 2 s: test 2026-11-22).
+        if (!cfg.test_room_respawn) return;
         room_hold_enemy_count(); // every tick
+        if (g_room.slots.empty()) return;
+        double now = hsvr::now_seconds();
         if (now < g_room.next_respawn_check) return;
         g_room.next_respawn_check = now + 0.25;
         std::vector<UObject*> willies;
@@ -22112,18 +22115,76 @@ namespace
             }
     }
 
-    // A weapon laid on whatever is under it: its colliding bounds measured, the surface found with
+    // World bounds of a component (KismetSystemLibrary GetComponentBounds: an axis-aligned box).
+    bool room_component_box(UObject* c, hsvr::Vec3& origin, hsvr::Vec3& extent)
+    {
+        static UObject* ksl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        if (!ksl || !c) return false;
+        Call b(ksl, STR("GetComponentBounds"));
+        b.object(STR("Component"), c);
+        if (!b.run()) return false;
+        origin = b.vec(STR("Origin"));
+        extent = b.vec(STR("BoxExtent"));
+        return extent.x > 0.0 || extent.y > 0.0 || extent.z > 0.0;
+    }
+
+    // The box round what you see of a weapon: BaseMesh and its visible parts. Not GetActorBounds: a
+    // weapon with a scabbard carries an invisible mass part 1e15 cm below it (ModularWeaponBP "Set Up
+    // Module" @4315; reforged and tool weapons 1e7 cm), and its AI search beacon is a big sphere; both
+    // counted in the actor's bounds threw swords out of the world and lifted the others 30 cm
+    // (test 2026-11-22 16:23).
+    bool room_weapon_box(UObject* weapon, hsvr::Vec3& origin, hsvr::Vec3& extent)
+    {
+        using hsvr::Vec3;
+        UObject* base = object_property(weapon, STR("BaseMesh"));
+        if (!base) return false;
+        Vec3 at = component_location(base);
+        std::vector<UObject*> parts{base};
+        Call kids(base, STR("GetChildrenComponents"));
+        kids.flag(STR("bIncludeAllDescendants"), true);
+        FProperty* cp = kids.param(STR("Children"));
+        if (kids.run() && cp)
+        {
+            struct RawArray { UObject** data; int32_t num, max; };
+            RawArray* arr = reinterpret_cast<RawArray*>(kids.buffer.data() + cp->GetOffset_Internal());
+            for (int32_t i = 0; arr->data && i < arr->num && i < 64; ++i)
+                if (arr->data[i]) parts.push_back(arr->data[i]);
+            cp->DestroyValue(kids.buffer.data() + cp->GetOffset_Internal());
+        }
+        Vec3 lo{1e18, 1e18, 1e18}, hi{-1e18, -1e18, -1e18};
+        int used = 0;
+        for (UObject* p : parts)
+        {
+            if (p != base)
+            {
+                if (p->GetName().find(STR("Beacon")) != std::wstring::npos) continue;
+                Call vis(p, STR("IsVisible"));
+                if (!vis.fn) continue; // not a scene component
+                vis.run();
+                FProperty* vr = vis.param(STR("ReturnValue"));
+                if (!vr || !*(vis.buffer.data() + vr->GetOffset_Internal())) continue;
+            }
+            Vec3 o, e;
+            if (!room_component_box(p, o, e)) continue;
+            if (hsvr::length(o - at) > 300.0 || e.x > 300.0 || e.y > 300.0 || e.z > 300.0) continue;
+            lo = Vec3{(std::min)(lo.x, o.x - e.x), (std::min)(lo.y, o.y - e.y), (std::min)(lo.z, o.z - e.z)};
+            hi = Vec3{(std::max)(hi.x, o.x + e.x), (std::max)(hi.y, o.y + e.y), (std::max)(hi.z, o.z + e.z)};
+            ++used;
+        }
+        if (!used) return false;
+        origin = (lo + hi) * 0.5;
+        extent = (hi - lo) * 0.5;
+        return true;
+    }
+
+    // A weapon laid on whatever is under it: its visible bounds measured (room_weapon_box), the surface found with
     // straight-down traces along its length (the highest hit), then moved so its lowest point is 0.5 cm
     // above that, with no speed. It is never dropped from a height.
     bool room_lay(UObject* weapon, UObject* player)
     {
         using hsvr::Vec3;
-        Call b(weapon, STR("GetActorBounds"));
-        b.flag(STR("bOnlyCollidingComponents"), true);
-        b.flag(STR("bIncludeFromChildActors"), false);
-        b.run();
-        Vec3 o = b.vec(STR("Origin")), e = b.vec(STR("BoxExtent"));
-        if (e.x <= 0.0 && e.y <= 0.0) return false;
+        Vec3 o, e;
+        if (!room_weapon_box(weapon, o, e)) return false;
         // Along the longer horizontal side of the box, 7 points, 2 cm in from its ends.
         Vec3 along = e.x >= e.y ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
         double half = (std::max)(0.0, (std::max)(e.x, e.y) - 2.0);
@@ -22298,12 +22359,12 @@ namespace
     bool room_lectern_top(UObject* comp, hsvr::Vec3& centre, hsvr::Vec3& normal)
     {
         using hsvr::Vec3;
-        Call b(comp, STR("GetLocalBounds"));
-        b.run();
-        Vec3 lo = b.vec(STR("Min")), hi = b.vec(STR("Max"));
-        Vec3 at = component_location(comp);
-        hsvr::Quat q = component_rotation(comp);
-        if (hi.z - lo.z < 30.0) return false;
+        // World bounds (GetLocalBounds' Min/Max read as 0 here: the reflected names' case differs).
+        Vec3 bo, be;
+        if (!room_component_box(comp, bo, be) || be.z < 15.0) return false;
+        Vec3 lo = bo - be, hi = bo + be;
+        Vec3 at{0, 0, 0};
+        hsvr::Quat q{};
         struct Hit { Vec3 p, n; };
         std::vector<Hit> hits;
         double top = -1e18;
@@ -22343,7 +22404,7 @@ namespace
         to_player.z = 0.0;
         to_player = hsvr::normalized(to_player);
         double yaw = std::atan2(to_player.y, to_player.x) * 57.29577951308232;
-        UObject* lectern = room_static(player, lectern_path, at, yaw_quat(yaw));
+        UObject* lectern = room_static(player, lectern_path, at, yaw_quat(yaw - 90.0)); // its slope faces the mesh's +Y (test pictures 2026-11-22)
         if (!lectern)
         {
             HSVR_LOG("TestRoom: %s book: no lectern", kind == 0 ? "weapon" : "Willie");
@@ -22358,7 +22419,7 @@ namespace
             Vec3 faces{n.x, n.y, 0.0};
             double turn = std::atan2(to_player.y, to_player.x) - std::atan2(faces.y, faces.x);
             Call rot(lectern, STR("K2_SetActorRotation"));
-            rot.three(STR("NewRotation"), 0.0, yaw + turn * 57.29577951308232, 0.0);
+            rot.three(STR("NewRotation"), 0.0, yaw - 90.0 + turn * 57.29577951308232, 0.0);
             rot.flag(STR("bTeleportPhysics"), true);
             rot.run();
             slanted = room_lectern_top(comp, centre, n);
@@ -22367,12 +22428,8 @@ namespace
         {
             // No slanted top found: the page stands above the lectern, leaning back 35 degrees.
             double top_z = at.z + 100.0;
-            if (comp)
-            {
-                Call b(comp, STR("GetLocalBounds"));
-                b.run();
-                top_z = at.z + b.vec(STR("Max")).z;
-            }
+            Vec3 bo, be;
+            if (comp && room_component_box(comp, bo, be)) top_z = bo.z + be.z;
             double lean = 35.0 * 3.14159265358979 / 180.0;
             n = to_player * std::cos(lean) + Vec3{0, 0, std::sin(lean)};
             centre = at + Vec3{0, 0, top_z - at.z + 22.0};
@@ -22393,13 +22450,14 @@ namespace
         hsvr::Quat q = hsvr::quat_from_axes(book.normal, hsvr::cross(book.up, book.normal), book.up);
         // The page: a thin parchment-coloured slab, and a small warm light over it so it can be read.
         room_shape(lectern, STR("/Engine/BasicShapes/Cube.Cube"), book.centre - book.normal * 0.4, q, Vec3{0.008, book.half_w / 50.0, book.half_h / 50.0}, 0.78f, 0.66f, 0.45f);
+        if (hsvr::config().test_room_book_light > 0.0)
         if (UObject* light = room_add_component(lectern, STR("/Script/Engine.PointLightComponent"), book.centre + book.normal * 35.0 + book.up * 10.0, q))
         {
             Call in(light, STR("SetIntensity"));
-            in.number(STR("NewIntensity"), 1200.0);
+            in.number(STR("NewIntensity"), hsvr::config().test_room_book_light); // 1200 blew the page out to white (test 2026-11-22)
             in.run();
             Call ar(light, STR("SetAttenuationRadius"));
-            ar.number(STR("NewRadius"), 90.0);
+            ar.number(STR("NewRadius"), 70.0);
             ar.run();
             Call cs(light, STR("SetCastShadows"));
             cs.first_flag(false);
@@ -22539,10 +22597,8 @@ namespace
             for (UObject* w : weapons)
             {
                 if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || is_fist(w)) continue;
-                Call bb(w, STR("GetActorBounds"));
-                bb.flag(STR("bOnlyCollidingComponents"), true);
-                bb.run();
-                boxes.emplace_back(bb.vec(STR("Origin")), bb.vec(STR("BoxExtent")));
+                hsvr::Vec3 o, e;
+                if (room_weapon_box(w, o, e)) boxes.emplace_back(o, e);
             }
             const TestRoom::WeaponSpot* spot = nullptr;
             for (const TestRoom::WeaponSpot& s : g_room.spots)
