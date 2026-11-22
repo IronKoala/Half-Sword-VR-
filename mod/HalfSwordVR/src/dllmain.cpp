@@ -18748,8 +18748,9 @@ namespace
 
     void fade_set_params(const hsvr::Config& cfg, bool force)
     {
-        char key[160];
-        std::snprintf(key, sizeof key, "%.3f/%s/%.3f/%.3f", cfg.helmet_fade_see_through, cfg.helmet_fade_tint.c_str(), cfg.helmet_fade_metallic, cfg.helmet_fade_roughness);
+        char key[200];
+        std::snprintf(key, sizeof key, "%.3f/%s/%.3f/%.3f/%.3f/%.3f", cfg.helmet_fade_see_through, cfg.helmet_fade_tint.c_str(), cfg.helmet_fade_metallic, cfg.helmet_fade_roughness,
+                      cfg.helmet_fade_vector_b, cfg.helmet_fade_vector_a);
         if (!force && g_fade_key == key) return;
         g_fade_key = key;
         double tint[3] = {0.55, 0.55, 0.58};
@@ -18783,7 +18784,9 @@ namespace
                 };
                 vec(STR("TintColor"), (float)tint[0], (float)tint[1], (float)tint[2], 1.0f);
                 // Opacity in the first channel, refraction (index 1 = none) in the second.
-                vec(STR("OpacityAndRefraction"), opacity, 1.0f, 0.0f, 0.0f);
+                vec(STR("OpacityAndRefraction"), opacity, 1.0f, (float)cfg.helmet_fade_vector_b, (float)cfg.helmet_fade_vector_a);
+                if (i == 0)
+                    HSVR_LOG("Helmet fade: OpacityAndRefraction (%.2f, 1.00, %.2f, %.2f)", opacity, cfg.helmet_fade_vector_b, cfg.helmet_fade_vector_a);
                 scalar(STR("OpacityAndRefraction"), opacity);
                 scalar(STR("MetallicAmount"), cfg.helmet_fade_metallic);
                 scalar(STR("RoughnessAmount"), cfg.helmet_fade_roughness);

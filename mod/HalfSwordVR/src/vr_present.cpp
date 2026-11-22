@@ -202,9 +202,13 @@ namespace hsvr
             float cp = std::cos(pitch * 0.5f), sp = std::sin(pitch * 0.5f);
             float qx = cy * sp, qy = sy * cp, qz = -sy * sp, qw = cy * cp;
             float sway = (float)std::sin(t * 0.4) * 0.10f * amount; // metres, side to side
+            const bool real = cfg.dev_fake_real_eyes;
+            shared().eye_width.store(real ? 1864 : 1280);
+            shared().eye_height.store(real ? 1864 : 1280);
+            const float half_gap = real ? 0.035087f : 0.032f;
             for (int e = 0; e < 2; ++e)
             {
-                float side = e == 0 ? -0.032f : 0.032f;
+                float side = e == 0 ? -half_gap : half_gap;
                 XrEyeRaw& eye = pose.eye[e];
                 // Eye offset along the head's right axis (rotated by yaw only; good enough for a test).
                 eye.px = sway + side * std::cos(yaw);
@@ -218,6 +222,13 @@ namespace hsvr
                 eye.angle_right = e == 0 ? 0.70f : 0.87f;
                 eye.angle_up = 0.79f;
                 eye.angle_down = -0.79f;
+                if (real)
+                {
+                    eye.angle_left = (e == 0 ? -58.6f : -50.3f) * to_radians;
+                    eye.angle_right = (e == 0 ? 50.7f : 59.2f) * to_radians;
+                    eye.angle_up = (e == 0 ? 49.1f : 49.5f) * to_radians;
+                    eye.angle_down = (e == 0 ? -60.3f : -59.9f) * to_radians;
+                }
             }
             pose.valid = true;
             pose.predicted_time = 0;
