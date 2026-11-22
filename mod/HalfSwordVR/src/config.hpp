@@ -675,8 +675,9 @@ namespace hsvr
         bool pose_throw = true;
         // Holster snap (B&S Holder.cs:683-695), only for weapons with no scabbard of their own (Matthew
         // 2026-11-19; scabbard weapons keep the physical sheathe): let go of one while your hand is within
-        // pose_holster_zone_cm of the free belt slot it goes in (the one the game's Assign picks) and moving
-        // slower than pose_holster_max_speed m/s (faster is a throw), and the game hangs it there.
+        // pose_holster_zone_cm of a free slot of its kind on EITHER hip or the back, with either hand
+        // (2026-11-22; nearest wins), moving slower than pose_holster_max_speed m/s (faster is a throw),
+        // and the game hangs it there.
         bool pose_holster_snap = true;
         // A drawn weapon dropped, thrown or passed to the other hand leaves its scabbard on the belt (B&S);
         // the game's own release takes it off (Matthew 2026-11-19: "the scabbard despawns").

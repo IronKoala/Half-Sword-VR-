@@ -16172,6 +16172,49 @@ namespace
     // Weapon Slot <S> 1/2 variables; 3 Back) and occupancy; Create Sheath Constraint <S> then puts its
     // BaseMesh on that socket and joins it to his mesh there; Set Up <S> Hand Weapon(None) lets go.
     // Drawing it again is the plain no-scabbard grab the draw already does.
+    // Across the body, without a scabbard: the game's Assign <S> only fills its own hand's side, so the
+    // mod does Assign's bookkeeping for the other side (Sheath Slot <T>, <T> Sheath Slot Name, Current
+    // Scabbard <T> None) and calls Create Sheath Constraint <T>, which reads Weapon <T>: that is set to the
+    // weapon for that one call and put back as it was (cross_sheathe.md §2-3; hs_draw_sheathe_calls.md
+    // Addendum 2). Create Sheath Constraint writes Weapon Slot <T> x, the constraint, the weights and runs
+    // Sheathed Mode; then the holding hand lets go, as the game's no-scabbard sheathe does (SURHW None).
+    bool holster_across(int side, int ts, UObject* pawn, UObject* w, const std::string& socket, uint8_t slot, double d, double kind)
+    {
+        using namespace hsvr;
+        const char* hand = side == 0 ? "left" : "right";
+        const wchar_t* T = ts == 0 ? L"L" : L"R";
+        auto nm = [&](const wchar_t* fmt) {
+            wchar_t buf[96];
+            std::swprintf(buf, 96, fmt, T);
+            return std::wstring(buf);
+        };
+        const TCHAR* weapon_t = ts == 0 ? STR("Weapon L") : STR("Weapon R");
+        UObject* other_held = object_property(pawn, weapon_t);
+        FName sock = bone_fname(socket.c_str());
+        bool ok = set_variable(pawn, nm(L"Sheath Slot %ls").c_str(), slot);
+        ok &= set_variable(pawn, nm(L"%ls Sheath Slot Name").c_str(), 0.0, nullptr, &sock);
+        set_variable(pawn, nm(L"Current Scabbard %ls").c_str(), 0.0, nullptr, nullptr);
+        set_variable(pawn, weapon_t, 0.0, w, nullptr);
+        Call make(pawn, nm(L"Create Sheath Constraint %ls").c_str());
+        make.byte(STR("Slot"), slot);
+        bool made = make.run();
+        set_variable(pawn, weapon_t, 0.0, other_held, nullptr);
+        UObject* now_in = object_property(pawn, slot == 2 ? STR("Weapon Slot Back") : nm(slot == 0 ? L"Weapon Slot %ls 1" : L"Weapon Slot %ls 2").c_str());
+        if (!made)
+        {
+            HSVR_LOG("Holster: no \"Create Sheath Constraint %ls\"; %s hand drops %ls", T, hand, w->GetName().c_str());
+            return false;
+        }
+        if (now_in != w)
+            HSVR_LOG("Holster: across the body, %ls's slot variable holds %s after Create Sheath Constraint %ls", w->GetName().c_str(), now_in ? "something else" : "nothing", T);
+        drop_weapon(side, pawn, false);
+        controllers_buzz(side, 0.4f);
+        HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s at %.1f m/s: hung across the body (SheathSlot %.0f, slot %ls %d, other hand %s; concrete R %.0f L %.0f)%s",
+                 hand, w->GetName().c_str(), d, socket.c_str(), g_hand_world_v[side], kind, T, (int)slot + 1, other_held ? "holding something (put back)" : "empty",
+                 read_number_variable(pawn, STR("R Sheath Slot Concrete")), read_number_variable(pawn, STR("L Sheath Slot Concrete")), ok ? "" : " (a game variable was NOT set)");
+        return true;
+    }
+
     bool holster_snap(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -16192,24 +16235,57 @@ namespace
             return std::wstring(buf);
         };
         double kind = read_number_variable(w, STR("SheathSlot"));
-        std::string socket;
-        std::string sx = side == 0 ? "L" : "R";
-        if (kind == 0.0 || kind == 1.0)
+        // Every free slot of its kind on either side (Matthew 2026-11-22: "I can only put my things in my
+        // right hand on my right hip"; B&S holders take either hand). On the hand's own side it is the one
+        // the game's Assign <S> picks (1, else 2); across the body the nearer free one. The back (SheathSlot
+        // 2 Shoulder_L, 3 Back) is the R side's in the game's Assign R (cross_sheathe.md §1).
+        struct Cand
         {
-            int first = kind == 0.0 ? 1 : 3;
-            if (!object_property(pawn, nm(L"Weapon Slot %ls 1").c_str())) socket = "Sheath_Slot_" + sx + "_" + std::to_string(first);
-            else if (!object_property(pawn, nm(L"Weapon Slot %ls 2").c_str())) socket = "Sheath_Slot_" + sx + "_" + std::to_string(first + 1);
+            int ts;           // the slot's side
+            std::string socket;
+            uint8_t slot;     // Sheath Slot <S> / Create Sheath Constraint's Slot byte
+            double d;
+        };
+        Vec3 palm = hand_grab_point(mesh, side);
+        std::vector<Cand> cands;
+        auto add = [&](int ts, const std::string& sock, uint8_t slot) {
+            cands.push_back({ts, sock, slot, length(palm - socket_location(mesh, bone_fname(sock)))});
+        };
+        for (int ts = 0; ts < 2; ++ts)
+        {
+            std::string tx = ts == 0 ? "L" : "R";
+            const wchar_t* T = ts == 0 ? L"L" : L"R";
+            wchar_t v1[48], v2[48];
+            std::swprintf(v1, 48, L"Weapon Slot %ls 1", T);
+            std::swprintf(v2, 48, L"Weapon Slot %ls 2", T);
+            if (kind == 0.0 || kind == 1.0)
+            {
+                int first = kind == 0.0 ? 1 : 3;
+                bool f1 = !object_property(pawn, v1), f2 = !object_property(pawn, v2);
+                if (ts == side)
+                {
+                    if (f1) add(ts, "Sheath_Slot_" + tx + "_" + std::to_string(first), 0);
+                    else if (f2) add(ts, "Sheath_Slot_" + tx + "_" + std::to_string(first + 1), 1);
+                }
+                else
+                {
+                    if (f1) add(ts, "Sheath_Slot_" + tx + "_" + std::to_string(first), 0);
+                    if (f2) add(ts, "Sheath_Slot_" + tx + "_" + std::to_string(first + 1), 1);
+                }
+            }
         }
-        else if (kind == 3.0 && side == 1 && !object_property(pawn, STR("Weapon Slot Back")))
-            socket = "Sheath_Slot_Back";
-        if (socket.empty())
+        if ((kind == 2.0 || kind == 3.0) && !object_property(pawn, STR("Weapon Slot Back")))
+            add(1, kind == 2.0 ? "Sheath_Slot_Shoulder_L" : "Sheath_Slot_Back", 2);
+        if (cands.empty())
         {
-            HSVR_LOG("Holster: %s hand let go of %ls: no holster (SheathSlot %.0f: no free slot of that kind on this side)", hand, w->GetName().c_str(), kind);
+            HSVR_LOG("Holster: %s hand let go of %ls: no holster (SheathSlot %.0f: no free slot of that kind)", hand, w->GetName().c_str(), kind);
             return false;
         }
-        Vec3 slot_at = socket_location(mesh, bone_fname(socket));
-        Vec3 palm = hand_grab_point(mesh, side);
-        double d = length(palm - slot_at);
+        const Cand* best = nullptr;
+        for (const Cand& c : cands)
+            if (!best || c.d < best->d) best = &c;
+        std::string socket = best->socket;
+        double d = best->d;
         if (d > cfg.pose_holster_zone_cm)
         {
             HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s (needs %.0f): dropped", hand, w->GetName().c_str(), d, socket.c_str(), cfg.pose_holster_zone_cm);
@@ -16223,6 +16299,7 @@ namespace
                      socket.c_str(), conc_r, conc_l);
             return false;
         }
+        if (best->ts != side) return holster_across(side, best->ts, pawn, w, socket, best->slot, d, kind);
         Call assign(pawn, nm(L"Assign %ls Weapon Slot").c_str());
         if (!assign.run())
         {
