@@ -22314,6 +22314,44 @@ namespace
                 }
                 continue;
             }
+            if (entry.command.rfind("hsvr.foe_head_on_weapon ", 0) == 0)
+            {
+                // Helmet-hit tests: "hsvr.foe_head_on_weapon <0..1>": the first NPC moved (not turned) so the
+                // middle of his head (bone + 8 cm up) is on the right hand weapon's line, that far from pommel to tip.
+                using hsvr::Vec3;
+                double along = std::atof(entry.command.c_str() + 24);
+                UObject* player = nullptr;
+                find_pawn_mesh(&player);
+                UObject* w = player ? object_property(player, STR("Weapon R")) : nullptr;
+                UObject* pommel = w ? object_property(w, STR("PommelSk")) : nullptr;
+                UObject* tip = w ? object_property(w, STR("TippyTipScene")) : nullptr;
+                if (!pommel || !tip) continue;
+                Vec3 a = component_location(pommel), to = a + (component_location(tip) - a) * along;
+                std::vector<UObject*> all;
+                UObjectGlobals::FindAllOf(STR("Willie_BP_C"), all);
+                for (UObject* foe : all)
+                {
+                    if (!foe || foe == player || foe->GetName().rfind(STR("Default__"), 0) == 0 || !object_alive(foe)) continue;
+                    UObject* fm = object_property(foe, STR("Mesh"));
+                    if (!fm) continue;
+                    auto head = [&]() { return socket_location(fm, bone_fname("head")) + Vec3{0, 0, 8}; };
+                    Vec3 d = to - head();
+                    Call mv(foe, STR("K2_AddActorWorldOffset"));
+                    mv.three(STR("DeltaLocation"), d.x, d.y, d.z);
+                    mv.flag(STR("bTeleport"), true);
+                    mv.run();
+                    Vec3 d2 = to - head();
+                    Call off(fm, STR("K2_AddWorldOffset"));
+                    off.three(STR("DeltaLocation"), d2.x, d2.y, d2.z);
+                    off.flag(STR("bTeleport"), true);
+                    off.run();
+                    Vec3 after = head();
+                    HSVR_LOG("Script: hsvr.foe_head_on_weapon %.2f: %ls head now (%.0f, %.0f, %.0f), %.1f cm from the weapon's point", along, foe->GetName().c_str(), after.x, after.y,
+                             after.z, hsvr::length(after - to));
+                    break;
+                }
+                continue;
+            }
             if (entry.command.rfind("hsvr.foe_front ", 0) == 0)
             {
                 // Stab tests: every foe stood in front of him, facing him: "hsvr.foe_front <cm>" from
@@ -22602,13 +22640,15 @@ namespace
                 }
                 continue;
             }
-            if (entry.command.rfind("hsvr.wear ", 0) == 0)
+            if (entry.command.rfind("hsvr.wear ", 0) == 0 || entry.command.rfind("hsvr.foe_wear ", 0) == 0)
             {
+                // hsvr.foe_wear <armour class path>: the same on the first NPC (a known helmet to hit).
+                const bool on_foe = entry.command.rfind("hsvr.foe_wear ", 0) == 0;
                 // hsvr.wear <armour class path>: he puts that armour piece on the way the game does when he
                 // picks one up (Willie's "Equip Armor" with an armour actor, armor_equip.md). The class
                 // default passport is empty, so the spawned actor's passport gets its class, slot and an
                 // ID first. For unattended tests: the scripted Free Mode start has no helmet.
-                std::string rest = entry.command.substr(10);
+                std::string rest = entry.command.substr(on_foe ? 14 : 10);
                 while (!rest.empty() && rest.back() == ' ') rest.pop_back();
                 std::wstring path(rest.begin(), rest.end());
                 UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path.c_str());
@@ -22621,6 +22661,21 @@ namespace
                 }
                 UObject* pawn = nullptr;
                 UObject* mesh = find_pawn_mesh(&pawn);
+                if (on_foe)
+                {
+                    UObject* player = pawn;
+                    pawn = nullptr;
+                    mesh = nullptr;
+                    std::vector<UObject*> all;
+                    UObjectGlobals::FindAllOf(STR("Willie_BP_C"), all);
+                    for (UObject* w : all)
+                    {
+                        if (!w || w == player || w->GetName().rfind(STR("Default__"), 0) == 0 || !object_alive(w)) continue;
+                        pawn = w;
+                        mesh = object_property(w, STR("Mesh"));
+                        break;
+                    }
+                }
                 static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
                 if (!cls || !mesh || !gs || !func_chain(pawn, STR("Equip Armor")))
                 {
