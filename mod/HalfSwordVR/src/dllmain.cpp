@@ -2027,6 +2027,7 @@ namespace
     bool hand_on_weapon(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool hand_on_grab(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool hand_rides_grab(int side);
+    bool hand_on_scenery(int side); // the hand is pinned on fixed scenery (a world grab)
     bool stuck_is_thrust(UObject* weapon);
     bool two_hand_pose(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
     bool hand_on_scabbard(int side, hsvr::Vec3& target, hsvr::Quat& hand_rot);
@@ -2858,6 +2859,7 @@ namespace
         Vec3 target = grip + grip_rot.rotate({cfg.pose_wrist_forward_cm, cfg.pose_wrist_right_cm * out, cfg.pose_wrist_up_cm});
         g_pose.raw_target[side] = target;
         Vec3 S = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
+        const Vec3 S_chest = S; // the shoulder as the chest carries it (before reaching)
         // Your reach scaled to his (once your arm length is measured): from his shoulder, your hand is
         // as far out along his arm as it is along yours.
         if (cfg.pose_user_arm_cm > 1.0 && tracked && !limp) target = S + (target - S) * ((a.upper_length + a.lower_length) / cfg.pose_user_arm_cm);
@@ -2894,7 +2896,15 @@ namespace
         g_solved_on[side] = on_weapon ? 1 : 0;
         if (two_hand_pose(side, target, Wh)) on_weapon = true, g_solved_on[side] |= 2;
         if (!on_weapon && hand_on_scabbard(side, target, Wh)) on_weapon = true, g_solved_on[side] |= 4;
-        if (!on_weapon && hand_on_grab(side, cfg, target, Wh)) on_weapon = true, g_solved_on[side] |= 8;
+        if (!on_weapon && hand_on_grab(side, cfg, target, Wh))
+        {
+            on_weapon = true, g_solved_on[side] |= 8;
+            // A hand pinned on scenery: the shoulder reaches for the pinned hand, not for your
+            // controller. Reaching for the controller slid the shoulder 7 cm as the controller drifted,
+            // and the arm (at full reach) dragged the pinned hand 4 cm up the fence after it
+            // (b8b5cb1 test frames: |H - S| 52.8 cm every row, H = drawn hand to 0.1 cm).
+            if (hand_on_scenery(side)) S = shoulder_reach(side, cfg, S_chest, target, component_inv);
+        }
         // Where your real hand is, while his stays on a stopped weapon.
         ghost_hand(side, cfg, on_weapon && hand_on_weapon_amount(side) > 0.5 && length(controller_wrist - target) > cfg.pose_ghost_from_cm, controller_wrist,
                    controller_rot);
@@ -10250,7 +10260,13 @@ namespace
         double ease = g.ease;
         double w = g.on ? wrap_smooth((now - g.since) / ease) : g.w_off * (1.0 - wrap_smooth((now - g.off_at) / ease));
         if (w <= 0.0 || !g_frig.ok) return 0.0;
-        if (g.on && g.comp && now >= g.next_at && g_frig.driver)
+        bool all_solved = true;
+        for (bool b : g.solved) all_solved = all_solved && b;
+        // Scenery doesn't move and the hand is pinned on it: keep the curls found at the grab. Re-solving
+        // straightened them as the hand slid against the rail (b8b5cb1 test: middle 0.31/0.62/1 at
+        // seating, 0/0/0 two seconds later with the palm at 0 cm).
+        bool frozen = g.world && all_solved;
+        if (g.on && g.comp && !frozen && now >= g.next_at && g_frig.driver)
         {
             hsvr::Config cfg = hsvr::config();
             WrapSolve ws;
@@ -10295,6 +10311,20 @@ namespace
                     HSVR_LOG("Wrap: %s %s on %ls bone %ls: curls %.2f/%.2f/%.2f (%d queries, finger radius %.2f cm; palm %.1f cm from it, snapshot hand %.1f cm from the drawn hand)",
                              side == 0 ? "left" : "right", kFingerNames[f], g.comp->GetName().c_str(), g.bone.ToString().c_str(), out[0], out[1], out[2], ws.queries,
                              ws.radius * ws.cs, palm_d, length(hand_w - drawn));
+                    if (!g.cloud.empty())
+                    {
+                        // Scenery: how far each joint and the tip end up from the sampled surface, and
+                        // how far the nearest sample is (a finger off the cloud's edge sees no surface).
+                        Vec3 seg[3][2];
+                        ws.place(out, seg);
+                        double dj[4], near_tip = 1e9;
+                        for (int k = 0; k < 3; ++k) dj[k] = ws.distance(seg[k][0]) * ws.cs;
+                        dj[3] = ws.distance(seg[2][1]) * ws.cs;
+                        Vec3 tip_w = ws.cp + ws.cq.rotate(seg[2][1] * ws.cs);
+                        for (const SurfacePoint& sp : g.cloud) near_tip = (std::min)(near_tip, length(sp.p - tip_w));
+                        HSVR_LOG("Wrap: %s %s on scenery: knuckle/middle/last/tip %.1f/%.1f/%.1f/%.1f cm from the surface, nearest of %d samples %.1f cm from the tip",
+                                 side == 0 ? "left" : "right", kFingerNames[f], dj[0], dj[1], dj[2], dj[3], (int)g.cloud.size(), near_tip);
+                    }
                 }
             }
         }
@@ -10514,6 +10544,7 @@ namespace
         const WrapGrab& g = g_wrap[side];
         return g.on && g.seated && g.comp && g.ride > 0.0;
     }
+    bool hand_on_scenery(int side) { return g_wrap[side].on && g_wrap[side].world; }
     bool hand_on_grab(int side, const hsvr::Config& cfg, hsvr::Vec3& target, hsvr::Quat& hand_rot)
     {
         using namespace hsvr;
