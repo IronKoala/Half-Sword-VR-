@@ -774,6 +774,7 @@ namespace hsvr
         num("pose_grab_body_slip_below_t", c.pose_grab_body_slip_below_t);
         num("pose_grab_body_let_go_cm", c.pose_grab_body_let_go_cm);
         flag("input_hand_tracking", c.input_hand_tracking);
+        flag("input_frame_layout", c.input_frame_layout);
         flag("pose_eat", c.pose_eat);
         num("pose_eat_cm", c.pose_eat_cm);
         num("pose_drink_tip", c.pose_drink_tip);

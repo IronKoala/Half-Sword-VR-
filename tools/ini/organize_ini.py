@@ -223,6 +223,7 @@ LAYOUT = [
     ]),
     ('Fingers and grip wrap', 'Finger tracking and how fingers close around what you hold.', [
         ('input_hand_tracking', "Read SteamVR's finger tracking when offered."),
+        ('input_frame_layout', '1 = use the Steam Frame controller layout (left D-pad: Down jump, Up grip flip, Left bug marker); 0 = SteamVR remaps the Touch layout. Takes effect at game start.'),
         ('pose_fingers_tracked', '1 = free fingers follow yours.'),
         ('pose_fingers_tau_s', 'Smoothing of the tracked fingers (s).'),
         ('pose_fingers_per_joint', '1 = with finger tracking, each finger joint follows your own.'),
@@ -596,8 +597,8 @@ LAYOUT = [
     ('Logging and troubleshooting', 'These change nothing in the game.', [
         ('log_poses', '1 = log the view anchor and camera once a second.'),
         ('log_frames', '1 = record every tick to logs\\frames-<time>.csv (headset, controllers, hands, held items).'),
-        ('replay_capture', '1 = bug marker: hold left Y (left B on Index) to save the last seconds of play to replays\\replay-<time>.csv; three strong pulses on both controllers say it is recording.'),
-        ('replay_hold_s', 'How long to hold left Y for a bug marker (seconds; a shorter tap still flips the grip).'),
+        ('replay_capture', '1 = bug marker: hold left D-pad Left (Steam Frame; left Y on Touch, left B on Index) to save the last seconds of play to replays\\replay-<time>.csv; three strong pulses on both controllers say it is recording.'),
+        ('replay_hold_s', 'How long to hold the bug-marker button (seconds). On Touch/Index it is left Y/B, whose shorter tap flips the grip.'),
         ('replay_before_s', 'Seconds before the press that the bug marker saves.'),
         ('replay_after_s', 'Seconds after the press that the bug marker keeps recording.'),
         ('log_input', '1 = log input: keyboard focus, Esc and menu clicks, sticks, turn speed.'),
