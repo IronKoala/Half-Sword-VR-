@@ -839,7 +839,7 @@ namespace hsvr
         bool pose_arm_fresh_shoulder = true;
         // 1 = walking fast doesn't swap his arms into the game's falling-backwards swing (it opened the weapon hand).
         bool pose_no_fall_arms = true;
-        bool pose_arm_fresh_shoulder_held = true; // ... and a hand holding a weapon, two-handing or on a scabbard
+        bool pose_arm_fresh_shoulder_held = false; // test 2026-11-22: with the joint off it shook held weapons 1.4-2.6x more // ... and a hand holding a weapon, two-handing or on a scabbard
         // He stops at walls and scenery when walking (stick or room): his capsule, from this far above his
         // feet (so steps and the floor don't stop him) to his head, radius = his capsule's x share.
         bool pose_body_wall_stop = true;

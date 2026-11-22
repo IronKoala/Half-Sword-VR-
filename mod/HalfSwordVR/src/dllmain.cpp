@@ -19172,6 +19172,19 @@ namespace
         // kept a 60 cm jump to 13 cm.
         bool jumping = now_seconds() < g_jump_until || bool_property(context, STR("Jump Pressed")) || bool_property(context, STR("Dolphin Dive Interval"));
         bool climb = rise > 30.0 && !jumping;
+        // A rise back up to standing height over the floor is a recovery, not a climb: after a hitch
+        // (~0.4 s) the game drops the capsule ~78 cm, and undoing its way back up sank him under the
+        // floor to the lose screen (unattended test 2026-11-22 12:50Z, also on 9592808).
+        if (climb && g_pose.mesh)
+        {
+            double floor_z = 0.0;
+            if (ground_below(context, now_at.x, now_at.y, g_hold_location.z + 40.0, floor_z) || ground_below(context, now_at.x, now_at.y, now_at.z + 40.0, floor_z))
+                if (now_at.z <= floor_z + 90.0 * component_scale_z(g_pose.mesh) + 5.0)
+                {
+                    climb = false;
+                    HSVR_LOG_EVERY(1.0, "Capsule: rose %.0f cm back to standing over the floor (%.0f): kept, not a climb", rise, floor_z);
+                }
+        }
         Vec3 keep{g_hold_location.x, g_hold_location.y, climb ? g_hold_location.z : now_at.z};
         // Take the game's step term back out of the height (pose_capsule_no_step_offset): it bobbed the
         // capsule ~3 cm down through every step and snapped it back up as each foot landed.
