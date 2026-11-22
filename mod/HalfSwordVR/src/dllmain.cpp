@@ -16723,96 +16723,96 @@ namespace
         return sheathe_cross_begin(side, pawn, w, f);
     }
 
-    // Each tick, for a hand holding a weapon: its tip at its side's empty belt scabbard mouth, lined up.
+    // Each tick, for a hand holding a weapon: its tip at a belt scabbard mouth on either hip, lined up. On
+    // each hip that is the weapon's own scabbard's real mouth (measured at the draw) while it is pinned
+    // there and its slot is empty, else that hip's free socket; the nearer one it fits in is taken. A
+    // weapon drawn across may so go into the hand's own hip, or back when that hip is full.
     void sheathe_check(int side, UObject* pawn, const hsvr::Config& cfg)
     {
         using namespace hsvr;
         if (!cfg.pose_sheathe || g_draw[side].active || g_two.active) return;
         UObject* w = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
-        if (!w || is_fist(w) || g_hold[side].weapon != w || !object_property(w, STR("Scabbard"))) return;
+        if (!w || is_fist(w) || g_hold[side].weapon != w) return;
+        UObject* scab = object_property(w, STR("Scabbard"));
+        if (!scab) return;
         UObject* base = object_property(w, STR("BaseMesh"));
         if (!base) return;
-        Vec3 sock_mouth, sock_ax;
-        bool have_sock = belt_mouth(side, pawn, sock_mouth, sock_ax);
-        // Its own scabbard's real mouth (measured at the draw), when that scabbard hangs on this hand's
-        // side (the game's Assign for this hand only sheathes into this side's slots).
-        Vec3 mouth = sock_mouth, ax = sock_ax;
-        bool real = false, other_side = false;
+        const char* hand = side == 0 ? "left" : "right";
+
+        const SheathFit* pinned = nullptr;
         auto fit = g_sheath_fit.find(w);
-        bool pinned = fit != g_sheath_fit.end() && fit->second.scab && scabbard_pin(fit->second.scab) != nullptr;
-        if (fit != g_sheath_fit.end() && fit->second.scab == object_property(w, STR("Scabbard")) && !pinned)
-            HSVR_LOG_EVERY(2.0, "Sheathe: %ls's scabbard is no longer on the belt (the game takes it off when its weapon is dropped); not sheathed",
-                           w->GetName().c_str());
-        if (fit != g_sheath_fit.end() && fit->second.scab == object_property(w, STR("Scabbard")) && pinned)
+        if (fit != g_sheath_fit.end() && fit->second.scab == scab)
         {
-            Vec3 sp = component_location(fit->second.scab);
-            Quat sq = component_rotation(fit->second.scab);
-            if (fit->second.slot_side == side)
+            if (!scabbard_pin(scab))
+                HSVR_LOG_EVERY(2.0, "Sheathe: %ls's scabbard is no longer on the belt (the game takes it off when its weapon is dropped); a free belt slot takes both",
+                               w->GetName().c_str());
+            else if (fit->second.slot == 0 || fit->second.slot == 1) // (one drawn off the back goes to the hip)
+                pinned = &fit->second;
+        }
+        struct Mouth
+        {
+            bool ok = false, real = false;
+            Vec3 at, ax;
+            double d = 1e9, c = -1.0;
+        };
+        Mouth mouths[2];
+        for (int hip = 0; hip < 2; ++hip)
+        {
+            Mouth& m = mouths[hip];
+            if (pinned && pinned->slot_side == hip && !object_property(pawn, k_belt[hip][pinned->slot].var))
             {
-                mouth = sp + sq.rotate(fit->second.mouth_local);
-                ax = sq.rotate(fit->second.axis_local);
-                real = true;
+                Quat sq = component_rotation(scab);
+                m.at = component_location(scab) + sq.rotate(pinned->mouth_local);
+                m.ax = sq.rotate(pinned->axis_local);
+                m.ok = m.real = true;
             }
             else
-                other_side = true;
+                m.ok = belt_mouth(hip, pawn, m.at, m.ax);
         }
-        // The other hip's free belt mouth, for a sheathe across when its scabbard isn't already there.
-        Vec3 far_mouth, far_ax;
-        bool have_far = cfg.pose_sheathe_cross && !other_side && belt_mouth(1 - side, pawn, far_mouth, far_ax);
-        if (!real && !have_sock && !have_far) return;
-        Vec3 bp = component_location(base);
-        Quat bq = component_rotation(base);
-        Vec3 blade = bq.rotate(Vec3{0, 0, 1});
-        Vec3 tip = bp + blade * blade_length(w);
-        if (have_far && g_sheathe_armed[side])
-        {
-            double d3 = length(tip - far_mouth), c3 = dot(blade, far_ax);
-            if (d3 < 40.0)
-                HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's tip %.1f cm from the other hip's belt mouth, %.0f deg off its line (needs %.0f cm, %.0f deg)",
-                               side == 0 ? "left" : "right", d3, std::acos((std::max)(-1.0, (std::min)(1.0, c3))) * 57.2958, cfg.pose_sheathe_mouth_cm,
-                               cfg.pose_sheathe_angle_deg);
-            if (d3 <= cfg.pose_sheathe_mouth_cm && c3 >= std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0) &&
-                (!(real || have_sock) || d3 < length(tip - mouth)) && sheathe_cross_fresh(side, pawn, w))
-                return;
-        }
-        if (!real && !have_sock)
-        {
-            if (!g_sheathe_armed[side] && have_far && length(tip - far_mouth) > 2.0 * cfg.pose_sheathe_mouth_cm + 10.0) g_sheathe_armed[side] = true;
-            return;
-        }
-        double d = length(tip - mouth), c = dot(blade, ax);
-        double off_deg = std::acos((std::max)(-1.0, (std::min)(1.0, c))) * 57.2958;
+        if (!mouths[0].ok && !mouths[1].ok) return;
+        Vec3 blade = component_rotation(base).rotate(Vec3{0, 0, 1});
+        Vec3 tip = component_location(base) + blade * blade_length(w);
+        for (Mouth& m : mouths)
+            if (m.ok) m.d = length(tip - m.at), m.c = dot(blade, m.ax);
+
         if (!g_sheathe_armed[side])
         {
-            if (d > 2.0 * cfg.pose_sheathe_mouth_cm + 10.0)
-            {
-                g_sheathe_armed[side] = true;
-                HSVR_LOG("Sheathe: %s hand's blade is clear of the scabbard (tip %.0f cm from the mouth); it can be sheathed again", side == 0 ? "left" : "right", d);
-            }
+            // Clear of every mouth. The own hip's alone re-armed it on the tick after any pull-out on the
+            // other hip, the tip still at that mouth: it went straight back in, Block set again, and Check
+            // refuses the break until it has been pushed in (Check Scabbard Unsheath State L @2808).
+            const double clear_cm = 2.0 * cfg.pose_sheathe_mouth_cm + 10.0;
+            double nearest = (std::min)(mouths[0].d, mouths[1].d);
+            if (nearest <= clear_cm) return;
+            if (UObject* mesh = object_property(pawn, STR("Mesh")))
+                for (const auto& hip_slots : k_belt)
+                    for (const BeltSlot& b : hip_slots)
+                        if (!object_property(pawn, b.var)) nearest = (std::min)(nearest, length(tip - socket_location(mesh, bone_fname(b.socket))));
+            if (nearest <= clear_cm) return;
+            g_sheathe_armed[side] = true;
+            HSVR_LOG("Sheathe: %s hand's blade is clear of every mouth (tip %.0f cm from the nearest); it can be sheathed again", hand, nearest);
             return;
+        }
+        const double min_cos = std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0);
+        int into = -1, closest = mouths[0].d <= mouths[1].d ? 0 : 1;
+        for (int hip = 0; hip < 2; ++hip)
+        {
+            const Mouth& m = mouths[hip];
+            if (!m.ok || m.d > cfg.pose_sheathe_mouth_cm || m.c < min_cos || (hip != side && !cfg.pose_sheathe_cross)) continue;
+            if (into < 0 || m.d < mouths[into].d) into = hip;
         }
         // Playtest 09:38: no sheathe ever began and nothing said how close the tip came. Near a mouth,
-        // twice a second: how far and how lined up (and where the belt socket's mouth is, for comparison).
-        if (d < 40.0 || other_side)
-            HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's tip %.1f cm from the %s mouth, %.0f deg off its line (needs %.0f cm, %.0f deg)%s%s",
-                           side == 0 ? "left" : "right", d, real ? "scabbard's" : "belt socket's", off_deg, cfg.pose_sheathe_mouth_cm, cfg.pose_sheathe_angle_deg,
-                           real && have_sock ? "; the belt socket's is " : "", real && have_sock ? (std::to_string((int)std::lround(length(tip - sock_mouth))) + " cm").c_str() : "");
-        if (other_side)
-        {
-            // Its own scabbard on the other hip: its real mouth, and the game's cross path.
-            Vec3 sp = component_location(fit->second.scab);
-            Quat sq = component_rotation(fit->second.scab);
-            Vec3 m2 = sp + sq.rotate(fit->second.mouth_local), a2 = sq.rotate(fit->second.axis_local);
-            double d2 = length(tip - m2), c2 = dot(blade, a2);
-            if (d2 < 40.0)
-                HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's tip %.1f cm from the mouth on the other hip, %.0f deg off its line (needs %.0f cm, %.0f deg)",
-                               side == 0 ? "left" : "right", d2, std::acos((std::max)(-1.0, (std::min)(1.0, c2))) * 57.2958, cfg.pose_sheathe_mouth_cm,
-                               cfg.pose_sheathe_angle_deg);
-            if (cfg.pose_sheathe_cross && d2 <= cfg.pose_sheathe_mouth_cm && c2 >= std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0))
-                sheathe_cross_begin(side, pawn, w, fit->second);
-            return;
-        }
-        if (d <= cfg.pose_sheathe_mouth_cm && c >= std::cos(cfg.pose_sheathe_angle_deg * 3.14159265358979 / 180.0)) sheathe_begin(side, pawn, w);
+        // twice a second: how far and how lined up.
+        if (mouths[closest].d < 40.0)
+            HSVR_LOG_EVERY(0.5, "Sheathe: %s hand's tip %.1f cm from the %s hip's %s mouth, %.0f deg off its line (needs %.0f cm, %.0f deg)", hand, mouths[closest].d,
+                           closest == 0 ? "left" : "right", mouths[closest].real ? "scabbard's" : "belt socket's",
+                           std::acos((std::max)(-1.0, (std::min)(1.0, mouths[closest].c))) * 57.2958, cfg.pose_sheathe_mouth_cm, cfg.pose_sheathe_angle_deg);
+        if (into < 0) return;
+        if (into == side)
+            sheathe_begin(side, pawn, w);
+        else if (mouths[into].real)
+            sheathe_cross_begin(side, pawn, w, *pinned); // its scabbard already hangs there
+        else
+            sheathe_cross_fresh(side, pawn, w);
     }
 
     // A sheathe whose hand has let go. "Sheathed" is no sign of a seat (Create Sheath Constraint sets it as
@@ -16906,6 +16906,19 @@ namespace
                 h.settle_from_rot = bq;
                 h.settle_s = (std::max)(0.02, cfg.pose_draw_settle_s);
                 h.settle_until = now + h.settle_s;
+                if (d.sheathing)
+                {
+                    // Create put it in Sheathed Mode as the sheathe began. The game's break takes that off
+                    // only on the right (Check Scabbard Unsheath State R @7623 / @7180; L @6464 / @6057 has
+                    // no such call). Either rebuilds its bodies, so the no-collide joints against his own
+                    // are made again (as after a late rebuild off the back).
+                    bool undo = bool_property(d.weapon, STR("Sheathed"));
+                    if (undo) undo = Call(d.weapon, STR("Unsheathed Mode")).run();
+                    clear_arm_ignore(side);
+                    ignore_arm_collision(pawn, object_property(pawn, STR("Mesh")), d.weapon, base, side);
+                    HSVR_LOG("Sheathe: %ls, pulled back out, is a held weapon again (%s; its no-collide joints made again)", d.weapon->GetName().c_str(),
+                             undo ? "Unsheathed Mode run" : "the game had unsheathed it");
+                }
                 d = DrawState{};
                 g_sheathe_armed[side] = false;
                 continue;
