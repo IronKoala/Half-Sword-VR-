@@ -480,6 +480,8 @@ namespace hsvr
         integer("pose_bs_iterations", c.pose_bs_iterations);
         num("pose_bs_two_let_go_cm", c.pose_bs_two_let_go_cm);
         flag("pose_hold_ignore_body", c.pose_hold_ignore_body);
+        flag("pose_hold_ignore_own_helmet", c.pose_hold_ignore_own_helmet);
+        flag("hold_blocker_log", c.hold_blocker_log);
         num("pose_hold_weight_spin_extra", c.pose_hold_weight_spin_extra);
         flag("pose_hold_hand_on_weapon", c.pose_hold_hand_on_weapon);
         flag("pose_arm_solve_drawn_hand", c.pose_arm_solve_drawn_hand);
@@ -500,6 +502,9 @@ namespace hsvr
         num("pose_hold_joint_stiffness", c.pose_hold_joint_stiffness);
         num("pose_hold_joint_damping", c.pose_hold_joint_damping);
         num("pose_hold_joint_max", c.pose_hold_joint_max);
+        flag("pose_hold_joint_shoulder", c.pose_hold_joint_shoulder);
+        flag("pose_hold_joint_carry_weight", c.pose_hold_joint_carry_weight);
+        num("pose_hold_joint_fade_min_speed", c.pose_hold_joint_fade_min_speed);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
         flag("pose_hold_ignore_hand", c.pose_hold_ignore_hand);
         flag("pose_hold_block_offhand_search", c.pose_hold_block_offhand_search);
@@ -533,6 +538,7 @@ namespace hsvr
         flag("pose_slide_butt_is_haft", c.pose_slide_butt_is_haft);
         flag("pose_slide_fixed_1h_sword", c.pose_slide_fixed_1h_sword);
         integer("pose_grip_two_zones_2h_sword", c.pose_grip_two_zones_2h_sword);
+        num("pose_grip_pommel_top_cm", c.pose_grip_pommel_top_cm);
         flag("pose_grip_dagger_fixed", c.pose_grip_dagger_fixed);
         num("pose_slide_rate_min", c.pose_slide_rate_min);
         num("pose_slide_rate_max", c.pose_slide_rate_max);
@@ -676,6 +682,9 @@ namespace hsvr
         num("pose_finger_scale_pip", c.pose_finger_scale_pip);
         num("pose_finger_scale_dip", c.pose_finger_scale_dip);
         flag("pose_finger_pivot_fix", c.pose_finger_pivot_fix);
+        flag("pose_hand_world_stop", c.pose_hand_world_stop);
+        num("pose_hand_world_radius_cm", c.pose_hand_world_radius_cm);
+        num("pose_hand_world_reach_cm", c.pose_hand_world_reach_cm);
         num("pose_finger_mcp_lag", c.pose_finger_mcp_lag);
         num("pose_finger_pip_full", c.pose_finger_pip_full);
         flag("pose_wrap", c.pose_wrap);

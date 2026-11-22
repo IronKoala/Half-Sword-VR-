@@ -439,6 +439,10 @@ namespace hsvr
         double pose_bs_two_rot_k = 2200.0, pose_bs_two_rot_c = 120.0, pose_bs_two_rot_max = 500.0;
         int pose_bs_iterations = 8;
         double pose_bs_two_let_go_cm = 45.0; // B&S gaps reach 18 cm (p95) on fast two-hand swings
+        // A worn helmet's collision is not part of his body mesh: the game welds it onto CM_Helmet, which
+        // pose_hold_ignore_body doesn't cover. On: the held weapon ignores that too (his own only).
+        bool pose_hold_ignore_own_helmet = true;
+        bool hold_blocker_log = false; // test: name what a held weapon hits, and what is along it while it is held off
         bool pose_hold_ignore_body = true;   // the held weapon never collides with his own body (B&S)
         double pose_bs_max_spin = 60.0; // rad/s
         // The weight's own swing never spins it faster than the turn wanted plus this (rad/s): one tick
@@ -484,10 +488,16 @@ namespace hsvr
         // hand: pose_hold_spring/damper/max_force and turn_spring/damper/max_torque; two hands: each
         // hand pulls (pose_bs_two_pos_*), only the main hand turns (pose_bs_two_rot_*). Caps scale with
         // strength/stamina/injury. Not used while drawing, sliding or stuck in a wound. 0 = the old hold.
-        bool pose_hold_joint = false;
+        bool pose_hold_joint = true;
         double pose_hold_joint_stiffness = 1.0; // multiplies the springs
         double pose_hold_joint_damping = 1.0;   // multiplies the dampers (the lag in a steady swing is about damper / spring x speed)
         double pose_hold_joint_max = 1.0;       // multiplies the force and torque caps
+        // The shoulder's limit on each hand's pull (the arm-lag decision 2026-11-20: weight shows as the arm
+        // being slow), as the old hold; it eases off to B&S's cap when the grip is far behind. 0 = B&S caps only.
+        bool pose_hold_joint_shoulder = true;
+        // The arm carries the weapon's weight at the grip outside that cap (as the old hold). 0 = the cap pays it.
+        bool pose_hold_joint_carry_weight = true;
+        double pose_hold_joint_fade_min_speed = 50.0; // cm/s: below it a grip far behind is stopped by something, no ease to B&S's cap
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
@@ -573,6 +583,9 @@ namespace hsvr
         // 0 = off (grip slides), 1 = hand-and-a-half (bastard sword, Grip_15) only, 2 = every two-handed
         // sword (also longswords and greatswords).
         int pose_grip_two_zones_2h_sword = 1; // Matthew 2026-11-21: bastard swords only
+        // The lower zone sits just above the pommel (Matthew 2026-11-22: "you grab just above the pommel"): the
+        // pommel's top is this far above its origin (measured 4.7 on a Grip_15 pommel, 8 cm long).
+        double pose_grip_pommel_top_cm = 4.7;
         // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
         bool pose_grip_dagger_fixed = true;
         double pose_slide_rate_min = 3.0;
@@ -815,6 +828,11 @@ namespace hsvr
         // 1 = finger joints turn about the finger's middle, not about Willie's bones (they sit on the
         // palm-side skin, so closing the hand rolled the fingers into loops).
         bool pose_finger_pivot_fix = true;
+        // A free hand (nothing held) stops at walls and scenery: a sphere of this radius at the palm's
+        // middle (reach_cm past the wrist along the fingers), swept from the shoulder.
+        bool pose_hand_world_stop = true;
+        double pose_hand_world_radius_cm = 3.5;
+        double pose_hand_world_reach_cm = 6.0;
         double pose_finger_mcp_lag = 0.25;
         double pose_finger_pip_full = 0.75;
         // Procedural finger wrap (his framework's grasp): fingers of a hand the game's grab holds a body or
