@@ -1325,6 +1325,8 @@ namespace
     hsvr::Vec3 g_wall_ok;          // where his capsule last stood legally (pose_body_wall_stop)
     bool g_wall_ok_have = false;
     UObject* g_wall_pawn = nullptr; // whose (a respawn starts over)
+    double g_kept_z = 0.0;          // his capsule's height as capsule_hold last kept it
+    bool g_kept_have = false;
     void pose_release()
     {
         for (auto& [bone, n] : g_pose.chain) node_release(n);
@@ -1337,6 +1339,7 @@ namespace
         g_pose_anchor_fixed = false;
         g_pose_room_moved_local = {};
         g_wall_ok_have = false;
+        g_kept_have = false;
         feet_reset();
     }
 
@@ -2648,6 +2651,7 @@ namespace
             g_pose_active.store(false);
             g_hold_capsule.store(false);
             g_wall_ok_have = false; // swept from where he gets up, not from where he fell
+            g_kept_have = false;
             return true;
         }
         if (g_inj.down_now)
@@ -4900,7 +4904,7 @@ namespace
         if (!is_receive_tick(context, function)) return;
         g_hold_location = actor_location(context);
         // The character movement (your stick) has moved him since the last tick: not into a wall.
-        if (context != g_wall_pawn) g_wall_pawn = context, g_wall_ok_have = false;
+        if (context != g_wall_pawn) g_wall_pawn = context, g_wall_ok_have = false, g_kept_have = false;
         if (g_pose_active.load() && g_wall_ok_have)
         {
             bool blocked = false;
@@ -19172,18 +19176,15 @@ namespace
         // kept a 60 cm jump to 13 cm.
         bool jumping = now_seconds() < g_jump_until || bool_property(context, STR("Jump Pressed")) || bool_property(context, STR("Dolphin Dive Interval"));
         bool climb = rise > 30.0 && !jumping;
-        // A rise back up to standing height over the floor is a recovery, not a climb: after a hitch
-        // (~0.4 s) the game drops the capsule ~78 cm, and undoing its way back up sank him under the
-        // floor to the lose screen (unattended test 2026-11-22 12:50Z, also on 9592808).
-        if (climb && g_pose.mesh)
+        // A rise back out of a drop is a recovery, not a climb: after a hitch (~0.4 s) the game drops
+        // the capsule ~78 cm, and undoing its way back up sank him under the floor to the lose screen
+        // (unattended test 2026-11-22 12:50Z, also on 9592808). Only a rise that starts 30 cm or more
+        // under where he was last kept, and ends within 15 cm above it, counts. (A floor trace instead
+        // found stair tops under him and let him climb 9 m: test 13:20Z.)
+        if (climb && g_kept_have && g_hold_location.z < g_kept_z - 30.0 && now_at.z <= g_kept_z + 15.0)
         {
-            double floor_z = 0.0;
-            if (ground_below(context, now_at.x, now_at.y, g_hold_location.z + 40.0, floor_z) || ground_below(context, now_at.x, now_at.y, now_at.z + 40.0, floor_z))
-                if (now_at.z <= floor_z + 90.0 * component_scale_z(g_pose.mesh) + 5.0)
-                {
-                    climb = false;
-                    HSVR_LOG_EVERY(1.0, "Capsule: rose %.0f cm back to standing over the floor (%.0f): kept, not a climb", rise, floor_z);
-                }
+            climb = false;
+            HSVR_LOG_EVERY(1.0, "Capsule: rose %.0f cm back out of a drop (kept height %.0f): kept, not a climb", rise, g_kept_z);
         }
         Vec3 keep{g_hold_location.x, g_hold_location.y, climb ? g_hold_location.z : now_at.z};
         // Take the game's step term back out of the height (pose_capsule_no_step_offset): it bobbed the
@@ -19363,6 +19364,7 @@ namespace
             put.run();
         }
         g_wall_ok = keep, g_wall_ok_have = true;
+        g_kept_z = keep.z, g_kept_have = true;
         for (const TCHAR* name : {STR("Pain Stumble Immediate"), STR("Pain Stumble Delayed"), STR("Stumble Direction"), STR("Dodge Vector")})
         {
             FProperty* p = prop_chain(context, name);
