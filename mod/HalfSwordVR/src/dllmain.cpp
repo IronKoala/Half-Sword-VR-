@@ -2272,6 +2272,7 @@ namespace
     }
 
     std::atomic<int> g_fake_arm_mode{0};
+    std::atomic<bool> g_fake_look{true}; // test: hsvr.fake_look 0 = the made-up head stops looking about
     std::atomic<int> g_fake_arm_epoch{0}; // bumped by every hsvr.arm_move: timed test paths restart
     std::atomic<double> g_fake_two_up{20.0};
     // hsvr.arm_move 10 <speed cm/s> <pitch deg> <height cm>: the right hand thrusts (stab tests).
@@ -2755,7 +2756,7 @@ namespace
         return p;
     }
 
-    bool xbow_test_grip(int side, hsvr::Vec3& grip);
+    bool xbow_test_grip(int side, hsvr::Vec3& grip, hsvr::Quat& grip_rot);
     void pose_arm(int side, const hsvr::Config& cfg, const hsvr::ControllerState& state, const hsvr::Quat& body, const hsvr::Quat& component_inv)
     {
         using namespace hsvr;
@@ -3157,7 +3158,7 @@ namespace
             if (mode == 9) grip_rot = (body * quat_axis_angle(Vec3{0, 1, 0}, std::fmod(now, 6.0) / 6.0 * 2.0 * 3.14159265358979) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
             if (double roll = g_fake_roll_deg[side].load(); roll != 0.0)
                 grip_rot = (body * quat_axis_angle(Vec3{1, 0, 0}, roll / 57.29578) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
-            xbow_test_grip(side, grip); // test: hsvr.xbow_hand
+            xbow_test_grip(side, grip, grip_rot); // test: hsvr.xbow_hand / xbow_wrist / keep, arm_move switches eased
         }
         if (cfg.dev_pose_fake_tracking && g_fake_jitter_cm.load() > 0.0)
         {
@@ -4603,8 +4604,8 @@ namespace
         if (have_head) head_rel = wrap(quat_yaw_deg(head_rot) - g_turn_yaw);
         else if (g_pose_fake)
         {
-            // Made-up path: looks up to 80 degrees left and right, slowly.
-            head_rel = 80.0 * std::sin(now * 0.25);
+            // Made-up path: looks up to 80 degrees left and right, slowly (hsvr.fake_look 0: straight ahead).
+            head_rel = g_fake_look.load() ? 80.0 * std::sin(now * 0.25) : 0.0;
             have_head = true;
         }
         if (have_head)
@@ -12748,7 +12749,7 @@ namespace
     // stock at 30 cm/s), quiver, cradle.
     struct XbowTestHand
     {
-        int target = 0; // 0 off, 1 rear, 2 front, 3 string, 4 pull, 5 quiver, 6 cradle
+        int target = 0; // 0 off, 1 rear, 2 front, 3 string, 4 pull, 5 quiver, 6 cradle, 7 keep (rigid to the other hand)
         double arg = 0.0;
         double t0 = 0.0;
         bool have_start = false;
@@ -12756,12 +12757,24 @@ namespace
         hsvr::Vec3 corr{0, 0, 0};
     };
     XbowTestHand g_xtest[2];
+    hsvr::Vec3 g_xtest_grip[2]; // each fake controller's grip point and turn last tick (for "keep")
+    hsvr::Quat g_xtest_rot[2];
+    hsvr::Quat g_xtest_keep_rot[2]; // "keep": this controller's turn in the other one's frame
+    // Test: hsvr.xbow_wrist <hand> <pitch|roll> <deg> <seconds>: that controller turns this far about its
+    // own right (pitch) or forward (roll) axis, evenly over that time, and stays there.
+    struct XbowWrist
+    {
+        int axis = 0; // 0 none, 1 pitch, 2 roll
+        double from = 0.0, deg = 0.0, secs = 1.0, t0 = 0.0; // from `from` to `deg` (the same axis continues from where it is)
+        double now_deg(double now) const { return from + (deg - from) * (std::min)(1.0, (std::max)(0.0, (now - t0) / (std::max)(0.01, secs))); }
+    };
+    XbowWrist g_xwrist[2];
 
-    bool xbow_test_grip(int side, hsvr::Vec3& grip)
+    bool xbow_steer(int side, hsvr::Vec3& grip)
     {
         using namespace hsvr;
         XbowTestHand& x = g_xtest[side];
-        if (x.target == 0 || !g_pose.pawn) return false;
+        if (x.target < 1 || x.target > 6 || !g_pose.pawn) return false;
         UObject* pawn = g_pose.pawn;
         UObject* mesh = object_property(pawn, STR("Mesh"));
         if (!mesh) return false;
@@ -12993,6 +13006,72 @@ namespace
                 enemy_drop_weapon(d.taker_side, d.taker);
             }
         }
+    }
+
+    // The fake controllers' last word in tests (called at the end of pose_arm's made-up path): steering
+    // (hsvr.xbow_hand), "keep" (rigid to the other controller, position AND turn, in its frame, so both
+    // hands on one weapon move it as one piece), wrist turns (hsvr.xbow_wrist), and every hsvr.arm_move
+    // switch eased over 0.3 s instead of a one-tick jump.
+    bool xbow_test_grip(int side, hsvr::Vec3& grip, hsvr::Quat& grip_rot)
+    {
+        using namespace hsvr;
+        XbowTestHand& x = g_xtest[side];
+        double now = now_seconds();
+        bool changed = false;
+        if (x.target == 7)
+        {
+            if (!x.have_start)
+            {
+                Quat oinv = g_xtest_rot[1 - side].inverse();
+                x.start_local = oinv.rotate(g_xtest_grip[side] - g_xtest_grip[1 - side]);
+                g_xtest_keep_rot[side] = (oinv * g_xtest_rot[side]).normalized();
+                x.have_start = true;
+                HSVR_LOG("Test: xbow_hand %s keep: %.1f cm from the other controller", side == 0 ? "left" : "right", length(x.start_local));
+            }
+            grip = g_xtest_grip[1 - side] + g_xtest_rot[1 - side].rotate(x.start_local);
+            grip_rot = (g_xtest_rot[1 - side] * g_xtest_keep_rot[side]).normalized();
+            changed = true;
+        }
+        else
+        {
+            changed = xbow_steer(side, grip);
+            // Ease an arm_move switch over 0.3 s (from where this controller was when it came).
+            static int epoch_seen[2] = {-1, -1};
+            static double ease_t0[2] = {-10.0, -10.0};
+            static Vec3 from_p[2];
+            static Quat from_q[2];
+            int epoch = g_fake_arm_epoch.load();
+            if (epoch != epoch_seen[side])
+            {
+                if (epoch_seen[side] >= 0)
+                {
+                    ease_t0[side] = now;
+                    from_p[side] = g_xtest_grip[side];
+                    from_q[side] = g_xtest_rot[side];
+                }
+                epoch_seen[side] = epoch;
+            }
+            double u = (now - ease_t0[side]) / 0.3;
+            if (u >= 0.0 && u < 1.0)
+            {
+                u = u * u * (3.0 - 2.0 * u);
+                grip = from_p[side] + (grip - from_p[side]) * u;
+                Quat a = from_q[side], b = grip_rot;
+                if (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0.0) b = Quat{-b.x, -b.y, -b.z, -b.w};
+                grip_rot = Quat{a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u, a.z + (b.z - a.z) * u, a.w + (b.w - a.w) * u}.normalized();
+                changed = true;
+            }
+        }
+        const XbowWrist& w = g_xwrist[side];
+        if (w.axis != 0)
+        {
+            double a = w.now_deg(now) / 57.29578;
+            grip_rot = (grip_rot * quat_axis_angle(w.axis == 1 ? Vec3{0, 1, 0} : Vec3{1, 0, 0}, a)).normalized();
+            changed = true;
+        }
+        g_xtest_grip[side] = grip;
+        g_xtest_rot[side] = grip_rot;
+        return changed;
     }
 
     void grab_button(const hsvr::Config& cfg, const hsvr::ControllerState& state, bool menu_up)
@@ -25422,10 +25501,35 @@ namespace
                     std::string t = what;
                     XbowTestHand& x = g_xtest[side];
                     x = XbowTestHand{};
-                    x.target = t == "rear" ? 1 : t == "front" ? 2 : t == "string" ? 3 : t == "pull" ? 4 : t == "quiver" ? 5 : t == "cradle" ? 6 : 0;
+                    x.target = t == "rear" ? 1 : t == "front" ? 2 : t == "string" ? 3 : t == "pull" ? 4 : t == "quiver" ? 5 : t == "cradle" ? 6 : t == "keep" ? 7 : 0;
                     x.arg = arg;
                     x.t0 = hsvr::now_seconds();
                     HSVR_LOG("Script: hsvr.xbow_hand %s -> %s (%d) %.1f", side == 0 ? "left" : "right", what, x.target, arg);
+                }
+                continue;
+            }
+            if (entry.command.rfind("hsvr.fake_look ", 0) == 0)
+            {
+                g_fake_look.store(atoi(entry.command.c_str() + 15) != 0);
+                HSVR_LOG("Script: hsvr.fake_look %d", (int)g_fake_look.load());
+                continue;
+            }
+            if (entry.command.rfind("hsvr.xbow_wrist ", 0) == 0)
+            {
+                int side = -1;
+                char what[16] = {0};
+                double deg = 0.0, secs = 1.0;
+                if (sscanf(entry.command.c_str() + 16, "%d %15s %lf %lf", &side, what, &deg, &secs) >= 3 && (side == 0 || side == 1))
+                {
+                    std::string t = what;
+                    XbowWrist& w = g_xwrist[side];
+                    int axis = t == "pitch" ? 1 : t == "roll" ? 2 : 0;
+                    w.from = axis == w.axis ? w.now_deg(hsvr::now_seconds()) : 0.0;
+                    w.axis = axis;
+                    w.deg = deg;
+                    w.secs = secs;
+                    w.t0 = hsvr::now_seconds();
+                    HSVR_LOG("Script: hsvr.xbow_wrist %s %s %.0f deg over %.1f s", side == 0 ? "left" : "right", what, deg, secs);
                 }
                 continue;
             }

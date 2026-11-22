@@ -27,7 +27,10 @@ Not done yet (later work): weight and feel, how hard the string is to pull, and 
 
 ## Test commands (HalfSwordVR_commands.txt)
 
-- `hsvr.xbow_hand <0|1> <off|rear|front|string|pull <cm>|quiver|cradle>`: moves that fake hand's grab point to that spot. `pull` draws the hand back from the nut along the stock at 30 cm/s. Use it with `hsvr.arm_move 1`.
+- `hsvr.xbow_hand <0|1> <off|rear|front|string|pull <cm>|quiver|cradle|keep>`: moves that fake hand's grab point to that spot. `pull` draws the hand back from the nut along the stock at 30 cm/s. Use it with `hsvr.arm_move 1`. `keep` holds that controller where it is against the other controller (any weapon), so two hands on one weapon move it rigidly with the other hand's arm moves.
+- `hsvr.xbow_wrist <0|1> <pitch|roll> <deg> <seconds>`: turns that fake controller about its own right (pitch) or forward (roll) axis to <deg>, evenly over <seconds> (from where it is on that axis).
+- `hsvr.fake_look <0|1>`: 0 stops the made-up head looking left and right.
+- Every `hsvr.arm_move` switch eases the fake controllers over 0.3 s. `keep` holds a controller rigid to the other one in that controller's own frame (position and turn).
 - `hsvr.xbow_report`: logs the quiver, both hands, the crossbow's parts in its BaseMesh frame and its flags.
 - `hsvr.xbow_quiver <n>`: calls your character's own `Add Bolt to Quiver` n times.
 - `hsvr.expect` values: `xbow_string`, `xbow_bolt` (the crossbow in either hand), `xbow_quiver` (bolts left), `bolt_l`, `bolt_r`, `xstring` (0 no hand on the string, 1 left, 2 right).
