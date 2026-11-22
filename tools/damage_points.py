@@ -198,6 +198,16 @@ def hafted_points(pos, numbers, over):
                          ["Piercing", "BoxCollision", "NoStab"]))
         # the back: beak/spike if it narrows to a point, else a hammer face
         back = head[head[:, 0] * sgn < -1.5]
+        # A double-bit axe: the back reaches nearly as far and is as tall at its edge as the front bit.
+        if len(back) > 3:
+            bfar0 = float(back[:, 0].min()) if sgn > 0 else float(back[:, 0].max())
+            bband = back[np.abs(back[:, 0] - bfar0) < 1.5]
+            if abs(bfar0) >= 0.6 * abs(far) and np.ptp(bband[:, 2]) >= 0.6 * np.ptp(band[:, 2]):
+                bz = 0.5 * (float(bband[:, 2].min()) + float(bband[:, 2].max()))
+                pts.append(point("Head", [bfar0 + sgn * 1.0, 0, bz], [0, 0, 1], [-sgn, 0, 0], 0, sEdge, 4, 0, rig,
+                                 ["Piercing", "BoxCollision", "NoStab"]))
+                info["double_bit"] = True
+                back = back[:0]  # no hammer face or beak on that side
         if len(back) > 3:
             bfar = float(back[:, 0].min()) if sgn > 0 else float(back[:, 0].max())
             tipband = back[np.abs(back[:, 0] - bfar) < 1.0]

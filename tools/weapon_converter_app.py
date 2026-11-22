@@ -1252,7 +1252,7 @@ class App:
         elif kind == "spear":
             what = f"spear point {dm.get('sTip')}, edges {dm.get('sEdge')}"
         elif kind == "axe":
-            what = f"axe blade, edge sharpness {dm.get('sEdge')}"
+            what = f"{'double-bit axe (both blades cut)' if dm.get('double_bit') else 'axe blade'}, edge sharpness {dm.get('sEdge')}"
         else:
             what = "blunt head"
         what += f", rigidity {dm.get('rig')}"
