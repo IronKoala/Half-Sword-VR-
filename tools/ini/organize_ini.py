@@ -314,7 +314,7 @@ LAYOUT = [
         ('pose_two_hand', '1 = squeeze the free hand on a weapon the other hand holds to hold it with both (grip or blade).'),
         ('pose_two_hand_strength', 'Two hands on one weapon hold this many times as strong.'),
         ('pose_two_hand_twist_only', '1 = with two hands the turning hand only rolls the weapon; your two hands point it.'),
-        ('pose_two_hand_joint_both_turn', 'Engine-joint hold, both hands on fixed grips (crossbow, sword grip zones): 1 = both wrists turn the weapon, each toward its own hand; 0 = the first hand only rolls it (test switch).'),
+        ('pose_two_hand_joint_both_turn', 'Engine-joint hold, both hands on fixed grips (crossbow, sword grip zones): 1 = both wrists turn the weapon, each toward its own hand; 0 = the first hand only rolls it (lags and creeps back toward the hands' line).'),
         ('pose_two_hand_swing_share', '0..1: how much the turning hand still points a two-handed weapon (1 = old).'),
         ('pose_two_hand_blade_gap_cm', 'The blade grip zone starts this far past the guard (cm).'),
         ('pose_two_hand_reach_cm', 'How far from a grip zone a squeeze still lands on it (cm).'),
