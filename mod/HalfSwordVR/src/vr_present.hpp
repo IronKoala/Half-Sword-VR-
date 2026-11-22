@@ -18,6 +18,11 @@ namespace hsvr
     // Asks the headset where the eyes will be when the next frame is shown and records that pose
     // as belonging to the frame the game is about to draw. Returns false if no pose is known yet.
     bool vr_latch_frame_pose(FramePose& out);
+    // Tests with the pretend headset and dev_fake_real_eyes: where its head is (the last latched pose's middle),
+    // so the head lock and the helmet follow it; and a steady turn through straight ahead.
+    struct XrPoseRaw;
+    bool vr_fake_head(XrPoseRaw& out);
+    void vr_fake_turn(double degrees_per_second);
 
     // Marks the current head position and heading as "straight ahead".
     struct Recenter

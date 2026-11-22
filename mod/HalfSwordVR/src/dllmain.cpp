@@ -3412,6 +3412,8 @@ namespace
             double base_yaw = 0.0;
             if (!g_fake_head_pose.load() || !stereo_view_anchor(w, base_yaw)) return false;
             r = quat_from_yaw_deg(base_yaw);
+            XrPoseRaw fake_head;
+            if (vr_fake_head(fake_head) && !stereo_tracking_to_world(fake_head, w, r)) return false;
         }
         double p = g_fake_tilt_pitch.load(), ro = g_fake_tilt_roll.load(), dr = g_fake_tilt_drop.load();
         if (double wa = g_fake_wobble_deg.load(); wa != 0.0) p += wa * std::sin(now_seconds() * 2.0 * kPi * g_fake_wobble_hz.load());
@@ -23307,6 +23309,14 @@ namespace
                 g_fake_tilt_roll.store(r);
                 g_fake_tilt_drop.store(d);
                 HSVR_LOG("Script: hsvr.fake_head_tilt pitch %.0f roll %.0f drop %.0f cm", p, r, d);
+            }
+            if (entry.command.rfind("hsvr.fake_turn ", 0) == 0)
+            {
+                // hsvr.fake_turn <deg/s>: the pretend headset turns for 2 s at that rate (+ = left), 0 = straight ahead again.
+                double dps = std::atof(entry.command.c_str() + 15);
+                hsvr::vr_fake_turn(dps);
+                HSVR_LOG("Script: hsvr.fake_turn %.0f deg/s", dps);
+                continue;
             }
             if (entry.command.rfind("hsvr.fake_head_drop ", 0) == 0)
             {

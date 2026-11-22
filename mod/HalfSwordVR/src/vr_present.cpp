@@ -187,6 +187,8 @@ namespace hsvr
         bool g_fake_headset = false;
 
         // Pretend headset for tests without SteamVR: sits at the origin and looks slowly left and right.
+        std::atomic<double> g_fake_turn_dps{0.0}, g_fake_turn_t0{0.0};
+
         void fake_pose(FramePose& pose)
         {
             double t = now_seconds();
@@ -202,6 +204,20 @@ namespace hsvr
             float cp = std::cos(pitch * 0.5f), sp = std::sin(pitch * 0.5f);
             float qx = cy * sp, qy = sy * cp, qz = -sy * sp, qw = cy * cp;
             float sway = (float)std::sin(t * 0.4) * 0.10f * amount; // metres, side to side
+            if (double dps = g_fake_turn_dps.load(); dps != 0.0)
+            {
+                // hsvr.fake_turn: 2 s at a steady rate, through straight ahead after 1 s (pictures are taken there).
+                double since = t - g_fake_turn_t0.load();
+                yaw = (float)(dps * ((since < 0.0 ? 0.0 : since > 2.0 ? 2.0 : since) - 1.0)) * to_radians;
+                pitch = 0.0f;
+                sway = 0.0f;
+                qx = 0.0f;
+                qy = std::sin(yaw * 0.5f);
+                qz = 0.0f;
+                qw = std::cos(yaw * 0.5f);
+                cy = qw;
+                sy = qy;
+            }
             const bool real = cfg.dev_fake_real_eyes;
             shared().eye_width.store(real ? 1864 : 1280);
             shared().eye_height.store(real ? 1864 : 1280);
@@ -2540,6 +2556,30 @@ float4 PSMain(VSOut i) : SV_Target
                      r.yaw, r.pitch, r.roll, gap.x, gap.y, gap.z);
         }
     } // namespace
+
+    void vr_fake_turn(double degrees_per_second)
+    {
+        g_fake_turn_t0.store(now_seconds());
+        g_fake_turn_dps.store(degrees_per_second);
+    }
+
+    bool vr_fake_head(XrPoseRaw& out)
+    {
+        if (!g_fake_headset || !config().dev_fake_real_eyes) return false;
+        FramePose pose;
+        {
+            std::lock_guard<std::mutex> lock(g_pipe.mutex);
+            pose = g_pipe.last_latched;
+        }
+        if (!pose.valid) return false;
+        const XrEyeRaw& a = pose.eye[0];
+        const XrEyeRaw& b = pose.eye[1];
+        out.px = (a.px + b.px) * 0.5f;
+        out.py = (a.py + b.py) * 0.5f;
+        out.pz = (a.pz + b.pz) * 0.5f;
+        centre_rotation(a, b, out.qx, out.qy, out.qz, out.qw);
+        return true;
+    }
 
     bool vr_latch_frame_pose(FramePose& out)
     {
