@@ -1553,7 +1553,7 @@ namespace
     // so a weapon in front of a wall doesn't hide the wall. Returns 0 when nothing is in the way, 1 on a
     // hit (`stop`: the shape's centre there, `normal`: the surface's), 2 when the shape starts inside
     // something (`normal`: the way out). `hit_name`: what it hit.
-    // `walls_only`: a shape starting inside something whose way out is mostly up or down (the floor, a
+    // `walls_only`: a hit or start-inside whose surface faces mostly up or down (the floor, a slope, a
     // table top) doesn't count: that thing is looked through. `depth`: how far in it starts (result 2).
     int world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, double half, bool complex, hsvr::Vec3& stop, hsvr::Vec3* normal = nullptr,
                     std::wstring* hit_name = nullptr, bool walls_only = false, double* depth = nullptr)
@@ -1617,7 +1617,7 @@ namespace
             hsvr::Vec3 nrm = b.vec(STR("Normal"));
             FProperty* ov = b.param(STR("bInitialOverlap"));
             bool inside = ov && *(b.buffer.data() + ov->GetOffset_Internal()) != 0;
-            if (inside && walls_only && std::sqrt(nrm.x * nrm.x + nrm.y * nrm.y) < 0.3)
+            if (walls_only && std::sqrt(nrm.x * nrm.x + nrm.y * nrm.y) < 0.3) // floor, slope or table top: not a wall
             {
                 if (!actor || ignored >= 16) return 0;
                 ignore[ignored++] = actor;
@@ -1693,7 +1693,7 @@ namespace
         {
             // Touching or in it: pushed out along its (flat) way out, then the move swept from there.
             Vec3 nf = flat(n);
-            Vec3 out = a + nf * ((std::max)(0.0, depth) + 0.2);
+            Vec3 out = a + nf * ((std::min)(5.0, (std::max)(0.0, depth)) + 0.2); // at most 5 cm a tick
             Vec3 m = out_of(b - a, n);
             Vec3 at3, n3;
             int r3 = world_sweep(out, out + m, r, half, false, at3, &n3, nullptr, true);
