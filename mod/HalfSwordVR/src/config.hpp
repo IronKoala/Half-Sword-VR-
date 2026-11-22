@@ -206,6 +206,9 @@ namespace hsvr
         // 1 = a short buzz on a controller each time its trigger is pulled all the way (checks vibration).
         // Read SteamVR's hand skeleton (XR_EXT_hand_tracking) for finger curls when it offers one.
         bool input_hand_tracking = true;
+        // Use SteamVR's native Steam Frame controller layout when offered (D-pad directions each get
+        // their own job: Down jump, Up grip flip, Left bug marker). 0 = SteamVR remaps the Touch layout.
+        bool input_frame_layout = true;
         bool haptics_test = false;
         // 1 = once a second, where your character's body, head and hands are.
         bool log_body = false;

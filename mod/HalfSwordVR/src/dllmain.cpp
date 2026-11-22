@@ -21756,8 +21756,8 @@ namespace
     // Every tick of his (after the game's tick) one fixed-size frame goes into a ring held in memory:
     // headset, both controllers (pose, trigger, grip, stick, buttons, finger curls), the mod's hand
     // targets, his posed hand bones, both held weapons (name, pose and hold numbers), his capsule and
-    // every physics-body bone of his visible mesh. Nothing is written to disk until he holds left Y
-    // (left B on Index) for replay_hold_s: then three strong pulses play on both controllers, a
+    // every physics-body bone of his visible mesh. Nothing is written to disk until he holds the
+    // marker button (Steam Frame: left D-pad Left; Touch/Index: left Y/B) for replay_hold_s: then three strong pulses play on both controllers, a
     // "Replay: MARK" line goes into the log, recording goes on for replay_after_s, and a helper thread
     // writes replays\replay-<time>.csv (replay_before_s before the press .. replay_after_s after) with
     // the log lines of that window. Read one with tools/replay/replay.py.
@@ -21776,7 +21776,7 @@ namespace
         {
             Pose7 ctl;          // controller grip, world
             float trigger, squeeze, stick_x, stick_y;
-            uint8_t buttons;    // 1 A/X, 2 B/Y, 4 stick click, 8 menu, 16 trigger touch, 32 thumb touch
+            uint8_t buttons;    // 1 A/X, 2 B/Y, 4 stick click, 8 menu, 16 trigger touch, 32 thumb touch, 64 bug-marker button
             uint8_t valid;      // 1 controller pose, 2 hand bone, 4 weapon pose, 8 finger skeleton
             uint8_t hold;       // 1 force capped, 2 torque capped, 4 sliding, 8 drawing, 16 sheathing, 32 scabbard held, 64 free grip, 128 flipped
             float curl[5];
@@ -22077,14 +22077,27 @@ namespace
                      cfg.replay_after_s);
         }
 
-        // Left Y (left secondary) held replay_hold_s with right B never down meanwhile (both held is
-        // the arm measure); one marker per hold.
+        // The bug-marker button held replay_hold_s: on the Steam Frame layout its own button (left D-pad
+        // Left), elsewhere left Y / B (left secondary) with right B never down meanwhile (both held is
+        // the arm measure). One marker per hold.
         void button(const hsvr::ControllerState& state, double now)
         {
             const hsvr::Config& cfg = hsvr::config();
-            static double down_since = -1.0;
-            static bool spent = false, other = false;
-            bool y = state.active && state.focused && state.hand[0].secondary;
+            static double down_since = -1.0, own_since = -1.0;
+            static bool spent = false, other = false, own_spent = false;
+            bool own = state.active && state.focused && state.hand[0].marker;
+            if (!own) own_since = -1.0, own_spent = false;
+            else
+            {
+                if (own_since < 0.0) own_since = now;
+                if (!own_spent && now - own_since >= cfg.replay_hold_s)
+                {
+                    own_spent = true;
+                    mark("left D-pad Left held");
+                }
+            }
+            // On the Frame layout the marker has its own button, so a held D-pad Up (grip flip) makes none.
+            bool y = state.active && state.focused && !state.frame_layout && state.hand[0].secondary;
             if (!y)
             {
                 down_since = -1.0;
@@ -22115,7 +22128,7 @@ namespace
             if (g_ring.empty())
             {
                 g_ring.resize(kRing);
-                HSVR_LOG("Replay: recording into memory (%d ticks, %.1f MB); hold left Y %.1f s to save the last %.0f s + next %.0f s", kRing,
+                HSVR_LOG("Replay: recording into memory (%d ticks, %.1f MB); hold the marker button (Frame left D-pad Left, else left Y/B) %.1f s to save the last %.0f s + next %.0f s", kRing,
                          kRing * sizeof(Frame) / 1048576.0, cfg.replay_hold_s, cfg.replay_before_s, cfg.replay_after_s);
             }
             double now = now_seconds();
@@ -22167,7 +22180,7 @@ namespace
                 if (hs.grip_valid && stereo_tracking_to_world(hs.grip, p, q)) put(h.ctl, p, q), h.valid |= 1;
                 h.trigger = hs.trigger, h.squeeze = hs.squeeze, h.stick_x = hs.stick_x, h.stick_y = hs.stick_y;
                 h.buttons = (uint8_t)((hs.primary ? 1 : 0) | (hs.secondary ? 2 : 0) | (hs.stick_click ? 4 : 0) | (hs.menu ? 8 : 0) | (hs.trigger_touch ? 16 : 0) |
-                                      (hs.thumb_touch ? 32 : 0));
+                                      (hs.thumb_touch ? 32 : 0) | (hs.marker ? 64 : 0));
                 if (hs.joints_valid) h.valid |= 8;
                 for (int f = 0; f < 5; ++f) h.curl[f] = hs.curl[f];
                 h.target[0] = (float)g_pose.target[side].x, h.target[1] = (float)g_pose.target[side].y, h.target[2] = (float)g_pose.target[side].z;
