@@ -486,6 +486,7 @@ namespace hsvr
         bool pose_hold_joint_shoulder = true;
         // The arm carries the weapon's weight at the grip outside that cap (as the old hold). 0 = the cap pays it.
         bool pose_hold_joint_carry_weight = true;
+        double pose_hold_joint_fade_min_speed = 50.0; // cm/s: below it a grip far behind is stopped by something, no ease to B&S's cap
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).

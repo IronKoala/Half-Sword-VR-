@@ -316,6 +316,7 @@ LAYOUT = [
         ("pose_hold_joint_max", ""),
         ("pose_hold_joint_shoulder", ""),
         ("pose_hold_joint_carry_weight", ""),
+        ("pose_hold_joint_fade_min_speed", ""),
         ("pose_hold_let_go_ignore_self", ""),
         ("pose_hold_contact_cm", ""),
         ("pose_hold_ignore_hand", ""),

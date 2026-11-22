@@ -500,6 +500,7 @@ namespace hsvr
         num("pose_hold_joint_max", c.pose_hold_joint_max);
         flag("pose_hold_joint_shoulder", c.pose_hold_joint_shoulder);
         flag("pose_hold_joint_carry_weight", c.pose_hold_joint_carry_weight);
+        num("pose_hold_joint_fade_min_speed", c.pose_hold_joint_fade_min_speed);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
         flag("pose_hold_ignore_hand", c.pose_hold_ignore_hand);
         flag("pose_hold_block_offhand_search", c.pose_hold_block_offhand_search);

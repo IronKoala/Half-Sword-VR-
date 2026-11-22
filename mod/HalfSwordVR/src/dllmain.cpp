@@ -12642,6 +12642,9 @@ namespace
         hsvr::Vec3 made_at{0, 0, 0}; // the point it was made at, in the weapon's frame
         bool turns = false;
         bool touched = false;
+        double made_t = -1.0;            // when it was made
+        hsvr::Vec3 prev_p{0, 0, 0};      // the point held last tick (world), for its speed
+        double prev_t = -1.0;
         int drives = -1; // which angular drives are on: bit 0 twist, bit 1 swing (-1 = not set yet)
     };
     JointHand g_jh[2][2]; // [side][0 = the hand's own joint, 1 = its joint as the second hand on the other's weapon]
@@ -12777,6 +12780,7 @@ namespace
         j.weapon = weapon;
         j.made_at = at_local;
         j.turns = turns;
+        j.made_t = now_seconds();
         HSVR_LOG("Joint hold: %s hand %s joint made on %ls at (%.1f, %.1f, %.1f) on it", side == 0 ? "left" : "right", turns ? "turning" : "pull-only",
                  weapon->GetName().c_str(), at_local.x, at_local.y, at_local.z);
         return true;
@@ -12862,9 +12866,19 @@ namespace
         double I = (std::max)(1e-4, ig_kgm2);
         double ang_scale = 1.5; // p.Chaos.JointConstraint.AngularDriveStiffnessScale / DampingScale default
         // Each hand's pull cap (N): B&S's, or the shoulder's (as the old hold) easing to B&S's when far behind.
+        // The ease toward B&S's cap is for a weapon left behind by a jump of the hand, not one that is
+        // stopped by something (r5: the staff propped on its head went past the fade and was pressed into
+        // the ground at 2-3 kN) or just handed over (r5: thrown up at 25 m/s). So: only while the point held
+        // still moves (>= pose_hold_joint_fade_min_speed cm/s) and not in the first 0.3 s of a joint.
+        double now = now_seconds();
+        double speed = (m.prev_t > 0.0 && now - m.prev_t > 1e-4) ? length(pivot_world - m.prev_p) / (now - m.prev_t) : 0.0;
+        m.prev_p = pivot_world;
+        m.prev_t = now;
+        bool may_fade = speed >= cfg.pose_hold_joint_fade_min_speed && now - m.made_t > 0.3;
         auto hand_cap = [&](double bs_n, double err_cm) {
             double sc = g_hold[side].shoulder_cap_n;
             if (!cfg.pose_hold_joint_shoulder || sc < 0.0 || sc >= bs_n) return bs_n;
+            if (!may_fade) return sc;
             double f0 = cfg.pose_hold_shoulder_fade_from_cm, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_shoulder_fade_to_cm);
             double u = (std::min)(1.0, (std::max)(0.0, (err_cm - f0) / (f1 - f0)));
             return sc + (bs_n - sc) * u;
@@ -12872,7 +12886,9 @@ namespace
         Vec3 target_pivot = target_pos + target_rot.rotate(pivot);
         double cap1 = hand_cap(pf * mx * (std::max)(0.0, body.total), length(pivot_world - target_pivot));
         double k = pk * st / mm, c = pc * dst / mm, fcap = cap1 / mm * 100.0;
-        double ka = rk * st / I / ang_scale, ca = rc * dst / I / ang_scale, tcap = rf * mx * (std::max)(0.0, two ? 0.5 * (body.total + s2b.total) : body.total) / I;
+        // The angular drive's acceleration mode scales by the inertia about the centre of mass (r5: dividing
+        // by the inertia about the grip, 3.3 vs 0.55 kg m^2 for the staff, left it ~5 N m of its 30).
+        double ka = rk * st / Ic / ang_scale, ca = rc * dst / Ic / ang_scale, tcap = rf * mx * (std::max)(0.0, two ? 0.5 * (body.total + s2b.total) : body.total) / Ic;
         // Two hands: the main hand only rolls it about the line between the hands (pose_two_hand_twist_only,
         // as the old hold); where it points is the two hands' pulls. The joint's own twist-only drive let
         // the staff tumble on a wrist roll (r2: 243 deg/s off its axis vs 41 for the old hold): the twist is
