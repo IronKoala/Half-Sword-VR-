@@ -283,6 +283,9 @@ namespace hsvr
         // The most your head can be turned from his hips (a neck's reach): past it the hips come
         // round with you at once.
         double pose_turn_max_deg = 85.0;
+        // Spawn yaw (playtest 2026-11-22 10:04Z: helmet, chest, hips and lean 13 deg off for a whole life).
+        bool pose_turn_spawn_guard = true;  // body turning never writes the last body's yaw onto a new one
+        bool pose_calib_body_facing = true; // calibrate against the way the body really faces, not the control yaw
         // Controller sticks: the left stick walks (toward where you look with "head", or where your
         // body faces with "body"), the right stick turns you ("smooth", "snap" or "off").
         bool pose_stick_walk = true;
