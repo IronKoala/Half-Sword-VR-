@@ -384,7 +384,7 @@ namespace hsvr
 
         int override_mode = shared().separate_override.load();
         bool asked = override_mode < 0 ? config().separate_render_target : override_mode != 0;
-        if (config().dev_fake_headset) asked = false; // the pretend headset shows both eyes in the window
+        if (config().dev_fake_headset && !config().dev_fake_separate) asked = false; // the pretend headset shows both eyes in the window
         bool want_separate = asked && shared().eye_width.load() > 0 && shared().eye_height.load() > 0 && !engine_texture_unavailable();
         if (want_separate != g_separate.load())
         {

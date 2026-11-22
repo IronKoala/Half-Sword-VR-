@@ -1125,6 +1125,13 @@ namespace hsvr
         // material the game ships). helmet_fade_see_through 0 = solid, 1 = invisible. The material has
         // no colour texture: helmet_fade_tint is the metal colour "r,g,b" (0-1).
         double helmet_fade_see_through = 0.5;
+        // Test: the 3rd and 4th channel written into the glass material's OpacityAndRefraction (its own are 5 and 1).
+        double helmet_fade_vector_b = 0.0;
+        double helmet_fade_vector_a = 0.0;
+        // Test, with dev_fake_headset: real_eyes = this headset's view angles, spacing and eye size (2026-11-22 log);
+        // separate = the eyes get their own double-wide target, as with a real headset.
+        bool dev_fake_real_eyes = false;
+        bool dev_fake_separate = false;
         // Which head pieces helmet_view 5 fades: those in front of your eyes (built-in list measured
         // from the meshes: helmet_fade_face.md). Comma lists of mesh names to always / never fade.
         std::string helmet_fade_always = "";
