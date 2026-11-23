@@ -34,6 +34,8 @@ LAYOUT = [
         ('test_room_blackout', '1 = the headset shows black while the room is put up, then fades in (nothing seen popping in).'),
         ('test_room_books', '1 = weapon and Willie spawn books on lecterns: point an empty hand at a line, pull the trigger.'),
         ('test_room_book_light', 'Brightness of the small light over each book page (0 = none). Read when the room is put up.'),
+        ('test_room_fight_x', 'Where fighting Willies from the book appear, world X (cellar default: the coffin corner, 1720). 0 with test_room_fight_y 0 = round you like passive ones.'),
+        ('test_room_fight_y', 'Same, world Y (cellar default 40: just inside the area the AI can walk; the coffins stand at y -340).'),
         ('test_room_tier', "Foes' tier: -1 random, 0 Beggar .. 8 Lord."),
         ('test_room_weapon_tier', "Table weapons' tier: -1 random 0-7, 0 Beggar .. 8 Lord."),
         ('test_room_respawn', '1 = a foe out of the fight is replaced.'),

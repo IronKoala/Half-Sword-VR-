@@ -2,3 +2,4 @@
 room_built|steps-room_built.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 book_weapons|steps-book_weapons.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 book_willies|steps-book_willies.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+book_fighter|steps-book_fighter.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar

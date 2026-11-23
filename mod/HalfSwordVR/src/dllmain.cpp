@@ -25355,13 +25355,25 @@ namespace
 
     void room_text_colour(UObject* tr, uint8_t r, uint8_t g, uint8_t b)
     {
+        if (!tr) return;
         Call c(tr, STR("SetTextRenderColor"));
-        if (FProperty* v = c.param(STR("Value")))
+        FProperty* v = c.param(STR("Value"));
+        if (v)
         {
             uint8_t* at = c.buffer.data() + v->GetOffset_Internal();
             at[0] = b, at[1] = g, at[2] = r, at[3] = 255; // FColor is B, G, R, A in memory
         }
-        c.run();
+        bool ran = c.fn && c.run();
+        // The pictures showed white text whatever colour was asked (test 2026-11-23 01:09): the colour is
+        // also written straight into the component, and its render state redone.
+        uint8_t* prop = value_ptr<uint8_t>(tr, STR("TextRenderColor"));
+        if (prop) prop[0] = b, prop[1] = g, prop[2] = r, prop[3] = 255;
+        Call dirty(tr, STR("MarkRenderStateDirty"));
+        if (dirty.fn) dirty.run();
+        static int logged = 0;
+        if (logged++ < 2)
+            HSVR_LOG("TestRoom: text colour %d,%d,%d: SetTextRenderColor %s (param %s), property %s, now %d,%d,%d", r, g, b, c.fn ? (ran ? "ran" : "failed") : "missing",
+                     v ? "found" : "MISSING", prop ? "written" : "MISSING", prop ? prop[2] : -1, prop ? prop[1] : -1, prop ? prop[0] : -1);
     }
 
     // One line of a page: a TextRender facing the reader (its +X), centred on its spot.
@@ -25783,7 +25795,7 @@ namespace
     // page: weapons on the left, Willies on the right. Point at a line with an empty hand (its aim ray;
     // a dot and a thin beam show where) and pull the trigger. The page is found on the lectern's
     // slanted top by traces (its normal says which way it faces); without one it stands above it.
-    const int kWeaponRows = 2 + 9;  // title, tier, 9 kinds
+    const int kWeaponRows = 2 + 9 + 1;  // title, tier, 9 kinds, clear all items
     const int kWillieRows = 2 + 9 + 2; // title, mode, 9 tiers, random, remove all
 
     std::wstring room_tier_text(int tier) { return tier < 0 ? std::wstring(L"Random") : std::wstring(kRankNames[(std::min)(tier, 8)]); }
@@ -25794,6 +25806,7 @@ namespace
         if (b.kind == 0)
         {
             if (row == 1) return L"<     Tier: " + room_tier_text(b.tier) + L"     >";
+            if (row == 2 + kRoomKindCount) return L"Clear all items";
             return kRoomKinds[row - 2].name;
         }
         if (row == 1) return std::wstring(L"Mode: ") + (b.fights ? L"Fighting" : L"Passive");
@@ -25806,15 +25819,18 @@ namespace
     {
         for (int i = 0; i < (int)b.rows.size(); ++i)
         {
-            if (i == b.hover) room_text_colour(b.rows[i], 255, 214, 60);      // pointed at: gold
-            else if (i == 0) room_text_colour(b.rows[i], 120, 20, 15);       // title: dark red
-            else room_text_colour(b.rows[i], 30, 22, 14);                    // ink
+            // Straight on the stand's dark brown wood, in its opposite: pale blue (Matthew 2026-11-23: dark ink
+            // on a light page was unreadable, "make the text something more colour opposite of the book stand").
+            // The board turned out pale wood under its light (pictures 2026-11-23 01:09): dark text on it.
+            if (i == b.hover) room_text_colour(b.rows[i], 200, 20, 10);       // pointed at: red
+            else if (i == 0) room_text_colour(b.rows[i], 10, 10, 10);        // title: black
+            else room_text_colour(b.rows[i], 15, 30, 110);                   // lines: dark blue
         }
     }
 
     // The lectern's reading surface: traces straight down over its footprint; the hits on its upper
     // part give the slope (their mean normal) and the page's centre. False if it has no slanted top.
-    bool room_lectern_top(UObject* comp, hsvr::Vec3& centre, hsvr::Vec3& normal)
+    bool room_lectern_top(UObject* comp, hsvr::Vec3& centre, hsvr::Vec3& normal, double* up_lo = nullptr, double* up_hi = nullptr)
     {
         using hsvr::Vec3;
         // World bounds (GetLocalBounds' Min/Max read as 0 here: the reflected names' case differs).
@@ -25849,6 +25865,19 @@ namespace
         if (k < 4) return false;
         centre = sum_p * (1.0 / k);
         normal = hsvr::normalized(sum_n);
+        // How far the board runs up and down its slope from `centre`: the hits that face the same way.
+        if (up_lo && up_hi)
+        {
+            Vec3 up = hsvr::normalized(Vec3{0, 0, 1} - normal * normal.z);
+            *up_lo = 0.0, *up_hi = 0.0;
+            for (const Hit& h : hits)
+                if (hsvr::dot(h.n, normal) > 0.95)
+                {
+                    double t = hsvr::dot(h.p - centre, up);
+                    *up_lo = (std::min)(*up_lo, t);
+                    *up_hi = (std::max)(*up_hi, t);
+                }
+        }
         double tilt = std::acos((std::min)(1.0, normal.z)) * 57.29577951308232;
         HSVR_LOG("TestRoom: lectern top at (%.0f, %.0f, %.0f), tilted %.0f deg", centre.x, centre.y, centre.z, tilt);
         return tilt > 8.0 && tilt < 70.0;
@@ -25889,6 +25918,7 @@ namespace
         }
         UObject* comp = room_mesh_of(lectern);
         Vec3 centre, n;
+        double up_lo = 0.0, up_hi = 0.0;
         bool slanted = comp && room_lectern_top(comp, centre, n);
         if (slanted)
         {
@@ -25899,7 +25929,7 @@ namespace
             rot.three(STR("NewRotation"), 0.0, yaw - 90.0 + turn * 57.29577951308232, 0.0);
             rot.flag(STR("bTeleportPhysics"), true);
             rot.run();
-            slanted = room_lectern_top(comp, centre, n);
+            slanted = room_lectern_top(comp, centre, n, &up_lo, &up_hi);
         }
         if (!slanted)
         {
@@ -25923,7 +25953,17 @@ namespace
         int rows = kind == 0 ? kWeaponRows : kWillieRows;
         book.half_w = 26.0;
         book.half_h = 21.0;
-        book.centre = centre + book.normal * 1.0 + book.up * (book.half_h * 0.35); // the page rests on the slope's lower lip
+        // The lines fill the board: centred on its middle along the slope, as tall as it (less 2 cm each
+        // end), at most 42 cm (the block sat 15-20 cm high, its top lines above the board: pictures
+        // 2026-11-23 01:09).
+        if (up_hi - up_lo > 10.0)
+        {
+            book.half_h = (std::clamp)((up_hi - up_lo) * 0.5 - 2.0, 10.0, 21.0);
+            centre = centre + book.up * ((up_lo + up_hi) * 0.5);
+        }
+        book.centre = centre + book.normal * 1.0;
+        HSVR_LOG("TestRoom: %s board runs %.0f .. %.0f cm along its slope from the hits' middle; lines %.0f cm tall", kind == 0 ? "weapon" : "Willie", up_lo, up_hi,
+                 2.0 * book.half_h);
         // Out along its face until no part of the lectern comes through it (the page sat inside the
         // stand, so he could neither read nor point at it: Matthew 2026-11-22 22:15). The slab is 0.8 cm
         // thick behind the face.
@@ -25936,7 +25976,8 @@ namespace
         }
         hsvr::Quat q = hsvr::quat_from_axes(book.normal, hsvr::cross(book.up, book.normal), book.up);
         // The page: a thin parchment-coloured slab, and a small warm light over it so it can be read.
-        room_shape(lectern, STR("/Engine/BasicShapes/Cube.Cube"), book.centre - book.normal * 0.4, q, Vec3{0.008, book.half_w / 50.0, book.half_h / 50.0}, 0.78f, 0.66f, 0.45f);
+        // No page slab: the text sits straight on the lectern's top (the light slab under white-looking text
+        // was unreadable: Matthew 2026-11-23).
         if (hsvr::config().test_room_book_light > 0.0)
         if (UObject* light = room_add_component(lectern, STR("/Script/Engine.PointLightComponent"), book.centre + book.normal * 35.0 + book.up * 10.0, q))
         {
@@ -25972,7 +26013,7 @@ namespace
         double floor_z = room_floor_z(player);
         for (int kind = 0; kind < 2; ++kind)
         {
-            Vec3 at = g_room.origin - g_room.forward * 30.0 + right * (kind == 0 ? -150.0 : 150.0);
+            Vec3 at = g_room.origin - g_room.forward * 30.0 + right * (kind == 0 ? -190.0 : 190.0); // 150 was crowded (Matthew 2026-11-23)
             at.z = floor_z;
             room_place_book(player, kind, at);
         }
@@ -26032,6 +26073,49 @@ namespace
         return false;
     }
 
+    // Where a fighting Willie from the book appears: far off, in the cellar's coffin corner
+    // (test_room_fight_x/y; Matthew 2026-11-23: "it's way too crowded ... aggressive ones need to spawn
+    // further away", coffin loot points at (1785, -339) and (1681, -352), defaults\cellar_spawns.md).
+    // The first free floor spot on rings of 0, 80 and 160 cm round it, facing him.
+    bool room_fight_spot(UObject* player, TestRoom::Slot& out)
+    {
+        using hsvr::Vec3;
+        const hsvr::Config& cfg = hsvr::config();
+        if (cfg.test_room_fight_x == 0.0 && cfg.test_room_fight_y == 0.0) return false;
+        double floor_z = room_floor_z(player);
+        std::vector<UObject*> willies;
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        std::vector<Vec3> taken;
+        for (UObject* w : willies)
+        {
+            if (!w || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            Vec3 a = actor_location(w);
+            if (a.x == 0.0 && a.y == 0.0 && a.z == 0.0) continue;
+            UObject* m = object_property(w, STR("Mesh"));
+            taken.push_back(m ? socket_location(m, pelvis_bone) : a);
+        }
+        Vec3 me = actor_location(player);
+        Vec3 centre{cfg.test_room_fight_x, cfg.test_room_fight_y, floor_z};
+        for (double radius : {0.0, 80.0, 160.0})
+            for (int k = 0; k < (radius == 0.0 ? 1 : 8); ++k)
+            {
+                double a = k * 3.14159265358979 / 4.0;
+                Vec3 at = centre + Vec3{std::cos(a), std::sin(a), 0.0} * radius;
+                bool ok = true;
+                for (const Vec3& t : taken)
+                    if (std::hypot(t.x - at.x, t.y - at.y) < 100.0) ok = false;
+                double gz = 0.0;
+                if (ok && (!ground_below(player, at.x, at.y, floor_z + 150.0, gz) || std::fabs(gz - floor_z) > 25.0)) ok = false;
+                if (!ok) continue;
+                at.z = me.z; // as the other slots (room_spawn_foe stands him on the floor)
+                out = TestRoom::Slot{at, std::atan2(me.y - at.y, me.x - at.x) * 57.29577951308232, nullptr, -1.0, {}};
+                return true;
+            }
+        HSVR_LOG("TestRoom: book: no free floor near the fight spot (%.0f, %.0f); round you instead", centre.x, centre.y);
+        return false;
+    }
+
     // Every Willie but you goes (bodies you are using stay); the room's slots go too, so nobody comes back.
     void room_remove_all_willies(UObject* player)
     {
@@ -26059,6 +26143,38 @@ namespace
         HSVR_LOG("TestRoom: book: removed %d Willie(s) and %d of their weapons; %d kept (in use)", removed, gear, kept);
     }
 
+    // "Clear all items" (weapon book; Matthew 2026-11-23): every loose weapon, shield and item in the
+    // level goes, the tables' too. Kept: anything in a hand (his or a Willie's), sheathed, hung on a
+    // body or held by the mod (hold joints, second hand), and the level's own traps.
+    void room_clear_items(UObject* player)
+    {
+        std::vector<UObject*> weapons, willies;
+        UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        int cleared = 0, kept = 0;
+        for (UObject* w : weapons)
+        {
+            if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || !object_alive(w) || is_fist(w)) continue;
+            if (w->GetName().find(STR("Trap")) != std::wstring::npos) continue;
+            bool keep = hit_is_his_item(w) || bool_property(w, STR("Is Sheathed"));
+            for (UObject* c : willies)
+                if (c && (object_property(c, STR("Weapon R")) == w || object_property(c, STR("Weapon L")) == w)) keep = true;
+            for (int side = 0; side < 2; ++side)
+                for (int i = 0; i < 2; ++i)
+                    if (g_jh[side][i].weapon == w) keep = true;
+            if (!keep)
+            {
+                Call parent(w, STR("GetAttachParentActor"));
+                if (parent.run() && parent.object_result(STR("ReturnValue"))) keep = true; // on a back, belt or forearm
+            }
+            if (keep) { ++kept; continue; }
+            Call d(w, STR("K2_DestroyActor"));
+            d.run();
+            ++cleared;
+        }
+        HSVR_LOG("TestRoom: book: cleared %d item(s); %d kept (in a hand, sheathed or worn)", cleared, kept);
+    }
+
     void room_book_click(UObject* player, TestRoom::Book& b, int row, double u)
     {
         if (row <= 0) return;
@@ -26073,6 +26189,11 @@ namespace
                 if (b.tier < -1) b.tier = 8;
                 room_text(b.rows[1], room_row_text(b, 1));
                 HSVR_LOG("TestRoom: book: weapon tier %ls", room_tier_text(b.tier).c_str());
+                return;
+            }
+            if (row == 2 + kRoomKindCount)
+            {
+                room_clear_items(player);
                 return;
             }
             int k = row - 2;
@@ -26149,7 +26270,7 @@ namespace
         }
         int tier = row == 11 ? -1 : row - 2;
         TestRoom::Slot slot;
-        if (!room_willie_spot(player, slot))
+        if (!(b.fights && room_fight_spot(player, slot)) && !room_willie_spot(player, slot))
         {
             HSVR_LOG("TestRoom: book: no free spot for a Willie");
             return;
@@ -26951,6 +27072,20 @@ namespace
             value = gm && (bool_property(gm, STR("Match Won")) || bool_property(gm, STR("All Enemies Dead"))) ? 1.0 : 0.0;
             return gm != nullptr;
         }
+        if (w == "room_fighter_d")
+        {
+            // How far the nearest fighting book Willie is from him (cm; 1e9 with none).
+            static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+            value = 1e9;
+            for (const TestRoom::Slot& s : g_room.slots)
+                if (s.fights && s.foe && object_alive(s.foe))
+                {
+                    UObject* m = object_property(s.foe, STR("Mesh"));
+                    Vec3 p = m ? socket_location(m, pelvis_bone) : actor_location(s.foe);
+                    value = (std::min)(value, std::hypot(p.x - me.x, p.y - me.y));
+                }
+            return true;
+        }
         if (w == "room_page_clip")
         {
             // The most any lectern comes through its page, cm (0 or less: clear).
@@ -27016,7 +27151,7 @@ namespace
             else
             {
                 auto it = g_room_marks.find(wp);
-                if (it != g_room_marks.end() && hsvr::length(at - it->second) > 3.0)
+                if (it != g_room_marks.end() && hsvr::length(at - it->second) > 6.0) // 6: a floor item settling its last 4 cm is no fault (test 2026-11-23 01:07)
                 {
                     ++moved;
                     if (w == "room_moved")
@@ -27460,6 +27595,26 @@ namespace
             if (entry.command == "hsvr.dump")
             {
                 script_dump();
+                continue;
+            }
+            // hsvr.book_photo <book> [cm]: the test camera <cm> (55) in front of that book's page, looking at
+            // it (for a screenshot of how the page reads); "hsvr.photo_cam off" ends it.
+            if (entry.command.rfind("hsvr.book_photo ", 0) == 0)
+            {
+                int bi = 0;
+                double cm = 55.0;
+                sscanf(entry.command.c_str() + 16, "%d %lf", &bi, &cm);
+                if (bi < 0 || bi >= (int)g_room.books.size()) { HSVR_LOG("Script: hsvr.book_photo: no book %d", bi); continue; }
+                const TestRoom::Book& b = g_room.books[bi];
+                hsvr::Vec3 at = b.centre + b.normal * cm;
+                hsvr::Vec3 d = b.centre - at;
+                hsvr::shared().photo_x.store(at.x);
+                hsvr::shared().photo_y.store(at.y);
+                hsvr::shared().photo_z.store(at.z);
+                hsvr::shared().photo_yaw.store(std::atan2(d.y, d.x) * 57.29577951308232);
+                hsvr::shared().photo_pitch.store(std::atan2(d.z, std::sqrt(d.x * d.x + d.y * d.y)) * 57.29577951308232);
+                hsvr::shared().photo_on.store(true);
+                HSVR_LOG("Script: hsvr.book_photo %d %.0f: camera at (%.0f, %.0f, %.0f) looking at the page", bi, cm, at.x, at.y, at.z);
                 continue;
             }
             if (entry.command.rfind("hsvr.photo_cam ", 0) == 0)
