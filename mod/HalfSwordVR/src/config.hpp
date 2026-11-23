@@ -619,7 +619,7 @@ namespace hsvr
         bool pose_grip_two_hand_swords_slide = true; // Matthew 2026-11-23: all longswords, greatswords and hand-and-a-half swords slide
         // The lower zone sits just above the pommel (Matthew 2026-11-22: "you grab just above the pommel"): the
         // pommel's top is this far above its origin (measured 4.7 on a Grip_15 pommel, 8 cm long).
-        double pose_grip_pommel_top_cm = 4.7;
+        double pose_grip_pommel_top_cm = 0.0; // the pommel's origin IS its top face (decomp 2026-11-23: meshes run 5.7-7.6 cm down from it); 4.7 kept hands 4.7 cm too high
         double pose_grip_hands_overlap_cm = 3.5; // short two-zone grips: the hands may overlap each other this much to stay off the pommel
         // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
         bool pose_grip_dagger_fixed = true;

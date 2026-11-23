@@ -7337,6 +7337,7 @@ namespace
     }
 
     void find_grip_zone(HoldState& h, UObject* weapon, UObject* base, const hsvr::Config& cfg);
+    bool room_component_box(UObject* c, hsvr::Vec3& origin, hsvr::Vec3& extent);
 
     // The first hand lets go while both hold (B&S): the weapon stays in the second hand, where it holds
     // it. The game moves it into that hand (Set Up Hand Weapon snaps its grip to the hand socket), so
@@ -14608,6 +14609,26 @@ namespace
                         // pommel (playtest 2026-11-22: second-hand grabs sat on it at -29.5 cm).
                         double pz = component_rotation(base).inverse().rotate(component_location(pom) - component_location(base)).z;
                         double floor_z = pz + cfg.pose_grip_pommel_top_cm + half;
+                        {
+                            // Where the pommel really is along the weapon: its world box's corners on the axis (a box
+                            // round a tilted pommel reads a bit long). The decomp says the pommel mesh's origin is its
+                            // top face and it runs 5.7-7.6 cm down from there (2026-11-23).
+                            Vec3 bo, be;
+                            if (room_component_box(pom, bo, be))
+                            {
+                                Quat binv = component_rotation(base).inverse();
+                                Vec3 b0 = component_location(base);
+                                double zmin = 1e9, zmax = -1e9;
+                                for (int c = 0; c < 8; ++c)
+                                {
+                                    Vec3 corner{bo.x + (c & 1 ? be.x : -be.x), bo.y + (c & 2 ? be.y : -be.y), bo.z + (c & 4 ? be.z : -be.z)};
+                                    double z = binv.rotate(corner - b0).z;
+                                    zmin = (std::min)(zmin, z);
+                                    zmax = (std::max)(zmax, z);
+                                }
+                                HSVR_LOG("Handles: %ls: pommel origin %.1f cm, its box on the axis %.1f..%.1f cm", item->GetName().c_str(), pz, zmin, zmax);
+                            }
+                        }
                         double g0_was = hs.back().a.z;
                         if (floor_z > g0_was)
                         {
