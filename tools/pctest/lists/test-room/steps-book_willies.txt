@@ -10,6 +10,7 @@
 3.0:hsvr.book_click 1 1
 3.1:hsvr.book_click 1 3
 3.6:hsvr.wait room_foes >= 6 6 0 a fighting Willie
+3.65:hsvr.expect room_fighter_d > 600 the fighting Willie appears far off (coffin corner)
 3.7:hsvr.book_click 1 1
 4.0:hsvr.book_click 1 12
 4.1:hsvr.wait room_foes = 0 6 0 all Willies gone
