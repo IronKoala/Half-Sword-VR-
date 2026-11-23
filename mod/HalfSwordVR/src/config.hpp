@@ -849,6 +849,14 @@ namespace hsvr
         // scales a sliding contact by the weapon's cutting rate, ~0 for a fist ball, so without this
         // a hard punch reached his damage as impulse ~1 (playtest 2026-11-22).
         bool pose_fist_full_impulse = true;
+        // Every new punch counts (Matthew 2026-11-23, "Only fix ignored punches"). The game drops a hit on
+        // the bone it last damaged unless it is bigger than the last one that counted (Deal Complex Damage:
+        // |impulse| x (cutting + 1) >= Last Complex Damage Impulse; Get Damage: damage >= Last Damage Taken),
+        // so a run of head punches of about the same strength mostly did nothing (38 of 58 in the playtest).
+        // A fist contact on a Willie more than pose_fist_new_punch_gap_s after that fist's last contact on
+        // him clears both, for that punch only; the contacts within one punch keep the game's rule.
+        bool pose_fist_new_punch_counts = true;
+        double pose_fist_new_punch_gap_s = 0.25;
         // Grabbing a weapon someone else holds: a tug of war under the game's own grip rule; his hand
         // lets go when its joint is pulled harder than his grip strength T x disarm_grip_scale (pain
         // weakens it, out cold he has none) for disarm_hold_s, and it is yours.

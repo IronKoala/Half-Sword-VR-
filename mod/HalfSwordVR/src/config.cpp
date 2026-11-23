@@ -697,6 +697,8 @@ namespace hsvr
         num("pose_fist_clear_margin_cm", c.pose_fist_clear_margin_cm);
         num("pose_fist_clear_retry_s", c.pose_fist_clear_retry_s);
         flag("pose_fist_full_impulse", c.pose_fist_full_impulse);
+        flag("pose_fist_new_punch_counts", c.pose_fist_new_punch_counts);
+        num("pose_fist_new_punch_gap_s", c.pose_fist_new_punch_gap_s);
         flag("disarm", c.disarm);
         num("disarm_grip_scale", c.disarm_grip_scale);
         num("disarm_hold_s", c.disarm_hold_s);

@@ -537,6 +537,8 @@ LAYOUT = [
         ('pose_fist_clear_margin_cm', 'Extra clearance the fist needs from him (cm).'),
         ('pose_fist_clear_retry_s', 'How often it checks again (s).'),
         ('pose_fist_full_impulse', "1 = a punch's full force reaches his damage (the game cut a sliding fist contact to almost nothing)."),
+        ('pose_fist_new_punch_counts', "1 = every new punch counts (the game ignored a hit on the same spot unless it was harder than the last one)."),
+        ('pose_fist_new_punch_gap_s', 'Contacts closer together than this (s) are one punch.'),
         ('disarm', "1 = grab a weapon out of an enemy's hand: pull harder than his grip and he lets go."),
         ('disarm_grip_scale', 'His grip against your pull: his grip strength x this (higher = harder to disarm).'),
         ('disarm_hold_s', 'How long your pull must beat his grip before he lets go (seconds).'),
