@@ -24,3 +24,8 @@
 12.8:hsvr.expect room_moved = 0 nothing moving 3 s later
 12.9:hsvr.expect room_won = 0 no win screen
 13.0:hsvr.test_room_report
+13.1:hsvr.book_click 0 11
+13.6:hsvr.wait room_on_tables = 0 3 0 clear all items: tables empty
+13.7:hsvr.expect room_on_floor = 0 clear all items: floor empty
+13.8:hsvr.expect room_lost = 0 nothing left out of the world
+13.9:hsvr.test_room_report
