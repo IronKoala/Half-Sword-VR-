@@ -2001,6 +2001,8 @@ float4 PSMain(VSOut i) : SV_Target
                 {
                     DXGI_SWAP_CHAIN_DESC scd{};
                     swapchain->GetDesc(&scd);
+                    shared().window_width.store((int)scd.BufferDesc.Width);
+                    shared().window_height.store((int)scd.BufferDesc.Height);
                     CURSORINFO ci{};
                     ci.cbSize = sizeof(ci);
                     RECT client{};

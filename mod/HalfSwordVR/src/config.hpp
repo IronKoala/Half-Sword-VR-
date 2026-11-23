@@ -77,6 +77,9 @@ namespace hsvr
         // Shape of the monitor picture, width / height (1.7778 = 16:9, the YouTube player). In a window
         // of another shape it is centred with black around it, never stretched. 0 = the window's shape.
         double mirror_aspect = 1.7778;
+        // Size the mod sets the game window to, "<width>x<height>" (windowed), e.g. 2560x1440 for a
+        // 16:9 recording on an ultrawide monitor. Empty = the game's own window size.
+        std::string mirror_window_res;
         // Widest the monitor picture is, degrees side to side (less when the eye does not cover it).
         double mirror_fov_deg = 90.0;
         // The monitor picture follows the head smoothed over this many seconds (0 = exactly the head).

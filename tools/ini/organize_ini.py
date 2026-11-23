@@ -59,6 +59,7 @@ LAYOUT = [
         ('mirror_window', 'Show the left eye in the game window.'),
         ('mirror_view', '1 = the game window shows a cut-out of the left eye (mirror_aspect shape, centred on where you look); 0 = the whole eye with black bars at the sides.'),
         ('mirror_aspect', 'Shape of the game window picture, width / height: 1.7778 = 16:9 (YouTube player); a wider window gets black at the sides, never stretched; 0 = the window shape.'),
+        ('mirror_window_res', 'Game window size set by the mod, e.g. 2560x1440 (windowed; 16:9 recordings on an ultrawide monitor). Empty = the game\'s own size.'),
         ('mirror_fov_deg', 'Widest the game window picture is, degrees side to side (narrower if the eye does not cover it).'),
         ('mirror_smooth_s', 'Game window picture follows your head smoothed over this many seconds, hiding small shakes for viewers (0 = exactly your head).'),
         ('mirror_level', '1 = keep the game window picture level (your head tilt taken out).'),

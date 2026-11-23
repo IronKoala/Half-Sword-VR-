@@ -357,6 +357,7 @@ namespace hsvr
         flag("mirror_window", c.mirror_window);
         integer("mirror_view", c.mirror_view);
         num("mirror_aspect", c.mirror_aspect);
+        text("mirror_window_res", c.mirror_window_res);
         num("mirror_fov_deg", c.mirror_fov_deg);
         num("mirror_smooth_s", c.mirror_smooth_s);
         flag("mirror_level", c.mirror_level);
