@@ -560,6 +560,7 @@ namespace hsvr
         flag("pose_slide_butt_is_haft", c.pose_slide_butt_is_haft);
         flag("pose_slide_fixed_1h_sword", c.pose_slide_fixed_1h_sword);
         integer("pose_grip_two_zones_2h_sword", c.pose_grip_two_zones_2h_sword);
+        flag("pose_grip_two_hand_swords_slide", c.pose_grip_two_hand_swords_slide);
         num("pose_grip_pommel_top_cm", c.pose_grip_pommel_top_cm);
         num("pose_grip_hands_overlap_cm", c.pose_grip_hands_overlap_cm);
         flag("pose_grip_dagger_fixed", c.pose_grip_dagger_fixed);
@@ -622,6 +623,7 @@ namespace hsvr
         num("crossbow_trigger_release", c.crossbow_trigger_release);
         num("crossbow_trigger_grip_cm", c.crossbow_trigger_grip_cm);
         num("pose_holster_zone_cm", c.pose_holster_zone_cm);
+        flag("pose_holster_by_item", c.pose_holster_by_item);
         num("pose_holster_max_speed", c.pose_holster_max_speed);
         num("pose_throw_multiplier", c.pose_throw_multiplier);
         flag("pose_draw", c.pose_draw);
@@ -666,6 +668,7 @@ namespace hsvr
         num("pose_sheathe_mouth_cm", c.pose_sheathe_mouth_cm);
         num("pose_sheathe_angle_deg", c.pose_sheathe_angle_deg);
         flag("pose_sheathe_two_hand", c.pose_sheathe_two_hand);
+        flag("pose_scabbard_on_pickup", c.pose_scabbard_on_pickup);
         flag("pose_sheathe_cross", c.pose_sheathe_cross);
         flag("pose_scabbard_grab", c.pose_scabbard_grab);
         num("pose_scabbard_touch_cm", c.pose_scabbard_touch_cm);
@@ -686,6 +689,7 @@ namespace hsvr
         }
         flag("pose_two_hand_twist_only", c.pose_two_hand_twist_only);
         flag("pose_two_hand_joint_both_turn", c.pose_two_hand_joint_both_turn);
+        flag("pose_two_hand_joint_line", c.pose_two_hand_joint_line);
         flag("pose_two_hand_fixed_rebase", c.pose_two_hand_fixed_rebase);
         num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
         flag("pose_fists", c.pose_fists);
@@ -704,6 +708,11 @@ namespace hsvr
         flag("pose_fist_clear", c.pose_fist_clear);
         num("pose_fist_clear_margin_cm", c.pose_fist_clear_margin_cm);
         num("pose_fist_clear_retry_s", c.pose_fist_clear_retry_s);
+        flag("pose_fist_clear_dropped", c.pose_fist_clear_dropped);
+        flag("pose_drop_keep_velocity", c.pose_drop_keep_velocity);
+        flag("pose_drop_joint_first", c.pose_drop_joint_first);
+        num("pose_drop_ignore_s", c.pose_drop_ignore_s);
+        num("pose_drop_ignore_clear_cm", c.pose_drop_ignore_clear_cm);
         flag("pose_fist_full_impulse", c.pose_fist_full_impulse);
         flag("disarm", c.disarm);
         num("disarm_grip_scale", c.disarm_grip_scale);
