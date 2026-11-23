@@ -5433,6 +5433,32 @@ namespace
     // or pose_drop_ignore_s passed.
     const TCHAR* const k_cm_proxies[] = {STR("CM_Arm_L"), STR("CM_Arm_R"), STR("CM_Cuirass"), STR("CM_Leg_L"), STR("CM_Leg_R"), STR("CM_Helmet")};
     double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part);
+    void drop_resume_guard(int side, UObject* item);
+    // The gap between an item and one body of his (a bone's physics body, or a whole component when bone is
+    // None): closest points taken in turn, from the bone's place, three times. 0 = touching or inside. A
+    // bone's place alone is not his body: a thigh body reaches 20+ cm from its bone (PC run 55b88f3: a light
+    // pavise "17 cm clear" of the bone points was inside him, and was flung 11 m as the pairs went).
+    double item_gap(UObject* item, UObject* comp, FName bone, hsvr::Vec3 p)
+    {
+        double gap = -1.0;
+        for (int k = 0; k < 3; ++k)
+        {
+            hsvr::Vec3 q;
+            double dq = closest_on_weapon(item, p, &q, nullptr);
+            if (dq < 0.0) return gap;
+            if (dq == 0.0) return 0.0;
+            Call cp(comp, STR("GetClosestPointOnCollision"));
+            cp.three(STR("Point"), q.x, q.y, q.z);
+            cp.name(STR("BoneName"), bone);
+            cp.run();
+            double d = cp.number();
+            if (d < 0.0) return gap;
+            if (d == 0.0) return 0.0;
+            gap = d;
+            p = cp.vec(STR("OutPointOnBody"));
+        }
+        return gap;
+    }
     bool drop_ignore_lingers(int side, UObject* pawn)
     {
         using namespace hsvr;
@@ -5443,16 +5469,35 @@ namespace
         UObject* mesh = pawn ? object_property(pawn, STR("Mesh")) : nullptr;
         if (age > cfg.pose_drop_ignore_s || !mesh || !object_alive(a.weapon))
         {
-            if (a.weapon && object_alive(a.weapon)) HSVR_LOG("Drop: %ls collides with you again (%.2f s after the let-go: time)", a.weapon->GetName().c_str(), age);
+            if (a.weapon && object_alive(a.weapon))
+            {
+                HSVR_LOG("Drop: %ls collides with you again (%.2f s after the let-go: time)", a.weapon->GetName().c_str(), age);
+                drop_resume_guard(side, a.weapon);
+            }
             return false;
         }
         double nearest = 1e9;
-        static const char* bones[] = {"hand_l", "hand_r", "lowerarm_l", "lowerarm_r", "upperarm_l", "upperarm_r", "clavicle_l", "clavicle_r", "spine_03",
-                                      "spine_05", "Head", "pelvis", "thigh_l", "thigh_r", "calf_l", "calf_r"};
-        for (const char* b : bones)
+        const char* nearest_what = "";
+        static UObject* bones_of = nullptr;
+        static std::vector<FName> bones;
+        if (bones_of != mesh) bones = physics_body_bones(mesh), bones_of = mesh;
+        static std::string nearest_bone;
+        for (const FName& b : bones)
         {
-            double d = closest_on_weapon(a.weapon, socket_location(mesh, bone_fname(b)), nullptr, nullptr);
-            if (d >= 0.0) nearest = (std::min)(nearest, d);
+            double d = item_gap(a.weapon, mesh, b, socket_location(mesh, b));
+            if (d >= 0.0 && d < nearest)
+            {
+                nearest = d;
+                std::wstring wn = b.ToString();
+                nearest_bone.clear();
+                for (wchar_t ch : wn) nearest_bone.push_back((char)ch);
+                nearest_what = nearest_bone.c_str();
+            }
+        }
+        if (UObject* cap = object_property(pawn, STR("CapsuleComponent")))
+        {
+            double d = item_gap(a.weapon, cap, FName(), component_location(cap));
+            if (d >= 0.0 && d < nearest) nearest = d, nearest_what = "capsule";
         }
         for (const TCHAR* name : k_cm_proxies)
             if (UObject* cm = object_property(pawn, name))
@@ -5460,13 +5505,15 @@ namespace
                 Call r(cm, STR("GetScaledSphereRadius"));
                 double radius = r.run() ? r.number() : 0.0;
                 double d = closest_on_weapon(a.weapon, component_location(cm), nullptr, nullptr);
-                if (d >= 0.0) nearest = (std::min)(nearest, d - radius);
+                if (d >= 0.0 && d - radius < nearest) nearest = d - radius, nearest_what = "armour proxy";
             }
         if (nearest > cfg.pose_drop_ignore_clear_cm)
         {
-            HSVR_LOG("Drop: %ls collides with you again (%.2f s after the let-go, %.0f cm clear)", a.weapon->GetName().c_str(), age, nearest);
+            HSVR_LOG("Drop: %ls collides with you again (%.2f s after the let-go, %.0f cm clear, nearest %s)", a.weapon->GetName().c_str(), age, nearest, nearest_what);
+            drop_resume_guard(side, a.weapon);
             return false;
         }
+        HSVR_LOG_EVERY(0.1, "Drop: %ls still %.1f cm from your %s (%.2f s after the let-go)", a.weapon->GetName().c_str(), nearest, nearest_what, age);
         return true;
     }
 
@@ -5504,6 +5551,16 @@ namespace
         std::vector<UObject*> parts;
         attached_meshes(base, object_property(item, STR("Scabbard")), parts, 0);
         int n = 0;
+        // And his capsule: a let-go item sliding down it was pushed aside (PC run 55b88f3: light pavise, a
+        // steady ~1.6 m/s^2 sideways while its pairs with his bones held).
+        for (const TCHAR* name : {STR("CapsuleComponent")})
+            if (UObject* cap = object_property(pawn, name))
+                for (UObject* p : parts)
+                    if (UObject* j = no_collision_pair(pawn, cls, p, cap))
+                    {
+                        g_arm_ignore[side].cm_joints.push_back(j);
+                        ++n;
+                    }
         for (const TCHAR* name : k_cm_proxies)
             if (UObject* cm = object_property(pawn, name))
                 for (UObject* p : parts)
@@ -5512,7 +5569,7 @@ namespace
                         g_arm_ignore[side].cm_joints.push_back(j);
                         ++n;
                     }
-        HSVR_LOG("Drop: %ls: %d no-collide pair(s) with your armour proxies until it is clear of you", item->GetName().c_str(), n);
+        HSVR_LOG("Drop: %ls: %d no-collide pair(s) with your capsule and armour proxies until it is clear of you", item->GetName().c_str(), n);
     }
 
     // A new constraint component of his, at his root, joining nothing yet.
@@ -6490,6 +6547,7 @@ namespace
         hsvr::Vec3 b0{};   // BaseMesh (the grip dummy) at the let-go
         double max_xy = 0.0;      // centre of mass, off the path its own velocity would take it
         double max_base_xy = 0.0; // the grip dummy, plain (it swings with any spin)
+        double max_xy_all = 0.0;  // centre of mass off its own path over the whole trace (0.5 s)
         double next_log = 0.0;
         hsvr::Vec3 v0{};   // its own velocity over the last ~60 ms in the hand (recent_com_velocity)
         bool have_v0 = false;
@@ -6521,8 +6579,79 @@ namespace
                  hsvr::length(v0), have_v0 ? "measured" : "unknown", hsvr::length(w), hsvr::length(d.p0 - d.b0));
     }
 
+    // For 0.3 s after a let-go item collides with him again: a sideways speed jump of more than 2 m/s in a
+    // tick is his body pushing out an item it found inside it, not a fall: the sideways speed and the spin
+    // are put back as they were (PC run 55b88f3: a light pavise flung 11 m, 63 rad/s, as its pairs went).
+    struct ResumeGuard
+    {
+        UObject* item = nullptr;
+        UObject* base = nullptr;
+        double t0 = 0.0;
+        hsvr::Vec3 v{}, w{};
+        int capped = 0;
+    };
+    ResumeGuard g_resume[2];
+    bool g_resume_tracked = on_freed([] {
+        for (ResumeGuard& r : g_resume)
+            if (gone(r.item) || gone(r.base)) r = ResumeGuard{};
+    });
+    void drop_resume_guard(int side, UObject* item)
+    {
+        ResumeGuard& r = g_resume[side];
+        r = ResumeGuard{};
+        if (!hsvr::config().pose_drop_keep_velocity || !item) return;
+        r.base = object_property(item, STR("BaseMesh"));
+        if (!r.base) return;
+        r.item = item;
+        r.t0 = hsvr::now_seconds();
+        Call lv(r.base, STR("GetPhysicsLinearVelocity"));
+        r.v = lv.run() ? lv.vec() : hsvr::Vec3{};
+        Call av(r.base, STR("GetPhysicsAngularVelocityInRadians"));
+        r.w = av.run() ? av.vec() : hsvr::Vec3{};
+    }
+    void resume_guard_tick(UObject* pawn)
+    {
+        for (int side = 0; side < 2; ++side)
+        {
+            ResumeGuard& r = g_resume[side];
+            if (!r.item) continue;
+            double age = hsvr::now_seconds() - r.t0;
+            if (age > 0.3 || !object_alive(r.item) || object_property(pawn, STR("Weapon L")) == r.item || object_property(pawn, STR("Weapon R")) == r.item)
+            {
+                if (r.capped) HSVR_LOG("Drop: %ls: pushed by your body as it collided again; put back %d tick(s)", r.item && object_alive(r.item) ? r.item->GetName().c_str() : STR("item"), r.capped);
+                r = ResumeGuard{};
+                continue;
+            }
+            Call lv(r.base, STR("GetPhysicsLinearVelocity"));
+            hsvr::Vec3 v = lv.run() ? lv.vec() : r.v;
+            Call av(r.base, STR("GetPhysicsAngularVelocityInRadians"));
+            hsvr::Vec3 w = av.run() ? av.vec() : r.w;
+            double jump = std::sqrt((v.x - r.v.x) * (v.x - r.v.x) + (v.y - r.v.y) * (v.y - r.v.y));
+            if (jump > 200.0)
+            {
+                hsvr::Vec3 keep{r.v.x, r.v.y, v.z};
+                Call slv(r.base, STR("SetPhysicsLinearVelocity"));
+                slv.three(STR("NewVel"), keep.x, keep.y, keep.z);
+                slv.flag(STR("bAddToCurrent"), false);
+                slv.run();
+                Call sav(r.base, STR("SetPhysicsAngularVelocityInRadians"));
+                sav.three(STR("NewAngVel"), r.w.x, r.w.y, r.w.z);
+                sav.flag(STR("bAddToCurrent"), false);
+                sav.run();
+                ++r.capped;
+                HSVR_LOG("Drop %.3f s after colliding again: %ls given %.0f cm/s sideways by your body, spin %.1f rad/s: put back", age, r.item->GetName().c_str(), jump,
+                         hsvr::length(w));
+                v = keep;
+                w = r.w;
+            }
+            r.v = v;
+            r.w = w;
+        }
+    }
+
     void drop_trace(UObject* pawn)
     {
+        resume_guard_tick(pawn);
         for (int side = 0; side < 2; ++side)
         {
             DropTrace& d = g_drop_trace[side];
@@ -6530,8 +6659,8 @@ namespace
             double age = hsvr::now_seconds() - d.t0;
             if (age > 0.5 || !object_alive(d.item) || object_property(pawn, STR("Weapon L")) == d.item || object_property(pawn, STR("Weapon R")) == d.item)
             {
-                HSVR_LOG("Drop trace: %s hand's %ls: centre of mass at most %.1f cm sideways off its own path in its first 0.3 s (grip dummy %.1f cm plain)",
-                         side == 0 ? "left" : "right", d.item && object_alive(d.item) ? d.item->GetName().c_str() : STR("item"), d.max_xy, d.max_base_xy);
+                HSVR_LOG("Drop trace: %s hand's %ls: centre of mass at most %.1f cm sideways off its own path in its first 0.3 s, %.1f in 0.5 s (grip dummy %.1f cm plain)",
+                         side == 0 ? "left" : "right", d.item && object_alive(d.item) ? d.item->GetName().c_str() : STR("item"), d.max_xy, d.max_xy_all, d.max_base_xy);
                 d.base = nullptr;
                 continue;
             }
@@ -6570,6 +6699,7 @@ namespace
             hsvr::Vec3 mb = component_location(d.base) - d.b0;
             double bxy = std::sqrt(mb.x * mb.x + mb.y * mb.y);
             if (age <= 0.3) d.max_xy = (std::max)(d.max_xy, xy), d.max_base_xy = (std::max)(d.max_base_xy, bxy);
+            d.max_xy_all = (std::max)(d.max_xy_all, xy);
             if (age >= d.next_log)
             {
                 d.next_log = age + 0.05;
@@ -8703,8 +8833,22 @@ namespace
     // through its long strap, fist on its side bar) and 8 (a handle in the hand) for the right; the
     // Tower pavise is 8 for both and has no forearm strap on its mesh. So: the game's own forearm
     // grip, kept (not moved into the hand), wherever the game has one for that hand.
+    // A shield mounted on a forearm that this arm's own hand closed on: held with the game's own forearm grip
+    // (fist on its forward grip) until that hand opens, then mounted again (mount_grip / mount_fist_release).
+    UObject* g_mount_fist[2] = {nullptr, nullptr};
+    bool g_mount_fist_tracked = track_freed(&g_mount_fist[0]) && track_freed(&g_mount_fist[1]);
+    // How far it moved from its mounted place as the hand took the forward grip, measured 0.3 s after (cm).
+    double g_mount_fist_moved[2] = {-1.0, -1.0};
+    struct MountFistCheck
+    {
+        double at = -1.0;
+        hsvr::Vec3 from{};
+        hsvr::Quat from_q{0, 0, 0, 1};
+    };
+    MountFistCheck g_mount_fist_check[2];
     bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg)
     {
+        if (shield && shield == g_mount_fist[side]) return true;
         if (cfg.pose_pavise_strap && pavise_spec(shield)) return false; // held by the strap, mounted by the player
         if (!cfg.pose_pavise_forearm || !shield || !(class_name_starts(shield, STR("Shield_Pavise")) || class_name_starts(shield, STR("Shield_Tagre")))) return false;
         double g = read_number_variable(shield, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default"));
@@ -9034,6 +9178,7 @@ namespace
         HSVR_LOG("Pavise: %ls comes off the %s forearm (%s)", m.weapon->GetName().c_str(), arm == 0 ? "left" : "right", why);
     }
 
+    bool mount_on(int arm, int side, UObject* pawn, UObject* mesh, UObject* w, UObject* base, const PaviseSpec* spec);
     // Let go of the strap by the back of the other forearm: mounted on it.
     bool pavise_mount(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg)
     {
@@ -9087,7 +9232,19 @@ namespace
             HSVR_LOG("Pavise: %s hand let go of the strap by the other forearm: not mounted (%s)", hand, no);
             return false;
         }
-        drop_weapon(side, pawn, false); // Set Up <S> Hand Weapon(None): that hand's joint goes
+        if (!mount_on(arm, side, pawn, mesh, w, base, spec)) return true;
+        controllers_buzz(side, 0.4f);
+        controllers_buzz(arm, 0.3f);
+        HSVR_LOG("Pavise: %s hand let go of the %s %.1f cm from the %s forearm: %ls mounted there, that hand free", hand, spec->strap, d,
+                 arm == 0 ? "left" : "right", w->GetName().c_str());
+        return true;
+    }
+
+    // Out of hand <side> (Set Up <S> Hand Weapon(None): that hand's joint goes) and mounted on forearm <arm>.
+    // False when no joint could be made (then it is loose).
+    bool mount_on(int arm, int side, UObject* pawn, UObject* mesh, UObject* w, UObject* base, const PaviseSpec* spec)
+    {
+        drop_weapon(side, pawn, false);
         clear_arm_ignore(side);
         g_pending_free[side] = FreeGrip{};
         g_pending_item[side] = nullptr;
@@ -9110,12 +9267,8 @@ namespace
         if (!join_mount(arm, m))
         {
             unmount_loose(arm, "no joint could be made");
-            return true;
+            return false;
         }
-        controllers_buzz(side, 0.4f);
-        controllers_buzz(arm, 0.3f);
-        HSVR_LOG("Pavise: %s hand let go of the %s %.1f cm from the %s forearm: %ls mounted there, that hand free", hand, spec->strap, d,
-                 arm == 0 ? "left" : "right", w->GetName().c_str());
         return true;
     }
 
@@ -9142,11 +9295,51 @@ namespace
         return true;
     }
 
-    // The mounted arm's own hand, with nothing else in reach.
+    // The mounted arm's own hand, with nothing else in reach: its fist on the shield's forward grip, as the
+    // game holds a strap shield (grip 6: forearm through the strap, fist on the handle; Matthew 2026-11-23:
+    // "I can't close my fist and grab the shield's grip, the forward grip, while the shield is on my
+    // forearm"). The mount's joint goes and the game's own forearm grip holds it in that hand; the game's
+    // scene for it is the one the mount uses (k_pavises), so it does not move. Opening the hand mounts it again.
     bool mount_grip(int side, UObject* pawn)
     {
         Mount& m = g_mount[side];
         if (!m.weapon || m.pawn != pawn) return false;
+        // Only where the game has a forearm grip for that hand (6 or 7), whose scene the mount uses: the heavy
+        // pavise's right is 8 (a handle in the hand, the mount there is the mod's mirror image) and the tower
+        // has none, so those would jump into the hand: their hand closes on the strap as before.
+        const double game_grip = object_alive(m.weapon) ? read_number_variable(m.weapon, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default")) : 0.0;
+        const bool forearm_grip = game_grip == 6.0 || game_grip == 7.0;
+        if (hsvr::config().pose_mount_fist_grip && !forearm_grip)
+            HSVR_LOG_EVERY(2.0, "Pavise: %s hand: the game has no forearm grip for %ls in that hand (grip %.0f): it closes on the strap only", side == 0 ? "left" : "right",
+                           m.weapon->GetName().c_str(), game_grip);
+        if (hsvr::config().pose_mount_fist_grip && forearm_grip && !object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
+        {
+            UObject* w = m.weapon;
+            Mount keep = m;
+            g_mount_fist_check[side] = MountFistCheck{hsvr::now_seconds(), component_location(m.base), component_rotation(m.base)};
+            g_mount_fist_moved[side] = -1.0;
+            unjoin_mount(m);
+            m = Mount{};
+            g_mount_fist[side] = w;
+            bool ok = give_hand_weapon(side, pawn, w) && object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) == w;
+            if (ok)
+            {
+                g_pending_free[side] = FreeGrip{};
+                g_pending_item[side] = nullptr;
+                hsvr::controllers_buzz(side, 0.3f);
+                HSVR_LOG("Pavise: %s hand closes on the forward grip of %ls on its own forearm: in that hand, the game's own forearm grip %.0f",
+                         side == 0 ? "left" : "right", w->GetName().c_str(), read_number_variable(pawn, side == 0 ? STR("L_GripType_Current") : STR("R_GripType_Current")));
+                return true;
+            }
+            g_mount_fist[side] = nullptr;
+            m = keep;
+            m.joint = m.anchor = m.beside_joint = nullptr;
+            m.beside = nullptr;
+            m.no_collide.clear();
+            if (!join_mount(side, m)) unmount_loose(side, "the hand could not take it and no joint could be made");
+            HSVR_LOG("Pavise: %s hand could NOT take the forward grip of %ls; it stays mounted", side == 0 ? "left" : "right", w->GetName().c_str());
+            return true;
+        }
         m.gripped = true;
         hsvr::controllers_buzz(side, 0.3f);
         HSVR_LOG("Pavise: %s hand grips the strap of the pavise on its own forearm (nothing else in reach)", side == 0 ? "left" : "right");
@@ -9159,6 +9352,20 @@ namespace
         g_mount[side].gripped = false;
         set_anim_grip(side, -1);
         HSVR_LOG("Pavise: %s hand lets go of the strap; it stays mounted", side == 0 ? "left" : "right");
+        return true;
+    }
+
+    // That hand opening on the forward grip (or let go by a hurt arm): the shield stays on the forearm, mounted.
+    bool mount_fist_release(int side, UObject* pawn, UObject* mesh, UObject* w, const char* why)
+    {
+        if (!w || w != g_mount_fist[side]) return false;
+        g_mount_fist[side] = nullptr;
+        UObject* base = object_property(w, STR("BaseMesh"));
+        const PaviseSpec* spec = pavise_spec(w);
+        if (!base || !spec || g_mount[side].weapon) return false;
+        bool ok = mount_on(side, side, pawn, mesh, w, base, spec);
+        HSVR_LOG("Pavise: %s hand opens on the forward grip of %ls (%s): %s", side == 0 ? "left" : "right", w->GetName().c_str(), why,
+                 ok ? "it stays mounted on that forearm" : "no joint could be made, it is loose");
         return true;
     }
 
@@ -14121,6 +14328,22 @@ namespace
                 g_regrab[side] = false;
                 held[side] = false; // the grip still closed: this tick looks for something to take
             }
+            // Forward grip of a mounted shield: forgotten once it left that hand some other way (passed, disarmed).
+            if (g_mount_fist[side] && object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != g_mount_fist[side]) g_mount_fist[side] = nullptr;
+            if (g_mount_fist_check[side].at >= 0.0 && now_seconds() - g_mount_fist_check[side].at >= 0.3)
+            {
+                MountFistCheck& c = g_mount_fist_check[side];
+                UObject* b = g_mount_fist[side] ? object_property(g_mount_fist[side], STR("BaseMesh")) : nullptr;
+                if (b)
+                {
+                    g_mount_fist_moved[side] = length(component_location(b) - c.from);
+                    Quat dq = component_rotation(b) * c.from_q.inverse();
+                    double turn = 2.0 * std::acos((std::min)(1.0, std::fabs(dq.w))) * 57.2958;
+                    HSVR_LOG("Pavise: %s hand's forward grip: the shield moved %.1f cm and %.0f deg from its mounted place as the hand took it", side == 0 ? "left" : "right",
+                             g_mount_fist_moved[side], turn);
+                }
+                c.at = -1.0;
+            }
             bool hurt = g_inj.pawn == pawn && g_inj.arm[side] != 0; // a hurt arm can't hold: it lets go
             if (hurt) squeeze = 0.0f;
             if (hurt && !held[side])
@@ -14131,7 +14354,7 @@ namespace
                 {
                     if (g_two.active && (side == g_two.second || side == g_two.main)) end_two_hand("arm hurt");
                     HSVR_LOG("Injury: %s arm hurt: drops %ls", side == 0 ? "left" : "right", m->GetName().c_str());
-                    drop_weapon(side, pawn, false);
+                    if (!mount_fist_release(side, pawn, object_property(pawn, STR("Mesh")), m, "arm hurt")) drop_weapon(side, pawn, false);
                 }
                 else if (!m && (g_world[side].on || bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R"))))
                     release_object(side, pawn);
@@ -14181,6 +14404,7 @@ namespace
                     if (cfg.pose_grab_release_drops && hand_over(pawn)) continue;
                     end_two_hand("the other hand let go");
                 }
+                if (mine && mount_fist_release(side, pawn, mesh, mine, hurt ? "arm hurt" : "grip released")) continue;
                 if (mine && cfg.pose_grab_release_drops && !hurt && pavise_mount(side, pawn, mesh, mine, cfg)) continue;
                 if (mine && cfg.pose_grab_release_drops && !hurt && holster_snap(side, pawn, mesh, mine, cfg)) continue;
                 if (mine && (cfg.pose_grab_release_drops || hurt))
@@ -27941,6 +28165,9 @@ namespace
             value = !sc ? -1.0 : scabbard_pin(sc) ? 1.0 : 0.0;
         }
         else if (w == "drop_xy_l" || w == "drop_xy_r") value = g_drop_trace[w.back() == 'l' ? 0 : 1].max_xy; // cm sideways, last drop's first 0.3 s
+        else if (w == "drop_xy05_l" || w == "drop_xy05_r") value = g_drop_trace[w.back() == 'l' ? 0 : 1].max_xy_all; // the same over 0.5 s
+        else if (w == "grip_type_l" || w == "grip_type_r") value = read_number_variable(pawn, w.back() == 'l' ? STR("L_GripType_Current") : STR("R_GripType_Current"));
+        else if (w == "mount_fist_moved_l" || w == "mount_fist_moved_r") value = g_mount_fist_moved[w.back() == 'l' ? 0 : 1]; // cm, last forward-grip take
         else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
         else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
         else if (w == "actor_z") value = pawn ? actor_location(pawn).z : 0.0;
