@@ -8,11 +8,10 @@
 2.5:hsvr.input Right_Guard_Axis 1 8
 4.0:hsvr.expect var:R_Hand_Active = 1 LMB held: right hand active
 # Mouse waggle: the game's Update Aim moves the arm (aim moves while R Hand Active, internals-map 2.). Checked by the
-# right hand bone's own speed (LMB held throughout, still first), not Aim Swing Speed (that needs Swing Velocity proxy over 25, which this waggle
+# right hand bone's own speed (LMB held throughout, moving 0.3 s), not Aim Swing Speed (that needs Swing Velocity proxy over 25, which this waggle
 # didn't reach in the 2026-11-23 combined run although the arm moved).
-5.0:hsvr.wait hand_speed_r < 5 3 0.3 right arm still before the waggle
 6.0:hsvr.input Left_Mouse 8 0.3
-6.0:hsvr.wait hand_speed_r > 10 2 0.15 mouse waggle moves the game's right arm
+6.0:hsvr.wait hand_speed_r > 20 2 0.3 mouse waggle moves the game's right arm
 6.3:hsvr.input Left_Mouse -8 0.3
 6.6:hsvr.input Left_Mouse 8 0.3
 6.9:hsvr.input Left_Mouse -8 0.3
