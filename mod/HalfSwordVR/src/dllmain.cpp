@@ -5378,6 +5378,7 @@ namespace
     {
         UObject* weapon = nullptr;
         std::vector<UObject*> joints;
+        double dropped_at = -1.0; // let go of by a plain let-go at this time: kept until it is clear of him
     };
     ArmIgnore g_arm_ignore[2];
     std::atomic<int> g_grip_ignore_arm{1};
@@ -5416,6 +5417,40 @@ namespace
         Call t(base, STR("GetCollisionObjectType"));
         t.run();
         HSVR_LOG("Grip: the weapon itself is channel %d", byte_result(t));
+    }
+
+    // An item let go of keeps not colliding with his body (and own headgear) until it is clear of him, as a
+    // B&S item ignores its last holder until it leaves him. PC run 12925e2: shields let go of were pushed
+    // 19-35 cm sideways after the release, the push starting as the no-collide pairs went (~25 ms after).
+    // Clear = no part of it within pose_drop_ignore_clear_cm of his hands, forearms, chest, hips or thighs,
+    // or pose_drop_ignore_s passed.
+    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part);
+    bool drop_ignore_lingers(int side, UObject* pawn)
+    {
+        using namespace hsvr;
+        ArmIgnore& a = g_arm_ignore[side];
+        const Config& cfg = hsvr::config();
+        if (a.dropped_at < 0.0 || !a.weapon || cfg.pose_drop_ignore_s <= 0.0) return false;
+        double age = now_seconds() - a.dropped_at;
+        UObject* mesh = pawn ? object_property(pawn, STR("Mesh")) : nullptr;
+        if (age > cfg.pose_drop_ignore_s || !mesh || !object_alive(a.weapon))
+        {
+            if (a.weapon && object_alive(a.weapon)) HSVR_LOG("Drop: %ls collides with you again (%.2f s after the let-go: time)", a.weapon->GetName().c_str(), age);
+            return false;
+        }
+        double nearest = 1e9;
+        static const char* bones[] = {"hand_l", "hand_r", "lowerarm_l", "lowerarm_r", "spine_03", "spine_05", "pelvis", "thigh_l", "thigh_r"};
+        for (const char* b : bones)
+        {
+            double d = closest_on_weapon(a.weapon, socket_location(mesh, bone_fname(b)), nullptr, nullptr);
+            if (d >= 0.0) nearest = (std::min)(nearest, d);
+        }
+        if (nearest > cfg.pose_drop_ignore_clear_cm)
+        {
+            HSVR_LOG("Drop: %ls collides with you again (%.2f s after the let-go, %.0f cm clear)", a.weapon->GetName().c_str(), age, nearest);
+            return false;
+        }
+        return true;
     }
 
     void clear_arm_ignore(int side)
@@ -6543,6 +6578,7 @@ namespace
         hsvr::Vec3 v_before{};
         bool have_v = held && recent_com_velocity(side, held, v_before);
         if (held && hsvr::config().pose_drop_joint_first) jh_release_for_drop(side, held);
+        if (held && loose && !thrown && g_arm_ignore[side].weapon == held) g_arm_ignore[side].dropped_at = hsvr::now_seconds();
         pawn->ProcessEvent(fn, parameters);
         if (held)
         {
@@ -21238,7 +21274,8 @@ namespace
             // With the spring off the game's own locked grip holds the weapon; it is still measured and logged.
             UObject* weapon = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
             // (Not the second hand's: it holds no weapon of its own, but must not collide with the one it holds too.)
-            if (g_arm_ignore[side].weapon && g_arm_ignore[side].weapon != weapon && !(g_two.active && g_two.second == side && g_arm_ignore[side].weapon == g_two.weapon))
+            if (g_arm_ignore[side].weapon && g_arm_ignore[side].weapon != weapon && !(g_two.active && g_two.second == side && g_arm_ignore[side].weapon == g_two.weapon) &&
+                !drop_ignore_lingers(side, pawn))
                 clear_arm_ignore(side);
             if (!weapon) continue;
             if (!joint)

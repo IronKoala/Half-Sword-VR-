@@ -701,6 +701,8 @@ namespace hsvr
         flag("pose_fist_clear_dropped", c.pose_fist_clear_dropped);
         flag("pose_drop_keep_velocity", c.pose_drop_keep_velocity);
         flag("pose_drop_joint_first", c.pose_drop_joint_first);
+        num("pose_drop_ignore_s", c.pose_drop_ignore_s);
+        num("pose_drop_ignore_clear_cm", c.pose_drop_ignore_clear_cm);
         flag("pose_fist_full_impulse", c.pose_fist_full_impulse);
         flag("disarm", c.disarm);
         num("disarm_grip_scale", c.disarm_grip_scale);
