@@ -15757,26 +15757,32 @@ namespace
         {
             Vec3 d_local = g_two.bs_local - pivot;
             Vec3 between = g_two.bs_p2 - target_pivot;
-            line_rot = target_rot;
+            line_rot = rot;
             if (length(d_local) > 5.0 && length(between) > 5.0)
             {
-                Vec3 a = normalized(target_rot.rotate(d_local)), b = normalized(between);
+                // Swing: from where the weapon points NOW onto the hands' line (a small, stable turn). Roll: only the
+                // twist about that line of the main wrist's turn. Swinging the main wrist's own turn onto the line
+                // was a near-180 deg turn when that wrist held the weapon far from the line (test 2026-11-23: the
+                // crossbow's main-hand target 178 deg off it), whose axis is undefined there: the pose flipped and
+                // the crossbow spun at 3000-3400 deg/s (two_crossbow 5.7 / 15.4 cm off the hands' line).
+                Vec3 a = normalized(rot.rotate(d_local)), b = normalized(between);
                 Vec3 ax = cross(a, b);
                 double sn = length(ax), cs = dot(a, b);
-                if (sn > 1e-6) line_rot = (from_scaled_axis(ax * (std::atan2(sn, cs) / sn)) * target_rot).normalized();
-                else if (cs < 0.0)
-                {
-                    // Exactly reversed: half a turn about any axis across it.
-                    Vec3 perp = std::fabs(a.x) < 0.9 ? normalized(cross(a, Vec3{1, 0, 0})) : normalized(cross(a, Vec3{0, 1, 0}));
-                    line_rot = (from_scaled_axis(perp * 3.14159265358979) * target_rot).normalized();
-                }
+                Quat aligned = rot;
+                if (sn > 1e-6) aligned = (from_scaled_axis(ax * (std::atan2(sn, cs) / sn)) * rot).normalized();
+                Quat dq = (target_rot * aligned.inverse()).normalized();
+                double along = dq.x * b.x + dq.y * b.y + dq.z * b.z;
+                Quat tw{b.x * along, b.y * along, b.z * along, dq.w};
+                double n = std::sqrt(tw.x * tw.x + tw.y * tw.y + tw.z * tw.z + tw.w * tw.w);
+                tw = n > 1e-9 ? Quat{tw.x / n, tw.y / n, tw.z / n, tw.w / n} : Quat{};
+                line_rot = (tw * aligned).normalized();
             }
             Vec3 miss = between - line_rot.rotate(d_local); // along the line: hands further apart (or closer) than the grips
             double w2 = (std::max)(0.0, s2b.total) / (std::max)(0.05, (std::max)(0.0, body.total) + (std::max)(0.0, s2b.total));
             line_main = target_pivot + miss * w2;
             s_rot = line_rot;
             s_pos = line_main - line_rot.rotate(pivot);
-            HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls (two hands, one pose): along the hands' line, %.0f deg from the main wrist's turn; hands %.1f cm %s than the grips (%.0f%% of it on the main hand)",
+            HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls (two hands, one pose): along the hands' line, %.0f deg from the main wrist's turn (only its roll is used); hands %.1f cm %s than the grips (%.0f%% of it on the main hand)",
                            side == 0 ? "left" : "right", weapon->GetName().c_str(), length(scaled_axis((line_rot * target_rot.inverse()).normalized())) * 57.2958,
                            std::fabs(length(between) - length(d_local)), length(between) >= length(d_local) ? "further apart" : "closer", w2 * 100.0);
         }
