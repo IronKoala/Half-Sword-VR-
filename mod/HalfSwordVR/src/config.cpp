@@ -653,6 +653,7 @@ namespace hsvr
         num("pose_sheathe_mouth_cm", c.pose_sheathe_mouth_cm);
         num("pose_sheathe_angle_deg", c.pose_sheathe_angle_deg);
         flag("pose_sheathe_two_hand", c.pose_sheathe_two_hand);
+        flag("pose_first_sheathe_letgo", c.pose_first_sheathe_letgo);
         flag("pose_sheathe_cross", c.pose_sheathe_cross);
         flag("pose_scabbard_grab", c.pose_scabbard_grab);
         num("pose_scabbard_touch_cm", c.pose_scabbard_touch_cm);
