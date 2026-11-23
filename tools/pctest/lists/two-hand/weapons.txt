@@ -1,2 +1,16 @@
-# name|asset class path (PC session: fill the real ModularWeaponBP_* paths from the decomp; one per row)|left hand cm along the weapon from the right hand (- toward the pommel)|"front" = crossbow fore end
+# name|asset class path or "passport <inventory DA> <index>" (verified 2026-11-23 against HalfSwordDecomp\extracted, pre-update extract 11-18)|left hand cm along the weapon from the right hand (- toward the pommel)|"front" = crossbow fore end
+# longsword: Knight free-mode passport 1 'Longsword' = Weapon_Sword_Grip_20_T4 (GripSize z 1), Blade_D_100
+longsword|passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight 1|-12
+# greatsword: built class, Grip Module = Weapon_Sword_Grip_20GS (Overall Scale 1.2-1.3)
+greatsword|/Game/Assets/Weapons/Blueprints/Built_Weapons/ModularWeaponBP_GreatSword.ModularWeaponBP_GreatSword_C|-12
+# short bastard: built class, Grip Module = Weapon_Sword_Grip_15_T1
+bastard_t1|/Game/Assets/Weapons/Blueprints/Built_Weapons/ModularWeaponBP_BastardSword_T1.ModularWeaponBP_BastardSword_T1_C|-12
+# long bastard: built class, Grip Module = Weapon_Sword_Grip_15_T3 (class grip mesh is 15 cm like T1; the playtest's 29.5 cm T3 was a passport build)
+bastard_t3|/Game/Assets/Weapons/Blueprints/Built_Weapons/ModularWeaponBP_BastardSword_T3.ModularWeaponBP_BastardSword_T3_C|-12
+# long war hammer: no built class uses Haft_Low_Tier_Long; this one is Weapon_Part_Hafted_Haft_Mid_Tier_Long (OffhandGrip -30, same as the Low_Tier_Long family)
+warhammer_long|/Game/Assets/Weapons/Blueprints/Built_Weapons/Tiers/ModularWeaponBP_Hafted_Mid_Tier_Long.ModularWeaponBP_Hafted_Mid_Tier_Long_C|-30
+# polehammer: Knight passport 0 'Pollaxe' = Modular_Weapon_Polearm_Haft_High_Tier_Avg (OffhandGrip +60, L Default +35; no room at -30 below the main hand)
+polehammer|passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight 0|30
+# war staff: built class (Knight passport 6); its Grip L Hand Off Hand is +50, R Default 0
+warstaff|/Game/Assets/Weapons/Blueprints/Built_Weapons/Reforged/ModularWeaponBP_WarStaff_A.ModularWeaponBP_WarStaff_A_C|30
 crossbow|/Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C|front
