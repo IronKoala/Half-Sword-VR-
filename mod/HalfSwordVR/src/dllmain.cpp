@@ -25039,6 +25039,10 @@ namespace
         int stage = 0;           // per pawn: 0 waiting, 1 foes and tables placed, 2 weapons spawned
         hsvr::Vec3 origin, forward;
         std::vector<hsvr::Vec3> table_at;
+        bool wall = false;               // the cellar's wall layout (room_wall_layout)
+        hsvr::Vec3 wall_table[2], wall_book[2];
+        double wall_face = 0.0;          // the north wall's face (y)
+        hsvr::Vec3 floor_centre;         // where book weapons that don't fit on the tables lie
         double table_yaw = 0.0;
         double next_sweep = 0.0, next_save_check = 0.0;
         std::vector<UObject*> settling; // foe meshes moved with physics off (room_settle_foes)
@@ -25993,7 +25997,7 @@ namespace
         g_room.tables.clear();
         for (int t = 0; t < 2; ++t)
         {
-            Vec3 at = g_room.origin + g_room.forward * 125.0 + right * (t == 0 ? -104.0 : 104.0); // 35 cm between them (Matthew 2026-11-20); 125 (was 110): a weapon in his hand at rest stayed clear of the tables (test 2026-11-22 21:58)
+            Vec3 at = g_room.wall ? g_room.wall_table[t] : g_room.origin + g_room.forward * 125.0 + right * (t == 0 ? -104.0 : 104.0); // 35 cm between them (Matthew 2026-11-20); 125 (was 110): a weapon in his hand at rest stayed clear of the tables (test 2026-11-22 21:58)
             at.z = floor_z;
             UObject* table = room_static(player, STR("/Game/Assets/Props/Furniture/Meshes/SM_Prop_Furniture_Table_011.SM_Prop_Furniture_Table_011"), at, yaw_quat(g_room.table_yaw));
             HSVR_LOG("TestRoom: weapon table %ls at (%.0f, %.0f, %.0f) (static)", table ? table->GetName().c_str() : STR("NOT made"), at.x, at.y, at.z);
@@ -26391,10 +26395,12 @@ namespace
         {
             // Straight on the stand's dark brown wood, in its opposite: pale blue (Matthew 2026-11-23: dark ink
             // on a light page was unreadable, "make the text something more colour opposite of the book stand").
-            // The board turned out pale wood under its light (pictures 2026-11-23 01:09): dark text on it.
-            if (i == b.hover) room_text_colour(b.rows[i], 200, 20, 10);       // pointed at: red
-            else if (i == 0) room_text_colour(b.rows[i], 10, 10, 10);        // title: black
-            else room_text_colour(b.rows[i], 15, 30, 110);                   // lines: dark blue
+            // The text draws itself lit (dark colours came out pale lavender, the black title nearly
+            // invisible on the lit board: pictures 2026-11-23 14:00), so bright text on the unlit dark wood
+            // (test_room_book_light 0).
+            if (i == b.hover) room_text_colour(b.rows[i], 80, 255, 120);      // pointed at: bright green
+            else if (i == 0) room_text_colour(b.rows[i], 255, 170, 40);      // title: gold
+            else room_text_colour(b.rows[i], 255, 238, 200);                 // lines: warm white
         }
     }
 
@@ -26476,7 +26482,8 @@ namespace
     {
         using hsvr::Vec3;
         const wchar_t* lectern_path = L"/Game/Assets/Props/Furniture/Meshes/SM_Prop_Furniture_Lectern_001.SM_Prop_Furniture_Lectern_001";
-        Vec3 to_player = g_room.origin - at;
+        // It faces him, or (wall layout) straight out from the wall.
+        Vec3 to_player = g_room.wall ? Vec3{0.0, -1.0, 0.0} : g_room.origin - at;
         to_player.z = 0.0;
         to_player = hsvr::normalized(to_player);
         double yaw = std::atan2(to_player.y, to_player.x) * 57.29577951308232;
@@ -26574,6 +26581,122 @@ namespace
         g_room.books.push_back(book);
     }
 
+    // ---- The cellar's wall layout (test_room_wall_layout) --------------------------------------------
+    // Matthew 2026-11-23: tables, books and Willies all in front of him was too crowded to move; the two
+    // tables go against one wall with the two books beside them. The north wall (y 1500) between x 600
+    // and 1500 is the cellar's longest stretch with nothing but loose props on it (map data,
+    // HalfSwordDecomp\defaults\cellar_layout.md; a wall pillar at x 1100 splits it): from the west,
+    // weapon book (x 680), table (870), pillar, table (1250), Willie book (1420). Its face is found by
+    // traces; the loose props on that strip (a table, stool, hourglass, candle stand, a flail) go.
+    bool room_is_cellar()
+    {
+        return hsvr::config().test_room_map.find("Map_Arena_Cellar") != std::string::npos;
+    }
+
+    // The mesh name of a StaticMeshActor ("" if none).
+    std::wstring room_actor_mesh(UObject* a)
+    {
+        UObject* c = object_property(a, STR("StaticMeshComponent"));
+        UObject* m = c ? object_property(c, STR("StaticMesh")) : nullptr;
+        return m ? m->GetName() : std::wstring();
+    }
+    bool room_is_simulating(UObject* comp)
+    {
+        if (!comp) return false;
+        Call s(comp, STR("IsSimulatingPhysics"));
+        if (!s.fn || !s.run()) return false;
+        FProperty* r = s.param(STR("ReturnValue"));
+        return r && (*(s.buffer.data() + r->GetOffset_Internal()) & 1);
+    }
+
+    void room_wall_layout(UObject* player)
+    {
+        using hsvr::Vec3;
+        g_room.wall = false;
+        if (!hsvr::config().test_room_wall_layout || !room_is_cellar()) return;
+        double floor_z = room_floor_z(player);
+        const double xs[4] = {680.0, 870.0, 1250.0, 1420.0};
+        double face = -1e9;
+        for (double x : xs)
+        {
+            Vec3 stop;
+            std::wstring name;
+            if (world_sweep(Vec3{x, 1150.0, floor_z + 100.0}, Vec3{x, 1750.0, floor_z + 100.0}, 5.0, 0.0, false, stop, nullptr, &name) == 1 && stop.y + 5.0 <= 1530.0)
+                face = (std::max)(face, stop.y + 5.0);
+        }
+        if (face < 1380.0) face = 1475.0; // the map's wall line less its plaster (inner faces are within 25 cm of y 1500)
+        g_room.wall_face = face;
+        // Loose things on the strip go: anything simulating, any prop mesh, loose weapons (not walls,
+        // pillars, windows, doors or the floor).
+        int removed = 0;
+        auto on_strip = [&](const Vec3& p) { return p.x > 560.0 && p.x < 1520.0 && p.y > face - 230.0 && p.y < face + 40.0; };
+        std::vector<UObject*> actors;
+        UObjectGlobals::FindAllOf(STR("StaticMeshActor"), actors);
+        for (UObject* a : actors)
+        {
+            if (!a || !object_alive(a) || a->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            if (std::find(g_room.furniture.begin(), g_room.furniture.end(), a) != g_room.furniture.end()) continue;
+            Vec3 p = actor_location(a);
+            if (!on_strip(p)) continue;
+            std::wstring mesh = room_actor_mesh(a);
+            bool structure = false;
+            for (const wchar_t* w : {L"Wall", L"Pillar", L"Column", L"Arch", L"Floor", L"Window", L"Door", L"Ceiling", L"Beam", L"Stair"})
+                if (mesh.find(w) != std::wstring::npos) structure = true;
+            bool loose = room_is_simulating(object_property(a, STR("StaticMeshComponent"))) || mesh.find(L"SM_Prop") == 0;
+            if (structure || !loose) continue;
+            HSVR_LOG("TestRoom: wall layout: cleared %ls (%ls) at (%.0f, %.0f, %.0f)", a->GetName().c_str(), mesh.c_str(), p.x, p.y, p.z);
+            Call d(a, STR("K2_DestroyActor"));
+            d.run();
+            ++removed;
+        }
+        std::vector<UObject*> weapons;
+        UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+        for (UObject* w : weapons)
+        {
+            if (!w || !object_alive(w) || w->GetName().rfind(STR("Default__"), 0) == 0 || is_fist(w) || hit_is_his_item(w) || bool_property(w, STR("Is Sheathed"))) continue;
+            if (!on_strip(actor_location(w))) continue;
+            Call parent(w, STR("GetAttachParentActor"));
+            if (parent.run() && parent.object_result(STR("ReturnValue"))) continue;
+            HSVR_LOG("TestRoom: wall layout: cleared %ls", w->GetName().c_str());
+            Call d(w, STR("K2_DestroyActor"));
+            d.run();
+            ++removed;
+        }
+        g_room.wall = true;
+        g_room.forward = Vec3{0.0, 1.0, 0.0}; // facing the wall: the tables' long side runs along it
+        g_room.wall_table[0] = Vec3{870.0, face - 20.0 - 55.0, floor_z};
+        g_room.wall_table[1] = Vec3{1250.0, face - 20.0 - 55.0, floor_z};
+        g_room.wall_book[0] = Vec3{680.0, face - 45.0, floor_z};
+        g_room.wall_book[1] = Vec3{1420.0, face - 45.0, floor_z};
+        g_room.floor_centre = Vec3{1060.0, face - 260.0, floor_z};
+        HSVR_LOG("TestRoom: wall layout: north wall face at y %.0f; %d loose thing(s) cleared off the strip", face, removed);
+    }
+
+    // The cellar's hay bundles and barrels are stacked overlapping in the level; once anything wakes
+    // them (a bolt, a weapon, a falling Willie) Chaos pushes them apart and they fly across the room
+    // (Matthew 2026-11-23; a hay bundle from the SW corner travelled 12.5 m: his log 00:35Z). In the test
+    // room they hold still instead.
+    void room_freeze_props()
+    {
+        if (!hsvr::config().test_room_freeze_props || !room_is_cellar()) return;
+        std::vector<UObject*> actors;
+        UObjectGlobals::FindAllOf(STR("StaticMeshActor"), actors);
+        int frozen = 0;
+        for (UObject* a : actors)
+        {
+            if (!a || !object_alive(a) || a->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            std::wstring mesh = room_actor_mesh(a);
+            if (mesh.find(L"Hay") == std::wstring::npos && mesh.find(L"Barrel") == std::wstring::npos) continue;
+            UObject* c = object_property(a, STR("StaticMeshComponent"));
+            if (!room_is_simulating(c)) continue;
+            Call s(c, STR("SetSimulatePhysics"));
+            s.first_flag(false);
+            s.run();
+            ++frozen;
+        }
+        HSVR_LOG("TestRoom: %d hay bundle(s) and barrel(s) hold still (test_room_freeze_props)", frozen);
+    }
+
     void room_place_books(UObject* player)
     {
         g_room.books.clear();
@@ -26584,6 +26707,7 @@ namespace
         for (int kind = 0; kind < 2; ++kind)
         {
             Vec3 at = g_room.origin - g_room.forward * 30.0 + right * (kind == 0 ? -190.0 : 190.0); // 150 was crowded (Matthew 2026-11-23)
+            if (g_room.wall) at = g_room.wall_book[kind];
             at.z = floor_z;
             room_place_book(player, kind, at);
         }
@@ -26799,6 +26923,8 @@ namespace
                 {
                     floor_spot.at = hsvr::Vec3{g_room.origin.x, g_room.origin.y, floor_z + 30.0} - g_room.forward * (90.0 + (i / 8) * 25.0) +
                                     right * (side * (150.0 - (i % 8) * 20.0));
+                    // Wall layout: in rows in front of the tables, 2 m along and 30 cm apart.
+                    if (g_room.wall) floor_spot.at = hsvr::Vec3{760.0 + (i % 4) * 200.0, g_room.wall_face - 200.0 - (i / 4) * 30.0, floor_z + 30.0};
                     floor_spot.q = lying;
                     if (std::hypot(floor_spot.at.x - me.x, floor_spot.at.y - me.y) < 80.0) continue;
                     bool floor_ok = true;
@@ -27351,6 +27477,8 @@ namespace
             g_room.forward = fl > 1e-3 ? f * (1.0 / fl) : hsvr::Vec3{1, 0, 0};
             double t0 = hsvr::now_seconds();
             room_place_foes(player);
+            room_freeze_props();
+            room_wall_layout(player);
             room_place_tables(player);
             room_spawn_weapons(player);
             room_place_books(player);
@@ -27636,6 +27764,7 @@ namespace
         Vec3 me = actor_location(player);
         if (w == "room_ready") { value = g_room.stage >= 2 ? 1.0 : 0.0; return true; }
         if (w == "room_books") { value = (double)g_room.books.size(); return true; }
+        if (w == "room_wall") { value = g_room.wall ? 1.0 : 0.0; return true; }
         if (w == "room_tables") { value = (double)g_room.tables.size(); return true; }
         if (w == "room_won")
         {
@@ -27717,7 +27846,7 @@ namespace
                 if (std::fabs(l.x) < 55.0 && std::fabs(l.y) < 90.0 && l.z > 80.0 && l.z < 130.0) table = true;
             }
             if (table) ++on_tables;
-            else if (at.z < floor_z + 30.0 && hsvr::length(at - g_room.origin) < 600.0) ++on_floor;
+            else if (at.z < floor_z + 30.0 && (hsvr::length(at - g_room.origin) < 600.0 || (g_room.wall && hsvr::length(at - g_room.floor_centre) < 600.0))) ++on_floor;
             if (mark) g_room_marks[wp] = at;
             else
             {
