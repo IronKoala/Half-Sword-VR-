@@ -23899,6 +23899,61 @@ namespace
         HSVR_LOG("Graphics: end of list");
     }
 
+    // mirror_window_res: puts the game window at that size (windowed) with the engine's own r.SetRes,
+    // so a recording of the window is 16:9 on an ultrawide monitor. Done again if the window size
+    // later changes away from what the engine settled on (the game's own settings applied again);
+    // never fights the engine over a size it clamps (it is compared with what it gave, not asked).
+    void apply_window_res(const hsvr::Config& cfg)
+    {
+        static std::string applied;
+        static double issued_at = -1.0;
+        static int settled_w = 0, settled_h = 0;
+        static int reissues = 0;
+        int want_w = 0, want_h = 0;
+        char tail = 0;
+        if (cfg.mirror_window_res.empty() || sscanf(cfg.mirror_window_res.c_str(), "%dx%d%c", &want_w, &want_h, &tail) < 2 || want_w < 320 ||
+            want_h < 200)
+        {
+            applied.clear();
+            return;
+        }
+        double now = hsvr::now_seconds();
+        int w = hsvr::shared().window_width.load(), h = hsvr::shared().window_height.load();
+        bool issue = false;
+        if (cfg.mirror_window_res != applied)
+        {
+            applied = cfg.mirror_window_res;
+            settled_w = settled_h = 0;
+            reissues = 0;
+            issue = true;
+        }
+        else if (issued_at >= 0.0 && now - issued_at > 3.0)
+        {
+            if (settled_w == 0)
+            {
+                if (w <= 0) return;
+                settled_w = w;
+                settled_h = h;
+                HSVR_LOG("Window: asked for %dx%d windowed, the window is %dx%d", want_w, want_h, w, h);
+            }
+            else if (w > 0 && (w != settled_w || h != settled_h) && reissues < 20)
+            {
+                ++reissues;
+                settled_w = settled_h = 0;
+                HSVR_LOG("Window: size changed to %dx%d; setting %dx%d again", w, h, want_w, want_h);
+                issue = true;
+            }
+        }
+        if (issue)
+        {
+            char command[64];
+            snprintf(command, sizeof(command), "r.SetRes %dx%dw", want_w, want_h);
+            run_console_command(std::string(command));
+            issued_at = now;
+            HSVR_LOG("Window: %s (mirror_window_res)", command);
+        }
+    }
+
     // Passes the picture tuning from the settings file on to the engine, when it is set and
     // whenever it changes (the file can be edited while the game runs).
     void apply_picture_settings(const hsvr::Config& cfg)
@@ -23932,6 +23987,7 @@ namespace
                 applied_percentage = cfg.screen_percentage;
             }
         }
+        apply_window_res(cfg);
         if (cfg.extra_commands != applied_commands)
         {
             applied_commands = cfg.extra_commands;
