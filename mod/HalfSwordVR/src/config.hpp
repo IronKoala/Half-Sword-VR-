@@ -196,7 +196,7 @@ namespace hsvr
         bool test_room_wall_layout = true;  // cellar: tables and books against the north wall (Matthew 2026-11-23)
         bool test_room_freeze_props = true; // cellar: hay bundles and barrels hold still (they are authored overlapping)
         // The small light over each book's page (the engine's unitless light intensity; 0 = none).
-        double test_room_book_light = 40.0;
+        double test_room_book_light = 0.0; // 0: bright self-lit text reads best on the dark wood (2026-11-23)
         double test_room_fight_x = 1720.0; // where fighting Willies from the book appear (the cellar's coffin corner)
         double test_room_fight_y = 40.0;
         int test_room_foes = 4;

@@ -35,7 +35,7 @@ LAYOUT = [
         ('test_room_books', '1 = weapon and Willie spawn books on lecterns: point an empty hand at a line, pull the trigger.'),
         ('test_room_wall_layout', '1 = in the cellar the two tables and the two books stand in a row against the north wall (loose props there are cleared away); 0 = in front of where you start.'),
         ('test_room_freeze_props', '1 = in the cellar the hay bundles and barrels hold still (the level has them stacked overlapping, and once woken they burst apart and fly across the room).'),
-        ('test_room_book_light', 'Brightness of the small light over each book page (0 = none). Read when the room is put up.'),
+        ('test_room_book_light', 'Brightness of a small light over each book (0 = none, best: the text lights itself and reads best on the dark wood). Read when the room is put up.'),
         ('test_room_fight_x', 'Where fighting Willies from the book appear, world X (cellar default: the coffin corner, 1720). 0 with test_room_fight_y 0 = round you like passive ones.'),
         ('test_room_fight_y', 'Same, world Y (cellar default 40: just inside the area the AI can walk; the coffins stand at y -340).'),
         ('test_room_tier', "Foes' tier: -1 random, 0 Beggar .. 8 Lord."),

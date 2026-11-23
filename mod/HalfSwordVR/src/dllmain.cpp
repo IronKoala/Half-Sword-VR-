@@ -26357,10 +26357,12 @@ namespace
         {
             // Straight on the stand's dark brown wood, in its opposite: pale blue (Matthew 2026-11-23: dark ink
             // on a light page was unreadable, "make the text something more colour opposite of the book stand").
-            // The board turned out pale wood under its light (pictures 2026-11-23 01:09): dark text on it.
-            if (i == b.hover) room_text_colour(b.rows[i], 200, 20, 10);       // pointed at: red
-            else if (i == 0) room_text_colour(b.rows[i], 10, 10, 10);        // title: black
-            else room_text_colour(b.rows[i], 15, 30, 110);                   // lines: dark blue
+            // The text draws itself lit (dark colours came out pale lavender, the black title nearly
+            // invisible on the lit board: pictures 2026-11-23 14:00), so bright text on the unlit dark wood
+            // (test_room_book_light 0).
+            if (i == b.hover) room_text_colour(b.rows[i], 80, 255, 120);      // pointed at: bright green
+            else if (i == 0) room_text_colour(b.rows[i], 255, 170, 40);      // title: gold
+            else room_text_colour(b.rows[i], 255, 238, 200);                 // lines: warm white
         }
     }
 
