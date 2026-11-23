@@ -25467,6 +25467,55 @@ namespace
         return (n > 0 && n < MAX_PATH) ? std::wstring(buf, n) : std::wstring();
     }
 
+    // The folder the game itself saves in (its Saved\ folder, with a trailing slash), asked from the
+    // engine (KismetSystemLibrary GetProjectSavedDirectory). A test copy started with -UserDir= saves
+    // somewhere else than %LOCALAPPDATA%, and the room must copy and put back THAT save, never his.
+    // Only when the command line moves nothing is the old %LOCALAPPDATA% path a safe stand-in.
+    std::wstring game_saved_dir()
+    {
+        static UObject* ksl = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        if (ksl)
+        {
+            Call c(ksl, STR("GetProjectSavedDirectory"));
+            FProperty* out = c.param(STR("ReturnValue"));
+            if (c.fn && out && c.run())
+            {
+                // FString = TArray<TCHAR>: data pointer, count (with the closing 0), capacity.
+                struct RawString { const wchar_t* data; int32_t num; int32_t max; };
+                const RawString* raw = reinterpret_cast<const RawString*>(c.buffer.data() + out->GetOffset_Internal());
+                std::wstring dir = (raw->data && raw->num > 1) ? std::wstring(raw->data, raw->num - 1) : std::wstring();
+                out->DestroyValue(c.buffer.data() + out->GetOffset_Internal());
+                if (!dir.empty())
+                {
+                    for (wchar_t& ch : dir)
+                        if (ch == L'/') ch = L'\\';
+                    if (dir.back() != L'\\') dir += L'\\';
+                    // A relative answer ("../../../HalfswordUE5/Saved/") counts from the exe's folder.
+                    if (!(dir.size() > 1 && (dir[1] == L':' || (dir[0] == L'\\' && dir[1] == L'\\'))))
+                    {
+                        wchar_t exe[MAX_PATH * 2]{};
+                        GetModuleFileNameW(nullptr, exe, MAX_PATH * 2 - 1);
+                        std::wstring base(exe);
+                        base.resize(base.find_last_of(L"\\/") + 1);
+                        wchar_t full[MAX_PATH * 2]{};
+                        if (GetFullPathNameW((base + dir).c_str(), MAX_PATH * 2, full, nullptr)) dir = full;
+                    }
+                    return dir;
+                }
+            }
+        }
+        std::wstring cmd = GetCommandLineW();
+        std::wstring low = cmd;
+        for (wchar_t& ch : low) ch = (wchar_t)towlower(ch);
+        if (low.find(L"userdir=") != std::wstring::npos || low.find(L"saveddirsuffix=") != std::wstring::npos)
+        {
+            HSVR_LOG("TestRoom: the engine did not say where it saves and the command line moves it; not guessing");
+            return std::wstring();
+        }
+        std::wstring lad = local_app_data();
+        return lad.empty() ? std::wstring() : lad + L"\\HalfswordUE5\\Saved\\";
+    }
+
     bool file_time(const std::wstring& path, FILETIME& out)
     {
         WIN32_FILE_ATTRIBUTE_DATA info{};
@@ -25543,8 +25592,9 @@ namespace
     void room_boot(const hsvr::Config& cfg)
     {
         g_room.booted = true;
-        std::wstring lad = local_app_data();
-        g_room.save_path = lad + L"\\HalfswordUE5\\Saved\\SaveGames\\GameProgress.sav";
+        std::wstring saved = game_saved_dir();
+        g_room.save_path = saved.empty() ? std::wstring() : saved + L"SaveGames\\GameProgress.sav";
+        HSVR_LOG("TestRoom: the game saves in %ls", saved.c_str());
         std::wstring dir = hsvr::mod_dir() + L"save_backups";
         CreateDirectoryW(dir.c_str(), nullptr);
         SYSTEMTIME utc{};
@@ -25553,7 +25603,7 @@ namespace
         swprintf(name, 96, L"\\GameProgress.sav.%04d%02d%02d-%02d%02d%02dZ.bak", (int)utc.wYear, (int)utc.wMonth, (int)utc.wDay, (int)utc.wHour, (int)utc.wMinute,
                  (int)utc.wSecond);
         g_room.backup_path = dir + name;
-        if (lad.empty() || !CopyFileW(g_room.save_path.c_str(), g_room.backup_path.c_str(), TRUE))
+        if (saved.empty() || !CopyFileW(g_room.save_path.c_str(), g_room.backup_path.c_str(), TRUE))
         {
             HSVR_LOG("TestRoom: could not copy %ls to %ls (error %lu); no test room this launch", g_room.save_path.c_str(), g_room.backup_path.c_str(), GetLastError());
             g_room.backup_path.clear();
