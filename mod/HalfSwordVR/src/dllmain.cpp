@@ -19727,6 +19727,103 @@ namespace
         return true;
     }
 
+    // ---- A picked-up sword's scabbard onto the belt (pose_scabbard_on_pickup, Matthew 2026-11-23) ---------
+    // A sword's scabbard is a part of the sword, kept out of sight until its first sheathe (add_new_weapons.md
+    // C4), so a sword picked up loose had none on the belt and two-handed sheathing could never start. Picked
+    // up, its empty scabbard goes to a free sword slot on that hand's hip (else the other hip's, when that
+    // hand is empty): the game's own sheathe-then-draw, at once. Assign + Create Sheath Constraint bring the
+    // scabbard to the socket and pin it; the game's Check, with Sheathing off and a length read below 0, then
+    // runs its break (the draw's: blade joint, slot, save entry, flags), which leaves the scabbard on the belt.
+    std::unordered_map<UObject*, double> g_scab_pickup_tried;
+    double g_scab_pickup_seen[2] = {-1.0, -1.0};
+    UObject* g_scab_pickup_w[2] = {nullptr, nullptr};
+
+    bool scabbard_to_belt(int side, UObject* pawn, UObject* w)
+    {
+        using namespace hsvr;
+        const char* hand = side == 0 ? "left" : "right";
+        UObject* scab = object_property(w, STR("Scabbard"));
+        UObject* base = object_property(w, STR("BaseMesh"));
+        if (!scab || !base) return false;
+        double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
+        if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
+            bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
+            return false;
+        // Its own hip only: the game's Create Sheath Constraint <T> reads Weapon <T>, and across that is the
+        // other hand's (sheathe_cross_begin's swap is for a weapon going IN, which this is not).
+        int ts = side;
+        bool free_slot = false;
+        for (int i = 0; i < 2; ++i)
+            if (!object_alive(object_property(pawn, k_belt[ts][i].var))) free_slot = true;
+        if (!free_slot)
+        {
+            HSVR_LOG("Scabbard: %ls picked up by the %s hand: no free sword slot on that hip; its scabbard stays hidden", w->GetName().c_str(), hand);
+            return false;
+        }
+        int slot = assign_scabbard_slot(side, ts, pawn, w);
+        if (slot < 0) return false;
+        const TCHAR* S = ts == 0 ? STR("L") : STR("R");
+        auto nm = [&](const wchar_t* fmt) {
+            wchar_t buf[96];
+            std::swprintf(buf, 96, fmt, S);
+            return std::wstring(buf);
+        };
+        Call make(pawn, nm(L"Create Sheath Constraint %ls").c_str());
+        make.byte(STR("Slot"), (uint8_t)slot);
+        bool made = make.run();
+        bool in_slot = object_property(pawn, k_belt[ts][slot].var) == w;
+        // The draw, as the game ends one: not sheathing, not blocked, unsheathing; Check breaks it.
+        set_bool_property(pawn, nm(L"Block %ls Weapon From Sheathing").c_str(), false);
+        set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), false);
+        set_bool_property(pawn, STR("Cross Unsheath"), false);
+        set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), true);
+        bool checked = in_slot && run_slot_check(pawn, ts, slot, -10000.0);
+        set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), false);
+        set_variable(pawn, nm(L"%ls Sheath Slot Concrete").c_str(), 11.0);
+        bool still_held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) == w;
+        bool slot_freed = object_property(pawn, k_belt[ts][slot].var) != w;
+        bool pinned = scabbard_pin(scab) != nullptr;
+        if (bool_property(w, STR("Sheathed"))) Call(w, STR("Unsheathed Mode")).run();
+        if (still_held)
+        {
+            clear_arm_ignore(side);
+            ignore_arm_collision(pawn, object_property(pawn, STR("Mesh")), w, base, side);
+        }
+        sheathe_disarm(side, ts);
+        HSVR_LOG("Scabbard: %ls picked up by the %s hand: its scabbard put on the %s hip's slot %d (Create %s, Check %s; scabbard %s, slot %s, sword %s)",
+                 w->GetName().c_str(), hand, ts == 0 ? "left" : "right", slot + 1, made ? "ran" : "NOT found", checked ? "ran" : "NOT run",
+                 pinned ? "pinned on the belt" : "NOT pinned", slot_freed ? "empty again" : "STILL HOLDS THE SWORD", still_held ? "still in the hand" : "NOT IN THE HAND");
+        return pinned && slot_freed && still_held;
+    }
+
+    void scabbard_pickup_tick(UObject* pawn, const hsvr::Config& cfg)
+    {
+        if (!cfg.pose_scabbard_on_pickup || !pawn) return;
+        static bool tracked = on_freed([] {
+            erase_gone_keys(g_scab_pickup_tried);
+            for (UObject*& o : g_scab_pickup_w)
+                if (gone(o)) o = nullptr;
+        });
+        (void)tracked;
+        double now = hsvr::now_seconds();
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* w = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            if (w != g_scab_pickup_w[side])
+            {
+                g_scab_pickup_w[side] = w;
+                g_scab_pickup_seen[side] = now;
+            }
+            if (!w || is_fist(w) || g_draw[side].active || g_two.active || now - g_scab_pickup_seen[side] < 0.3) continue;
+            UObject* scab = object_property(w, STR("Scabbard"));
+            if (!scab || scabbard_pin(scab) || read_number_variable(w, STR("SheathSlot")) != 0.0 || bool_property(w, STR("Is Ammo"))) continue;
+            auto t = g_scab_pickup_tried.find(w);
+            if (t != g_scab_pickup_tried.end() && now - t->second < 2.0) continue; // a slot may free up later
+            g_scab_pickup_tried[w] = now;
+            scabbard_to_belt(side, pawn, w);
+        }
+    }
+
     // The game's stuck-hand rule (ExecuteUbergraph_Willie_BP @474346-474446, then left @475366-476198, right
     // @474461-475313): with a two-handed grip in the right hand (R_GripType_Current 10 or 11) and a hand
     // in this zone of spine_02 (|X| <= 10, Y < 0, Z <= 50), "Weapon UnSheathing <that hand>" makes it Set
@@ -20204,6 +20301,7 @@ namespace
             }
         }
         seat_watch_tick(pawn);
+        scabbard_pickup_tick(pawn, cfg);
         for (int side = 0; side < 2; ++side) sheathe_check(side, pawn, cfg);
     }
 

@@ -437,6 +437,7 @@ LAYOUT = [
         ('pose_sheathe_mouth_cm', 'Tip within this of the scabbard mouth (cm).'),
         ('pose_sheathe_angle_deg', "Blade within this angle of the scabbard's line (degrees)."),
         ('pose_sheathe_two_hand', "1 = sheathing takes two hands: hold the sword's scabbard on your belt with the other hand, then put the blade in. 0 = the blade goes into any free mouth by itself."),
+        ('pose_scabbard_on_pickup', "1 = pick up a sword whose scabbard isn't on your belt and its empty scabbard goes onto a free sword slot on that hip."),
         ('pose_sheathe_cross', '1 = a weapon whose scabbard is on the other hip goes back across.'),
         ('pose_scabbard_grab', '1 = the off hand can take a belt scabbard and angle it.'),
         ('pose_scabbard_handle', '1 = a belt scabbard is a handle (taken along its length, trigger slides).'),
