@@ -1,0 +1,13 @@
+# On mouse and keyboard the game's own controls work: LMB raises the right hand, mouse waggle makes swing speed.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.player_immortal
+1.0:hsvr.input_list
+1.5:hsvr.input_mode keyboard
+2.0:hsvr.expect input_kbm = 1 on mouse and keyboard
+2.0:hsvr.expect mouse_off = 0 mouse not ignored
+2.5:hsvr.input Right_Guard_Axis 1 3
+4.0:hsvr.expect var:R_Hand_Active = 1 LMB held: right hand active
+6.0:hsvr.input Left_Mouse 8 0.25
+6.3:hsvr.input Left_Mouse -8 0.25
+6.6:hsvr.input Left_Mouse 8 0.25
+6.7:hsvr.expect var:Aim_Swing_Speed > 3 mouse waggle swings

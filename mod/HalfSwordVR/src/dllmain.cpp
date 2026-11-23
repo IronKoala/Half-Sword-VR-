@@ -2335,6 +2335,13 @@ namespace
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     double g_jump_until = -1.0;               // a jump released by left X: until then the capsule's rise is the game's jump, not a climb
     std::atomic<bool> g_fake_x{false};        // test: hsvr.press_x 1 holds left X (jump)
+    // Mouse and keyboard drive the arms (input_mode, input_mode_tick): the arms are the game's own and
+    // the controllers are ignored (grips, fingers, mouse lock), the head stays tracked.
+    std::atomic<bool> g_kbm{false};
+    std::atomic<int> g_kbm_force{-1};         // test: hsvr.input_mode auto|controllers|keyboard (-1 = the ini)
+    std::atomic<bool> g_fake_kbm_use{false};  // test: hsvr.kbm_use: one mouse-and-keyboard press
+    std::atomic<bool> g_fake_ctl_use{false};  // test: hsvr.controller_use: one controller button press
+    std::atomic<bool> g_mouse_off_now{false};  // turn_body: the mouse is ignored this tick (hsvr.expect mouse_off)
     double g_floor_miss_until = -1.0;         // test: hsvr.floor_miss <s>: the capsule's floor traces (middle and feet) find nothing until then
     std::atomic<bool> g_fake_rstick{false};   // test: hsvr.press_rstick 1 holds the right stick click (slow motion)
     std::atomic<bool> g_fake_stick_click{false}; // test: hsvr.stick_click 1 holds the left stick click
@@ -2800,10 +2807,11 @@ namespace
         double out = side == 0 ? -1.0 : 1.0;
         Vec3 grip;
         Quat grip_rot;
-        bool tracked = !cfg.dev_pose_fake_tracking && hs.grip_valid && stereo_tracking_to_world(hs.grip, grip, grip_rot);
+        bool kbm = g_kbm.load();
+        bool tracked = !kbm && !cfg.dev_pose_fake_tracking && hs.grip_valid && stereo_tracking_to_world(hs.grip, grip, grip_rot);
         if (!tracked)
         {
-            if (!cfg.dev_pose_fake_tracking)
+            if (!cfg.dev_pose_fake_tracking || kbm)
             {
                 // No controller (playing with mouse and keyboard, or tracking lost): the game's own arms.
                 for (const char* b : {"clavicle", "upperarm", "lowerarm", "hand"})
@@ -4588,7 +4596,8 @@ namespace
         // Playing with controllers, the mouse does nothing: no turn, no look up or down (Matthew
         // 2026-11-21: moving the mouse over the window bent him to look down while he stood straight;
         // the game's spine bend reads the control pitch). pose_mouse_off_with_controllers.
-        bool controllers_in_use = state.active && (state.hand[0].grip_valid || state.hand[1].grip_valid);
+        bool controllers_in_use = !g_kbm.load() && state.active && (state.hand[0].grip_valid || state.hand[1].grip_valid);
+        g_mouse_off_now.store(config().pose_mouse_off_with_controllers && controllers_in_use);
         bool mouse_off = config().pose_mouse_off_with_controllers && controllers_in_use;
         // Whatever turned the control yaw since we last wrote it (mouse, stick) is your turn.
         if (!mouse_off) g_turn_yaw = wrap(g_turn_yaw + wrap(rotation->Yaw - g_last_written_yaw));
@@ -13176,6 +13185,7 @@ namespace
                         !bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")) && !scabbard_held(side) && !(g_two.active && side == g_two.second);
             // A hand wrapping what the game's grab holds is posed by the wrap (from your curls).
             if (wrap_active(side) && g_frig.ok) free = true;
+            if (g_kbm.load()) free = false; // mouse and keyboard: the game's own hand
             const hsvr::HandState& h = state.hand[side];
             double target[5];
             double touch_override = -1.0;
@@ -13283,6 +13293,7 @@ namespace
     void fists_from_fingers(const hsvr::Config& cfg, const hsvr::ControllerState& state, UObject* pawn, bool menu_up)
     {
         if (!cfg.pose_fists || !cfg.pose_fist_from_fingers) return;
+        if (g_kbm.load()) return; // mouse and keyboard: the game makes its own fists
         for (int side = 0; side < 2; ++side)
         {
             const hsvr::HandState& h = state.hand[side];
@@ -14337,6 +14348,27 @@ namespace
         g_wrap_untouched.store(cfg.pose_wrap_untouched_curl);
         if (pawn && g_pose_active.load()) wrap_tick(cfg, pawn);
         if (pawn && g_pose_active.load()) fingers_track_tick(cfg, state, pawn);
+        {
+            // Mouse and keyboard: the controllers' grips do nothing, and what the hands hold stays
+            // (the game's arms hold it). Back on the controllers, each grip starts from how it is
+            // now, so a grip left open on the desk does not drop what the hand holds.
+            static bool was_kbm = false;
+            if (g_kbm.load())
+            {
+                was_kbm = true;
+                return;
+            }
+            if (was_kbm)
+            {
+                was_kbm = false;
+                for (int side = 0; side < 2; ++side)
+                {
+                    float sq = g_fake_squeeze[side].load() >= 0.0f ? g_fake_squeeze[side].load() : state.hand[side].squeeze;
+                    held[side] = sq > 0.6f;
+                }
+                HSVR_LOG("Grab: back on the controllers: grips start %s/%s, nothing dropped", held[0] ? "closed" : "open", held[1] ? "closed" : "open");
+            }
+        }
         if (!cfg.pose_grab_button || !pawn || !mesh || (!faked && (!state.active || !state.focused)) || !g_pose_active.load())
         {
             if (held[0] || held[1])
@@ -27980,6 +28012,10 @@ namespace
         g_count_punches_counted.store(0);
         g_fake_continue.store(false);
         g_fake_x.store(false);
+        g_kbm_force.store(-1);
+        g_fake_kbm_use.store(false);
+        g_fake_ctl_use.store(false);
+        g_kbm.store(false);
         g_floor_miss_until = -1.0;
         g_fake_rstick.store(false);
         g_fake_stick_click.store(false);
@@ -28153,6 +28189,9 @@ namespace
         value = 0.0;
         bool known = true;
         if (w == "held_r") value = object_property(pawn, STR("Weapon R")) ? 1.0 : 0.0;
+        else if (w == "input_kbm") value = g_kbm.load() ? 1.0 : 0.0;
+        else if (w == "mouse_off") value = g_mouse_off_now.load() ? 1.0 : 0.0;
+        else if (w == "hand_valid_l" || w == "hand_valid_r") value = g_pose.hand_valid[w.back() == 'l' ? 0 : 1] ? 1.0 : 0.0;
         else if (w == "hand_speed_l" || w == "hand_speed_r")
         {
             // How fast the hand bone moves (cm/s) between two reads; for "hsvr.wait hand_speed_l < 5 3 0.2"
@@ -30118,6 +30157,19 @@ namespace
                 HSVR_LOG("Script: hsvr.body_hold %d", g_body_hold_test.load());
                 continue;
             }
+            if (entry.command.rfind("hsvr.input_mode ", 0) == 0)
+            {
+                std::string m = entry.command.substr(16);
+                g_kbm_force.store(m == "keyboard" ? 1 : m == "controllers" ? 0 : -1);
+                HSVR_LOG("Script: hsvr.input_mode %s", m.c_str());
+                continue;
+            }
+            if (entry.command == "hsvr.kbm_use" || entry.command == "hsvr.controller_use")
+            {
+                (entry.command == "hsvr.kbm_use" ? g_fake_kbm_use : g_fake_ctl_use).store(true);
+                HSVR_LOG("Script: %s", entry.command.c_str());
+                continue;
+            }
             if (entry.command.rfind("hsvr.squeeze ", 0) == 0)
             {
                 int side = atoi(entry.command.c_str() + 13) != 0 ? 1 : 0;
@@ -30901,6 +30953,94 @@ namespace
     //   clamp(track, MapRange(Body Skill 0..1 -> 0.75..0.25), 1), SetGlobalTimeDilation, vignette and
     //   fringe on his cameras, stamina use x up to 10); off: NoSlowMo sound, timeline back.
     //   It ends itself through End Arrow Time Event at stamina 0.5 or consciousness 50 (UG @620089).
+    // Controllers or mouse and keyboard (input_mode, Matthew 2026-11-23 "Automatic, plus a key").
+    // auto: a mouse button or a key (not the mod's own keys, Escape, Tab, Windows or a lone Shift/Ctrl/
+    // Alt) pressed in the game window, with no menu up, while no controller button, trigger, grip or
+    // stick has been used for input_kbm_quiet_s, hands the arms to mouse and keyboard. Mouse movement
+    // alone never does (a bumped mouse bent him, 2026-11-21). Any controller button, trigger, grip or
+    // stick push gives them back. Tracking is not used for this: controllers lying on the desk stay
+    // tracked, and the Frame's hand tracking may move them. input_mode_key flips it by hand in any mode
+    // but a forced one; flipping to mouse and keyboard with a grip held keeps what that hand holds.
+    void input_mode_tick(const hsvr::Config& cfg, bool front, bool menu_up)
+    {
+        using namespace hsvr;
+        static double last_ctl = -1e9;
+        static bool key_was[256] = {};
+        static bool flip_down = false;
+        double now = now_seconds();
+        ControllerState state = controllers_state();
+        bool ctl = g_fake_ctl_use.exchange(false);
+        if (state.active && state.focused)
+            for (int h = 0; h < 2; ++h)
+            {
+                const HandState& hs = state.hand[h];
+                if (hs.trigger > 0.5f || hs.squeeze > 0.5f || hs.primary || hs.secondary || hs.stick_click || hs.menu || hs.marker ||
+                    std::fabs(hs.stick_x) > 0.7f || std::fabs(hs.stick_y) > 0.7f)
+                    ctl = true;
+            }
+        for (int h = 0; h < 2; ++h)
+            if (g_fake_squeeze[h].load() > 0.5f || g_fake_trigger[h].load() > 0.5f) ctl = true;
+        if (ctl) last_ctl = now;
+        bool kbm_press = g_fake_kbm_use.exchange(false);
+        for (int vk = 1; vk < 256; ++vk)
+        {
+            bool down = front && (GetAsyncKeyState(vk) & 0x8000) != 0;
+            bool edge = down && !key_was[vk];
+            key_was[vk] = down;
+            if (!edge) continue;
+            switch (vk)
+            {
+            case VK_ESCAPE: case VK_TAB: case VK_LWIN: case VK_RWIN: case VK_APPS: case VK_SNAPSHOT:
+            case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
+            case VK_MENU: case VK_LMENU: case VK_RMENU: case VK_CAPITAL: case VK_NUMLOCK: case VK_SCROLL:
+                continue;
+            default: break;
+            }
+            if (vk == cfg.recenter_key || vk == cfg.toggle_ui_key || vk == cfg.toggle_view_key || vk == cfg.toggle_mode_key || vk == cfg.input_mode_key)
+                continue;
+            if (menu_up) continue; // menus take clicks and keys from the VR pointer and from you alike
+            kbm_press = true;
+        }
+        bool flip = key_pressed_once(front ? cfg.input_mode_key : 0, flip_down);
+        int forced = g_kbm_force.load();
+        if (forced < 0) forced = cfg.input_mode == "keyboard" ? 1 : cfg.input_mode == "controllers" ? 0 : -1;
+        bool was = g_kbm.load(), want = was;
+        const char* why = nullptr;
+        if (forced >= 0)
+        {
+            want = forced == 1;
+            why = "input_mode";
+        }
+        else if (flip)
+        {
+            want = !was;
+            why = "input_mode_key";
+        }
+        else if (!was && kbm_press && now - last_ctl >= cfg.input_kbm_quiet_s)
+        {
+            want = true;
+            why = "a mouse-and-keyboard press with the controllers idle";
+        }
+        else if (was && ctl)
+        {
+            want = false;
+            why = "a controller button";
+        }
+        if (want == was) return;
+        g_kbm.store(want);
+        if (want)
+        {
+            // A grip held as the key flips it: that hand keeps what it holds (the game's arm takes it).
+            HSVR_LOG("Input: mouse and keyboard drive the arms now (%s); head still tracked, controllers ignored", why);
+        }
+        else
+        {
+            HSVR_LOG("Input: the controllers drive the arms again (%s)", why);
+            const float t[3] = {0.0f, 0.05f, 0.12f}, v[3] = {1.0f, 1.0f, 0.0f};
+            for (int h = 0; h < 2; ++h) controllers_hit(h, t, v, 3, 0.12, 0.6f);
+        }
+    }
+
     void jump_slowmo_buttons(const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -31853,7 +31993,9 @@ namespace
         bool view = key_pressed_once(cfg.toggle_view_key, view_down);
         DWORD front_process = 0;
         if (HWND front = GetForegroundWindow()) GetWindowThreadProcessId(front, &front_process);
-        if (front_process != GetCurrentProcessId())
+        bool game_front = front_process == GetCurrentProcessId();
+        input_mode_tick(cfg, game_front, shared.menu_up.load());
+        if (!game_front)
         {
             menu_buttons(cfg, nullptr); // lets a held Escape go
             jump_slowmo_buttons(cfg);
