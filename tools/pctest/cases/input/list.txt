@@ -4,3 +4,4 @@ kbm_blocked_while_gripping|steps-kbm_blocked_while_gripping.txt
 kbm_keeps_weapon|steps-kbm_keeps_weapon.txt
 kbm_game_arms|steps-kbm_game_arms.txt
 kbm_forced_ini|steps-kbm_forced_ini.txt|input_mode=keyboard
+kbm_walk_and_look|steps-kbm_walk_and_look.txt

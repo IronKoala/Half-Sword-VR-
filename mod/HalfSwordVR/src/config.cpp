@@ -450,6 +450,7 @@ namespace hsvr
         text("input_mode", c.input_mode);
         num("input_kbm_quiet_s", c.input_kbm_quiet_s);
         integer("input_mode_key", c.input_mode_key);
+        flag("input_kbm_mouse_pitch", c.input_kbm_mouse_pitch);
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);
@@ -696,6 +697,14 @@ namespace hsvr
         flag("pose_two_hand_joint_both_turn", c.pose_two_hand_joint_both_turn);
         flag("pose_two_hand_joint_line", c.pose_two_hand_joint_line);
         num("pose_two_hand_line_ref_cm", c.pose_two_hand_line_ref_cm);
+        flag("pose_two_hand_bs", c.pose_two_hand_bs);
+        num("pose_two_hand_bs_pos_k", c.pose_two_hand_bs_pos_k);
+        num("pose_two_hand_bs_pos_c", c.pose_two_hand_bs_pos_c);
+        num("pose_two_hand_bs_pos_max", c.pose_two_hand_bs_pos_max);
+        num("pose_two_hand_bs_rot_k", c.pose_two_hand_bs_rot_k);
+        num("pose_two_hand_bs_rot_c", c.pose_two_hand_bs_rot_c);
+        num("pose_two_hand_bs_rot_max", c.pose_two_hand_bs_rot_max);
+        flag("pose_two_hand_bs_solve_pulls", c.pose_two_hand_bs_solve_pulls);
         flag("pose_two_hand_fixed_rebase", c.pose_two_hand_fixed_rebase);
         num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
         flag("pose_fists", c.pose_fists);

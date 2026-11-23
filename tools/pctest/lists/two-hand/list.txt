@@ -1,4 +1,5 @@
-# Two hands with real-hand conditions (playtest 2026-11-23). Control run: the same with pose_two_hand_joint_line=0 must FAIL.
+# Two hands with real-hand conditions (playtest 2026-11-23); two hands are held as B&S holds them (pose_two_hand_bs=1).
+# rp_: his own recorded controller motion. ctl_: the same cases in the previous line mode (pose_two_hand_bs=0), for comparison.
 two_longsword|steps-longsword.txt
 two_greatsword|steps-greatsword.txt
 two_bastard_t1|steps-bastard_t1.txt
@@ -8,12 +9,18 @@ two_polehammer|steps-polehammer.txt
 two_warstaff|steps-warstaff.txt
 two_crossbow|steps-crossbow.txt
 two_bastard_knight2|steps-bastard_knight2.txt
-ctl_longsword|steps-longsword.txt|pose_two_hand_joint_line=0
-ctl_greatsword|steps-greatsword.txt|pose_two_hand_joint_line=0
-ctl_bastard_t1|steps-bastard_t1.txt|pose_two_hand_joint_line=0
-ctl_bastard_t3|steps-bastard_t3.txt|pose_two_hand_joint_line=0
-ctl_warhammer_long|steps-warhammer_long.txt|pose_two_hand_joint_line=0
-ctl_polehammer|steps-polehammer.txt|pose_two_hand_joint_line=0
-ctl_warstaff|steps-warstaff.txt|pose_two_hand_joint_line=0
-ctl_crossbow|steps-crossbow.txt|pose_two_hand_joint_line=0
-ctl_bastard_knight2|steps-bastard_knight2.txt|pose_two_hand_joint_line=0
+rp_sword_waggle|steps-rp_sword_waggle.txt
+rp_polearm|steps-rp_polearm.txt
+rp_mace2h|steps-rp_mace2h.txt
+ctl_longsword|steps-line-longsword.txt|pose_two_hand_bs=0
+ctl_greatsword|steps-line-greatsword.txt|pose_two_hand_bs=0
+ctl_bastard_t1|steps-line-bastard_t1.txt|pose_two_hand_bs=0
+ctl_bastard_t3|steps-line-bastard_t3.txt|pose_two_hand_bs=0
+ctl_warhammer_long|steps-line-warhammer_long.txt|pose_two_hand_bs=0
+ctl_polehammer|steps-line-polehammer.txt|pose_two_hand_bs=0
+ctl_warstaff|steps-line-warstaff.txt|pose_two_hand_bs=0
+ctl_crossbow|steps-line-crossbow.txt|pose_two_hand_bs=0
+ctl_bastard_knight2|steps-line-bastard_knight2.txt|pose_two_hand_bs=0
+ctl_rp_sword_waggle|steps-rp_sword_waggle.txt|pose_two_hand_bs=0
+ctl_rp_polearm|steps-rp_polearm.txt|pose_two_hand_bs=0
+ctl_rp_mace2h|steps-rp_mace2h.txt|pose_two_hand_bs=0

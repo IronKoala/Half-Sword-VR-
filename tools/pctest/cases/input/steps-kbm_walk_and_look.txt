@@ -1,0 +1,15 @@
+# Playtest 2026-11-23 19:2xZ on mouse and keyboard: walking crawled at 3-4 cm/s (his speed cleared every tick),
+# and the mouse must tilt the view up and down.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.player_immortal
+1.5:hsvr.input_mode keyboard
+2.0:hsvr.expect input_kbm = 1 on mouse and keyboard
+2.5:hsvr.input Move_Forward 1 3
+4.0:hsvr.expect walk_speed > 30 W held: walks (stick walk in VR measured 50-70 cm/s)
+4.5:hsvr.expect walk_speed > 30 still walking
+7.0:hsvr.expect walk_speed < 20 stopped after letting go
+7.5:hsvr.input Down_Mouse -10 0.5
+8.5:hsvr.expect control_pitch_abs > 5 mouse moved: the game's pitch changed
+8.5:hsvr.expect view_pitch_abs > 5 the view tilts with it
+9.0:hsvr.input_mode controllers
+9.5:hsvr.expect view_pitch = 0 controllers: no mouse tilt

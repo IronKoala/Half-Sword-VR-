@@ -29,7 +29,8 @@ Add-Type -Namespace HsvrPc -Name Idle -MemberDefinition @'
 [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO p);
 public static double Seconds() { var i = new LASTINPUTINFO(); i.cbSize = (uint)Marshal.SizeOf(i); GetLastInputInfo(ref i); return ((uint)Environment.TickCount - i.dwTime) / 1000.0; }
 '@
-function His-GameRuns { [bool](Get-CimInstance Win32_Process | Where-Object { $_.Name -like "HalfswordUE5*" -and -not ($_.ExecutablePath -and $_.ExecutablePath -like "$Root\*") }) }
+# He is using the PC for games: his own Half Sword (not from a test copy) or SteamVR is running.
+function His-GameRuns { [bool](Get-CimInstance Win32_Process | Where-Object { $_.Name -like "vrserver*" -or $_.Name -like "vrcompositor*" -or ($_.Name -like "HalfswordUE5*" -and -not ($_.ExecutablePath -and $_.ExecutablePath -like "$Root\*")) }) }
 function Allowed {
   if (His-GameRuns) { return 1 }
   if ([HsvrPc.Idle]::Seconds() -lt $IdleMinutes * 60) { return 1 }

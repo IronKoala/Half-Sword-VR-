@@ -51,8 +51,9 @@ $files = @(
 # Processes of this game folder (by exe path), whoever started them.
 function Get-CopyGames { @(Get-CimInstance Win32_Process | Where-Object { $_.Name -like "HalfswordUE5*" -and $_.ExecutablePath -and $_.ExecutablePath.StartsWith($game + "\", [StringComparison]::OrdinalIgnoreCase) }) }
 # His own game: a Half Sword that does not run from a test copy.
-function His-GameRuns { [bool](Get-CimInstance Win32_Process | Where-Object { $_.Name -like "HalfswordUE5*" -and -not ($_.ExecutablePath -and $_.ExecutablePath -like "C:\HSTest\*") }) }
-$vrGames = "HalfswordUE5*","BladeAndSorcery*","SaintsAndSinners*","TWD*","Boneworks*","BONELAB*","VRChat*","Beat Saber*","HLA*","hlvr*","Pavlov*"
+# He is using the PC for games: his own Half Sword (not from a test copy) or SteamVR is running.
+function His-GameRuns { [bool](Get-CimInstance Win32_Process | Where-Object { $_.Name -like "vrserver*" -or $_.Name -like "vrcompositor*" -or ($_.Name -like "HalfswordUE5*" -and -not ($_.ExecutablePath -and $_.ExecutablePath -like "C:\HSTest\*")) }) }
+$vrGames = "HalfswordUE5*","SaintsAndSinners*","TWD*","Boneworks*","BONELAB*","VRChat*","Beat Saber*","HLA*","hlvr*","Pavlov*"
 $bad = @()
 foreach ($b in ($BadSpawn -split ";")) { if ($b -match "^\s*(-?\d+)\s*,\s*(-?\d+)\s*$") { $bad += , @([int]$matches[1], [int]$matches[2]) } }
 
