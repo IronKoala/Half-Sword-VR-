@@ -53,7 +53,7 @@ function Get-CopyGames { @(Get-CimInstance Win32_Process | Where-Object { $_.Nam
 # His own game: a Half Sword that does not run from a test copy.
 # He is using the PC for games: his own Half Sword (not from a test copy) or SteamVR is running.
 function His-GameRuns { [bool](Get-CimInstance Win32_Process | Where-Object { $_.Name -like "vrserver*" -or $_.Name -like "vrcompositor*" -or ($_.Name -like "HalfswordUE5*" -and -not ($_.ExecutablePath -and $_.ExecutablePath -like "C:\HSTest\*")) }) }
-$vrGames = "HalfswordUE5*","BladeAndSorcery*","SaintsAndSinners*","TWD*","Boneworks*","BONELAB*","VRChat*","Beat Saber*","HLA*","hlvr*","Pavlov*"
+$vrGames = "HalfswordUE5*","SaintsAndSinners*","TWD*","Boneworks*","BONELAB*","VRChat*","Beat Saber*","HLA*","hlvr*","Pavlov*"
 $bad = @()
 foreach ($b in ($BadSpawn -split ";")) { if ($b -match "^\s*(-?\d+)\s*,\s*(-?\d+)\s*$") { $bad += , @([int]$matches[1], [int]$matches[2]) } }
 
