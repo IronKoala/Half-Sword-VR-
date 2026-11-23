@@ -19412,7 +19412,6 @@ namespace
         return true;
     }
 
-    bool first_sheathe(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg);
     bool holster_snap(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -19422,19 +19421,7 @@ namespace
             HSVR_LOG("Holster: %s hand let go of %ls: no holster (%s)", hand, w->GetName().c_str(), why);
             return false;
         };
-        if (UObject* scab = object_property(w, STR("Scabbard")))
-        {
-            // Its scabbard not on the belt yet (a sword picked up loose: the game keeps it hidden until the
-            // first sheathe), so there is none for the other hand to hold: let go at a free hip slot puts both
-            // there (Matthew 2026-11-23). Returns false either way: the let-go goes on and drops it from the
-            // hand, and a started sheathe is then seated by the game (draw_tick's seat watch).
-            if (cfg.pose_sheathe_two_hand && cfg.pose_first_sheathe_letgo && !scabbard_pin(scab) && read_number_variable(w, STR("SheathSlot")) == 0.0)
-            {
-                first_sheathe(side, pawn, mesh, w, cfg);
-                return false;
-            }
-            return no("it has its own scabbard: the physical sheathe");
-        }
+        if (object_property(w, STR("Scabbard"))) return no("it has its own scabbard: the physical sheathe");
         if (g_two.active && g_two.weapon == w) return no("held in two hands");
         if (g_draw[side].active) return no("mid draw or sheathe");
         if (g_hand_world_v[side] > cfg.pose_holster_max_speed) return no("hand too fast: a throw");
@@ -19738,46 +19725,6 @@ namespace
         controllers_buzz(side, 0.3f);
         HSVR_LOG("Sheathe: %s hand puts %ls into slot %ls %d", side == 0 ? "left" : "right", w->GetName().c_str(), S, slot + 1);
         return true;
-    }
-
-    // A sword whose scabbard is not on the belt, let go near a free sword slot on that hand's hip: the blade is
-    // put all the way into where its scabbard will hang (BaseMesh +Z along the slot's +Z, guard 1 cm short of
-    // the socket, as hsvr.sheathe_test lines one up), the sheathe started (Assign + Create Sheath Constraint,
-    // which brings the scabbard there and pins it), and the let-go then seats it.
-    bool first_sheathe(int side, UObject* pawn, UObject* mesh, UObject* w, const hsvr::Config& cfg)
-    {
-        using namespace hsvr;
-        const char* hand = side == 0 ? "left" : "right";
-        UObject* base = object_property(w, STR("BaseMesh"));
-        Vec3 mouth, ax;
-        const char* sock = "";
-        if (!base || !belt_mouth(side, pawn, mouth, ax, &sock))
-        {
-            HSVR_LOG("Holster: %s hand let go of %ls (its scabbard not on the belt yet): no free sword slot on that hip; dropped", hand, w->GetName().c_str());
-            return false;
-        }
-        double pd = length(hand_grab_point(mesh, side) - mouth);
-        double id = cfg.pose_holster_by_item ? closest_on_weapon(w, mouth) : -1.0;
-        double d = id >= 0.0 && id < pd ? id : pd;
-        if (d > cfg.pose_holster_zone_cm)
-        {
-            HSVR_LOG("Holster: %s hand let go of %ls (its scabbard not on the belt yet) %.0f cm from %s (needs %.0f; palm %.0f, item %.0f): dropped", hand,
-                     w->GetName().c_str(), d, sock, cfg.pose_holster_zone_cm, pd, id);
-            return false;
-        }
-        if (g_hand_world_v[side] > cfg.pose_holster_max_speed)
-        {
-            HSVR_LOG("Holster: %s hand let go of %ls by %s too fast (a throw); dropped", hand, w->GetName().c_str(), sock);
-            return false;
-        }
-        Vec3 z = normalized(ax), xh = std::fabs(z.z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
-        Vec3 x = normalized(xh - z * dot(xh, z));
-        set_component_transform(base, mouth - z * 1.0, quat_from_axes(x, cross(z, x), z), true);
-        g_hold[side].settle_until = -1.0;
-        bool ok = sheathe_begin(side, pawn, w);
-        HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s: its first sheathe, sword and scabbard onto the belt %s", hand, w->GetName().c_str(), d, sock,
-                 ok ? "(sheathe started; the let-go seats it)" : "NOT started; dropped");
-        return ok;
     }
 
     // The game's stuck-hand rule (ExecuteUbergraph_Willie_BP @474346-474446, then left @475366-476198, right
