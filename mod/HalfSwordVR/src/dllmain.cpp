@@ -13303,7 +13303,13 @@ namespace
         UObject* own = object_property(pawn, hand_weapon_name(side));
         if ((own && !is_fist(own)) || g_world[side].on || bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")) || scabbard_held(side) ||
             (g_two.active && g_two.second == side))
+        {
+            if (is_crossbow(object_property(pawn, hand_weapon_name(1 - side))))
+                HSVR_LOG("Crossbow: %s trigger at the string: that hand is not empty (holds %ls, world grip %d, Grabbed %d, scabbard %d, second hand %d)", side == 0 ? "left" : "right",
+                         own ? own->GetName().c_str() : STR("nothing"), (int)g_world[side].on, (int)bool_property(pawn, side == 0 ? STR("Grabbed L") : STR("Grabbed R")),
+                         (int)scabbard_held(side), (int)(g_two.active && g_two.second == side));
             return false; // that hand holds something
+        }
         UObject* xb = object_property(pawn, hand_weapon_name(1 - side));
         if (!is_crossbow(xb) || bool_property(xb, STR("String Loaded"))) return false;
         UObject* base = object_property(xb, STR("BaseMesh"));
@@ -13319,7 +13325,11 @@ namespace
         Vec3 at = hand_grab_point(mesh, side);
         Vec3 pp = component_location(peg);
         double d = length(at - pp);
-        if (d > cfg.crossbow_string_reach_cm) return false;
+        if (d > cfg.crossbow_string_reach_cm)
+        {
+            HSVR_LOG("Crossbow: %s trigger %.1f cm from the nut (reach %.0f): string not taken", side == 0 ? "left" : "right", d, cfg.crossbow_string_reach_cm);
+            return false;
+        }
         Vec3 bp = component_location(base);
         Quat binv = component_rotation(base).inverse();
         Vec3 hand_local = binv.rotate(at - bp);
