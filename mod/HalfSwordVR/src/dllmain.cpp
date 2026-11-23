@@ -20008,7 +20008,17 @@ namespace
         set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), false);
         set_bool_property(pawn, STR("Cross Unsheath"), false);
         set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), true);
-        bool checked = in_slot && run_slot_check(pawn, ts, slot, -10000.0);
+        // Check seats a blade whose scabbard is within 20 cm up it (Z = the scabbard in BaseMesh's frame), and
+        // breaks it at Z >= its length x 0.85 (hs_draw_sheathe_calls.md §1-§3). Picked up by the hip, Z was
+        // small and it was seated: the sword went onto the belt (PC run 6499f79, 4 of 4). So for the one call
+        // the blade is put a whole length plus 15 cm out along its own line, then back in the hand.
+        Vec3 held_p = component_location(base);
+        Quat held_q = component_rotation(base);
+        double len = blade_length(w);
+        set_component_transform(base, component_location(scab) - held_q.rotate(Vec3{0, 0, 1}) * (len + 15.0), held_q, true);
+        double z_out = held_q.inverse().rotate(component_location(scab) - component_location(base)).z;
+        bool checked = in_slot && run_slot_check(pawn, ts, slot, len);
+        if (object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) == w) set_component_transform(base, held_p, held_q, true);
         set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), false);
         set_variable(pawn, nm(L"%ls Sheath Slot Concrete").c_str(), 11.0);
         bool still_held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) == w;
@@ -20021,8 +20031,9 @@ namespace
             ignore_arm_collision(pawn, object_property(pawn, STR("Mesh")), w, base, side);
         }
         sheathe_disarm(side, ts);
-        HSVR_LOG("Scabbard: %ls picked up by the %s hand: its scabbard put on the %s hip's slot %d (Create %s, Check %s; scabbard %s, slot %s, sword %s)",
-                 w->GetName().c_str(), hand, ts == 0 ? "left" : "right", slot + 1, made ? "ran" : "NOT found", checked ? "ran" : "NOT run",
+        HSVR_LOG("Scabbard: %ls picked up by the %s hand: its scabbard put on the %s hip's slot %d (Create %s, Check %s at %.1f cm out of %.1f, grip %.0f; scabbard %s, slot %s, sword %s)",
+                 w->GetName().c_str(), hand, ts == 0 ? "left" : "right", slot + 1, made ? "ran" : "NOT found", checked ? "ran" : "NOT run", z_out, len,
+                 read_number_variable(pawn, side == 0 ? STR("L_GripType_Current") : STR("R_GripType_Current")),
                  pinned ? "pinned on the belt" : "NOT pinned", slot_freed ? "empty again" : "STILL HOLDS THE SWORD", still_held ? "still in the hand" : "NOT IN THE HAND");
         return pinned && slot_freed && still_held;
     }
