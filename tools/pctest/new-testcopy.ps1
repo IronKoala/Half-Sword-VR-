@@ -21,6 +21,11 @@ if (Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.Exe
   throw "a game runs from $game; not touching it"
 }
 if ((Split-Path $src -Qualifier) -ne (Split-Path $Root -Qualifier)) { throw "hard links need $Root on the same drive as $src" }
+# Making a copy writes GBs to C:. On 2026-11-23 it starved C: so badly that SteamVR's watchdog killed it three
+# times while he was starting VR. So: never while VR or his game runs, and at the lowest processor and disk priority.
+$busy = @(Get-Process -Name "vrserver", "vrcompositor", "vrmonitor", "HalfswordUE5*" -ErrorAction SilentlyContinue | Where-Object { -not ($_.Path -and $_.Path -like "$Root\*") })
+if ($busy) { throw "SteamVR or his Half Sword is running ($(@($busy | ForEach-Object ProcessName | Select-Object -Unique) -join ', ')): make test copies only while he is away" }
+try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = "Idle" } catch {}
 
 $big = 50MB
 $ue4ss = "HalfswordUE5\Binaries\Win64\ue4ss"
@@ -42,11 +47,15 @@ if ($fresh -or $Refresh) {
     else { Copy-Item $f.FullName $dst; $copied++ }
   }
   # The mod folder: always a real copy (the runner puts the test dll and ini in it).
+  # His mod folder holds GBs of logs, save backups and replays (31.9 GB on 2026-11-23): never copied.
   if (Test-Path "$game\$ue4ss") { Remove-Item "$game\$ue4ss" -Recurse -Force }
-  Copy-Item "$src\$ue4ss" "$game\$ue4ss" -Recurse
-  $m = "$game\$ue4ss\Mods\HalfSwordVR"
-  foreach ($junk in "HalfSwordVR_commands.txt", "replays", "logs", "save_backups") { if (Test-Path "$m\$junk") { Remove-Item "$m\$junk" -Recurse -Force } }
-  Get-ChildItem $m -Filter "test-save-*.sav" -ErrorAction SilentlyContinue | Remove-Item -Force
+  $rc = Start-Process robocopy -ArgumentList @("`"$src\$ue4ss`"", "`"$game\$ue4ss`"", "/E", "/R:1", "/W:1", "/NP", "/NFL", "/NDL",
+          "/XD", "logs", "save_backups", "replays", "/XF", "HalfSwordVR_commands.txt", "test-save-*.sav", "*.log", "*.dmp") -NoNewWindow -PassThru
+  try { $rc.PriorityClass = "Idle" } catch {}
+  $rc.WaitForExit()
+  if ($rc.ExitCode -ge 8) { throw "robocopy of the mod folder failed (exit $($rc.ExitCode))" }
+  $size = (Get-ChildItem "$game\$ue4ss" -Recurse -File | Measure-Object Length -Sum).Sum
+  if ($size -gt 2GB) { throw "the copied mod folder is $([int]($size / 1MB)) MB: something big was not left out; check before using it" }
   Write-Host "game: $linked linked, $copied copied, ue4ss copied"
 }
 

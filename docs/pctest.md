@@ -137,3 +137,10 @@ or names a folder outside the copy.
   Otherwise up to `-Slots`. A running copy is never stopped when he comes back; its chunk is short.
   SLOW cases are queued again (up to `-SlowTries` 3). `<Out>\STOP` stops everything.
 - His install, mod ini and save are never written by any of this.
+
+**Incident 2026-11-23 19:03-19:14Z:** the first `new-testcopy.ps1` copied his whole mod folder (31.9 GB:
+25.2 GB logs, 4.7 GB save backups, 1 GB replays) before deleting them. C: was swamped, and SteamVR's watchdog
+killed vrserver/vrcompositor three times while he started VR ("Failed Watchdog timeout ... CVRLog::LogDirect").
+Now: logs, save_backups and replays are never copied (robocopy /XD), the copy runs at Idle priority, it refuses
+to run while SteamVR or his Half Sword runs, and it stops if the copied mod folder is over 2 GB. A test copy
+loading a level still READS GBs from C:; while he plays, the runner keeps one test game at lower priority.
