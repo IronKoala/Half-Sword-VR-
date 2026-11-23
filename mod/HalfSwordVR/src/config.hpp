@@ -532,6 +532,7 @@ namespace hsvr
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
         bool pose_two_hand_twist_only = true;
+        bool pose_two_hand_joint_line = true; // joint hold, two hands: one pose along the hands' line, both joints to it (playtest 2026-11-23)
         bool pose_two_hand_joint_both_turn = true; // joint hold, both hands on fixed grips: both wrists turn it (rerun 388ca67: 60 deg pitch followed, 2.5-3.3 cm / 5-6 deg off; off: 27-37 deg, creeps back)
         bool pose_two_hand_fixed_rebase = true; // fixed grips, both wrists: the second hand's turn and spot taken from the first hand at the grab
         double pose_two_hand_swing_share = 0.0;
@@ -614,7 +615,8 @@ namespace hsvr
         // Two fixed grip zones, under the guard and above the pommel, no slide (Matthew 2026-11-21):
         // 0 = off (grip slides), 1 = hand-and-a-half (bastard sword, Grip_15) only, 2 = every two-handed
         // sword (also longswords and greatswords).
-        int pose_grip_two_zones_2h_sword = 1; // Matthew 2026-11-21: bastard swords only
+        int pose_grip_two_zones_2h_sword = 1; // Matthew 2026-11-21: bastard swords only (unused while pose_grip_two_hand_swords_slide)
+        bool pose_grip_two_hand_swords_slide = true; // Matthew 2026-11-23: all longswords, greatswords and hand-and-a-half swords slide
         // The lower zone sits just above the pommel (Matthew 2026-11-22: "you grab just above the pommel"): the
         // pommel's top is this far above its origin (measured 4.7 on a Grip_15 pommel, 8 cm long).
         double pose_grip_pommel_top_cm = 4.7;

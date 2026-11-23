@@ -1,0 +1,2 @@
+# name|asset class path (PC session: fill the real ModularWeaponBP_* paths from the decomp; one per row)|left hand cm along the weapon from the right hand (- toward the pommel)|"front" = crossbow fore end
+crossbow|/Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C|front

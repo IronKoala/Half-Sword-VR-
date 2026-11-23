@@ -1,0 +1,3 @@
+# Two hands with real-hand conditions (playtest 2026-11-23). Control run: the same with pose_two_hand_joint_line=0 must FAIL.
+two_crossbow|steps-crossbow.txt
+ctl_crossbow|steps-crossbow.txt|pose_two_hand_joint_line=0
