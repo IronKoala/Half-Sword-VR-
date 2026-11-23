@@ -558,7 +558,7 @@ namespace hsvr
         bool pose_two_hand_bs = true;
         double pose_two_hand_bs_pos_k = 10000.0, pose_two_hand_bs_pos_c = 150.0, pose_two_hand_bs_pos_max = 6000.0; // each hand's pull: N/m, N s/m, N
         double pose_two_hand_bs_rot_k = 2200.0, pose_two_hand_bs_rot_c = 90.0, pose_two_hand_bs_rot_max = 500.0;    // the main hand's turn: N m/rad, N m s/rad, N m
-        bool pose_two_hand_bs_solve_pulls = true; // the mod's solve does both hands' pulls (the joints pull nothing)
+        bool pose_two_hand_bs_solve_pulls = false; // (off: run 6cec1f5 no better on the waggle, and lost the war staff once) the mod's solve does both hands' pulls (the joints pull nothing)
         bool pose_two_hand_joint_both_turn = true; // joint hold, both hands on fixed grips: both wrists turn it (rerun 388ca67: 60 deg pitch followed, 2.5-3.3 cm / 5-6 deg off; off: 27-37 deg, creeps back)
         bool pose_two_hand_fixed_rebase = true; // fixed grips, both wrists: the second hand's turn and spot taken from the first hand at the grab
         double pose_two_hand_swing_share = 0.0;
