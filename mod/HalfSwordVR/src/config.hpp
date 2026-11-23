@@ -553,6 +553,11 @@ namespace hsvr
         bool pose_two_hand_twist_only = true;
         double pose_two_hand_line_ref_cm = 25.0; // two hands: grips this far apart aim half by the wrist, half by the hands' line (closer = more the wrist)
         bool pose_two_hand_joint_line = true; // joint hold, two hands: one pose along the hands' line, both joints to it (playtest 2026-11-23)
+        // Two hands as Blade & Sorcery holds them (bs_hold_measured.md section 3; Matthew 2026-11-23 19:02Z: "It needs to copy blade and
+        // sorcery"): the main hand pulls and turns, the second hand only pulls, each a stiff spring; no shared pose. Not the crossbow.
+        bool pose_two_hand_bs = true;
+        double pose_two_hand_bs_pos_k = 10000.0, pose_two_hand_bs_pos_c = 150.0, pose_two_hand_bs_pos_max = 6000.0; // each hand's pull: N/m, N s/m, N
+        double pose_two_hand_bs_rot_k = 2200.0, pose_two_hand_bs_rot_c = 90.0, pose_two_hand_bs_rot_max = 500.0;    // the main hand's turn: N m/rad, N m s/rad, N m
         bool pose_two_hand_joint_both_turn = true; // joint hold, both hands on fixed grips: both wrists turn it (rerun 388ca67: 60 deg pitch followed, 2.5-3.3 cm / 5-6 deg off; off: 27-37 deg, creeps back)
         bool pose_two_hand_fixed_rebase = true; // fixed grips, both wrists: the second hand's turn and spot taken from the first hand at the grab
         double pose_two_hand_swing_share = 0.0;

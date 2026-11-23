@@ -15,7 +15,7 @@ Checks (hsvr.expect on the mod's measures, worst since hsvr.two_reset):
   two_gap       cm between the two hands' points on the weapon (>= 9: never inside each other)
   two_hand      the second hand still holds it
 
-Usage: make_steps.py weapons.txt   (lines: name|asset class path|left hand cm along the weapon from the right|front for the crossbow)
+Usage: make_steps.py weapons.txt [tracks folder on the PC]   (lines: name|asset class path|left hand cm along the weapon from the right|front for the crossbow)
 Writes steps-<name>.txt and list.txt next to this file.
 """
 import sys
@@ -92,6 +92,30 @@ WRIST = """28:hsvr.xbow_hand 0 off
 """
 
 
+# His own recorded controller motion (hsvr.ctl_replay, tracks/ cut from his playtest replays by tools/replay/ctl_track.py):
+# playtest 2026-11-23 19:00Z, two-handing "very jittery ... very unintuitive" while the rig's smooth made-up paths passed.
+# name | weapon (a weapons.txt name) | track file | left hand cm along | worst mean turn off the main wrist (deg) | worst mean grip lag (cm)
+# The limits are B&S's own two-hand main-hand gaps (bs_hold_measured.md section 3: 1-3 m/s 16 deg / 10.1 cm, >3 m/s 34 / 15.8);
+# the playtest (line mode, 457f284 + others) had waggle 33.0 / 12.6, polearm 23.7 / 6.8, mace 25.1 / 6.3 in the same windows.
+REPLAYS = [
+    ("sword_waggle", "longsword", "sword2h-waggle.csv", "-12", 25, 13),
+    ("polearm", "polehammer", "polearm.csv", "55", 16, 10),
+    ("mace2h", "warstaff", "mace2h.csv", "-30", 16, 10),
+]
+REPLAY = """10:hsvr.expect two_hand = 1 second hand took it
+10.2:hsvr.ctl_replay {track} 0.5
+11.5:hsvr.two_reset
+21.5:hsvr.expect two_hand = 1 his motion: still held in both hands
+21.5:hsvr.expect two_turn_mean < {turn} his motion: weapon follows the main wrist (mean deg off it)
+21.5:hsvr.expect two_hold_lag_mean < {lag} his motion: weapon follows the main hand (mean cm behind)
+21.5:hsvr.expect two_wrist_mean < 90 his motion: (report) mean deg the blade points off where the main wrist points it
+21.5:hsvr.expect two_lag_mean < 100 his motion: (report) mean cm the main grip is off its hand
+21.5:hsvr.expect two_jitter < 100 his motion: (report) % of ticks the spin reversed (his playtest: see the track header)
+21.6:hsvr.ctl_replay off
+22:quit
+"""
+
+
 def main():
     rows = []
     for line in Path(sys.argv[1]).read_text().splitlines():
@@ -104,9 +128,24 @@ def main():
             steps = steps.replace("28:quit\n", "") + WRIST.format(along=along)
         (HERE / ("steps-%s.txt" % name)).write_text(steps, newline="\n")
         rows.append(name)
-    lst = ["# Two hands with real-hand conditions (playtest 2026-11-23). Control run: the same with pose_two_hand_joint_line=0 must FAIL."]
+    paths = {}
+    for line in Path(sys.argv[1]).read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            name, path, along = [p.strip() for p in line.split("|")]
+            paths[name] = path
+    tracks = sys.argv[2] if len(sys.argv) > 2 else r"C:\dev\hsvr-2h0303\tools\pctest\lists\two-hand\tracks"
+    rp = []
+    for name, weapon, track, along, turn, lag in REPLAYS:
+        steps = HEAD.format(path=paths[weapon]) + TAKE_ALONG.format(along=along) + REPLAY.format(track=tracks + "\\" + track, turn=turn, lag=lag)
+        (HERE / ("steps-rp_%s.txt" % name)).write_text(steps, newline="\n")
+        rp.append(name)
+    lst = ["# Two hands with real-hand conditions (playtest 2026-11-23); two hands are held as B&S holds them (pose_two_hand_bs=1).",
+           "# rp_: his own recorded controller motion. ctl_: the same cases in the previous line mode (pose_two_hand_bs=0), for comparison."]
     lst += ["two_%s|steps-%s.txt" % (n, n) for n in rows]
-    lst += ["ctl_%s|steps-%s.txt|pose_two_hand_joint_line=0" % (n, n) for n in rows]
+    lst += ["rp_%s|steps-rp_%s.txt" % (n, n) for n in rp]
+    lst += ["ctl_%s|steps-%s.txt|pose_two_hand_bs=0" % (n, n) for n in rows]
+    lst += ["ctl_rp_%s|steps-rp_%s.txt|pose_two_hand_bs=0" % (n, n) for n in rp]
     (HERE / "list.txt").write_text("\n".join(lst) + "\n", newline="\n")
     print("wrote %d cases (+%d control)" % (len(rows), len(rows)))
 

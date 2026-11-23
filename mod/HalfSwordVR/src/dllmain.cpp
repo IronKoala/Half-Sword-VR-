@@ -3,6 +3,7 @@
 // the running engine, and tells it where the player's head is each frame.
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <atomic>
 #include <cmath>
@@ -2331,6 +2332,10 @@ namespace
     // from the other one along the line between them (real hands are never exactly on the grips).
     std::atomic<double> g_two_line_deg{0.0}, g_two_off_cm{0.0}, g_two_line_now{0.0}, g_two_off_now{0.0};
     std::atomic<double> g_two_wrist_deg{0.0}, g_two_wrist_now{0.0}; // the weapon's grip line against where the main wrist points it (deg)
+    std::atomic<double> g_two_wrist_sum{0.0}, g_two_lag_sum{0.0}; // sums since hsvr.two_reset: weapon off the main wrist (deg), main grip off its hand (cm)
+    std::atomic<double> g_two_turn_sum{0.0}, g_two_hlag_sum{0.0}; // the main hold's turn_deg and lag (the replay's columns), summed
+    std::atomic<int> g_two_mean_n{0};
+    std::atomic<int> g_two_ticks{0}, g_two_revs{0}; // two-hand ticks since hsvr.two_reset, and those where the weapon's spin reversed (jitter)
     std::atomic<double> g_hand_spread[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     double g_jump_until = -1.0;               // a jump released by left X: until then the capsule's rise is the game's jump, not a climb
@@ -2790,6 +2795,99 @@ namespace
     }
 
     bool xbow_test_grip(int side, hsvr::Vec3& grip, hsvr::Quat& grip_rot);
+    // Test aid hsvr.ctl_replay <track file> [blend s] / off: both pretend controllers play back Matthew's own recorded motion,
+    // in his body's frame (position from the actor, yaw only), looped. A track is a replay capture cut down by
+    // tools/replay/ctl_track.py (t, actor x y z yaw, then each hand's controller x y z qx qy qz qw, world). Made for two-hand
+    // jitter (playtest 2026-11-23 19:00Z), which the rig's smooth made-up paths never showed.
+    struct CtlTrack
+    {
+        std::vector<std::array<double, 19>> rows; // t, ax, ay, az, yaw, l(7), r(7)
+        bool on = false;
+        double start = -1.0, blend = 0.5;
+        hsvr::Vec3 from_p[2];
+        hsvr::Quat from_q[2];
+        bool from_set[2] = {false, false};
+    };
+    CtlTrack g_ctl_track;
+    bool ctl_track_load(const std::string& file, double blend)
+    {
+        std::wstring path(file.begin(), file.end());
+        if (path.find(L':') == std::wstring::npos) path = hsvr::mod_dir() + path;
+        FILE* f = _wfopen(path.c_str(), L"rb");
+        if (!f) return false;
+        CtlTrack t;
+        char line[1024];
+        while (fgets(line, sizeof line, f))
+        {
+            if (line[0] == '#' || line[0] == 't') continue;
+            std::array<double, 19> r{};
+            int n = 0;
+            char* p = line;
+            while (n < 19 && *p)
+            {
+                char* e = nullptr;
+                r[n] = strtod(p, &e);
+                if (e == p) break;
+                ++n;
+                p = e;
+                if (*p == ',') ++p;
+            }
+            if (n == 19) t.rows.push_back(r);
+        }
+        fclose(f);
+        if (t.rows.size() < 2) return false;
+        t.on = true;
+        t.start = hsvr::now_seconds();
+        t.blend = (std::max)(0.0, blend);
+        g_ctl_track = t;
+        return true;
+    }
+    void ctl_track_grip(int side, hsvr::Vec3& grip, hsvr::Quat& grip_rot)
+    {
+        using namespace hsvr;
+        CtlTrack& t = g_ctl_track;
+        if (!t.on || !g_pose.pawn) return;
+        double now = now_seconds();
+        double t0 = t.rows.front()[0], len = t.rows.back()[0] - t0;
+        if (len <= 0.0) return;
+        double at = t0 + std::fmod(now - t.start, len);
+        size_t i = 0;
+        while (i + 2 < t.rows.size() && t.rows[i + 1][0] < at) ++i;
+        const auto& a = t.rows[i];
+        const auto& b = t.rows[i + 1];
+        double u = b[0] > a[0] ? (std::min)(1.0, (std::max)(0.0, (at - a[0]) / (b[0] - a[0]))) : 0.0;
+        int o = 5 + side * 7;
+        auto pose_of = [&](const std::array<double, 19>& r, Vec3& lp, Quat& lq) {
+            Quat yaw = quat_from_yaw_deg(r[4]);
+            lp = yaw.inverse().rotate(Vec3{r[o], r[o + 1], r[o + 2]} - Vec3{r[1], r[2], r[3]});
+            lq = (yaw.inverse() * Quat{r[o + 3], r[o + 4], r[o + 5], r[o + 6]}).normalized();
+        };
+        Vec3 pa, pb;
+        Quat qa, qb;
+        pose_of(a, pa, qa);
+        pose_of(b, pb, qb);
+        if (qa.x * qb.x + qa.y * qb.y + qa.z * qb.z + qa.w * qb.w < 0.0) qb = Quat{-qb.x, -qb.y, -qb.z, -qb.w};
+        Vec3 lp = pa + (pb - pa) * u;
+        Quat lq = Quat{qa.x + (qb.x - qa.x) * u, qa.y + (qb.y - qa.y) * u, qa.z + (qb.z - qa.z) * u, qa.w + (qb.w - qa.w) * u}.normalized();
+        Call rc(g_pose.pawn, STR("K2_GetActorRotation"));
+        rc.run();
+        Quat yaw_now = quat_from_yaw_deg(rc.vec().y);
+        Vec3 p = actor_location(g_pose.pawn) + yaw_now.rotate(lp);
+        Quat q = (yaw_now * lq).normalized();
+        // Eased in from wherever the rig had the hand over the first blend seconds.
+        if (!t.from_set[side]) t.from_p[side] = grip, t.from_q[side] = grip_rot, t.from_set[side] = true;
+        double e = t.blend > 0.0 ? (std::min)(1.0, (now - t.start) / t.blend) : 1.0;
+        if (e < 1.0)
+        {
+            e = e * e * (3.0 - 2.0 * e);
+            Quat fq = t.from_q[side];
+            if (fq.x * q.x + fq.y * q.y + fq.z * q.z + fq.w * q.w < 0.0) fq = Quat{-fq.x, -fq.y, -fq.z, -fq.w};
+            p = t.from_p[side] + (p - t.from_p[side]) * e;
+            q = Quat{fq.x + (q.x - fq.x) * e, fq.y + (q.y - fq.y) * e, fq.z + (q.z - fq.z) * e, fq.w + (q.w - fq.w) * e}.normalized();
+        }
+        grip = p;
+        grip_rot = q;
+    }
     void pose_arm(int side, const hsvr::Config& cfg, const hsvr::ControllerState& state, const hsvr::Quat& body, const hsvr::Quat& component_inv)
     {
         using namespace hsvr;
@@ -3192,6 +3290,7 @@ namespace
             if (double roll = g_fake_roll_deg[side].load(); roll != 0.0)
                 grip_rot = (body * quat_axis_angle(Vec3{1, 0, 0}, roll / 57.29578) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
             xbow_test_grip(side, grip, grip_rot); // test: hsvr.xbow_hand / xbow_wrist / keep, arm_move switches eased
+            ctl_track_grip(side, grip, grip_rot);  // test: hsvr.ctl_replay (his own recorded controllers)
         }
         if (cfg.dev_pose_fake_tracking && g_fake_jitter_cm.load() > 0.0)
         {
@@ -7468,6 +7567,13 @@ namespace
     };
     TwoHand g_two;
     bool two_hands_hold(UObject* weapon) { return g_two.active && g_two.weapon == weapon; }
+    bool is_crossbow(UObject* w);
+    // Both hands on this weapon, held as B&S holds two hands (pose_two_hand_bs, on the joint hold): every two-hand weapon but the
+    // crossbow, whose two fixed grips keep the one-pose line (Matthew 2026-11-23 13:56Z: it aims "exactly how one would expect").
+    bool two_hands_bs(UObject* weapon, const hsvr::Config& cfg)
+    {
+        return cfg.pose_two_hand_bs && cfg.pose_hold_joint && two_hands_hold(weapon) && !is_crossbow(weapon);
+    }
 
     // The second hand's fingers: the game curls a hand's fingers from its grip type (ABP_Willie copies
     // L/R_GripType_Current, @153084; 1-4 play the sword grip, hand_pose.md), which it sets only for a
@@ -15507,6 +15613,7 @@ namespace
         double fade_until = -1.0;        // the ease to B&S's cap stays allowed until then (it must also brake)
         bool fresh = false;              // made this tick: the weapon is given the old hold's velocity once
         bool mod_turn = false;           // this tick the old hold's turn is set on the weapon, the joint only pulls
+        bool bs2 = false;                // this tick two hands as B&S (pose_two_hand_bs): the mod sets the main hand's turn, both joints only pull
         hsvr::Vec3 lim_p{0, 0, 0};       // where the point held is sent, rate-limited (world)
         double lim_t = -1.0;
         bool lim_valid = false;
@@ -15908,10 +16015,20 @@ namespace
             tpos = target_pos + (lp - want_p);
         }
         BodyStrength s2b = two ? body_strength(pawn, g_two.second, cfg) : BodyStrength{};
+        // Two hands as B&S (pose_two_hand_bs): each hand's joint only pulls its grip spot toward its own controller with B&S's
+        // two-hand spring (10000 N/m, 150, 6000 N); the main hand's turn (2200 N m/rad, 90, 500 N m) is set on the weapon by the
+        // mod each tick (hold_weapon), as one hand's is. No shared pose, no line, no second turn: the weapon settles where the
+        // pulls and the one turn balance, as B&S's does (with close hands the main wrist aims it, with wide hands their line).
+        bool bs2 = two && two_hands_bs(weapon, cfg);
         double pk = two ? cfg.pose_bs_two_pos_k : cfg.pose_hold_spring, pc = two ? cfg.pose_bs_two_pos_c : cfg.pose_hold_damper,
                pf = two ? cfg.pose_bs_two_pos_max : cfg.pose_hold_max_force;
         double rk = two ? cfg.pose_bs_two_rot_k : cfg.pose_hold_turn_spring, rc = two ? cfg.pose_bs_two_rot_c : cfg.pose_hold_turn_damper,
                rf = two ? cfg.pose_bs_two_rot_max : cfg.pose_hold_max_torque;
+        if (bs2)
+        {
+            pk = cfg.pose_two_hand_bs_pos_k, pc = cfg.pose_two_hand_bs_pos_c, pf = cfg.pose_two_hand_bs_pos_max;
+            rk = cfg.pose_two_hand_bs_rot_k, rc = cfg.pose_two_hand_bs_rot_c, rf = cfg.pose_two_hand_bs_rot_max;
+        }
         double st = (std::max)(0.0, cfg.pose_hold_strength) * (std::max)(0.0, cfg.pose_hold_joint_stiffness);
         double dst = (std::max)(0.0, cfg.pose_hold_strength) * (std::max)(0.0, cfg.pose_hold_joint_damping);
         double mx = (std::max)(0.0, cfg.pose_hold_joint_max);
@@ -15951,7 +16068,10 @@ namespace
         bool may_fade = now < m.fade_until;
         auto hand_cap = [&](double bs_n, double err_cm) {
             double sc = g_hold[side].shoulder_cap_n;
-            if (!cfg.pose_hold_joint_shoulder || sc < 0.0 || sc >= bs_n) return bs_n;
+            // B&S two hands: B&S's own cap (times strength), no shoulder cap. The hands' spacing never matches the grips', and
+            // B&S's stiff pulls absorb that as a few cm of stretch each; capped at the shoulder's ~55-75 N they saturated on every
+            // move (playtest 2026-11-23 19:00Z: 73.8 N, the cap, on most two-hand ticks) and the weapon tugged between them.
+            if (bs2 || !cfg.pose_hold_joint_shoulder || sc < 0.0 || sc >= bs_n) return bs_n;
             if (!may_fade) return sc;
             double f0 = cfg.pose_hold_shoulder_fade_from_cm, f1 = (std::max)(f0 + 1.0, cfg.pose_hold_shoulder_fade_to_cm);
             double u = (std::min)(1.0, (std::max)(0.0, (err_cm - f0) / (f1 - f0)));
@@ -16015,7 +16135,7 @@ namespace
         // Both hands on fixed grips (a crossbow's two grips, a sword's two grip zones): both wrists hold its turn,
         // each toward where its own hand has it, so neither the turning hand alone nor two short-levered pulls
         // steer it (crossbow 2026-11-22: 15 cm / 42 deg off on the joint, 177 deg on the old hold). Off: as before.
-        bool both_turn = two && cfg.pose_two_hand_joint_both_turn && g_two.use_rel && !g_two.has_handle;
+        bool both_turn = two && !bs2 && cfg.pose_two_hand_joint_both_turn && g_two.use_rel && !g_two.has_handle;
         // Two hands, one pose (pose_two_hand_joint_line): the weapon lies along the line from the main hand to the
         // second, rolled about it as the main hand has it, the hands' distance-vs-grips mismatch split between them;
         // both joints are sent to that one pose, both turning it. Before, the main joint held the main wrist's turn (or
@@ -16023,7 +16143,7 @@ namespace
         // where the weapon's grips are (playtest 2026-11-23: controllers 15-33 cm further apart than the grips, the
         // second wrist 30-90 deg off the first's), so the joints fought and the weapon sat 12-24 cm off the main hand
         // and 30-66 deg off the hands' line with the hands still. The test rig's hands were always exactly on it.
-        bool line = two && cfg.pose_two_hand_joint_line;
+        bool line = two && !bs2 && cfg.pose_two_hand_joint_line;
         Vec3 line_main{};
         Quat line_rot{};
         if (line)
@@ -16083,7 +16203,7 @@ namespace
                            side == 0 ? "left" : "right", weapon->GetName().c_str(), f_line * 100.0, length(scaled_axis((line_rot * target_rot.inverse()).normalized())) * 57.2958,
                            std::fabs(length(between) - length(d_local)), length(between) >= length(d_local) ? "further apart" : "closer", w2 * 100.0);
         }
-        if (two && !line && cfg.pose_two_hand_twist_only && !both_turn)
+        if (two && !line && !bs2 && cfg.pose_two_hand_twist_only && !both_turn)
         {
             Vec3 ax = (pos + rot.rotate(g_two.bs_local)) - pivot_world;
             if (length(ax) > 5.0)
@@ -16104,7 +16224,8 @@ namespace
         // each axis after conditioning (MaxInertiaRatio 5), and the game's tensors can be far from a rod's
         // (polehammer 6784 / 779 / 818 kg cm^2): one number per drive got ~1/5 of the turn on the small axes and
         // the polehammer hung backwards (sanity c238662). UE 5.4 hard-codes acceleration mode (PhysInterface_Chaos).
-        m.mod_turn = !two && cfg.pose_hold_joint_mod_turn;
+        m.mod_turn = (!two || bs2) && cfg.pose_hold_joint_mod_turn;
+        m.bs2 = bs2 && m.mod_turn;
         if (m.mod_turn) jh_drive(m, k, c, fcap, 0.0, 0.0, 0.0, true);
         else jh_drive(m, k, c, fcap, ka, ca, tcap, true);
         if (two)
@@ -16172,10 +16293,41 @@ namespace
                         Vec3 u = normalized(wl);
                         auto across = [&](const Vec3& q) { Vec3 d = q - g1; return length(d - u * dot(d, u)); };
                         double off = (std::max)(across(h1), across(h2));
+                        {
+                            // Jitter (B&S's own measure, bs_hold_measured.md): a tick where a component of the weapon's spin
+                            // reverses with both ticks above 1 rad/s. B&S two hands: 1.7% of ticks; ours 2026-11-23 19:00Z: 10.4%.
+                            static Quat prev_rot{};
+                            static Vec3 prev_w{};
+                            static double prev_t = -1.0;
+                            static bool have_w = false;
+                            double tn = hsvr::now_seconds(), gap = tn - prev_t;
+                            if (prev_t > 0.0 && gap > 1e-3 && gap < 0.1)
+                            {
+                                Vec3 wv = scaled_axis((rot * prev_rot.inverse()).normalized()) * (1.0 / gap);
+                                if (have_w)
+                                {
+                                    bool rev = (std::fabs(wv.x) > 1.0 && std::fabs(prev_w.x) > 1.0 && wv.x * prev_w.x < 0.0) ||
+                                               (std::fabs(wv.y) > 1.0 && std::fabs(prev_w.y) > 1.0 && wv.y * prev_w.y < 0.0) ||
+                                               (std::fabs(wv.z) > 1.0 && std::fabs(prev_w.z) > 1.0 && wv.z * prev_w.z < 0.0);
+                                    g_two_ticks.fetch_add(1);
+                                    if (rev) g_two_revs.fetch_add(1);
+                                }
+                                prev_w = wv;
+                                have_w = true;
+                            }
+                            else have_w = false;
+                            prev_rot = rot;
+                            prev_t = tn;
+                        }
                         Vec3 wz = normalized(target_rot.rotate(g_two.bs_local - pivot)), az = normalized(g2 - g1);
                         double wang = std::acos((std::min)(1.0, (std::max)(-1.0, dot(wz, az)))) * 57.2958;
                         g_two_wrist_now.store(wang);
                         if (wang > g_two_wrist_deg.load()) g_two_wrist_deg.store(wang);
+                        g_two_wrist_sum.store(g_two_wrist_sum.load() + wang);
+                        g_two_lag_sum.store(g_two_lag_sum.load() + length(g1 - target_pivot));
+                        g_two_turn_sum.store(g_two_turn_sum.load() + g_hold[side].turn_deg); // as the replay's r_turn_deg / r_lag_cm (playtest comparisons)
+                        g_two_hlag_sum.store(g_two_hlag_sum.load() + g_hold[side].lag);
+                        g_two_mean_n.fetch_add(1);
                         g_two_line_now.store(ang);
                         g_two_off_now.store(off);
                         // The worst SUSTAINED error: the least of the last 3 ticks (~40 ms), so a one-tick spike (a hitch frame,
@@ -17303,6 +17455,28 @@ namespace
             {
                 // The turn about the GRIP: the grip's own velocity is kept (the joint pulls it), only the spin changes.
                 Vec3 ev = lv.vec(), ew = av.vec();
+                if (jm.bs2)
+                {
+                    // Two hands as B&S: only the main hand's turn, B&S's two-hand angular drive (a soft spring and damper toward
+                    // the main controller's turn, capped), solved over the frame on the spin the physics left (which already has
+                    // both joints' pulls and their leverage in it). Nothing about the second hand or the line between the hands:
+                    // that is the two joints' pulls (bs_hold_measured.md: "the second hand always has rotation drive 0").
+                    double DTb = world_delta_seconds(pawn);
+                    if (!(DTb > 1e-4 && DTb < 0.1)) DTb = dt;
+                    BodyStrength s2 = body_strength(pawn, g_two.second, cfg);
+                    double stb = (std::max)(0.0, cfg.pose_hold_strength);
+                    double tmax = cfg.pose_two_hand_bs_rot_max * (std::max)(0.0, cfg.pose_hold_joint_max) * 0.5 * ((std::max)(0.0, body.total) + (std::max)(0.0, s2.total)) * 1e4;
+                    Vec3 err_rot = scaled_axis((rot * target_rot.inverse()).normalized());
+                    Vec3 vb = ev, wb = ew, ang;
+                    bs_solve(mass, about_com.inverse(), vb, wb, nullptr, 0, err_rot, target_ang, cfg.pose_two_hand_bs_rot_k * stb * 1e4, cfg.pose_two_hand_bs_rot_c * stb * 1e4, tmax,
+                             DTb, (std::max)(1, cfg.pose_bs_iterations), ang);
+                    w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
+                    h.torque_nm = length(ang) / DTb / 1e4;
+                    h.torque_capped = length(ang) >= tmax * DTb * 0.999;
+                    HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls (two hands, B&S): main wrist %.0f deg off, turn %.1f N m%s of %.0f; spin %.0f -> %.0f deg/s",
+                                   side == 0 ? "left" : "right", weapon->GetName().c_str(), length(err_rot) * 57.2958, h.torque_nm, h.torque_capped ? " (cap)" : "", tmax / 1e4,
+                                   length(ew) * 57.2958, length(w_next) * 57.2958);
+                }
                 Vec3 nv = ev + cross(ew - w_next, pivot_now - com);
                 Call slv(base, STR("SetPhysicsLinearVelocity"));
                 slv.three(STR("NewVel"), nv.x, nv.y, nv.z);
@@ -27703,6 +27877,7 @@ namespace
         g_fake_two_up.store(20.0);
         g_fake_thrust_pitch.store(60.0);
         g_fake_thrust_up.store(-5.0);
+        g_ctl_track.on = false;
         for (int i = 0; i < 2; ++i)
         {
             g_fake_roll_deg[i].store(0.0);
@@ -27920,6 +28095,12 @@ namespace
         else if (w == "two_line_max") value = g_two_line_deg.load();
         else if (w == "two_wrist_max") value = g_two_wrist_deg.load();
         else if (w == "two_wrist") value = g_two_wrist_now.load();
+        else if (w == "two_jitter") value = g_two_ticks.load() > 0 ? 100.0 * g_two_revs.load() / g_two_ticks.load() : 0.0; // % of two-hand ticks
+        else if (w == "two_ticks") value = g_two_ticks.load();
+        else if (w == "two_wrist_mean") value = g_two_mean_n.load() > 0 ? g_two_wrist_sum.load() / g_two_mean_n.load() : 0.0;
+        else if (w == "two_lag_mean") value = g_two_mean_n.load() > 0 ? g_two_lag_sum.load() / g_two_mean_n.load() : 0.0;
+        else if (w == "two_turn_mean") value = g_two_mean_n.load() > 0 ? g_two_turn_sum.load() / g_two_mean_n.load() : 0.0;
+        else if (w == "two_hold_lag_mean") value = g_two_mean_n.load() > 0 ? g_two_hlag_sum.load() / g_two_mean_n.load() : 0.0;
         else if (w == "two_off_max") value = g_two_off_cm.load();
         else if (w == "two_line") value = g_two_line_now.load();
         else if (w == "two_off") value = g_two_off_now.load();
@@ -30095,6 +30276,23 @@ namespace
                 HSVR_LOG("Script: hsvr.fake_look %d", (int)g_fake_look.load());
                 continue;
             }
+            if (entry.command.rfind("hsvr.ctl_replay ", 0) == 0)
+            {
+                char file[512] = {0};
+                double blend = 0.5;
+                int got = sscanf(entry.command.c_str() + 16, "%511s %lf", file, &blend);
+                if (got >= 1 && std::string(file) == "off")
+                {
+                    g_ctl_track.on = false;
+                    HSVR_LOG("Script: hsvr.ctl_replay off");
+                }
+                else if (got >= 1 && ctl_track_load(file, blend))
+                    HSVR_LOG("Script: hsvr.ctl_replay %s: %d rows, %.2f s, eased in over %.2f s", file, (int)g_ctl_track.rows.size(),
+                             g_ctl_track.rows.back()[0] - g_ctl_track.rows.front()[0], g_ctl_track.blend);
+                else
+                    HSVR_LOG("Script: hsvr.ctl_replay: could not read %s", file);
+                continue;
+            }
             if (entry.command.rfind("hsvr.hand_spread ", 0) == 0)
             {
                 int side = -1;
@@ -30111,6 +30309,13 @@ namespace
                 g_two_line_deg.store(0.0);
                 g_two_off_cm.store(0.0);
                 g_two_wrist_deg.store(0.0);
+                g_two_ticks.store(0);
+                g_two_revs.store(0);
+                g_two_wrist_sum.store(0.0);
+                g_two_lag_sum.store(0.0);
+                g_two_mean_n.store(0);
+                g_two_turn_sum.store(0.0);
+                g_two_hlag_sum.store(0.0);
                 HSVR_LOG("Script: hsvr.two_reset");
                 continue;
             }
