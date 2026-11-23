@@ -5379,6 +5379,7 @@ namespace
         UObject* weapon = nullptr;
         std::vector<UObject*> joints;
         double dropped_at = -1.0; // let go of by a plain let-go at this time: kept until it is clear of him
+        std::vector<UObject*> cm_joints; // that dropped item's no-collide pairs with his CM_* armour proxies
     };
     ArmIgnore g_arm_ignore[2];
     std::atomic<int> g_grip_ignore_arm{1};
@@ -5422,8 +5423,9 @@ namespace
     // An item let go of keeps not colliding with his body (and own headgear) until it is clear of him, as a
     // B&S item ignores its last holder until it leaves him. PC run 12925e2: shields let go of were pushed
     // 19-35 cm sideways after the release, the push starting as the no-collide pairs went (~25 ms after).
-    // Clear = no part of it within pose_drop_ignore_clear_cm of his hands, forearms, chest, hips or thighs,
+    // Clear = no part of it within pose_drop_ignore_clear_cm of his bones or his CM_* armour proxies,
     // or pose_drop_ignore_s passed.
+    const TCHAR* const k_cm_proxies[] = {STR("CM_Arm_L"), STR("CM_Arm_R"), STR("CM_Cuirass"), STR("CM_Leg_L"), STR("CM_Leg_R"), STR("CM_Helmet")};
     double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part);
     bool drop_ignore_lingers(int side, UObject* pawn)
     {
@@ -5439,12 +5441,21 @@ namespace
             return false;
         }
         double nearest = 1e9;
-        static const char* bones[] = {"hand_l", "hand_r", "lowerarm_l", "lowerarm_r", "spine_03", "spine_05", "pelvis", "thigh_l", "thigh_r"};
+        static const char* bones[] = {"hand_l", "hand_r", "lowerarm_l", "lowerarm_r", "upperarm_l", "upperarm_r", "clavicle_l", "clavicle_r", "spine_03",
+                                      "spine_05", "Head", "pelvis", "thigh_l", "thigh_r", "calf_l", "calf_r"};
         for (const char* b : bones)
         {
             double d = closest_on_weapon(a.weapon, socket_location(mesh, bone_fname(b)), nullptr, nullptr);
             if (d >= 0.0) nearest = (std::min)(nearest, d);
         }
+        for (const TCHAR* name : k_cm_proxies)
+            if (UObject* cm = object_property(pawn, name))
+            {
+                Call r(cm, STR("GetScaledSphereRadius"));
+                double radius = r.run() ? r.number() : 0.0;
+                double d = closest_on_weapon(a.weapon, component_location(cm), nullptr, nullptr);
+                if (d >= 0.0) nearest = (std::min)(nearest, d - radius);
+            }
         if (nearest > cfg.pose_drop_ignore_clear_cm)
         {
             HSVR_LOG("Drop: %ls collides with you again (%.2f s after the let-go, %.0f cm clear)", a.weapon->GetName().c_str(), age, nearest);
@@ -5461,8 +5472,41 @@ namespace
             d.object(STR("Object"), j);
             d.run();
         }
+        for (UObject* j : g_arm_ignore[side].cm_joints)
+            if (j && object_alive(j))
+            {
+                Call d(j, STR("K2_DestroyComponent"));
+                d.object(STR("Object"), j);
+                d.run();
+            }
         g_arm_ignore[side].joints.clear();
+        g_arm_ignore[side].cm_joints.clear();
         g_arm_ignore[side].weapon = nullptr;
+        g_arm_ignore[side].dropped_at = -1.0;
+    }
+
+    // His armour proxies (spheres the game keeps on him, channel 20, blocking weapons): a dropped item is
+    // not paired off with them while held, so on the let-go any it overlapped shoved it (PC run 0815006: a
+    // ~3 m/s kick as the no-collide pairs went with the item 8 cm clear of his bones).
+    void attached_meshes(UObject* root, UObject* skip, std::vector<UObject*>& out, int depth);
+    UObject* no_collision_pair(UObject* pawn, UClass* cls, UObject* a, UObject* b);
+    void drop_cm_pairs(int side, UObject* pawn, UObject* item)
+    {
+        UObject* base = object_property(item, STR("BaseMesh"));
+        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+        if (!base || !cls) return;
+        std::vector<UObject*> parts;
+        attached_meshes(base, object_property(item, STR("Scabbard")), parts, 0);
+        int n = 0;
+        for (const TCHAR* name : k_cm_proxies)
+            if (UObject* cm = object_property(pawn, name))
+                for (UObject* p : parts)
+                    if (UObject* j = no_collision_pair(pawn, cls, p, cm))
+                    {
+                        g_arm_ignore[side].cm_joints.push_back(j);
+                        ++n;
+                    }
+        HSVR_LOG("Drop: %ls: %d no-collide pair(s) with your armour proxies until it is clear of you", item->GetName().c_str(), n);
     }
 
     // A new constraint component of his, at his root, joining nothing yet.
@@ -6578,7 +6622,11 @@ namespace
         hsvr::Vec3 v_before{};
         bool have_v = held && recent_com_velocity(side, held, v_before);
         if (held && hsvr::config().pose_drop_joint_first) jh_release_for_drop(side, held);
-        if (held && loose && !thrown && g_arm_ignore[side].weapon == held) g_arm_ignore[side].dropped_at = hsvr::now_seconds();
+        if (held && loose && !thrown && g_arm_ignore[side].weapon == held)
+        {
+            g_arm_ignore[side].dropped_at = hsvr::now_seconds();
+            if (hsvr::config().pose_drop_ignore_s > 0.0) drop_cm_pairs(side, pawn, held);
+        }
         pawn->ProcessEvent(fn, parameters);
         if (held)
         {
@@ -23214,6 +23262,24 @@ namespace
     }
     UObject* g_fade_pawn = nullptr;
     std::string g_fade_key; // the scalars last written
+    // Freed copies, pieces and the character are nulled here: gone() is only true inside the freed batch, so
+    // later reads of a freed pointer (object_alive on it) crashed (PC run 0815006: a room reopen,
+    // helmet_fade_update -> fade_clear -> object_alive on a freed FadeCopy).
+    bool g_fade_tracked = on_freed([] {
+        for (FadeCopy& f : g_fade)
+        {
+            if (gone(f.real)) f.real = nullptr;
+            if (gone(f.copy)) f.copy = nullptr;
+        }
+        for (HeadWear& w : g_head_wear)
+            if (gone(w.comp)) w.comp = nullptr;
+        if (gone(g_fade_pawn)) g_fade_pawn = nullptr;
+        for (SeeThroughSlot& t : g_see_slots)
+        {
+            if (gone(t.comp)) t.comp = nullptr;
+            if (gone(t.mid)) t.mid = nullptr;
+        }
+    });
 
     void fade_clear(const char* why)
     {
@@ -23303,7 +23369,7 @@ namespace
         bool same = want && pawn == g_fade_pawn && pieces.size() == g_fade.size();
         if (same)
             for (const FadeCopy& f : g_fade)
-                if (gone(f.real) || gone(f.copy) || std::find(pieces.begin(), pieces.end(), f.real) == pieces.end()) same = false;
+                if (!f.real || !f.copy || gone(f.real) || gone(f.copy) || std::find(pieces.begin(), pieces.end(), f.real) == pieces.end()) same = false;
         if (!same) fade_clear(!want ? "helmet_view not 5" : pawn != g_fade_pawn ? "new character" : "head pieces changed");
         if (!want || pieces.empty()) return true;
         if (same)
@@ -30185,6 +30251,7 @@ namespace
             if (gone(g_grip_log[side].weapon_seen)) g_grip_log[side].weapon_seen = nullptr;
             if (gone(g_arm_ignore[side].weapon)) g_arm_ignore[side] = ArmIgnore{};
             erase_gone(g_arm_ignore[side].joints);
+            erase_gone(g_arm_ignore[side].cm_joints);
             if (gone(g_pending_item[side])) g_pending_item[side] = nullptr;
             if (gone(g_hold[side].weapon))
             {

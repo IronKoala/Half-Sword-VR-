@@ -877,7 +877,7 @@ namespace hsvr
         // An item let go of keeps not colliding with his body until no part of it is within clear_cm of his
         // hands, forearms, chest, hips or thighs, at most ignore_s (0 = off). It pushed dropped shields.
         double pose_drop_ignore_s = 1.5;
-        double pose_drop_ignore_clear_cm = 8.0;
+        double pose_drop_ignore_clear_cm = 15.0;
         // A fist blow's assisted impulse (hit_assist) goes into the victim's damage as is. The game
         // scales a sliding contact by the weapon's cutting rate, ~0 for a fist ball, so without this
         // a hard punch reached his damage as impulse ~1 (playtest 2026-11-22).
