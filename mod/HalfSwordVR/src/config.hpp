@@ -779,6 +779,9 @@ namespace hsvr
         // The hand on the rear grip (by the trigger) is the one that fires: within this of it (cm).
         double crossbow_trigger_grip_cm = 8.0;
         double pose_holster_zone_cm = 15.0;
+        // 1 = the zone counts from any part of the item as well as the palm (B&S holders take the item's own
+        // collider); 0 = the palm only (playtest 2026-11-23: his palm stayed 19-23 cm off, items dropped).
+        bool pose_holster_by_item = true;
         double pose_holster_max_speed = 3.0;
         double pose_throw_speed = 2.0;
         double pose_throw_multiplier = 2.0;
@@ -808,6 +811,9 @@ namespace hsvr
         // Sheathing takes two hands (Matthew 2026-11-22): the other hand holds the sword's own scabbard
         // where it hangs; the blade never goes in by itself. 0 = the old one-hand sheathe at any free mouth.
         bool pose_sheathe_two_hand = true;
+        // A sword picked up whose scabbard is not on the belt (the game hides it until its first sheathe):
+        // its empty scabbard goes to a free sword slot on that hand's hip at once (Matthew 2026-11-23).
+        bool pose_scabbard_on_pickup = true;
         bool pose_sheathe_cross = true; // a weapon whose scabbard hangs on the other hip goes back across (the game's cross path)
         // The off hand on a belt scabbard: a squeeze within touch_cm of it takes it; it turns with the hand
         // up to angle_deg on the belt (the game's own loose limit is 30) and stays pinned there; let go and it
@@ -862,6 +868,18 @@ namespace hsvr
         bool pose_fist_clear = true;
         double pose_fist_clear_margin_cm = 2.0;
         double pose_fist_clear_retry_s = 0.03;
+        // Nor inside what that hand just let go of (playtest 2026-11-23: a shield let go with the fingers
+        // still curled was shoved out of the hand by the fist made inside it), until the ball is clear of it.
+        bool pose_fist_clear_dropped = true;
+        // A let-go keeps the item's own velocity from the hand: for 0.15 s a velocity > 1 m/s off it is put
+        // back (PC run f2e499f: shields let go from a still hand left at ~4 m/s).
+        bool pose_drop_keep_velocity = true;
+        // The joint hold on an item let go of is removed before the game's release, not after it.
+        bool pose_drop_joint_first = true;
+        // An item let go of keeps not colliding with his body until no part of it is within clear_cm of his
+        // hands, forearms, chest, hips or thighs, at most ignore_s (0 = off). It pushed dropped shields.
+        double pose_drop_ignore_s = 1.5;
+        double pose_drop_ignore_clear_cm = 15.0;
         // A fist blow's assisted impulse (hit_assist) goes into the victim's damage as is. The game
         // scales a sliding contact by the weapon's cutting rate, ~0 for a fist ball, so without this
         // a hard punch reached his damage as impulse ~1 (playtest 2026-11-22).

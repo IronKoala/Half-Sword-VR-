@@ -621,6 +621,7 @@ namespace hsvr
         num("crossbow_trigger_release", c.crossbow_trigger_release);
         num("crossbow_trigger_grip_cm", c.crossbow_trigger_grip_cm);
         num("pose_holster_zone_cm", c.pose_holster_zone_cm);
+        flag("pose_holster_by_item", c.pose_holster_by_item);
         num("pose_holster_max_speed", c.pose_holster_max_speed);
         num("pose_throw_multiplier", c.pose_throw_multiplier);
         flag("pose_draw", c.pose_draw);
@@ -665,6 +666,7 @@ namespace hsvr
         num("pose_sheathe_mouth_cm", c.pose_sheathe_mouth_cm);
         num("pose_sheathe_angle_deg", c.pose_sheathe_angle_deg);
         flag("pose_sheathe_two_hand", c.pose_sheathe_two_hand);
+        flag("pose_scabbard_on_pickup", c.pose_scabbard_on_pickup);
         flag("pose_sheathe_cross", c.pose_sheathe_cross);
         flag("pose_scabbard_grab", c.pose_scabbard_grab);
         num("pose_scabbard_touch_cm", c.pose_scabbard_touch_cm);
@@ -704,6 +706,11 @@ namespace hsvr
         flag("pose_fist_clear", c.pose_fist_clear);
         num("pose_fist_clear_margin_cm", c.pose_fist_clear_margin_cm);
         num("pose_fist_clear_retry_s", c.pose_fist_clear_retry_s);
+        flag("pose_fist_clear_dropped", c.pose_fist_clear_dropped);
+        flag("pose_drop_keep_velocity", c.pose_drop_keep_velocity);
+        flag("pose_drop_joint_first", c.pose_drop_joint_first);
+        num("pose_drop_ignore_s", c.pose_drop_ignore_s);
+        num("pose_drop_ignore_clear_cm", c.pose_drop_ignore_clear_cm);
         flag("pose_fist_full_impulse", c.pose_fist_full_impulse);
         flag("disarm", c.disarm);
         num("disarm_grip_scale", c.disarm_grip_scale);
