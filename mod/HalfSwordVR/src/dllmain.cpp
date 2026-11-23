@@ -9023,7 +9023,8 @@ namespace
         UObject* beside = nullptr;        // what that arm's hand holds, not colliding with it either
         UObject* beside_joint = nullptr;
         const PaviseSpec* spec = nullptr;
-        bool gripped = false; // that arm's own hand is on its strap
+        bool gripped = false; // that arm's own hand is on its strap (or on its handle: handle not empty)
+        std::string handle;   // the handle that hand closed on, the shield still strapped on (pose_mount_fist_grip 1)
         bool unstuck = false; // its "Static Mesh Collision Disabled (Unstuck)" as last seen
         double last_log = -1e9;
     };
@@ -9039,6 +9040,17 @@ namespace
     });
 
     bool mount_gripped(int side) { return g_mount[side].gripped; }
+    bool mount_on_handle(int side) { return g_mount[side].weapon && g_mount[side].gripped && !g_mount[side].handle.empty(); }
+    void mount_pose(int arm, const Mount& m, hsvr::Vec3& p, hsvr::Quat& q);
+    double mount_off_cm(int side)
+    {
+        const Mount& m = g_mount[side];
+        if (!m.weapon || !m.base || !object_alive(m.weapon)) return -1.0;
+        hsvr::Vec3 p;
+        hsvr::Quat q;
+        mount_pose(side, m, p, q);
+        return hsvr::length(component_location(m.base) - p);
+    }
     bool is_mounted(UObject* w) { return w && (w == g_mount[0].weapon || w == g_mount[1].weapon); }
 
     void destroy_joint(UObject*& j)
@@ -9297,6 +9309,7 @@ namespace
         if (d > cfg.pose_grab_handle_cm) return false;
         UObject* w = m.weapon;
         UObject* base = m.base;
+        if (m.gripped) set_anim_grip(arm, -1); // that arm's fist was on its strap or handle: it opens
         unjoin_mount(m);
         m = Mount{};
         bool ok = take_by_strap(side, pawn, mesh, w, base, *strap, palm);
@@ -9325,7 +9338,13 @@ namespace
         // 2026-11-23 19:00Z: "When the light [Pavise] is strapped to my forearm, I still want the ability to
         // grab main handle, the one that's right by my hand"). His playtest on mode 2 (the game's forearm
         // grip): no handle in the hand, the hold pulling a forearm-jointed shield 26 cm and 95 deg off.
-        if (cfg.pose_mount_fist_grip == 1 && hand_free)
+        // 1 (Matthew 2026-11-23 17:06, on the big pavise: "the arm strap is strapping it to my forearm, but when I
+        // go to grab the grip, it then unstraps the forearm. I don't want that to happen. I want it to stay
+        // strapped. The only way it comes unstrapped is if I go to grab that back strap with my other hand"):
+        // the fist closes on the handle by the palm and the shield stays on the forearm's joint, as it was;
+        // the hand opening leaves it so. Only the other hand on its back strap takes it off (pavise_unmount).
+        // 3: the earlier 1, the handle taken into that hand and the strap's joint gone until the hand opens.
+        if ((cfg.pose_mount_fist_grip == 1 || cfg.pose_mount_fist_grip == 3) && hand_free)
         {
             using namespace hsvr;
             Vec3 bp = component_location(m.base);
@@ -9338,6 +9357,15 @@ namespace
             {
                 HSVR_LOG("Pavise: %s hand closes by %ls on its forearm: no handle within %.0f cm of the palm (nearest %s %.1f cm): it closes on the strap", hand,
                          w->GetName().c_str(), cfg.pose_mount_handle_cm, hi >= 0 ? hs[hi].name.c_str() : "none", d);
+            }
+            else if (cfg.pose_mount_fist_grip == 1)
+            {
+                m.gripped = true;
+                m.handle = hs[hi].name;
+                controllers_buzz(side, 0.3f);
+                HSVR_LOG("Pavise: %s hand closes on the %s of %ls on its own forearm (%.1f cm from the palm): it stays strapped on that forearm", hand,
+                         m.handle.c_str(), w->GetName().c_str(), d);
+                return true;
             }
             else
             {
@@ -9438,8 +9466,10 @@ namespace
     {
         if (!g_mount[side].gripped) return false;
         g_mount[side].gripped = false;
+        std::string was = g_mount[side].handle.empty() ? std::string("strap") : g_mount[side].handle;
+        g_mount[side].handle.clear();
         set_anim_grip(side, -1);
-        HSVR_LOG("Pavise: %s hand lets go of the strap; it stays mounted", side == 0 ? "left" : "right");
+        HSVR_LOG("Pavise: %s hand lets go of the %s; it stays mounted", side == 0 ? "left" : "right", was.c_str());
         return true;
     }
 
@@ -9468,6 +9498,11 @@ namespace
         Mount& m = g_mount[arm];
         if (!m.weapon || m.pawn != pawn) return;
         UObject* want = held ? held : g_pending_item[arm] ? g_pending_item[arm] : g_hold[arm].weapon;
+        // That arm's hand as the second hand on a weapon the other hand holds: Weapon <S> of this side stays
+        // empty, so it was never paired (playtest 2026-11-23 17:09: a war hammer two-handed with the light
+        // pavise on the second hand's forearm hit the pavise over and over, 4.8-6.1 m/s, the hammer spinning
+        // at 1000-4500 deg/s and the pavise knocked up to 18 cm / 65 deg off: "freaking out like crazy").
+        if ((!want || is_fist(want)) && g_two.active && g_two.second == arm && g_two.weapon) want = g_two.weapon;
         if (want == m.weapon) want = nullptr;
         if (want == m.beside) return;
         destroy_joint(m.beside_joint);
@@ -21324,7 +21359,12 @@ namespace
                 // 02:57Z: stuck 33-47 cm out of 57). So once pulled back 8 cm it is a draw (0.85 of the
                 // length, less when swung); pushed in again, a sheathe.
                 d.z_in = (std::min)(d.z_in, z);
-                bool back = d.pulling_back ? z > d.z_in + 2.0 : z > d.z_in + 8.0;
+                // For its first 0.3 s it must come 20 cm back, not 8: as the blade goes in, the held scabbard swings
+                // onto its line and kicks it back a few cm (playtest 2026-11-23 17:04: in at 50.2 cm out, 0.04 s later
+                // 55.7 and "pulled back out", the scabbard 41 deg off its belt angle; Matthew: "it got in position for
+                // sheathing, but immediately got back out of position").
+                const double back_cm = now - d.t0 < 0.3 ? 20.0 : 8.0;
+                bool back = d.pulling_back ? z > d.z_in + 2.0 : z > d.z_in + back_cm;
                 if (back != d.pulling_back)
                 {
                     d.pulling_back = back;
@@ -23315,7 +23355,7 @@ namespace
         g_hidden_scab = HiddenScabbard{};
         // Mounts stay known through a moment without his pawn (an end screen: the save still needs them);
         // freed ones go with the GC, another pawn's at that pawn's first tick (mount_tick).
-        for (Mount& m : g_mount) m.gripped = false;
+        for (Mount& m : g_mount) m.gripped = false, m.handle.clear();
         g_hung.clear();
         g_thrown.clear();
         g_item_track.clear();
@@ -25337,7 +25377,7 @@ namespace
     std::vector<std::wstring> g_watch_words;
     std::vector<WatchedVar> g_watched;
     std::vector<WatchedVar> g_watch_previous; // the list before a re-collect
-    UObject* g_watch_owners[3] = {nullptr, nullptr, nullptr};
+    UObject* g_watch_owners[4] = {nullptr, nullptr, nullptr, nullptr};
 
     double watch_read(UObject* owner, FProperty* p)
     {
@@ -25371,7 +25411,8 @@ namespace
                     if (ch != L' ' && ch != L'_') lower += (wchar_t)towlower(ch); // words match with or without spaces
                 bool match = false;
                 for (auto& w : g_watch_words)
-                    if (lower.find(w) != std::wstring::npos) match = true;
+                    if (lower.find(w) != std::wstring::npos || (w == L"all" && name.rfind(STR("__"), 0) != 0 && kind != STR("DoubleProperty") && kind != STR("FloatProperty")))
+                        match = true; // all: every yes/no, byte, enum and int but the compiler's own (numbers change every tick)
                 if (!match) continue;
                 std::string label = who;
                 label += ".";
@@ -25398,15 +25439,20 @@ namespace
     {
         if (g_watch_words.empty()) return;
         UObject* pawn = g_pose.pawn;
-        UObject* owners[3] = {pawn, pawn ? object_property(pawn, STR("Weapon L")) : nullptr, pawn ? object_property(pawn, STR("Weapon R")) : nullptr};
-        if (owners[0] != g_watch_owners[0] || owners[1] != g_watch_owners[1] || owners[2] != g_watch_owners[2])
+        // The fourth: his animation blueprint (ABP_Willie on his DriverSkeleton), whose own variables pick the
+        // poses the game blends in (playtest 2026-11-23 17:10: "a vomit-like animation" each time a pavise
+        // went on or off, nothing of the mod's in the log at those times).
+        UObject* owners[4] = {pawn, pawn ? object_property(pawn, STR("Weapon L")) : nullptr, pawn ? object_property(pawn, STR("Weapon R")) : nullptr,
+                              pawn ? player_pose_instance(pawn) : nullptr};
+        if (owners[0] != g_watch_owners[0] || owners[1] != g_watch_owners[1] || owners[2] != g_watch_owners[2] || owners[3] != g_watch_owners[3])
         {
             g_watch_previous.swap(g_watched);
             g_watched.clear();
-            for (int i = 0; i < 3; ++i) g_watch_owners[i] = owners[i];
+            for (int i = 0; i < 4; ++i) g_watch_owners[i] = owners[i];
             watch_collect(owners[0], "pawn");
             watch_collect(owners[1], "weaponL");
             watch_collect(owners[2], "weaponR");
+            watch_collect(owners[3], "anim");
         }
         double now = hsvr::now_seconds();
         for (auto& v : g_watched)
@@ -28427,6 +28473,8 @@ namespace
         else if (w == "drop_xy05_l" || w == "drop_xy05_r") value = g_drop_trace[w.back() == 'l' ? 0 : 1].max_xy_all; // the same over 0.5 s
         else if (w == "grip_type_l" || w == "grip_type_r") value = read_number_variable(pawn, w.back() == 'l' ? STR("L_GripType_Current") : STR("R_GripType_Current"));
         else if (w == "mount_fist_moved_l" || w == "mount_fist_moved_r") value = g_mount_fist_moved[w.back() == 'l' ? 0 : 1]; // cm, last forward-grip take
+        else if (w == "mount_handle_l" || w == "mount_handle_r") value = mount_on_handle(w.back() == 'l' ? 0 : 1) ? 1.0 : 0.0; // fist on its handle, strapped on
+        else if (w == "mount_off_l" || w == "mount_off_r") value = mount_off_cm(w.back() == 'l' ? 0 : 1); // cm off its place on the forearm, -1 = none
         else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
         else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
         else if (w == "actor_z") value = pawn ? actor_location(pawn).z : 0.0;

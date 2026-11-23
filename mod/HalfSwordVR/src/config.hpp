@@ -722,8 +722,10 @@ namespace hsvr
         // taken off and hung back by it.
         bool pose_pavise_strap = true;
         double pose_pavise_mount_cm = 15.0;
-        // The mounted arm's own hand closing (nothing else in reach) (Matthew 2026-11-23): 1 takes the shield's
-        // handle nearest the palm (within pose_mount_handle_cm) in that hand, as any handle is held; 2 the
+        // The mounted arm's own hand closing (nothing else in reach) (Matthew 2026-11-23): 1 closes the fist on
+        // the shield's handle nearest the palm (within pose_mount_handle_cm), the shield staying strapped on the
+        // forearm (his 17:06 playtest: it must stay strapped until the other hand takes its back strap); 3 takes
+        // that handle into the hand, as any handle is held, the strap's joint gone until the hand opens; 2 the
         // game's own forearm grip; 0 only closes the hand on the strap. Opening it leaves the shield mounted.
         int pose_mount_fist_grip = 1;
         double pose_mount_handle_cm = 8.0;
@@ -837,9 +839,9 @@ namespace hsvr
         // far off it for 0.3 s lets go. block_auto: keep the game's own teleporting off-hand grab from firing.
         bool pose_scabbard_grab = true;
         double pose_scabbard_touch_cm = 8.0;
-        double pose_scabbard_angle_deg = 30.0;
+        double pose_scabbard_angle_deg = 60.0;
         double pose_scabbard_follow_s = 0.015; // ~1 tick: it carries a sheathed sword and the soft cone (0.05 left 11-18 deg)
-        double pose_scabbard_let_go_cm = 25.0;
+        double pose_scabbard_let_go_cm = 40.0;
         double pose_scabbard_grip_type = 2.0;
         bool pose_scabbard_block_auto = true;
         double pose_grab_seat_reverse_bias_deg = 45.0; // a reversed seat must be this much nearer to win
