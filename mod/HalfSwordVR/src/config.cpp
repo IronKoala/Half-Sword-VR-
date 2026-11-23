@@ -450,6 +450,7 @@ namespace hsvr
         text("input_mode", c.input_mode);
         num("input_kbm_quiet_s", c.input_kbm_quiet_s);
         integer("input_mode_key", c.input_mode_key);
+        flag("input_kbm_mouse_pitch", c.input_kbm_mouse_pitch);
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);
