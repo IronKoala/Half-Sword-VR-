@@ -23919,7 +23919,7 @@ namespace
     // page: weapons on the left, Willies on the right. Point at a line with an empty hand (its aim ray;
     // a dot and a thin beam show where) and pull the trigger. The page is found on the lectern's
     // slanted top by traces (its normal says which way it faces); without one it stands above it.
-    const int kWeaponRows = 2 + 9;  // title, tier, 9 kinds
+    const int kWeaponRows = 2 + 9 + 1;  // title, tier, 9 kinds, clear all items
     const int kWillieRows = 2 + 9 + 2; // title, mode, 9 tiers, random, remove all
 
     std::wstring room_tier_text(int tier) { return tier < 0 ? std::wstring(L"Random") : std::wstring(kRankNames[(std::min)(tier, 8)]); }
@@ -23930,6 +23930,7 @@ namespace
         if (b.kind == 0)
         {
             if (row == 1) return L"<     Tier: " + room_tier_text(b.tier) + L"     >";
+            if (row == 2 + kRoomKindCount) return L"Clear all items";
             return kRoomKinds[row - 2].name;
         }
         if (row == 1) return std::wstring(L"Mode: ") + (b.fights ? L"Fighting" : L"Passive");
@@ -24108,7 +24109,7 @@ namespace
         double floor_z = room_floor_z(player);
         for (int kind = 0; kind < 2; ++kind)
         {
-            Vec3 at = g_room.origin - g_room.forward * 30.0 + right * (kind == 0 ? -150.0 : 150.0);
+            Vec3 at = g_room.origin - g_room.forward * 30.0 + right * (kind == 0 ? -190.0 : 190.0); // 150 was crowded (Matthew 2026-11-23)
             at.z = floor_z;
             room_place_book(player, kind, at);
         }
@@ -24195,6 +24196,38 @@ namespace
         HSVR_LOG("TestRoom: book: removed %d Willie(s) and %d of their weapons; %d kept (in use)", removed, gear, kept);
     }
 
+    // "Clear all items" (weapon book; Matthew 2026-11-23): every loose weapon, shield and item in the
+    // level goes, the tables' too. Kept: anything in a hand (his or a Willie's), sheathed, hung on a
+    // body or held by the mod (hold joints, second hand), and the level's own traps.
+    void room_clear_items(UObject* player)
+    {
+        std::vector<UObject*> weapons, willies;
+        UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        int cleared = 0, kept = 0;
+        for (UObject* w : weapons)
+        {
+            if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || !object_alive(w) || is_fist(w)) continue;
+            if (w->GetName().find(STR("Trap")) != std::wstring::npos) continue;
+            bool keep = hit_is_his_item(w) || bool_property(w, STR("Is Sheathed"));
+            for (UObject* c : willies)
+                if (c && (object_property(c, STR("Weapon R")) == w || object_property(c, STR("Weapon L")) == w)) keep = true;
+            for (int side = 0; side < 2; ++side)
+                for (int i = 0; i < 2; ++i)
+                    if (g_jh[side][i].weapon == w) keep = true;
+            if (!keep)
+            {
+                Call parent(w, STR("GetAttachParentActor"));
+                if (parent.run() && parent.object_result(STR("ReturnValue"))) keep = true; // on a back, belt or forearm
+            }
+            if (keep) { ++kept; continue; }
+            Call d(w, STR("K2_DestroyActor"));
+            d.run();
+            ++cleared;
+        }
+        HSVR_LOG("TestRoom: book: cleared %d item(s); %d kept (in a hand, sheathed or worn)", cleared, kept);
+    }
+
     void room_book_click(UObject* player, TestRoom::Book& b, int row, double u)
     {
         if (row <= 0) return;
@@ -24209,6 +24242,11 @@ namespace
                 if (b.tier < -1) b.tier = 8;
                 room_text(b.rows[1], room_row_text(b, 1));
                 HSVR_LOG("TestRoom: book: weapon tier %ls", room_tier_text(b.tier).c_str());
+                return;
+            }
+            if (row == 2 + kRoomKindCount)
+            {
+                room_clear_items(player);
                 return;
             }
             int k = row - 2;
