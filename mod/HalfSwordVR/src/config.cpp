@@ -558,6 +558,7 @@ namespace hsvr
         flag("pose_slide_butt_is_haft", c.pose_slide_butt_is_haft);
         flag("pose_slide_fixed_1h_sword", c.pose_slide_fixed_1h_sword);
         integer("pose_grip_two_zones_2h_sword", c.pose_grip_two_zones_2h_sword);
+        flag("pose_grip_two_hand_swords_slide", c.pose_grip_two_hand_swords_slide);
         num("pose_grip_pommel_top_cm", c.pose_grip_pommel_top_cm);
         num("pose_grip_hands_overlap_cm", c.pose_grip_hands_overlap_cm);
         flag("pose_grip_dagger_fixed", c.pose_grip_dagger_fixed);
@@ -687,6 +688,7 @@ namespace hsvr
         }
         flag("pose_two_hand_twist_only", c.pose_two_hand_twist_only);
         flag("pose_two_hand_joint_both_turn", c.pose_two_hand_joint_both_turn);
+        flag("pose_two_hand_joint_line", c.pose_two_hand_joint_line);
         flag("pose_two_hand_fixed_rebase", c.pose_two_hand_fixed_rebase);
         num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
         flag("pose_fists", c.pose_fists);
