@@ -1,0 +1,6 @@
+# fresh
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.book_photo 0
+1.2:hsvr.book_click 0 1 1
+6.0:hsvr.book_photo 1
+11.0:hsvr.photo_cam off

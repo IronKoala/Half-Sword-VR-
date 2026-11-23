@@ -25489,9 +25489,11 @@ namespace
     {
         for (int i = 0; i < (int)b.rows.size(); ++i)
         {
-            if (i == b.hover) room_text_colour(b.rows[i], 255, 214, 60);      // pointed at: gold
-            else if (i == 0) room_text_colour(b.rows[i], 120, 20, 15);       // title: dark red
-            else room_text_colour(b.rows[i], 30, 22, 14);                    // ink
+            // Straight on the stand's dark brown wood, in its opposite: pale blue (Matthew 2026-11-23: dark ink
+            // on a light page was unreadable, "make the text something more colour opposite of the book stand").
+            if (i == b.hover) room_text_colour(b.rows[i], 255, 230, 40);      // pointed at: bright yellow
+            else if (i == 0) room_text_colour(b.rows[i], 255, 255, 255);     // title: white
+            else room_text_colour(b.rows[i], 150, 215, 255);                 // lines: pale blue
         }
     }
 
@@ -25619,7 +25621,8 @@ namespace
         }
         hsvr::Quat q = hsvr::quat_from_axes(book.normal, hsvr::cross(book.up, book.normal), book.up);
         // The page: a thin parchment-coloured slab, and a small warm light over it so it can be read.
-        room_shape(lectern, STR("/Engine/BasicShapes/Cube.Cube"), book.centre - book.normal * 0.4, q, Vec3{0.008, book.half_w / 50.0, book.half_h / 50.0}, 0.78f, 0.66f, 0.45f);
+        // No page slab: the text sits straight on the lectern's top (the light slab under white-looking text
+        // was unreadable: Matthew 2026-11-23).
         if (hsvr::config().test_room_book_light > 0.0)
         if (UObject* light = room_add_component(lectern, STR("/Script/Engine.PointLightComponent"), book.centre + book.normal * 35.0 + book.up * 10.0, q))
         {
@@ -27225,6 +27228,26 @@ namespace
             if (entry.command == "hsvr.dump")
             {
                 script_dump();
+                continue;
+            }
+            // hsvr.book_photo <book> [cm]: the test camera <cm> (55) in front of that book's page, looking at
+            // it (for a screenshot of how the page reads); "hsvr.photo_cam off" ends it.
+            if (entry.command.rfind("hsvr.book_photo ", 0) == 0)
+            {
+                int bi = 0;
+                double cm = 55.0;
+                sscanf(entry.command.c_str() + 16, "%d %lf", &bi, &cm);
+                if (bi < 0 || bi >= (int)g_room.books.size()) { HSVR_LOG("Script: hsvr.book_photo: no book %d", bi); continue; }
+                const TestRoom::Book& b = g_room.books[bi];
+                hsvr::Vec3 at = b.centre + b.normal * cm;
+                hsvr::Vec3 d = b.centre - at;
+                hsvr::shared().photo_x.store(at.x);
+                hsvr::shared().photo_y.store(at.y);
+                hsvr::shared().photo_z.store(at.z);
+                hsvr::shared().photo_yaw.store(std::atan2(d.y, d.x) * 57.29577951308232);
+                hsvr::shared().photo_pitch.store(std::atan2(d.z, std::sqrt(d.x * d.x + d.y * d.y)) * 57.29577951308232);
+                hsvr::shared().photo_on.store(true);
+                HSVR_LOG("Script: hsvr.book_photo %d %.0f: camera at (%.0f, %.0f, %.0f) looking at the page", bi, cm, at.x, at.y, at.z);
                 continue;
             }
             if (entry.command.rfind("hsvr.photo_cam ", 0) == 0)
