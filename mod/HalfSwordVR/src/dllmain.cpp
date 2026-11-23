@@ -9161,7 +9161,15 @@ namespace
     {
         Mount& m = g_mount[side];
         if (!m.weapon || m.pawn != pawn) return false;
-        if (hsvr::config().pose_mount_fist_grip && object_alive(m.weapon) && !object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
+        // Only where the game has a forearm grip for that hand (6 or 7), whose scene the mount uses: the heavy
+        // pavise's right is 8 (a handle in the hand, the mount there is the mod's mirror image) and the tower
+        // has none, so those would jump into the hand: their hand closes on the strap as before.
+        const double game_grip = object_alive(m.weapon) ? read_number_variable(m.weapon, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default")) : 0.0;
+        const bool forearm_grip = game_grip == 6.0 || game_grip == 7.0;
+        if (hsvr::config().pose_mount_fist_grip && !forearm_grip)
+            HSVR_LOG_EVERY(2.0, "Pavise: %s hand: the game has no forearm grip for %ls in that hand (grip %.0f): it closes on the strap only", side == 0 ? "left" : "right",
+                           m.weapon->GetName().c_str(), game_grip);
+        if (hsvr::config().pose_mount_fist_grip && forearm_grip && !object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
         {
             UObject* w = m.weapon;
             Mount keep = m;
