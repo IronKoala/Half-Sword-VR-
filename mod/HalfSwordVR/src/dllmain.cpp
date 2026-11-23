@@ -25050,13 +25050,25 @@ namespace
 
     void room_text_colour(UObject* tr, uint8_t r, uint8_t g, uint8_t b)
     {
+        if (!tr) return;
         Call c(tr, STR("SetTextRenderColor"));
-        if (FProperty* v = c.param(STR("Value")))
+        FProperty* v = c.param(STR("Value"));
+        if (v)
         {
             uint8_t* at = c.buffer.data() + v->GetOffset_Internal();
             at[0] = b, at[1] = g, at[2] = r, at[3] = 255; // FColor is B, G, R, A in memory
         }
-        c.run();
+        bool ran = c.fn && c.run();
+        // The pictures showed white text whatever colour was asked (test 2026-11-23 01:09): the colour is
+        // also written straight into the component, and its render state redone.
+        uint8_t* prop = value_ptr<uint8_t>(tr, STR("TextRenderColor"));
+        if (prop) prop[0] = b, prop[1] = g, prop[2] = r, prop[3] = 255;
+        Call dirty(tr, STR("MarkRenderStateDirty"));
+        if (dirty.fn) dirty.run();
+        static int logged = 0;
+        if (logged++ < 2)
+            HSVR_LOG("TestRoom: text colour %d,%d,%d: SetTextRenderColor %s (param %s), property %s, now %d,%d,%d", r, g, b, c.fn ? (ran ? "ran" : "failed") : "missing",
+                     v ? "found" : "MISSING", prop ? "written" : "MISSING", prop ? prop[2] : -1, prop ? prop[1] : -1, prop ? prop[0] : -1);
     }
 
     // One line of a page: a TextRender facing the reader (its +X), centred on its spot.
@@ -25504,15 +25516,16 @@ namespace
         {
             // Straight on the stand's dark brown wood, in its opposite: pale blue (Matthew 2026-11-23: dark ink
             // on a light page was unreadable, "make the text something more colour opposite of the book stand").
-            if (i == b.hover) room_text_colour(b.rows[i], 255, 230, 40);      // pointed at: bright yellow
-            else if (i == 0) room_text_colour(b.rows[i], 255, 255, 255);     // title: white
-            else room_text_colour(b.rows[i], 150, 215, 255);                 // lines: pale blue
+            // The board turned out pale wood under its light (pictures 2026-11-23 01:09): dark text on it.
+            if (i == b.hover) room_text_colour(b.rows[i], 200, 20, 10);       // pointed at: red
+            else if (i == 0) room_text_colour(b.rows[i], 10, 10, 10);        // title: black
+            else room_text_colour(b.rows[i], 15, 30, 110);                   // lines: dark blue
         }
     }
 
     // The lectern's reading surface: traces straight down over its footprint; the hits on its upper
     // part give the slope (their mean normal) and the page's centre. False if it has no slanted top.
-    bool room_lectern_top(UObject* comp, hsvr::Vec3& centre, hsvr::Vec3& normal)
+    bool room_lectern_top(UObject* comp, hsvr::Vec3& centre, hsvr::Vec3& normal, double* up_lo = nullptr, double* up_hi = nullptr)
     {
         using hsvr::Vec3;
         // World bounds (GetLocalBounds' Min/Max read as 0 here: the reflected names' case differs).
@@ -25547,6 +25560,19 @@ namespace
         if (k < 4) return false;
         centre = sum_p * (1.0 / k);
         normal = hsvr::normalized(sum_n);
+        // How far the board runs up and down its slope from `centre`: the hits that face the same way.
+        if (up_lo && up_hi)
+        {
+            Vec3 up = hsvr::normalized(Vec3{0, 0, 1} - normal * normal.z);
+            *up_lo = 0.0, *up_hi = 0.0;
+            for (const Hit& h : hits)
+                if (hsvr::dot(h.n, normal) > 0.95)
+                {
+                    double t = hsvr::dot(h.p - centre, up);
+                    *up_lo = (std::min)(*up_lo, t);
+                    *up_hi = (std::max)(*up_hi, t);
+                }
+        }
         double tilt = std::acos((std::min)(1.0, normal.z)) * 57.29577951308232;
         HSVR_LOG("TestRoom: lectern top at (%.0f, %.0f, %.0f), tilted %.0f deg", centre.x, centre.y, centre.z, tilt);
         return tilt > 8.0 && tilt < 70.0;
@@ -25587,6 +25613,7 @@ namespace
         }
         UObject* comp = room_mesh_of(lectern);
         Vec3 centre, n;
+        double up_lo = 0.0, up_hi = 0.0;
         bool slanted = comp && room_lectern_top(comp, centre, n);
         if (slanted)
         {
@@ -25597,7 +25624,7 @@ namespace
             rot.three(STR("NewRotation"), 0.0, yaw - 90.0 + turn * 57.29577951308232, 0.0);
             rot.flag(STR("bTeleportPhysics"), true);
             rot.run();
-            slanted = room_lectern_top(comp, centre, n);
+            slanted = room_lectern_top(comp, centre, n, &up_lo, &up_hi);
         }
         if (!slanted)
         {
@@ -25621,7 +25648,17 @@ namespace
         int rows = kind == 0 ? kWeaponRows : kWillieRows;
         book.half_w = 26.0;
         book.half_h = 21.0;
-        book.centre = centre + book.normal * 1.0 + book.up * (book.half_h * 0.35); // the page rests on the slope's lower lip
+        // The lines fill the board: centred on its middle along the slope, as tall as it (less 2 cm each
+        // end), at most 42 cm (the block sat 15-20 cm high, its top lines above the board: pictures
+        // 2026-11-23 01:09).
+        if (up_hi - up_lo > 10.0)
+        {
+            book.half_h = (std::clamp)((up_hi - up_lo) * 0.5 - 2.0, 10.0, 21.0);
+            centre = centre + book.up * ((up_lo + up_hi) * 0.5);
+        }
+        book.centre = centre + book.normal * 1.0;
+        HSVR_LOG("TestRoom: %s board runs %.0f .. %.0f cm along its slope from the hits' middle; lines %.0f cm tall", kind == 0 ? "weapon" : "Willie", up_lo, up_hi,
+                 2.0 * book.half_h);
         // Out along its face until no part of the lectern comes through it (the page sat inside the
         // stand, so he could neither read nor point at it: Matthew 2026-11-22 22:15). The slab is 0.8 cm
         // thick behind the face.
@@ -26806,7 +26843,7 @@ namespace
             else
             {
                 auto it = g_room_marks.find(wp);
-                if (it != g_room_marks.end() && hsvr::length(at - it->second) > 3.0)
+                if (it != g_room_marks.end() && hsvr::length(at - it->second) > 6.0) // 6: a floor item settling its last 4 cm is no fault (test 2026-11-23 01:07)
                 {
                     ++moved;
                     if (w == "room_moved")
