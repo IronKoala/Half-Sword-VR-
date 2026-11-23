@@ -23,6 +23,7 @@ namespace hsvr
         bool primary = false;   // A on the right hand, X on the left (or the Index A buttons)
         bool secondary = false; // B / Y
         bool menu = false;
+        bool marker = false;    // the bug-marker button (Steam Frame left D-pad Left; no other layout has one)
         bool trigger_touch = false; // index finger on the trigger (touch sensor)
         bool thumb_touch = false;   // thumb on the stick, a face button or the thumb rest (touch sensors)
         // Finger curls, thumb .. little, 0 open .. 1 closed.
@@ -42,6 +43,7 @@ namespace hsvr
         bool head_valid = false;
         XrPoseRaw head; // point between the eyes at the same time, for relative positions
         HandState hand[2]; // 0 = left, 1 = right
+        bool frame_layout = false; // the left hand runs on the native Steam Frame layout (own bug-marker button)
     };
 
     // After the instance exists: makes the action set and suggests bindings for the common

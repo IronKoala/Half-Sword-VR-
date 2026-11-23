@@ -206,6 +206,9 @@ namespace hsvr
         // 1 = a short buzz on a controller each time its trigger is pulled all the way (checks vibration).
         // Read SteamVR's hand skeleton (XR_EXT_hand_tracking) for finger curls when it offers one.
         bool input_hand_tracking = true;
+        // Use SteamVR's native Steam Frame controller layout when offered (D-pad directions each get
+        // their own job: Down jump, Up grip flip, Left bug marker). 0 = SteamVR remaps the Touch layout.
+        bool input_frame_layout = true;
         bool haptics_test = false;
         // 1 = once a second, where your character's body, head and hands are.
         bool log_body = false;
@@ -523,11 +526,14 @@ namespace hsvr
         double pose_hold_joint_fade_after_s = 0.0;  // s: no ease to B&S's cap this soon after a joint is made (was 0.3 before the grab's speed was zeroed)
         bool pose_hold_joint_slerp = true; // 1 = the joint turns the weapon by one SLERP drive (0 = twist and swing drives)
         bool pose_hold_joint_mod_turn = true; // one hand: 1 = the old hold's turn (spin set each tick), the joint only pulls; 0 = the joint's turn drive
+        double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)
+        bool pose_hold_joint_draw_wound = true; // drawing/sheathing and a blade in a wound stay on the joint (sent where the old rules put it)
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
         bool pose_two_hand_twist_only = true;
-        bool pose_two_hand_joint_both_turn = false; // joint hold, both hands on fixed grips: both wrists turn it (test)
+        bool pose_two_hand_joint_both_turn = true; // joint hold, both hands on fixed grips: both wrists turn it (rerun 388ca67: 60 deg pitch followed, 2.5-3.3 cm / 5-6 deg off; off: 27-37 deg, creeps back)
+        bool pose_two_hand_fixed_rebase = true; // fixed grips, both wrists: the second hand's turn and spot taken from the first hand at the grab
         double pose_two_hand_swing_share = 0.0;
         // Whoosh judged on the weapon's speed against your body: the game's whoosh threshold for a weapon in
         // a tracked hand is raised by your walking speed x this (0 = off).
@@ -612,6 +618,7 @@ namespace hsvr
         // The lower zone sits just above the pommel (Matthew 2026-11-22: "you grab just above the pommel"): the
         // pommel's top is this far above its origin (measured 4.7 on a Grip_15 pommel, 8 cm long).
         double pose_grip_pommel_top_cm = 4.7;
+        double pose_grip_hands_overlap_cm = 3.5; // short two-zone grips: the hands may overlap each other this much to stay off the pommel
         // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
         bool pose_grip_dagger_fixed = true;
         double pose_slide_rate_min = 3.0;
@@ -646,6 +653,8 @@ namespace hsvr
         // A grab leaves the item where it was and the hold pulls it into the hand over this long (B&S);
         // also a hand-over. 0 = put it in the hand at once.
         double pose_grab_settle_s = 0.08;
+        bool pose_grab_joint = true; // loose objects (cups, rocks) held on a joint like weapons (with pose_hold_joint)
+        double pose_grab_joint_hz = 12.0; // that joint's spring frequency
         // Shields: every measured strap and handle is a grab point; anywhere else (the rim, an edge)
         // the hand holds it where it touched (pose_shield_free_grip; 0 = always the game's grip).
         bool pose_shield_free_grip = true;

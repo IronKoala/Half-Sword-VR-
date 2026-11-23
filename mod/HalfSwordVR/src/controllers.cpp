@@ -29,6 +29,10 @@ namespace hsvr
         XrAction g_haptic = XR_NULL_HANDLE;
         XrAction g_trigger_touch = XR_NULL_HANDLE;
         XrAction g_thumb_touch = XR_NULL_HANDLE;
+        XrAction g_marker = XR_NULL_HANDLE; // bug-marker button (only on layouts with a spare one: Steam Frame left D-pad Left)
+        std::atomic<bool> g_frame_active{false}; // left hand's current layout is the Steam Frame one
+        bool g_ext_frame = false;           // XR_VALVE_frame_controller_interaction enabled (Steam Frame layout)
+        const char* kFrameExt = "XR_VALVE_frame_controller_interaction";
 
         // SteamVR's hand skeleton (XR_EXT_hand_tracking): its estimate of each finger from the
         // controller's sensors (or real finger tracking where the controller has it).
@@ -134,7 +138,7 @@ namespace hsvr
             const char* right; // path below /user/hand/right, or nullptr
         };
 
-        void suggest(const XrApi& xr, const char* profile, const std::vector<Binding>& bindings)
+        bool suggest(const XrApi& xr, const char* profile, const std::vector<Binding>& bindings)
         {
             std::vector<XrActionSuggestedBinding> list;
             for (const Binding& b : bindings)
@@ -157,6 +161,7 @@ namespace hsvr
             suggested.suggestedBindings = list.data();
             XrResult r = xr.SuggestInteractionProfileBindings(g_instance, &suggested);
             HSVR_LOG("Controllers: bindings for %s %s (%d inputs)", profile, XR_SUCCEEDED(r) ? "accepted" : result_name(xr, g_instance, r), (int)list.size());
+            return XR_SUCCEEDED(r);
         }
 
         bool read_bool(const XrApi& xr, XrSession session, XrAction action, int hand)
@@ -321,6 +326,7 @@ namespace hsvr
         // Touch sensors (finger curls for fists); not fatal if a runtime refuses them.
         make_action(xr, XR_ACTION_TYPE_BOOLEAN_INPUT, "trigger_touch", "Finger on trigger", g_trigger_touch);
         make_action(xr, XR_ACTION_TYPE_BOOLEAN_INPUT, "thumb_touch", "Thumb resting", g_thumb_touch);
+        make_action(xr, XR_ACTION_TYPE_BOOLEAN_INPUT, "bug_marker", "Bug marker (replay)", g_marker);
 
         const char* grip = "/input/grip/pose";
         const char* aim = "/input/aim/pose";
@@ -368,6 +374,35 @@ namespace hsvr
                  {&g_stick_click, "/input/trackpad/click", "/input/trackpad/click"},
                  {&g_menu, "/input/menu/click", "/input/menu/click"},
                  {&g_haptic, haptic, haptic}});
+        // Steam Frame controllers, native (Matthew's, 2026-11-22). Without this SteamVR runs the mod as
+        // Touch and puts left Y on D-pad Up, Left AND Right (frame_controller_remapping.json), so the
+        // grip flip and the bug marker shared three directions. Here: left D-pad Down = A/X (jump),
+        // Up = B/Y (grip flip), Left = bug marker only, Right free; View = menu; right A/B as Touch.
+        // Paths from SteamVR's vrclient_x64.dll table and the Frame driver profile. One unknown path
+        // refuses the whole layout, so a smaller set is tried next; if both fail, the Touch remap stays.
+        if (g_ext_frame)
+        {
+            const char* fp = "/interaction_profiles/valve/frame_controller";
+            std::vector<Binding> core = {{&g_grip_pose, grip, grip},
+                                         {&g_aim_pose, aim, aim},
+                                         {&g_trigger, "/input/trigger/value", "/input/trigger/value"},
+                                         {&g_squeeze, "/input/squeeze/value", "/input/squeeze/value"},
+                                         {&g_stick, "/input/thumbstick", "/input/thumbstick"},
+                                         {&g_stick_click, "/input/thumbstick/click", "/input/thumbstick/click"},
+                                         {&g_primary, "/input/dpad_down/click", "/input/a/click"},
+                                         {&g_secondary, "/input/dpad_up/click", "/input/b/click"},
+                                         {&g_marker, "/input/dpad_left/click", nullptr},
+                                         {&g_menu, "/input/view/click", nullptr},
+                                         {&g_haptic, haptic, haptic}};
+            std::vector<Binding> full = core;
+            full.push_back({&g_trigger_touch, "/input/trigger/touch", "/input/trigger/touch"});
+            full.push_back({&g_thumb_touch, "/input/thumbstick/touch", "/input/thumbstick/touch"});
+            full.push_back({&g_thumb_touch, "/input/dpad_up/touch", "/input/a/touch"});
+            full.push_back({&g_thumb_touch, "/input/dpad_down/touch", "/input/b/touch"});
+            full.push_back({&g_thumb_touch, "/input/dpad_left/touch", "/input/x/touch"});
+            full.push_back({&g_thumb_touch, "/input/dpad_right/touch", "/input/y/touch"});
+            if (!suggest(xr, fp, full) && !suggest(xr, fp, core)) HSVR_LOG("Controllers: Steam Frame layout refused; SteamVR will remap the Touch layout instead");
+        }
         // The minimal layout every runtime supports.
         suggest(xr, "/interaction_profiles/khr/simple_controller",
                 {{&g_grip_pose, grip, grip},
@@ -458,6 +493,7 @@ namespace hsvr
             hand.primary = read_bool(xr, session, g_primary, h);
             hand.secondary = read_bool(xr, session, g_secondary, h);
             hand.menu = read_bool(xr, session, g_menu, h);
+            hand.marker = read_bool(xr, session, g_marker, h);
             hand.trigger_touch = read_bool(xr, session, g_trigger_touch, h);
             hand.thumb_touch = read_bool(xr, session, g_thumb_touch, h);
             // Sensor curls (as Matthew's framework, ik/fingers.rs): the thumb resting on a control is
@@ -499,6 +535,7 @@ namespace hsvr
             if (hit > 0.01f && hit >= buzz) pulse(xr, session, h, hit, 1.0 / 30.0);
             else if (buzz > 0.01f) pulse(xr, session, h, (std::min)(1.0f, buzz), 0.02);
         }
+        s.frame_layout = g_frame_active.load();
         std::lock_guard<std::mutex> lock(g_state_mutex);
         g_state = s;
     }
@@ -524,6 +561,7 @@ namespace hsvr
             uint32_t length = 0;
             xr.PathToString(instance, state.interactionProfile, XR_MAX_PATH_LENGTH, &length, text);
             HSVR_LOG("Controllers: %s hand uses layout %s", kHandName[h], text);
+            if (h == 0) g_frame_active.store(std::strcmp(text, "/interaction_profiles/valve/frame_controller") == 0);
         }
     }
 
@@ -531,6 +569,11 @@ namespace hsvr
     {
         std::vector<const char*> want;
         g_ext_hand_tracking = g_ext_motion_range = false;
+        g_ext_frame = false;
+        for (const std::string& e : offered)
+            if (e == kFrameExt && config().input_frame_layout) g_ext_frame = true;
+        if (g_ext_frame) want.push_back(kFrameExt);
+        HSVR_LOG("Controllers: Steam Frame controller layout %s", g_ext_frame ? "offered: using it" : "not used (not offered or input_frame_layout=0)");
         if (!config().input_hand_tracking) return want;
         for (const std::string& e : offered)
         {
