@@ -8848,6 +8848,7 @@ namespace
     // (fist on its forward grip) until that hand opens, then mounted again (mount_grip / mount_fist_release).
     UObject* g_mount_fist[2] = {nullptr, nullptr};
     bool g_mount_fist_tracked = track_freed(&g_mount_fist[0]) && track_freed(&g_mount_fist[1]);
+    bool g_mount_fist_game[2] = {false, false}; // held with the game's forearm grip (pose_mount_fist_grip 2), not by a handle
     // How far it moved from its mounted place as the hand took the forward grip, measured 0.3 s after (cm).
     double g_mount_fist_moved[2] = {-1.0, -1.0};
     struct MountFistCheck
@@ -8859,7 +8860,7 @@ namespace
     MountFistCheck g_mount_fist_check[2];
     bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg)
     {
-        if (shield && shield == g_mount_fist[side]) return true;
+        if (shield && shield == g_mount_fist[side] && g_mount_fist_game[side]) return true;
         if (cfg.pose_pavise_strap && pavise_spec(shield)) return false; // held by the strap, mounted by the player
         if (!cfg.pose_pavise_forearm || !shield || !(class_name_starts(shield, STR("Shield_Pavise")) || class_name_starts(shield, STR("Shield_Tagre")))) return false;
         double g = read_number_variable(shield, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default"));
@@ -9315,45 +9316,97 @@ namespace
     {
         Mount& m = g_mount[side];
         if (!m.weapon || m.pawn != pawn) return false;
-        // Only where the game has a forearm grip for that hand (6 or 7), whose scene the mount uses: the heavy
-        // pavise's right is 8 (a handle in the hand, the mount there is the mod's mirror image) and the tower
-        // has none, so those would jump into the hand: their hand closes on the strap as before.
-        const double game_grip = object_alive(m.weapon) ? read_number_variable(m.weapon, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default")) : 0.0;
-        const bool forearm_grip = game_grip == 6.0 || game_grip == 7.0;
-        if (hsvr::config().pose_mount_fist_grip && !forearm_grip)
-            HSVR_LOG_EVERY(2.0, "Pavise: %s hand: the game has no forearm grip for %ls in that hand (grip %.0f): it closes on the strap only", side == 0 ? "left" : "right",
-                           m.weapon->GetName().c_str(), game_grip);
-        if (hsvr::config().pose_mount_fist_grip && forearm_grip && !object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")))
+        const hsvr::Config& cfg = hsvr::config();
+        const char* hand = side == 0 ? "left" : "right";
+        UObject* w = m.weapon;
+        const bool hand_free = object_alive(w) && !object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+        // 1: the handle by the hand, held in that hand as any handle is (the mod's grip: the fingers close on
+        // it and the shield follows the hand), the strap still round the forearm when the hand opens (Matthew
+        // 2026-11-23 19:00Z: "When the light [Pavise] is strapped to my forearm, I still want the ability to
+        // grab main handle, the one that's right by my hand"). His playtest on mode 2 (the game's forearm
+        // grip): no handle in the hand, the hold pulling a forearm-jointed shield 26 cm and 95 deg off.
+        if (cfg.pose_mount_fist_grip == 1 && hand_free)
         {
-            UObject* w = m.weapon;
+            using namespace hsvr;
+            Vec3 bp = component_location(m.base);
+            Quat bq = component_rotation(m.base);
+            Vec3 palm = hand_grab_point(m.mesh, side);
+            const std::vector<Handle>& hs = item_handles(w, m.base);
+            double t = 0.0, d = 1e9;
+            int hi = nearest_handle(hs, bq.inverse().rotate(palm - bp), t, d);
+            if (hi < 0 || d > cfg.pose_mount_handle_cm)
+            {
+                HSVR_LOG("Pavise: %s hand closes by %ls on its forearm: no handle within %.0f cm of the palm (nearest %s %.1f cm): it closes on the strap", hand,
+                         w->GetName().c_str(), cfg.pose_mount_handle_cm, hi >= 0 ? hs[hi].name.c_str() : "none", d);
+            }
+            else
+            {
+                Handle hd = hs[hi];
+                MountFistCheck check{now_seconds(), bp, bq};
+                Mount keep = m;
+                unjoin_mount(m);
+                m = Mount{};
+                bool ok = take_by_strap(side, pawn, keep.mesh, w, keep.base, hd, palm);
+                if (ok)
+                {
+                    g_mount_fist[side] = w;
+                    g_mount_fist_game[side] = false;
+                    g_mount_fist_check[side] = check;
+                    g_mount_fist_moved[side] = -1.0;
+                    controllers_buzz(side, 0.3f);
+                    HSVR_LOG("Pavise: %s hand closes on the %s of %ls on its own forearm (%.1f cm from the palm): held in that hand by it; opening the hand mounts it again",
+                             hand, hd.name.c_str(), w->GetName().c_str(), d);
+                    return true;
+                }
+                Call(w, STR("Set Weapon Damping Pick Up")).run();
+                m = keep;
+                m.joint = m.anchor = m.beside_joint = nullptr;
+                m.beside = nullptr;
+                m.no_collide.clear();
+                if (!join_mount(side, m)) unmount_loose(side, "the hand could not take it and no joint could be made");
+                HSVR_LOG("Pavise: %s hand could NOT take the %s of %ls; it stays mounted", hand, hd.name.c_str(), w->GetName().c_str());
+                return true;
+            }
+        }
+        // 2: the game's own forearm grip, only where the game has one for that hand (6 or 7), whose scene the
+        // mount uses: the heavy pavise's right is 8 (a handle in the hand) and the tower has none.
+        const double game_grip = object_alive(w) ? read_number_variable(w, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default")) : 0.0;
+        const bool forearm_grip = game_grip == 6.0 || game_grip == 7.0;
+        if (cfg.pose_mount_fist_grip == 2 && !forearm_grip)
+            HSVR_LOG_EVERY(2.0, "Pavise: %s hand: the game has no forearm grip for %ls in that hand (grip %.0f): it closes on the strap only", hand, w->GetName().c_str(),
+                           game_grip);
+        if (cfg.pose_mount_fist_grip == 2 && forearm_grip && hand_free)
+        {
             Mount keep = m;
             g_mount_fist_check[side] = MountFistCheck{hsvr::now_seconds(), component_location(m.base), component_rotation(m.base)};
             g_mount_fist_moved[side] = -1.0;
             unjoin_mount(m);
             m = Mount{};
             g_mount_fist[side] = w;
+            g_mount_fist_game[side] = true;
             bool ok = give_hand_weapon(side, pawn, w) && object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) == w;
             if (ok)
             {
                 g_pending_free[side] = FreeGrip{};
                 g_pending_item[side] = nullptr;
                 hsvr::controllers_buzz(side, 0.3f);
-                HSVR_LOG("Pavise: %s hand closes on the forward grip of %ls on its own forearm: in that hand, the game's own forearm grip %.0f",
-                         side == 0 ? "left" : "right", w->GetName().c_str(), read_number_variable(pawn, side == 0 ? STR("L_GripType_Current") : STR("R_GripType_Current")));
+                HSVR_LOG("Pavise: %s hand closes on the forward grip of %ls on its own forearm: in that hand, the game's own forearm grip %.0f", hand,
+                         w->GetName().c_str(), read_number_variable(pawn, side == 0 ? STR("L_GripType_Current") : STR("R_GripType_Current")));
                 return true;
             }
             g_mount_fist[side] = nullptr;
+            g_mount_fist_game[side] = false;
             m = keep;
             m.joint = m.anchor = m.beside_joint = nullptr;
             m.beside = nullptr;
             m.no_collide.clear();
             if (!join_mount(side, m)) unmount_loose(side, "the hand could not take it and no joint could be made");
-            HSVR_LOG("Pavise: %s hand could NOT take the forward grip of %ls; it stays mounted", side == 0 ? "left" : "right", w->GetName().c_str());
+            HSVR_LOG("Pavise: %s hand could NOT take the forward grip of %ls; it stays mounted", hand, w->GetName().c_str());
             return true;
         }
         m.gripped = true;
         hsvr::controllers_buzz(side, 0.3f);
-        HSVR_LOG("Pavise: %s hand grips the strap of the pavise on its own forearm (nothing else in reach)", side == 0 ? "left" : "right");
+        HSVR_LOG("Pavise: %s hand grips the strap of the pavise on its own forearm (nothing else in reach)", hand);
         return true;
     }
 
@@ -9371,6 +9424,7 @@ namespace
     {
         if (!w || w != g_mount_fist[side]) return false;
         g_mount_fist[side] = nullptr;
+        g_mount_fist_game[side] = false;
         UObject* base = object_property(w, STR("BaseMesh"));
         const PaviseSpec* spec = pavise_spec(w);
         if (!base || !spec || g_mount[side].weapon) return false;
@@ -14398,7 +14452,7 @@ namespace
                 held[side] = false; // the grip still closed: this tick looks for something to take
             }
             // Forward grip of a mounted shield: forgotten once it left that hand some other way (passed, disarmed).
-            if (g_mount_fist[side] && object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != g_mount_fist[side]) g_mount_fist[side] = nullptr;
+            if (g_mount_fist[side] && object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) != g_mount_fist[side]) g_mount_fist[side] = nullptr, g_mount_fist_game[side] = false;
             if (g_mount_fist_check[side].at >= 0.0 && now_seconds() - g_mount_fist_check[side].at >= 0.3)
             {
                 MountFistCheck& c = g_mount_fist_check[side];
