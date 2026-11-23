@@ -10011,6 +10011,7 @@ namespace
         punch_last_victim[side] = victim;
         punch_last_t[side] = t_hit;
         double last_cdi = read_number_variable(victim, STR("Last Complex Damage Impulse")), last_taken = read_number_variable(victim, STR("Last Damage Taken"));
+        std::string last_cdb = nested_name(victim, {STR("Last Complex Damage Bone")}), last_db = nested_name(victim, {STR("Last Damaged Bone")});
         bool cleared = false;
         if (new_punch && config().pose_fist_new_punch_counts)
         {
@@ -10060,10 +10061,10 @@ namespace
         std::wstring b = bone ? reinterpret_cast<FName*>(locals + bone->GetOffset_Internal())->ToString() : STR("?");
         HSVR_LOG("Punch: %s fist %s %ls (%ls): velocity %.0f cm/s (hand %.0f), impulse %.0f (game's %.0f), rigidity %.2f, cut %.2f, stab %.2f, kick %.2f, blunt %.0f, draw %.2f, "
                  "lower %d, parent %d, extra %d, cos(velocity, impulse) %.2f, cos(velocity, normal) %.2f; learnt from %d hits: rigidity %.2f, cut %.2f, impulse/velocity %.3f, velocity/hand %.2f; "
-                 "%s (game's last counted: complex impulse %.0f, damage %.2f; this one %.0f)",
+                 "%s (game's last counted: complex impulse %.0f on %s, damage %.2f on %s; this one %.0f)",
                  side == 0 ? "left" : "right", blow ? "blow on" : "touch on", victim->GetName().c_str(), b.c_str(), speed, hand_speed, length(ni), game_ni, r, c, s, P.kick, P.blunt_int, P.draw_cut,
                  (int)P.lower_threshold, (int)P.damage_parent, (int)P.extra_high, cos_ni, cos_n, P.n, P.rigidity, P.cut, P.impulse_per_v, P.v_per_speed,
-                 cleared ? "new punch, checks cleared" : new_punch ? "new punch" : "same punch", last_cdi, last_taken, length(ni) * (c + 1.0));
+                 cleared ? "new punch, checks cleared" : new_punch ? "new punch" : "same punch", last_cdi, last_cdb.c_str(), last_taken, last_db.c_str(), length(ni) * (c + 1.0));
     }
 
     // After his Deal Complex Damage: what the blow (or touch) did to him.
@@ -10080,7 +10081,10 @@ namespace
             g_punch_counted_serial = g_punch_serial;
             g_count_punches_counted.fetch_add(1);
         }
-        HSVR_LOG("Punch: -> %ls health %.2f -> %.2f, consciousness %.2f -> %.2f", w->GetName().c_str(), g_punch_h0, h1, g_punch_c0, c1);
+        // What the game now remembers (the "must beat the last hit on that bone" checks the next contact meets).
+        HSVR_LOG("Punch: -> %ls health %.2f -> %.2f, consciousness %.2f -> %.2f; game now remembers complex impulse %.0f on %s, damage %.2f on %s", w->GetName().c_str(), g_punch_h0, h1,
+                 g_punch_c0, c1, read_number_variable(w, STR("Last Complex Damage Impulse")), nested_name(w, {STR("Last Complex Damage Bone")}).c_str(),
+                 read_number_variable(w, STR("Last Damage Taken")), nested_name(w, {STR("Last Damaged Bone")}).c_str());
     }
 
     void install_punch_watch()
