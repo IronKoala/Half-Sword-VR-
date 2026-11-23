@@ -854,6 +854,11 @@ namespace hsvr
         // Nor inside what that hand just let go of (playtest 2026-11-23: a shield let go with the fingers
         // still curled was shoved out of the hand by the fist made inside it), until the ball is clear of it.
         bool pose_fist_clear_dropped = true;
+        // A let-go keeps the item's own velocity from the hand: for 0.15 s a velocity > 1 m/s off it is put
+        // back (PC run f2e499f: shields let go from a still hand left at ~4 m/s).
+        bool pose_drop_keep_velocity = true;
+        // The joint hold on an item let go of is removed before the game's release, not after it.
+        bool pose_drop_joint_first = true;
         // A fist blow's assisted impulse (hit_assist) goes into the victim's damage as is. The game
         // scales a sliding contact by the weapon's cutting rate, ~0 for a fist ball, so without this
         // a hard punch reached his damage as impulse ~1 (playtest 2026-11-22).

@@ -6403,13 +6403,17 @@ namespace
         hsvr::Vec3 p0{};
         double max_xy = 0.0;
         double next_log = 0.0;
+        hsvr::Vec3 v0{};   // its own velocity over the last ~60 ms in the hand (recent_com_velocity)
+        bool have_v0 = false;
+        bool thrown = false;
+        int kept = 0;      // ticks its velocity was put back
     };
     DropTrace g_drop_trace[2];
     bool g_drop_trace_tracked = track_freed(&g_drop_trace[0].item) && track_freed(&g_drop_trace[0].base) && track_freed(&g_drop_trace[1].item) &&
                                 track_freed(&g_drop_trace[1].base);
     hsvr::Vec3 component_location(UObject* component);
 
-    void drop_trace_start(int side, UObject* item)
+    void drop_trace_start(int side, UObject* item, bool thrown, const hsvr::Vec3& v0, bool have_v0)
     {
         DropTrace& d = g_drop_trace[side];
         d = DropTrace{};
@@ -6418,6 +6422,9 @@ namespace
         if (!d.base) return;
         d.t0 = hsvr::now_seconds();
         d.p0 = component_location(d.base);
+        d.thrown = thrown;
+        d.v0 = v0;
+        d.have_v0 = have_v0;
     }
 
     void drop_trace(UObject* pawn)
@@ -6434,6 +6441,30 @@ namespace
                 d.base = nullptr;
                 continue;
             }
+            // A let-go (not a throw) leaves with the item's own velocity from the hand and then falls. PC run
+            // f2e499f: a shield let go from a still hand left at ~4 m/s in the release tick (22-56 cm sideways
+            // in 0.3 s, with or without the fist), the hold's joint just gone. For 0.15 s, a velocity more than
+            // 1 m/s off that is put back (and its spin stopped).
+            if (hsvr::config().pose_drop_keep_velocity && !d.thrown && d.have_v0 && age <= 0.15)
+            {
+                Call lv(d.base, STR("GetPhysicsLinearVelocity"));
+                lv.run();
+                hsvr::Vec3 v = lv.vec(), want = d.v0 + hsvr::Vec3{0, 0, -980.0 * age};
+                if (hsvr::length(v - want) > 100.0)
+                {
+                    Call slv(d.base, STR("SetPhysicsLinearVelocity"));
+                    slv.three(STR("NewVel"), want.x, want.y, want.z);
+                    slv.flag(STR("bAddToCurrent"), false);
+                    slv.run();
+                    Call sav(d.base, STR("SetPhysicsAngularVelocityInRadians"));
+                    sav.three(STR("NewAngVel"), 0.0, 0.0, 0.0);
+                    sav.flag(STR("bAddToCurrent"), false);
+                    sav.run();
+                    ++d.kept;
+                    HSVR_LOG("Drop trace %.3f s: %s hand's %ls was given %.0f cm/s at the let-go (its own %.0f): put back", age, side == 0 ? "left" : "right",
+                             d.item->GetName().c_str(), hsvr::length(v), hsvr::length(d.v0));
+                }
+            }
             hsvr::Vec3 m = component_location(d.base) - d.p0;
             double xy = std::sqrt(m.x * m.x + m.y * m.y);
             if (age <= 0.3) d.max_xy = (std::max)(d.max_xy, xy);
@@ -6446,7 +6477,10 @@ namespace
         }
     }
 
-    void drop_weapon(int side, UObject* pawn, bool thrown = false)
+    void jh_release_for_drop(int side, UObject* w);
+    // loose: a plain let-go into the world (grab_button), not a hand-over, hang or mount: only then is the
+    // item's own velocity kept (pose_drop_keep_velocity).
+    void drop_weapon(int side, UObject* pawn, bool thrown = false, bool loose = false)
     {
         UObject* held = pawn ? object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) : nullptr;
         // A fist is not a weapon to drop: it goes.
@@ -6506,11 +6540,14 @@ namespace
                 *slot = nullptr;
             }
         }
+        hsvr::Vec3 v_before{};
+        bool have_v = held && recent_com_velocity(side, held, v_before);
+        if (held && hsvr::config().pose_drop_joint_first) jh_release_for_drop(side, held);
         pawn->ProcessEvent(fn, parameters);
         if (held)
         {
             g_just_dropped[side] = JustDropped{held, hsvr::now_seconds()};
-            drop_trace_start(side, held);
+            drop_trace_start(side, held, thrown || !loose, v_before, have_v);
         }
         if (kept_scab)
         {
@@ -13973,7 +14010,7 @@ namespace
                 {
                     if (hurt) HSVR_LOG("Injury: %s arm hurt: its hand lets go", hand);
                     bool throw_it = !hurt && cfg.pose_throw && g_hand_world_v[side] >= cfg.pose_throw_speed && !is_fist(mine);
-                    drop_weapon(side, pawn, throw_it);
+                    drop_weapon(side, pawn, throw_it, true);
                     HSVR_LOG("Grab: %s grip let go: %s %ls (hand %.1f m/s)", hand, throw_it ? "threw" : "dropped", mine->GetName().c_str(), g_hand_world_v[side]);
                 }
                 else if (!mine)
@@ -15488,6 +15525,27 @@ namespace
     // than its accel caps (heavier things slower). The joint pulls instead of the velocity being set, so what
     // it bumps pushes back as physics. Accel-mode drives: k = w^2, c = 2 w, caps as accelerations.
     JointHand g_jo[2];
+
+    // The hand's joint hold on an item it lets go of, removed BEFORE the game's Set Up <S> Hand Weapon(None)
+    // (it went at the end of that tick, after the release: PC run f2e499f, a still hand's shield left at
+    // ~4 m/s). The same bookkeeping as the end-of-tick removal.
+    void jh_release_for_drop(int side, UObject* w)
+    {
+        for (int i = 0; i < 2; ++i)
+        {
+            JointHand& j = g_jh[side][i];
+            if (j.weapon != w || !(j.sphere || j.con)) continue;
+            HSVR_LOG("Joint hold: %s hand's joint on %ls removed before the let-go", side == 0 ? "left" : "right", w->GetName().c_str());
+            if (i == 0) g_jh_gone[side] = JointGone{j.weapon, hsvr::now_seconds(), j.made_t, j.fade_until};
+            jh_destroy(j);
+        }
+        JointHand& o = g_jo[side];
+        if (o.weapon == w && (o.sphere || o.con))
+        {
+            HSVR_LOG("Joint hold: %s hand's other joint on %ls removed before the let-go", side == 0 ? "left" : "right", w->GetName().c_str());
+            jh_destroy(o);
+        }
+    }
     bool g_jo_tracked = on_freed([] {
         for (JointHand& j : g_jo)
         {
@@ -20584,6 +20642,12 @@ namespace
         double last_slide_t = -1.0;
     };
     ScabHold g_scab[2];
+    // A held scabbard freed (a map change while holding it): forgotten, not read (PC run f2e499f: access
+    // violation in hand_on_scabbard on the freed scabbard after a room reopen with the left hand on one).
+    bool g_scab_tracked = on_freed([] {
+        for (ScabHold& h : g_scab)
+            if (gone(h.scab)) h = ScabHold{};
+    });
     UObject* held_scabbard(int side) { return g_scab[side].active ? g_scab[side].scab : nullptr; }
 
     // A scabbard's length along its own Z, from its collision: the stretch of its axis within 3.5 cm of it.
