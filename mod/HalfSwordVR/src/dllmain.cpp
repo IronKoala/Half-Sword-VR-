@@ -14609,6 +14609,19 @@ namespace
                         // pommel (playtest 2026-11-22: second-hand grabs sat on it at -29.5 cm).
                         double pz = component_rotation(base).inverse().rotate(component_location(pom) - component_location(base)).z;
                         double floor_z = pz + cfg.pose_grip_pommel_top_cm + half;
+                        // The game's own off-hand spot when it is lower (Matthew 2026-11-23, "do it the way the vanilla game
+                        // does it"): on a short hand-and-a-half grip (Grip_15: off hand -10, pommel top -10) the second hand
+                        // goes where the game puts it, on the pommel's top, rather than not fitting at all.
+                        if (UObject* off = object_property(item, STR("Grip L Hand Off Hand")))
+                        {
+                            double oz = component_rotation(base).inverse().rotate(component_location(off) - component_location(base)).z;
+                            if (oz < floor_z && oz > pz - 2.0 * half && oz < hs.back().b.z)
+                            {
+                                HSVR_LOG("Handles: %ls: the game's off-hand spot %.1f cm is under the pommel stop %.1f: the slide goes down to it", item->GetName().c_str(), oz,
+                                         floor_z);
+                                floor_z = oz;
+                            }
+                        }
                         {
                             // Where the pommel really is along the weapon: its world box's corners on the axis (a box
                             // round a tilted pommel reads a bit long). The decomp says the pommel mesh's origin is its
