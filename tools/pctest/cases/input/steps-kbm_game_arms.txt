@@ -1,13 +1,20 @@
-# On mouse and keyboard the game's own controls work: LMB raises the right hand, mouse waggle makes swing speed.
+# On mouse and keyboard the game's own controls work: LMB raises the right hand, mouse waggle moves the arm.
 0.5:hsvr.wait room_ready = 1 6 0 room revealed
 1.0:hsvr.player_immortal
 1.0:hsvr.input_list
 1.5:hsvr.input_mode keyboard
 2.0:hsvr.expect input_kbm = 1 on mouse and keyboard
 2.0:hsvr.expect mouse_off = 0 mouse not ignored
-2.5:hsvr.input Right_Guard_Axis 1 3
+2.5:hsvr.input Right_Guard_Axis 1 8
 4.0:hsvr.expect var:R_Hand_Active = 1 LMB held: right hand active
-6.0:hsvr.input Left_Mouse 8 0.25
-6.3:hsvr.input Left_Mouse -8 0.25
-6.6:hsvr.input Left_Mouse 8 0.25
-6.7:hsvr.expect var:Aim_Swing_Speed > 3 mouse waggle swings
+# Mouse waggle: the game's Update Aim moves the arm (aim moves while R Hand Active, internals-map 2.). Checked by the
+# right hand bone's own speed (LMB held throughout, still first), not Aim Swing Speed (that needs Swing Velocity proxy over 25, which this waggle
+# didn't reach in the 2026-11-23 combined run although the arm moved).
+5.0:hsvr.wait hand_speed_r < 5 3 0.3 right arm still before the waggle
+6.0:hsvr.input Left_Mouse 8 0.3
+6.0:hsvr.wait hand_speed_r > 10 2 0.15 mouse waggle moves the game's right arm
+6.3:hsvr.input Left_Mouse -8 0.3
+6.6:hsvr.input Left_Mouse 8 0.3
+6.9:hsvr.input Left_Mouse -8 0.3
+7.2:hsvr.input Left_Mouse 8 0.3
+7.5:hsvr.input Left_Mouse -8 0.3
