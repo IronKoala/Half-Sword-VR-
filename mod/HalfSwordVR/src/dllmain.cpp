@@ -27105,6 +27105,13 @@ namespace
         else if (w == "two_hand") value = g_two.active ? 1.0 : 0.0;
         else if (w == "fist_r") value = is_fist(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
         else if (w == "fist_l") value = is_fist(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
+        else if (w == "scab_pinned_l" || w == "scab_pinned_r")
+        {
+            // the held weapon's own scabbard is pinned on his belt (1), not (0), or it has none (-1)
+            UObject* held = object_property(pawn, w.back() == 'l' ? STR("Weapon L") : STR("Weapon R"));
+            UObject* sc = held ? object_property(held, STR("Scabbard")) : nullptr;
+            value = !sc ? -1.0 : scabbard_pin(sc) ? 1.0 : 0.0;
+        }
         else if (w == "drop_xy_l" || w == "drop_xy_r") value = g_drop_trace[w.back() == 'l' ? 0 : 1].max_xy; // cm sideways, last drop's first 0.3 s
         else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
         else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
