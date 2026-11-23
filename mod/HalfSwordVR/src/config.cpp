@@ -694,6 +694,7 @@ namespace hsvr
         flag("pose_two_hand_twist_only", c.pose_two_hand_twist_only);
         flag("pose_two_hand_joint_both_turn", c.pose_two_hand_joint_both_turn);
         flag("pose_two_hand_joint_line", c.pose_two_hand_joint_line);
+        num("pose_two_hand_line_ref_cm", c.pose_two_hand_line_ref_cm);
         flag("pose_two_hand_fixed_rebase", c.pose_two_hand_fixed_rebase);
         num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
         flag("pose_fists", c.pose_fists);

@@ -337,6 +337,7 @@ LAYOUT = [
         ('pose_two_hand_twist_only', '1 = with two hands the turning hand only rolls the weapon; your two hands point it.'),
         ('pose_two_hand_joint_both_turn', 'Engine-joint hold, both hands on fixed grips (crossbow, sword grip zones): 1 = both wrists turn the weapon, each toward its own hand; 0 = the first hand only rolls it (lags and creeps back toward the line between the hands).'),
         ('pose_two_hand_joint_line', '1 = two hands on the joint hold: the weapon lies along the line between your hands, rolled as your main hand has it, and both hands hold that one pose (no tug of war between them). 0 = the older two-hand modes below.'),
+        ('pose_two_hand_line_ref_cm', 'Two hands on a sliding grip: how the weapon is aimed. Grips this far apart (cm) aim half by your main wrist and half by the line between your hands; closer grips (swords) aim mostly by the wrist, wider ones (polearms) mostly by the line. 0 = always the line. Fixed grips (crossbow) always use the line.'),
         ('pose_two_hand_fixed_rebase', 'Both wrists on fixed grips: 1 = the second hand takes its turn and spot from the first hand as it grabs, so the two never pull against each other at rest.'),
         ('pose_two_hand_swing_share', '0..1: how much the turning hand still points a two-handed weapon (1 = old).'),
         ('pose_two_hand_blade_gap_cm', 'The blade grip zone starts this far past the guard (cm).'),

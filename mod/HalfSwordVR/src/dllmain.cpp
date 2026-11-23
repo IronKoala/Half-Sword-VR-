@@ -2331,6 +2331,7 @@ namespace
     // weapon's grip line (cm, across it). hsvr.hand_spread <side> <cm> puts that fake controller this much further
     // from the other one along the line between them (real hands are never exactly on the grips).
     std::atomic<double> g_two_line_deg{0.0}, g_two_off_cm{0.0}, g_two_line_now{0.0}, g_two_off_now{0.0};
+    std::atomic<double> g_two_wrist_deg{0.0}, g_two_wrist_now{0.0}; // the weapon's grip line against where the main wrist points it (deg)
     std::atomic<double> g_hand_spread[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     double g_jump_until = -1.0;               // a jump released by left X: until then the capsule's rise is the game's jump, not a climb
@@ -16394,13 +16395,37 @@ namespace
                 tw = n > 1e-9 ? Quat{tw.x / n, tw.y / n, tw.z / n, tw.w / n} : Quat{};
                 line_rot = (tw * aligned).normalized();
             }
+            // Close-together grips point with the WRISTS (playtest 2026-11-23, 37e2bcf: the swords sat 19-51 deg off where
+            // his main wrist pointed them and within 2-12 deg of the hands' line, which on a sword grip is 10-18 cm long:
+            // "I can't properly point the tip outward ... can't properly do strikes"). So the pose is the main wrist's
+            // turned toward the hands' line by f = s^2 / (s^2 + ref^2) of the way (s = the grips' distance): a sword grip
+            // (10-16 cm) mostly the wrist, a polearm (50 cm) mostly the line. Fixed grips (the crossbow) keep the line.
+            double f_line = 1.0;
+            if (!(g_two.use_rel && !g_two.has_handle) && cfg.pose_two_hand_line_ref_cm > 0.0)
+            {
+                double sd = length(d_local), ref = cfg.pose_two_hand_line_ref_cm;
+                f_line = sd * sd / (sd * sd + ref * ref);
+                Vec3 sw = scaled_axis((line_rot * target_rot.inverse()).normalized());
+                double ang = length(sw);
+                if (ang < 150.0 / 57.2958)
+                    line_rot = (from_scaled_axis(sw * (1.0 - f_line)).inverse() * line_rot).normalized(); // = from target_rot, f_line of the way to the line
+                else
+                    f_line = 1.0; // the wrist far round from the line (half a turn): the line, as before
+            }
             Vec3 miss = between - line_rot.rotate(d_local); // along the line: hands further apart (or closer) than the grips
             double w2 = (std::max)(0.0, s2b.total) / (std::max)(0.05, (std::max)(0.0, body.total) + (std::max)(0.0, s2b.total));
+            if (f_line < 1.0)
+            {
+                // Across the line the main hand stays where it is (the wrist points it) and the second takes most of the miss.
+                Vec3 u = normalized(line_rot.rotate(d_local));
+                Vec3 m_along = u * dot(miss, u), m_across = miss - m_along;
+                miss = m_along + m_across * f_line;
+            }
             line_main = target_pivot + miss * w2;
             s_rot = line_rot;
             s_pos = line_main - line_rot.rotate(pivot);
-            HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls (two hands, one pose): along the hands' line, %.0f deg from the main wrist's turn (only its roll is used); hands %.1f cm %s than the grips (%.0f%% of it on the main hand)",
-                           side == 0 ? "left" : "right", weapon->GetName().c_str(), length(scaled_axis((line_rot * target_rot.inverse()).normalized())) * 57.2958,
+            HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls (two hands, one pose): %.0f%% toward the hands' line from the main wrist, %.0f deg from the main wrist's turn; hands %.1f cm %s than the grips (%.0f%% of it on the main hand)",
+                           side == 0 ? "left" : "right", weapon->GetName().c_str(), f_line * 100.0, length(scaled_axis((line_rot * target_rot.inverse()).normalized())) * 57.2958,
                            std::fabs(length(between) - length(d_local)), length(between) >= length(d_local) ? "further apart" : "closer", w2 * 100.0);
         }
         if (two && !line && cfg.pose_two_hand_twist_only && !both_turn)
@@ -16475,7 +16500,16 @@ namespace
                 jh_drive(o, pk * st / mm2, pc * dst / mm2, fcap2, o_turns ? ka : 0.0, o_turns ? ca : 0.0, tcap2);
                 {
                     // Test measures: the weapon's grip line against the hands' line, and each hand off the weapon's line.
+                    // With the one pose on, against the pose asked for (its grip line and both grip spots): on close-together
+                    // grips that pose is aimed mostly by the main wrist (pose_two_hand_line_ref_cm), so it leaves the hands'
+                    // line by design and the hands' line is no longer the yardstick (run 5cb1bb6: wrist aim passed, and a
+                    // sword at rest read 12-13 deg off the rig's hands' line). Without it, against the hands as before.
                     Vec3 g1 = pivot_world, g2 = at_world, h1 = target_pivot, h2 = g_two.bs_p2;
+                    if (line)
+                    {
+                        h1 = line_main;
+                        h2 = line_main + line_rot.rotate(g_two.bs_local - pivot);
+                    }
                     Vec3 wl = g2 - g1, hl = h2 - h1;
                     if (length(wl) > 5.0 && length(hl) > 5.0)
                     {
@@ -16483,12 +16517,31 @@ namespace
                         Vec3 u = normalized(wl);
                         auto across = [&](const Vec3& q) { Vec3 d = q - g1; return length(d - u * dot(d, u)); };
                         double off = (std::max)(across(h1), across(h2));
+                        Vec3 wz = normalized(target_rot.rotate(g_two.bs_local - pivot)), az = normalized(g2 - g1);
+                        double wang = std::acos((std::min)(1.0, (std::max)(-1.0, dot(wz, az)))) * 57.2958;
+                        g_two_wrist_now.store(wang);
+                        if (wang > g_two_wrist_deg.load()) g_two_wrist_deg.store(wang);
                         g_two_line_now.store(ang);
                         g_two_off_now.store(off);
-                        if (ang > g_two_line_deg.load()) g_two_line_deg.store(ang);
-                        if (off > g_two_off_cm.load()) g_two_off_cm.store(off);
-                        HSVR_LOG_EVERY(0.5, "Two hands measure: weapon line %.1f deg off the hands' line; hands %.1f / %.1f cm off the weapon's line (worst %.1f deg, %.1f cm)", ang,
-                                       across(h1), across(h2), g_two_line_deg.load(), g_two_off_cm.load());
+                        // The worst SUSTAINED error: the least of the last 3 ticks (~40 ms), so a one-tick spike (a hitch frame,
+                        // the target stepping as a test aid switches) doesn't fail a case (run 754654d: lines all under 0.5 cm,
+                        // one tick read 8.6), while a dropped or thrown weapon (0.1 s and more) still does.
+                        static double last_ang[3] = {0, 0, 0}, last_off[3] = {0, 0, 0};
+                        static int k3 = 0;
+                        last_ang[k3 % 3] = ang;
+                        last_off[k3 % 3] = off;
+                        ++k3;
+                        double sa = (std::min)((std::min)(last_ang[0], last_ang[1]), last_ang[2]), so = (std::min)((std::min)(last_off[0], last_off[1]), last_off[2]);
+                        if (sa > g_two_line_deg.load()) g_two_line_deg.store(sa);
+                        if (so > g_two_off_cm.load()) g_two_off_cm.store(so);
+                        static double spike_log_t = -1.0;
+                        if ((ang > sa + 3.0 || off > so + 3.0) && hsvr::now_seconds() - spike_log_t > 0.25)
+                        {
+                            spike_log_t = hsvr::now_seconds();
+                            HSVR_LOG("Two hands measure: one-tick spike %.1f deg / %.1f cm (sustained %.1f / %.1f)", ang, off, sa, so);
+                        }
+                        HSVR_LOG_EVERY(0.5, "Two hands measure: weapon line %.1f deg off the %s; %s %.1f / %.1f cm off the weapon's line (worst %.1f deg, %.1f cm); %.1f deg from where the main wrist points it", ang,
+                                       line ? "two-hand pose's" : "hands' line", line ? "its grip spots" : "hands", across(h1), across(h2), g_two_line_deg.load(), g_two_off_cm.load(), wang);
                     }
                 }
                 HSVR_LOG_EVERY(0.5, "Joint hold: second hand on %ls%s: %.1f cm from its spot, its turn %.0f deg from the first hand's",
@@ -28038,6 +28091,7 @@ namespace
         }
         g_two_line_deg.store(0.0);
         g_two_off_cm.store(0.0);
+        g_two_wrist_deg.store(0.0);
     }
 
     void case_end_log()
@@ -28222,6 +28276,8 @@ namespace
         else if (w == "strength_l") value = g_hold[0].body_strength;
         else if (w == "two_hand") value = g_two.active ? 1.0 : 0.0;
         else if (w == "two_line_max") value = g_two_line_deg.load();
+        else if (w == "two_wrist_max") value = g_two_wrist_deg.load();
+        else if (w == "two_wrist") value = g_two_wrist_now.load();
         else if (w == "two_off_max") value = g_two_off_cm.load();
         else if (w == "two_line") value = g_two_line_now.load();
         else if (w == "two_off") value = g_two_off_now.load();
@@ -30452,6 +30508,7 @@ namespace
             {
                 g_two_line_deg.store(0.0);
                 g_two_off_cm.store(0.0);
+                g_two_wrist_deg.store(0.0);
                 HSVR_LOG("Script: hsvr.two_reset");
                 continue;
             }

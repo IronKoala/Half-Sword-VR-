@@ -14,3 +14,4 @@ polehammer|passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_I
 # war staff: built class (Knight passport 6); its Grip L Hand Off Hand is +50, R Default 0
 warstaff|/Game/Assets/Weapons/Blueprints/Built_Weapons/Reforged/ModularWeaponBP_WarStaff_A.ModularWeaponBP_WarStaff_A_C|30
 crossbow|/Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C|front
+bastard_knight2|passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight 2|-12
