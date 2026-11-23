@@ -48,6 +48,9 @@ namespace hsvr
         // Per-eye render size in pixels (after render_scale).
         std::atomic<int> eye_width{0};
         std::atomic<int> eye_height{0};
+        // The game window's picture size (its swap chain), seen at the last Present.
+        std::atomic<int> window_width{0};
+        std::atomic<int> window_height{0};
         // True once our stereo device is installed in the engine.
         std::atomic<bool> stereo_installed{false};
         // Asked by the game thread (recenter key); consumed where the head pose is known.
@@ -63,9 +66,17 @@ namespace hsvr
         std::atomic<bool> game_wants_pointer{false};
         // View from the game's own (third-person) camera instead of the character's head.
         std::atomic<bool> third_person{false};
+        // Test pictures (hsvr.photo_cam): both eyes put at this world point looking at this yaw/pitch.
+        std::atomic<bool> photo_on{false};
+        std::atomic<double> photo_x{0.0}, photo_y{0.0}, photo_z{0.0}, photo_yaw{0.0}, photo_pitch{0.0};
+        // helmet_view 3: the eyes' near clip while a helmet is worn (cm; 0 = the normal near_clip_cm).
+        std::atomic<double> helmet_window_cm{0.0};
         // Set by a key to flip between full-resolution mode and the fallback while playing:
         // -1 = follow the settings file, 0 = fallback, 1 = full resolution.
         std::atomic<int> separate_override{-1};
+        // Both eyes dimmed toward black (0 = as rendered, 1 = black): the test room is built while the
+        // headset shows black, so nothing is seen popping in (set by the game thread).
+        std::atomic<float> blackout{0.0f};
         // Diagnostics.
         std::atomic<uint64_t> frames_submitted{0};
         std::atomic<uint64_t> frames_without_image{0};
