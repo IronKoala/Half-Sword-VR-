@@ -74,6 +74,34 @@ BODY = """10:hsvr.expect two_hand = 1 second hand took it
 27.6:hsvr.expect two_gap >= 8.9 rest: hands apart
 28:quit
 """
+# B&S two hands (pose_two_hand_bs=1): the limits are B&S's own, measured in his greatsword session 2026-11-23
+# (private\bs-2h-2026-11-23\an2h_bins.py, KingSword 6 kg + GreatSwordA, p90 of the larger, rest = both hands still >= 0.5 s p97):
+# blade vs the line between his hands rest 43 / still 55 / slow 61 / fast 57 deg; second grip off its hand rest 11 / still 20 /
+# slow 19 / fast 26 cm. B&S keeps the blade on the MAIN WRIST, not on the hands' line, so the line-mode limits (6-30 deg) do not
+# apply (run 456cfc5: B&S-held swords sat 10-21 deg off the line at rest, 33-40 in swings; all failed the line limits).
+# two_jitter_own: spin reversals not matched by the hands' own reversal; B&S 1.23% / 0.99% of two-hand ticks.
+BS_LIMITS = [
+    ("two_line_max < 6 static", "two_line_max < 44 static"),
+    ("two_off_max < 3 static", "two_off_max < 11 static"),
+    ("two_line_max < 8 spread", "two_line_max < 55 spread"),
+    ("two_off_max < 5 spread", "two_off_max < 20 spread"),
+    ("two_line_max < 15 slow", "two_line_max < 61 slow"),
+    ("two_off_max < 8 slow", "two_off_max < 19 slow"),
+    ("two_line_max < 30 fast", "two_line_max < 57 fast"),
+    ("two_off_max < 15 fast", "two_off_max < 26 fast"),
+    ("24:hsvr.expect two_off_max < 26 fast swing: grips on the pose\n", "24:hsvr.expect two_off_max < 26 fast swing: grips on the pose\n24:hsvr.expect two_jitter_own < 1.5 fast swing: spin reversals not the hands' own (B&S 1.2%)\n"),
+    ("two_line_max < 6 rest", "two_line_max < 44 rest"),
+    ("two_off_max < 3 rest", "two_off_max < 11 rest"),
+]
+
+
+def bs_limits(steps):
+    for a, b in BS_LIMITS:
+        assert a in steps, a
+        steps = steps.replace(a, b)
+    return steps.replace("follows the two-hand pose", "within B&S's own gap to the hands' line").replace("grips on the pose", "second grip within B&S's gap")
+
+
 # Swords only (grips close together): the main wrist alone points the tip, the second hand stays put
 # (playtest 2026-11-23: "I can't properly point the tip outward"). The left controller stops riding the
 # right one and holds where it is; the right wrist pitches 35 deg, then a fast 50 deg cut and back.
@@ -113,6 +141,7 @@ REPLAY = """10:hsvr.expect two_hand = 1 second hand took it
 21.5:hsvr.expect two_wrist_mean < 90 his motion: (report) mean deg the blade points off where the main wrist points it
 21.5:hsvr.expect two_lag_mean < 100 his motion: (report) mean cm the main grip is off its hand
 21.5:hsvr.expect two_jitter < 100 his motion: (report) % of ticks the spin reversed (his playtest: see the track header)
+21.5:hsvr.expect two_jitter_own < 1.5 his motion: spin reversals not his hands' own (B&S 1.23% / 0.99%)
 21.6:hsvr.ctl_replay off
 22:quit
 """
@@ -128,7 +157,9 @@ def main():
         steps = HEAD.format(path=path) + (TAKE_FRONT if along == "front" else TAKE_ALONG.format(along=along)) + BODY
         if along != "front" and abs(float(along)) <= 15.0:
             steps = steps.replace("28:quit\n", "") + WRIST.format(along=along)
-        (HERE / ("steps-%s.txt" % name)).write_text(steps, newline="\n")
+        # line mode (the crossbow always, the ctl_ cases): the line limits; B&S mode: B&S's own
+        (HERE / ("steps-line-%s.txt" % name)).write_text(steps, newline="\n")
+        (HERE / ("steps-%s.txt" % name)).write_text(steps if along == "front" else bs_limits(steps), newline="\n")
         rows.append(name)
     paths = {}
     for line in Path(sys.argv[1]).read_text().splitlines():
@@ -146,7 +177,7 @@ def main():
            "# rp_: his own recorded controller motion. ctl_: the same cases in the previous line mode (pose_two_hand_bs=0), for comparison."]
     lst += ["two_%s|steps-%s.txt" % (n, n) for n in rows]
     lst += ["rp_%s|steps-rp_%s.txt" % (n, n) for n in rp]
-    lst += ["ctl_%s|steps-%s.txt|pose_two_hand_bs=0" % (n, n) for n in rows]
+    lst += ["ctl_%s|steps-line-%s.txt|pose_two_hand_bs=0" % (n, n) for n in rows]
     lst += ["ctl_rp_%s|steps-rp_%s.txt|pose_two_hand_bs=0" % (n, n) for n in rp]
     (HERE / "list.txt").write_text("\n".join(lst) + "\n", newline="\n")
     print("wrote %d cases (+%d control)" % (len(rows), len(rows)))

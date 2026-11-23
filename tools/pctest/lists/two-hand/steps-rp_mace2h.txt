@@ -21,5 +21,6 @@
 21.5:hsvr.expect two_wrist_mean < 90 his motion: (report) mean deg the blade points off where the main wrist points it
 21.5:hsvr.expect two_lag_mean < 100 his motion: (report) mean cm the main grip is off its hand
 21.5:hsvr.expect two_jitter < 100 his motion: (report) % of ticks the spin reversed (his playtest: see the track header)
+21.5:hsvr.expect two_jitter_own < 1.5 his motion: spin reversals not his hands' own (B&S 1.23% / 0.99%)
 21.6:hsvr.ctl_replay off
 22:quit

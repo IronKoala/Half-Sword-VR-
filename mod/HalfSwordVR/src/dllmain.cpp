@@ -2335,7 +2335,7 @@ namespace
     std::atomic<double> g_two_wrist_sum{0.0}, g_two_lag_sum{0.0}; // sums since hsvr.two_reset: weapon off the main wrist (deg), main grip off its hand (cm)
     std::atomic<double> g_two_turn_sum{0.0}, g_two_hlag_sum{0.0}; // the main hold's turn_deg and lag (the replay's columns), summed
     std::atomic<int> g_two_mean_n{0};
-    std::atomic<int> g_two_ticks{0}, g_two_revs{0}; // two-hand ticks since hsvr.two_reset, and those where the weapon's spin reversed (jitter)
+    std::atomic<int> g_two_ticks{0}, g_two_revs{0}, g_two_revs_own{0}; // two-hand ticks since hsvr.two_reset, those where the weapon's spin reversed (jitter), and those not matched by his hands' own reversal
     std::atomic<double> g_hand_spread[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     double g_jump_until = -1.0;               // a jump released by left X: until then the capsule's rise is the game's jump, not a climb
@@ -16299,27 +16299,51 @@ namespace
                         {
                             // Jitter (B&S's own measure, bs_hold_measured.md): a tick where a component of the weapon's spin
                             // reverses with both ticks above 1 rad/s. B&S two hands: 1.7% of ticks; ours 2026-11-23 19:00Z: 10.4%.
-                            static Quat prev_rot{};
-                            static Vec3 prev_w{};
+                            // Also as B&S's own split (2026-11-23 greatsword session): a reversal is his own when his hands' spin
+                            // (the main target's turn, or the line between his two hands) reversed on the same component within
+                            // +-1 tick. B&S: 1.23% (KingSword) / 0.99% (GreatSwordA) of two-hand ticks were NOT his own.
+                            static Quat prev_rot{}, prev_trot{};
+                            static Vec3 prev_w{}, prev_tw{}, prev_lw{}, prev_hu{};
                             static double prev_t = -1.0;
                             static bool have_w = false;
+                            static int ctl_m[2] = {0, 0}, pend_w = 0;
+                            auto rev_mask = [](const Vec3& a, const Vec3& b) {
+                                return ((std::fabs(a.x) > 1.0 && std::fabs(b.x) > 1.0 && a.x * b.x < 0.0) ? 1 : 0) |
+                                       ((std::fabs(a.y) > 1.0 && std::fabs(b.y) > 1.0 && a.y * b.y < 0.0) ? 2 : 0) |
+                                       ((std::fabs(a.z) > 1.0 && std::fabs(b.z) > 1.0 && a.z * b.z < 0.0) ? 4 : 0);
+                            };
                             double tn = hsvr::now_seconds(), gap = tn - prev_t;
+                            Vec3 hu = normalized(hl);
                             if (prev_t > 0.0 && gap > 1e-3 && gap < 0.1)
                             {
                                 Vec3 wv = scaled_axis((rot * prev_rot.inverse()).normalized()) * (1.0 / gap);
+                                Vec3 tw = scaled_axis((target_rot * prev_trot.inverse()).normalized()) * (1.0 / gap);
+                                Vec3 lw = cross(prev_hu, hu) * (1.0 / gap);
                                 if (have_w)
                                 {
-                                    bool rev = (std::fabs(wv.x) > 1.0 && std::fabs(prev_w.x) > 1.0 && wv.x * prev_w.x < 0.0) ||
-                                               (std::fabs(wv.y) > 1.0 && std::fabs(prev_w.y) > 1.0 && wv.y * prev_w.y < 0.0) ||
-                                               (std::fabs(wv.z) > 1.0 && std::fabs(prev_w.z) > 1.0 && wv.z * prev_w.z < 0.0);
+                                    int mw = rev_mask(wv, prev_w);
+                                    int mc = rev_mask(tw, prev_tw) | rev_mask(lw, prev_lw);
+                                    // the previous tick's weapon reversal, against his hands' reversals one tick before, then and after
+                                    if (pend_w && !(pend_w & (ctl_m[0] | ctl_m[1] | mc))) g_two_revs_own.fetch_add(1);
+                                    ctl_m[0] = ctl_m[1];
+                                    ctl_m[1] = mc;
+                                    pend_w = mw;
                                     g_two_ticks.fetch_add(1);
-                                    if (rev) g_two_revs.fetch_add(1);
+                                    if (mw) g_two_revs.fetch_add(1);
                                 }
                                 prev_w = wv;
+                                prev_tw = tw;
+                                prev_lw = lw;
                                 have_w = true;
                             }
-                            else have_w = false;
+                            else
+                            {
+                                have_w = false;
+                                ctl_m[0] = ctl_m[1] = pend_w = 0;
+                            }
                             prev_rot = rot;
+                            prev_trot = target_rot;
+                            prev_hu = hu;
                             prev_t = tn;
                         }
                         Vec3 wz = normalized(target_rot.rotate(g_two.bs_local - pivot)), az = normalized(g2 - g1);
@@ -28124,6 +28148,7 @@ namespace
         else if (w == "two_wrist") value = g_two_wrist_now.load();
         else if (w == "two_jitter") value = g_two_ticks.load() > 0 ? 100.0 * g_two_revs.load() / g_two_ticks.load() : 0.0; // % of two-hand ticks
         else if (w == "two_ticks") value = g_two_ticks.load();
+        else if (w == "two_jitter_own") value = g_two_ticks.load() > 0 ? 100.0 * g_two_revs_own.load() / g_two_ticks.load() : 0.0; // % of two-hand ticks: reversals not his hands' own
         else if (w == "two_wrist_mean") value = g_two_mean_n.load() > 0 ? g_two_wrist_sum.load() / g_two_mean_n.load() : 0.0;
         else if (w == "two_lag_mean") value = g_two_mean_n.load() > 0 ? g_two_lag_sum.load() / g_two_mean_n.load() : 0.0;
         else if (w == "two_turn_mean") value = g_two_mean_n.load() > 0 ? g_two_turn_sum.load() / g_two_mean_n.load() : 0.0;
@@ -30338,6 +30363,7 @@ namespace
                 g_two_wrist_deg.store(0.0);
                 g_two_ticks.store(0);
                 g_two_revs.store(0);
+                g_two_revs_own.store(0);
                 g_two_wrist_sum.store(0.0);
                 g_two_lag_sum.store(0.0);
                 g_two_mean_n.store(0);
