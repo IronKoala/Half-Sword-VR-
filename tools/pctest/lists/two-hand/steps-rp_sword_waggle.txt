@@ -16,8 +16,8 @@
 10.2:hsvr.ctl_replay C:\dev\hsvr-2h0303\tools\pctest\lists\two-hand\tracks\sword2h-waggle.csv 0.5
 11.5:hsvr.two_reset
 21.5:hsvr.expect two_hand = 1 his motion: still held in both hands
-21.5:hsvr.expect two_turn_mean < 25 his motion: weapon follows the main wrist (mean deg off it)
-21.5:hsvr.expect two_hold_lag_mean < 13 his motion: weapon follows the main hand (mean cm behind)
+21.5:hsvr.expect two_turn_mean < 34 his motion: weapon follows the main wrist (mean deg off it)
+21.5:hsvr.expect two_hold_lag_mean < 15.8 his motion: weapon follows the main hand (mean cm behind)
 21.5:hsvr.expect two_wrist_mean < 90 his motion: (report) mean deg the blade points off where the main wrist points it
 21.5:hsvr.expect two_lag_mean < 100 his motion: (report) mean cm the main grip is off its hand
 21.5:hsvr.expect two_jitter < 100 his motion: (report) % of ticks the spin reversed (his playtest: see the track header)

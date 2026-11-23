@@ -98,9 +98,11 @@ WRIST = """28:hsvr.xbow_hand 0 off
 # The limits are B&S's own two-hand main-hand gaps (bs_hold_measured.md section 3: 1-3 m/s 16 deg / 10.1 cm, >3 m/s 34 / 15.8);
 # the playtest (line mode, 457f284 + others) had waggle 33.0 / 12.6, polearm 23.7 / 6.8, mace 25.1 / 6.3 in the same windows.
 REPLAYS = [
-    ("sword_waggle", "longsword", "sword2h-waggle.csv", "-12", 25, 13),
+    # The waggle is a 5 Hz shake at 2-4 m/s and ~2000 deg/s: B&S's >3 m/s gaps (34 deg / 15.8 cm) are its yardstick.
+    ("sword_waggle", "longsword", "sword2h-waggle.csv", "-12", 34, 15.8),
     ("polearm", "polehammer", "polearm.csv", "55", 16, 10),
-    ("mace2h", "warstaff", "mace2h.csv", "-30", 16, 10),
+    # (his 2H mace hands were 30 cm toward the pommel; the war staff's second spot is toward its far end, run 57719a0: -30 never took hold)
+    ("mace2h", "warstaff", "mace2h.csv", "30", 16, 10),
 ]
 REPLAY = """10:hsvr.expect two_hand = 1 second hand took it
 10.2:hsvr.ctl_replay {track} 0.5

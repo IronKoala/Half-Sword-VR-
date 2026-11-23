@@ -2794,6 +2794,7 @@ namespace
         return p;
     }
 
+    bool right_hold_target_axis(UObject* held, hsvr::Vec3& axis); // the right hold's target blade axis (BaseMesh +Z), world
     bool xbow_test_grip(int side, hsvr::Vec3& grip, hsvr::Quat& grip_rot);
     // Test aid hsvr.ctl_replay <track file> [blend s] / off: both pretend controllers play back Matthew's own recorded motion,
     // in his body's frame (position from the actor, yaw only), looped. A track is a replay capture cut down by
@@ -2987,6 +2988,12 @@ namespace
                     Vec3 along{0, 0, 1};
                     UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
                     if (UObject* wb = held ? object_property(held, STR("BaseMesh")) : nullptr) along = body.inverse().rotate(component_rotation(wb).rotate(Vec3{0, 0, 1}));
+                    // Along where the right hand WANTS the weapon (its hold's target), not where it hangs: a long weapon droops in one
+                    // hand, and a left hand put along the droop disagreed with the right wrist from the start (run 57719a0, B&S two
+                    // hands: polehammer 59 deg between the wrist's aim and the hands' line at rest). A real second hand goes where
+                    // the weapon is meant to point.
+                    Vec3 want_axis;
+                    if (right_hold_target_axis(held, want_axis)) along = body.inverse().rotate(want_axis);
                     // Once both hands hold it, the left target stays where it was put (in his body's frame), as
                     // a real hand would: following the weapon's own axis let a drooping weapon pull the hand
                     // down after it (joint-hold test 2026-11-22: the staff fell 87 deg and kept wandering).
@@ -6257,6 +6264,12 @@ namespace
         double far_since = -1.0, far_logged = 0.0;
     };
     HoldState g_hold[2];
+    bool right_hold_target_axis(UObject* held, hsvr::Vec3& axis)
+    {
+        if (!held || g_hold[1].weapon != held || !g_hold[1].have_last) return false;
+        axis = g_hold[1].last_target_rot.rotate(hsvr::Vec3{0, 0, 1});
+        return true;
+    }
     bool hand_has_weapon(int side) { return g_hold[side].weapon != nullptr && !is_fist(g_hold[side].weapon); }
     bool hand_is_fist(int side) { return is_fist(g_hold[side].weapon); }
 
@@ -17467,8 +17480,32 @@ namespace
                     double stb = (std::max)(0.0, cfg.pose_hold_strength);
                     double tmax = cfg.pose_two_hand_bs_rot_max * (std::max)(0.0, cfg.pose_hold_joint_max) * 0.5 * ((std::max)(0.0, body.total) + (std::max)(0.0, s2.total)) * 1e4;
                     Vec3 err_rot = scaled_axis((rot * target_rot.inverse()).normalized());
+                    // Solved WITH both hands' pulls as B&S's solver (PhysX) solves its three drives together: the turn alone,
+                    // set as a spin outside the physics, swung the far grip against the second joint every tick (run 57719a0,
+                    // his polearm motion: the main grip 28.8 cm from his hand on average, 6.8 in the playtest). Only the spin is
+                    // kept; the joints still do the pulling in the physics step (near this answer, so they add little).
+                    SoftPoint pts[2];
+                    {
+                        SoftPoint& p = pts[0];
+                        p.r = pivot_now - com;
+                        p.err = pivot_now - target_pivot;
+                        p.vt = target_vel;
+                        p.k = cfg.pose_two_hand_bs_pos_k * stb;
+                        p.c = cfg.pose_two_hand_bs_pos_c * stb;
+                        p.fmax = cfg.pose_two_hand_bs_pos_max * (std::max)(0.0, cfg.pose_hold_joint_max) * (std::max)(0.0, body.total) * 100.0;
+                    }
+                    {
+                        SoftPoint& p = pts[1];
+                        Vec3 at2 = pos + rot.rotate(g_two.bs_local);
+                        p.r = at2 - com;
+                        p.err = at2 - g_two.bs_p2;
+                        p.vt = g_two.bs_vel;
+                        p.k = cfg.pose_two_hand_bs_pos_k * stb;
+                        p.c = cfg.pose_two_hand_bs_pos_c * stb;
+                        p.fmax = cfg.pose_two_hand_bs_pos_max * (std::max)(0.0, cfg.pose_hold_joint_max) * (std::max)(0.0, s2.total) * 100.0;
+                    }
                     Vec3 vb = ev, wb = ew, ang;
-                    bs_solve(mass, about_com.inverse(), vb, wb, nullptr, 0, err_rot, target_ang, cfg.pose_two_hand_bs_rot_k * stb * 1e4, cfg.pose_two_hand_bs_rot_c * stb * 1e4, tmax,
+                    bs_solve(mass, about_com.inverse(), vb, wb, pts, 2, err_rot, target_ang, cfg.pose_two_hand_bs_rot_k * stb * 1e4, cfg.pose_two_hand_bs_rot_c * stb * 1e4, tmax,
                              DTb, (std::max)(1, cfg.pose_bs_iterations), ang);
                     w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
                     h.torque_nm = length(ang) / DTb / 1e4;
