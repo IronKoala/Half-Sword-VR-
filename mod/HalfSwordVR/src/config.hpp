@@ -709,6 +709,10 @@ namespace hsvr
         // taken off and hung back by it.
         bool pose_pavise_strap = true;
         double pose_pavise_mount_cm = 15.0;
+        // The mounted arm's own hand closing (nothing else in reach) takes the shield's forward grip: the
+        // game's own forearm grip, shield in that hand (Matthew 2026-11-23). Opening it leaves the shield
+        // mounted. 0: the hand only closes on the strap and the shield stays the mod's mount.
+        bool pose_mount_fist_grip = true;
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;

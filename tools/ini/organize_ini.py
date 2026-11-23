@@ -436,6 +436,7 @@ LAYOUT = [
         ('pose_pavise_forearm', '1 = pavises strap onto the forearm (light: either arm; heavy: left arm), not held in the hand. Only with pose_pavise_strap=0.'),
         ('pose_pavise_strap', '1 = a pavise goes by its rear strap: the hand across from it takes it off your back and hangs it back; let go of the strap at the back of your other forearm to mount it there (that hand stays free); grab the strap to take it off or pass it.'),
         ('pose_pavise_mount_cm', 'How near the back of the other forearm you let go of the strap to mount a pavise (cm).'),
+        ('pose_mount_fist_grip', '1 = closing the hand of the arm a shield is mounted on takes its forward grip (the shield in that hand, on the forearm); opening it leaves it mounted. 0 = the hand only closes on the strap.'),
     ]),
     ('Drawing, sheathing, belt', '', [
         ('pose_draw', "1 = squeeze near a sheathed weapon's grip to draw it."),
