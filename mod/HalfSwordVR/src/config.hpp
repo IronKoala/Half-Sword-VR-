@@ -71,6 +71,21 @@ namespace hsvr
         bool ui_use_alpha = false;
         // Show the left eye's picture (with menus) in the game window on the monitor.
         bool mirror_window = true;
+        // 1 = the monitor shows a window-shaped cut-out of the left eye (fills the window, no black
+        // bars); 0 = the whole left eye fitted inside the window (black bars at the sides).
+        int mirror_view = 1;
+        // Shape of the monitor picture, width / height (1.7778 = 16:9, the YouTube player). In a window
+        // of another shape it is centred with black around it, never stretched. 0 = the window's shape.
+        double mirror_aspect = 1.7778;
+        // Size the mod sets the game window to, "<width>x<height>" (windowed), e.g. 2560x1440 for a
+        // 16:9 recording on an ultrawide monitor. Empty = the game's own window size.
+        std::string mirror_window_res;
+        // Widest the monitor picture is, degrees side to side (less when the eye does not cover it).
+        double mirror_fov_deg = 90.0;
+        // The monitor picture follows the head smoothed over this many seconds (0 = exactly the head).
+        double mirror_smooth_s = 0.1;
+        // 1 = keep the monitor picture's horizon level (head tilt taken out).
+        bool mirror_level = false;
         // Virtual key codes. 0x24 = Home, 0x23 = End, 0x2D = Insert.
         int recenter_key = 0x24;
         int toggle_ui_key = 0x23;
@@ -534,6 +549,7 @@ namespace hsvr
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
         bool pose_two_hand_twist_only = true;
+        bool pose_two_hand_joint_line = true; // joint hold, two hands: one pose along the hands' line, both joints to it (playtest 2026-11-23)
         bool pose_two_hand_joint_both_turn = true; // joint hold, both hands on fixed grips: both wrists turn it (rerun 388ca67: 60 deg pitch followed, 2.5-3.3 cm / 5-6 deg off; off: 27-37 deg, creeps back)
         bool pose_two_hand_fixed_rebase = true; // fixed grips, both wrists: the second hand's turn and spot taken from the first hand at the grab
         double pose_two_hand_swing_share = 0.0;
@@ -616,10 +632,11 @@ namespace hsvr
         // Two fixed grip zones, under the guard and above the pommel, no slide (Matthew 2026-11-21):
         // 0 = off (grip slides), 1 = hand-and-a-half (bastard sword, Grip_15) only, 2 = every two-handed
         // sword (also longswords and greatswords).
-        int pose_grip_two_zones_2h_sword = 1; // Matthew 2026-11-21: bastard swords only
+        int pose_grip_two_zones_2h_sword = 1; // Matthew 2026-11-21: bastard swords only (unused while pose_grip_two_hand_swords_slide)
+        bool pose_grip_two_hand_swords_slide = true; // Matthew 2026-11-23: all longswords, greatswords and hand-and-a-half swords slide
         // The lower zone sits just above the pommel (Matthew 2026-11-22: "you grab just above the pommel"): the
         // pommel's top is this far above its origin (measured 4.7 on a Grip_15 pommel, 8 cm long).
-        double pose_grip_pommel_top_cm = 4.7;
+        double pose_grip_pommel_top_cm = 0.0; // the pommel's origin IS its top face (decomp 2026-11-23: meshes run 5.7-7.6 cm down from it); 4.7 kept hands 4.7 cm too high
         double pose_grip_hands_overlap_cm = 3.5; // short two-zone grips: the hands may overlap each other this much to stay off the pommel
         // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
         bool pose_grip_dagger_fixed = true;
@@ -762,6 +779,9 @@ namespace hsvr
         // The hand on the rear grip (by the trigger) is the one that fires: within this of it (cm).
         double crossbow_trigger_grip_cm = 8.0;
         double pose_holster_zone_cm = 15.0;
+        // 1 = the zone counts from any part of the item as well as the palm (B&S holders take the item's own
+        // collider); 0 = the palm only (playtest 2026-11-23: his palm stayed 19-23 cm off, items dropped).
+        bool pose_holster_by_item = true;
         double pose_holster_max_speed = 3.0;
         double pose_throw_speed = 2.0;
         double pose_throw_multiplier = 2.0;
@@ -791,6 +811,9 @@ namespace hsvr
         // Sheathing takes two hands (Matthew 2026-11-22): the other hand holds the sword's own scabbard
         // where it hangs; the blade never goes in by itself. 0 = the old one-hand sheathe at any free mouth.
         bool pose_sheathe_two_hand = true;
+        // A sword picked up whose scabbard is not on the belt (the game hides it until its first sheathe):
+        // its empty scabbard goes to a free sword slot on that hand's hip at once (Matthew 2026-11-23).
+        bool pose_scabbard_on_pickup = true;
         bool pose_sheathe_cross = true; // a weapon whose scabbard hangs on the other hip goes back across (the game's cross path)
         // The off hand on a belt scabbard: a squeeze within touch_cm of it takes it; it turns with the hand
         // up to angle_deg on the belt (the game's own loose limit is 30) and stays pinned there; let go and it
@@ -845,6 +868,18 @@ namespace hsvr
         bool pose_fist_clear = true;
         double pose_fist_clear_margin_cm = 2.0;
         double pose_fist_clear_retry_s = 0.03;
+        // Nor inside what that hand just let go of (playtest 2026-11-23: a shield let go with the fingers
+        // still curled was shoved out of the hand by the fist made inside it), until the ball is clear of it.
+        bool pose_fist_clear_dropped = true;
+        // A let-go keeps the item's own velocity from the hand: for 0.15 s a velocity > 1 m/s off it is put
+        // back (PC run f2e499f: shields let go from a still hand left at ~4 m/s).
+        bool pose_drop_keep_velocity = true;
+        // The joint hold on an item let go of is removed before the game's release, not after it.
+        bool pose_drop_joint_first = true;
+        // An item let go of keeps not colliding with his body until no part of it is within clear_cm of his
+        // hands, forearms, chest, hips or thighs, at most ignore_s (0 = off). It pushed dropped shields.
+        double pose_drop_ignore_s = 1.5;
+        double pose_drop_ignore_clear_cm = 15.0;
         // A fist blow's assisted impulse (hit_assist) goes into the victim's damage as is. The game
         // scales a sliding contact by the weapon's cutting rate, ~0 for a fist ball, so without this
         // a hard punch reached his damage as impulse ~1 (playtest 2026-11-22).
