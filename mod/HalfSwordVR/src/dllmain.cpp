@@ -2809,6 +2809,12 @@ namespace
         bool from_set[2] = {false, false};
     };
     CtlTrack g_ctl_track;
+    // Test aid hsvr.hold_rebase <side>: that hand's hold takes the weapon's turn in the hand as it is NOW (as if grabbed so). With
+    // his replayed wrists the rig's grab turn was not his: the main wrist aimed the polehammer 135 deg from where his two hands
+    // put it and the turn sat at its cap for the whole replay (runs 4750e14 / 6cec1f5). Cleared on a new case or weapon.
+    std::atomic<bool> g_hold_rebase_req[2] = {false, false};
+    hsvr::Quat g_hold_rebase[2];
+    UObject* g_hold_rebase_for[2] = {nullptr, nullptr};
     bool ctl_track_load(const std::string& file, double blend)
     {
         std::wstring path(file.begin(), file.end());
@@ -16679,7 +16685,15 @@ namespace
         h.f1 = f1;
         h.f2 = f2;
         // The weapon as the game's locked joint would sit it in that hand.
-        Quat target_rot = (hand_rot * f2 * f1.inverse()).normalized();
+        if (g_hold_rebase_req[side].exchange(false))
+        {
+            g_hold_rebase[side] = (hand_rot.inverse() * component_rotation(base) * f1 * f2.inverse()).normalized();
+            g_hold_rebase_for[side] = weapon;
+            HSVR_LOG("Script: hsvr.hold_rebase: %s hand keeps %ls turned as it is now (%.0f deg from its grab)", side == 0 ? "left" : "right",
+                     weapon->GetName().c_str(), length(scaled_axis(g_hold_rebase[side])) * 57.2958);
+        }
+        Quat rebase = g_hold_rebase_for[side] == weapon ? g_hold_rebase[side] : Quat{};
+        Quat target_rot = (hand_rot * rebase * f2 * f1.inverse()).normalized();
         Vec3 target_pos = hand_pos + hand_rot.rotate(in_hand) - target_rot.rotate(pivot); // weapon origin
         if (h.free.place)
         {
@@ -27940,6 +27954,8 @@ namespace
         g_fake_thrust_pitch.store(60.0);
         g_fake_thrust_up.store(-5.0);
         g_ctl_track.on = false;
+        g_hold_rebase_for[0] = g_hold_rebase_for[1] = nullptr;
+        g_hold_rebase_req[0] = g_hold_rebase_req[1] = false;
         for (int i = 0; i < 2; ++i)
         {
             g_fake_roll_deg[i].store(0.0);
@@ -30354,6 +30370,12 @@ namespace
                              g_ctl_track.rows.back()[0] - g_ctl_track.rows.front()[0], g_ctl_track.blend);
                 else
                     HSVR_LOG("Script: hsvr.ctl_replay: could not read %s", file);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.hold_rebase ", 0) == 0)
+            {
+                int side = atoi(entry.command.c_str() + 17);
+                if (side == 0 || side == 1) g_hold_rebase_req[side] = true;
                 continue;
             }
             if (entry.command.rfind("hsvr.hand_spread ", 0) == 0)

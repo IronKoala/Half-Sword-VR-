@@ -132,8 +132,11 @@ REPLAYS = [
     # (his 2H mace hands were 30 cm toward the pommel; the war staff's second spot is toward its far end, run 57719a0: -30 never took hold)
     ("mace2h", "warstaff", "mace2h.csv", "30", 16, 10),
 ]
+# hold_rebase: the main hold keeps the weapon turned as it is once his wrists play (the rig's grab turn is not his:
+# polehammer aimed 135 deg off his hands, runs 4750e14 / 6cec1f5).
 REPLAY = """10:hsvr.expect two_hand = 1 second hand took it
 10.2:hsvr.ctl_replay {track} 0.5
+11.3:hsvr.hold_rebase 1
 11.5:hsvr.two_reset
 21.5:hsvr.expect two_hand = 1 his motion: still held in both hands
 21.5:hsvr.expect two_turn_mean < {turn} his motion: weapon follows the main wrist (mean deg off it)
