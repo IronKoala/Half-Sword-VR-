@@ -17,6 +17,8 @@
 6:hsvr.xbow_hand 0 front
 9.5:hsvr.squeeze 0 1
 10.5:hsvr.expect two_hand = 1 front grip taken by grip
+10.5:hsvr.expect xforearm_l < -0.3 front forearm under the stock
+10.5:hsvr.expect xforearm_r < -0.3 rear forearm under the stock
 10.5:hsvr.xbow_report
 10.6:hsvr.trigger 0 1
 10.8:hsvr.trigger 0 0

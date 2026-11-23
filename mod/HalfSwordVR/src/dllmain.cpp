@@ -7401,6 +7401,10 @@ namespace
         // holds it at a + (b - a) * fixed_t and never slides along it.
         bool fixed = false;
         double fixed_t = 0.0;
+        // A fixed hand pose (a crossbow's grips, Matthew 2026-11-23: "there's pretty much only one way that
+        // you grab a crossbow"): the seat is never the one nearest to how the hand came; it is the one whose
+        // forearm points most along seat_forearm (BaseMesh frame, down and back from the grip). Zero = off.
+        hsvr::Vec3 seat_forearm{0, 0, 0};
     };
     const std::vector<Handle>& item_handles(UObject* item, UObject* base);
     // Weapons and tools are taken only by a handle; shields and bottles anywhere.
@@ -13190,14 +13194,27 @@ namespace
         using namespace hsvr;
         Vec3 rear, front, axis;
         if (!xbow_grip_points(xb, base, rear, front, axis)) return false;
+        // Fixed hand poses (Matthew 2026-11-23: the fore end was sometimes taken with the wrist pointing
+        // straight up and the forearm in his line of sight): on both grips the forearm hangs under the stock
+        // and back toward him. "Under" is away from the string's nut (it rides on top of the stock).
+        Vec3 up{1, 0, 0};
+        if (UObject* peg = object_property(xb, STR("CM_Test_Peg")))
+        {
+            Vec3 to_nut = component_rotation(base).inverse().rotate(component_location(peg) - component_location(base)) - front;
+            Vec3 across = to_nut - axis * dot(to_nut, axis);
+            if (length(across) > 0.5) up = normalized(across);
+        }
+        Vec3 forearm = normalized(up * -1.0 - axis * 0.5);
         hs.push_back(Handle{rear - axis, rear + axis, "grip", -1, 2});
         hs.back().fixed = true;
         hs.back().fixed_t = 0.5;
+        hs.back().seat_forearm = forearm;
         hs.push_back(Handle{front - axis, front + axis, "grip", -1, 2});
         hs.back().fixed = true;
         hs.back().fixed_t = 0.5;
-        HSVR_LOG("Crossbow: %ls grips: rear (trigger) (%.1f, %.1f, %.1f), front (%.1f, %.1f, %.1f), stock line (%.2f, %.2f, %.2f) in its BaseMesh frame",
-                 xb->GetName().c_str(), rear.x, rear.y, rear.z, front.x, front.y, front.z, axis.x, axis.y, axis.z);
+        hs.back().seat_forearm = forearm;
+        HSVR_LOG("Crossbow: %ls grips: rear (trigger) (%.1f, %.1f, %.1f), front (%.1f, %.1f, %.1f), stock line (%.2f, %.2f, %.2f), top (%.2f, %.2f, %.2f) in its BaseMesh frame; fixed hand poses, forearm along (%.2f, %.2f, %.2f)",
+                 xb->GetName().c_str(), rear.x, rear.y, rear.z, front.x, front.y, front.z, axis.x, axis.y, axis.z, up.x, up.y, up.z, forearm.x, forearm.y, forearm.z);
         return true;
     }
 
@@ -15028,7 +15045,8 @@ namespace
         g.t = t;
         g.handle = hd.name;
         g.grip_type = clamp_grip_type(side, side == 1 ? hd.grip_r : hd.grip_l);
-        if (hsvr::config().pose_grab_seat && (hd.name == "grip" || hd.name == "blade"))
+        bool fixed_pose = length(hd.seat_forearm) > 0.5;
+        if ((hsvr::config().pose_grab_seat || fixed_pose) && (hd.name == "grip" || hd.name == "blade"))
         {
             // B&S: an item sits in the hand in one of a few fixed orientations, the one nearest to how
             // it was. Here: the game's own seat (weapon_rSocket / weapon_lSocket in the hand bone, the same
@@ -15046,6 +15064,16 @@ namespace
             const char* flip_name[4] = {"as the game seats it", "edge turned", "blade reversed", "blade reversed, edge turned"};
             int best = 0;
             double best_a = 1e9, best_cost = 1e9;
+            // The forearm (hand bone to elbow) in the hand bone's frame, for a fixed pose.
+            Vec3 forearm_h{0, 0, 0};
+            if (fixed_pose)
+            {
+                Vec3 hand_p = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
+                Vec3 elbow = socket_location(mesh, bone_fname(side == 0 ? "lowerarm_l" : "lowerarm_r"));
+                if (length(elbow - hand_p) > 1.0) forearm_h = normalized(a_rot.inverse().rotate(elbow - hand_p));
+                else fixed_pose = false;
+            }
+            double fit[4] = {0, 0, 0, 0};
             for (int i = 0; i < 4; ++i)
             {
                 Quat c = (seat * flips[i]).normalized();
@@ -15053,6 +15081,12 @@ namespace
                 double ang = 2.0 * std::acos((std::min)(1.0, d));
                 // A reversed blade (pommel up) only when clearly nearer: a sword picked up is held blade up.
                 double cost = ang + (i >= 2 ? hsvr::config().pose_grab_seat_reverse_bias_deg * 3.14159265358979 / 180.0 : 0.0);
+                if (fixed_pose)
+                {
+                    // c = the item in the hand's frame: the forearm in the item's frame is c^-1 (forearm_h).
+                    fit[i] = dot(c.inverse().rotate(forearm_h), hd.seat_forearm);
+                    cost = -fit[i];
+                }
                 if (cost < best_cost)
                 {
                     best_cost = cost;
@@ -15062,7 +15096,11 @@ namespace
             }
             g.rel = (seat * flips[best]).normalized();
             g.in_anchor = Vec3{-7.25 * mx, 1.34, -2.87};
-            HSVR_LOG("Grab: %s hand seats it %s (%.0f deg from how it was)", side == 0 ? "left" : "right", flip_name[best], best_a * 180.0 / 3.14159265358979);
+            if (fixed_pose)
+                HSVR_LOG("Grab: %s hand takes its fixed pose on the %s: %s (%.0f deg from how it was; forearm fit %.2f / %.2f / %.2f / %.2f)", side == 0 ? "left" : "right",
+                         hd.name.c_str(), flip_name[best], best_a * 180.0 / 3.14159265358979, fit[0], fit[1], fit[2], fit[3]);
+            else
+                HSVR_LOG("Grab: %s hand seats it %s (%.0f deg from how it was)", side == 0 ? "left" : "right", flip_name[best], best_a * 180.0 / 3.14159265358979);
         }
         return g;
     }
@@ -27774,6 +27812,30 @@ namespace
         else if (w == "bolt_r") value = is_bolt(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
         else if (w == "bolt_l") value = is_bolt(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
         else if (w == "xstring") value = g_xstring.on ? g_xstring.side + 1.0 : 0.0;
+        else if (w == "xforearm_l" || w == "xforearm_r")
+        {
+            // that hand's forearm (hand bone to elbow) along the crossbow's top (toward the nut, across the
+            // stock): -1 = straight under it, +1 = straight over it (the wrist up, in his sight); 2 = no crossbow
+            value = 2.0;
+            UObject* xb = object_property(pawn, STR("Weapon R"));
+            if (!is_crossbow(xb)) xb = object_property(pawn, STR("Weapon L"));
+            UObject* base = is_crossbow(xb) ? object_property(xb, STR("BaseMesh")) : nullptr;
+            UObject* peg = xb ? object_property(xb, STR("CM_Test_Peg")) : nullptr;
+            UObject* mesh = g_pose.mesh;
+            if (base && peg && mesh)
+            {
+                hsvr::Vec3 rear, front, axis;
+                if (xbow_grip_points(xb, base, rear, front, axis))
+                {
+                    hsvr::Quat binv = component_rotation(base).inverse();
+                    hsvr::Vec3 to_nut = binv.rotate(component_location(peg) - component_location(base)) - front;
+                    hsvr::Vec3 up = hsvr::normalized(to_nut - axis * hsvr::dot(to_nut, axis));
+                    bool l = w.back() == 'l';
+                    hsvr::Vec3 fa = socket_location(mesh, bone_fname(l ? "lowerarm_l" : "lowerarm_r")) - socket_location(mesh, bone_fname(l ? "hand_l" : "hand_r"));
+                    if (hsvr::length(fa) > 1.0) value = hsvr::dot(hsvr::normalized(binv.rotate(fa)), up);
+                }
+            }
+        }
         else if (w.rfind("var:", 0) == 0 && pawn)
         {
             // var:<pawn variable>, '_' for spaces (var:Leg_R_Tonus); a variable named with '_' is tried as written first
