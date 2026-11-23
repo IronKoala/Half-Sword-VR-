@@ -666,6 +666,7 @@ LAYOUT = [
         ('joint_break_legs', 'Knees can be strained and dislocated too (calf bent against the thigh).'),
         ('joint_break_scale', 'How fast joints strain (1 = the old game).'),
         ('joint_break_twist_needs_wrist', "A twist counts only as far as your own wrist turned it (his head flopping while you drag or choke him doesn't snap his neck). 0 = any twist counts."),
+        ('joint_break_wrist_free_deg', 'Your wrist must turn at least this far (degrees since you took hold) before a twist strains him, however weak he is.'),
         ('joint_break_wrench_nm_per_deg', 'Your wrist turns his head (or upper arm): torque per degree he lags behind your wrist. 0 = off.'),
         ('joint_break_wrench_from_deg', 'Your wrist must turn this far (degrees since you took hold) before it turns him.'),
         ('joint_break_wrench_max_nm', 'Most torque your wrist puts on him (N m, times your grip strength).'),

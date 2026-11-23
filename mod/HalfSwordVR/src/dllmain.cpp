@@ -10291,6 +10291,9 @@ namespace
                     }
                 }
                 double excess = (std::max)(0.0, std::fabs(counted) - free);
+                // Your wrist must also have turned past joint_break_wrist_free_deg (not shrunk by his weakness):
+                // an out-cold man's free range is only 16 deg, and a hand turns that much by itself.
+                if (gated) excess = (std::min)(excess, (std::max)(0.0, std::fabs(ctl_tw) - cfg.joint_break_wrist_free_deg));
                 double twist_dot = std::cos((std::min)(180.0, excess * cfg.joint_break_twist_gain) * kDegToRad);
                 double d = (std::min)(dot, twist_dot);
                 double strain = read_number_variable(w, p.strain);

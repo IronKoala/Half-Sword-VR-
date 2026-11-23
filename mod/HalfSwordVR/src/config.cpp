@@ -805,6 +805,7 @@ namespace hsvr
         flag("joint_break_legs", c.joint_break_legs);
         num("joint_break_scale", c.joint_break_scale);
         flag("joint_break_twist_needs_wrist", c.joint_break_twist_needs_wrist);
+        num("joint_break_wrist_free_deg", c.joint_break_wrist_free_deg);
         num("joint_break_wrench_nm_per_deg", c.joint_break_wrench_nm_per_deg);
         num("joint_break_wrench_from_deg", c.joint_break_wrench_from_deg);
         num("joint_break_wrench_max_nm", c.joint_break_wrench_max_nm);

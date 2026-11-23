@@ -1078,6 +1078,9 @@ namespace hsvr
         // and no further than it turned (playtest 2026-11-23: his head flopping as you dragged or choked him
         // snapped his neck with your hand still). 0 = any twist of his while you hold him counts (old).
         bool joint_break_twist_needs_wrist = true;
+        // With that on, your wrist must have turned at least this far past where it was (degrees) before the
+        // twist strains him, however weak he is (his own free range shrinks to 16 deg out cold).
+        double joint_break_wrist_free_deg = 35.0;
         // Your wrist turns him: once your controller has turned past joint_break_wrench_from_deg about his
         // neck (or upper arm), a torque on his head (upper arm) toward your wrist's turn, this many N m per
         // degree he lags, at most joint_break_wrench_max_nm x your grip strength (T/121). 0 = off.
