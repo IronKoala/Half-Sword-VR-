@@ -259,7 +259,7 @@ function Run-Launch($group, [string]$run) {
       if ($sv -lt 0) { throw "the mod never said where the game saves (needs the mod with game_saved_dir)" }
       $m = [regex]::Match($script:logText.ToString(), "TestRoom: the game saves in (.*)")
       $where = $m.Groups[1].Value.Trim()
-      if (-not $where.StartsWith($userDir + "\", [StringComparison]::OrdinalIgnoreCase)) { throw "the test game saves in '$where', not in $userDir: stopped before anything ran" }
+      if (-not $where.StartsWith($userDir + "\", [StringComparison]::OrdinalIgnoreCase)) { throw "the test game saves in '$where', not in ${userDir}: stopped before anything ran" }
       # While he plays, his game gets the processor first.
       if (His-GameRuns) { foreach ($p in @(Get-MineAlive)) { try { $p.PriorityClass = "BelowNormal" } catch {} } }
     }
