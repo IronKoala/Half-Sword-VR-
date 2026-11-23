@@ -86,6 +86,11 @@ foreach ($l in $gus) {
 $missing = @($set.Keys | Where-Object { -not $seen[$_] -and $null -ne $set[$_] })
 if ($missing) { throw "his GameUserSettings.ini has no " + ($missing -join ", ") + ": check it before making a copy" }
 Set-Content "$user\Saved\Config\Windows\GameUserSettings.ini" $out -Encoding ascii
-Copy-Item "$here\testcopy-Engine.ini" "$user\Saved\Config\Windows\Engine.ini" -Force
+# The game deletes Saved\Config\Windows\Engine.ini at start (seen 2026-11-23 on copies A and B; the potato
+# guide says the same): read-only keeps it.
+$eng = "$user\Saved\Config\Windows\Engine.ini"
+if (Test-Path $eng) { Set-ItemProperty $eng -Name IsReadOnly -Value $false }
+Copy-Item "$here\testcopy-Engine.ini" $eng -Force
+Set-ItemProperty $eng -Name IsReadOnly -Value $true
 "$(Get-Date -Format o) from $src" | Set-Content "$copy\made.txt"
 Write-Host "test copy $copy ready (user dir $user)"
