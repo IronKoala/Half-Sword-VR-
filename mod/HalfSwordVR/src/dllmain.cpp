@@ -29880,6 +29880,60 @@ namespace
                 g_fake_continue.store(atoi(entry.command.c_str() + 13) != 0);
                 continue;
             }
+            if (entry.command.rfind("hsvr.punch_sim ", 0) == 0)
+            {
+                // hsvr.punch_sim <impulse>: one right-fist blow on the nearest other Willie's head, made as the
+                // fist weapon's own Deal Complex Damage call (its Sphere as the collided component), so it goes
+                // through the punch watch and the game's own damage exactly as a real punch, without having to
+                // land one with fake arms (a passive foe stood in front drifted metres off: combined run 3f939ad).
+                double imp = atof(entry.command.c_str() + 15);
+                UObject* pawn = nullptr;
+                find_pawn_mesh(&pawn);
+                UObject* fist = pawn ? object_property(pawn, STR("Weapon R")) : nullptr;
+                UObject* sphere = fist && is_fist(fist) ? object_property(fist, STR("Sphere")) : nullptr;
+                UObject* foe = nullptr;
+                if (pawn)
+                {
+                    std::vector<UObject*> ws;
+                    UObjectGlobals::FindAllOf(STR("Willie_BP_C"), ws);
+                    hsvr::Vec3 ap = actor_location(pawn);
+                    double best = 1e9;
+                    for (UObject* w : ws)
+                    {
+                        if (!w || w == pawn || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
+                        double d = hsvr::length(actor_location(w) - ap);
+                        if (d < best) { best = d; foe = w; }
+                    }
+                }
+                UObject* fm = foe ? object_property(foe, STR("Mesh")) : nullptr;
+                if (!sphere || !fm)
+                {
+                    HSVR_LOG("Script: hsvr.punch_sim: %s", !sphere ? "no fist (with a Sphere) in the right hand" : "no foe");
+                    continue;
+                }
+                static const FName head_bone(STR("head"), FNAME_Add);
+                hsvr::Vec3 head = socket_location(fm, head_bone), from = actor_location(pawn);
+                hsvr::Vec3 dir = hsvr::normalized(head - from);
+                hsvr::Vec3 v = dir * 800.0, iv = dir * imp, nrm = dir * -1.0;
+                Call dc(foe, STR("Deal Complex Damage"));
+                if (!dc.fn) continue;
+                uint8_t* base = dc.buffer.data();
+                dc.object(STR("Hit Component"), fm);
+                dc.object(STR("Collided Component"), sphere);
+                dc.name(STR("Hit Bone"), head_bone);
+                dc.three(STR("Location"), head.x, head.y, head.z);
+                dc.three(STR("Normal"), nrm.x, nrm.y, nrm.z);
+                dc.three(STR("Hit Velocity"), v.x, v.y, v.z);
+                dc.three(STR("Hit Impulse"), iv.x, iv.y, iv.z);
+                auto num = [&](const TCHAR* n, double x) { if (FProperty* p = dc.param(n)) write_param_number(base, p, x); };
+                num(STR("Cutting Power"), 0.3);
+                num(STR("Rigidity"), 0.6);
+                num(STR("Kick Power"), 1.0);
+                num(STR("Blunt Destruction Int"), 1.0);
+                HSVR_LOG("Script: hsvr.punch_sim %.0f on %ls's head", imp, foe->GetName().c_str());
+                dc.run();
+                continue;
+            }
             if (entry.command.rfind("hsvr.floor_miss ", 0) == 0)
             {
                 // hsvr.floor_miss <s>: the capsule's floor traces (under his middle and under his feet) find
