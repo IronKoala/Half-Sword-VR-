@@ -1,7 +1,10 @@
 param(
   [Parameter(Mandatory = $true)][string]$List,     # one case a line: name|steps file|extra ini keys (k=v;k=v), '#' = comment
   [Parameter(Mandatory = $true)][string]$Dll,      # the test build's main.dll
-  [Parameter(Mandatory = $true)][string]$Master,   # backup tag: private\{main.dll,ini,save,settings}.bak-<tag> = what is installed now
+  [string]$Master = "",                            # old way (no -Copy): backup tag, private\{main.dll,ini,save,settings}.bak-<tag> = what is installed now
+  [string]$Copy = "",                              # a test copy (new-testcopy.ps1, e.g. C:\HSTest\A): his install, ini and save are never touched
+  [double]$MinFps = 65,                            # -Copy: a case whose game fell below this (Perf lines) counts as SLOW, not pass/fail
+  [int]$MaxFps = 72,                               # -Copy: t.MaxFPS for the test game (72 = the headset's rate; 0 = no cap)
   [string]$Out = "",                               # results folder (default private\suite-<list name>-<UTC time>)
   [int]$CaseSeconds = 100,                         # a case that has not ended by then is stopped
   [int]$PerLaunch = 40,                            # at most this many cases in one launch
@@ -18,20 +21,37 @@ param(
 # back to how a launch starts it. A case that fails (or times out) is run again in a launch of its own,
 # so a failure that only comes from sharing a launch shows up as "shared-only".
 $ErrorActionPreference = "Stop"
-$game = "C:\Games\Steam\steamapps\common\Half Sword"
-$mod = "$game\HalfswordUE5\Binaries\Win64\ue4ss\Mods\HalfSwordVR"
 $priv = "C:\Users\matth\Documents\Codex\HalfSwordDecomp\private"
-$saves = "$env:LOCALAPPDATA\HalfswordUE5\Saved\SaveGames"
+$userDir = ""
+if ($Copy) {
+  # A test copy: its own game folder, mod folder and -UserDir (save and settings). Nothing of his is read
+  # after the copy was made, or written ever. Other Half Swords (his own game, other copies) are left alone.
+  $game = "$Copy\game"
+  $userDir = "$Copy\user"
+  $saves = "$userDir\Saved\SaveGames"
+  if (-not (Test-Path "$game\HalfSwordUE5.exe") -or -not (Test-Path $saves)) { throw "$Copy is not a test copy (tools/pctest/new-testcopy.ps1)" }
+} else {
+  if (-not $Master) { throw "give -Copy <test copy> (or -Master <tag> for the old way on his install)" }
+  $game = "C:\Games\Steam\steamapps\common\Half Sword"
+  $saves = "$env:LOCALAPPDATA\HalfswordUE5\Saved\SaveGames"
+}
+$mod = "$game\HalfswordUE5\Binaries\Win64\ue4ss\Mods\HalfSwordVR"
 $logPath = "$mod\HalfSwordVR.log"
 $cmdPath = "$mod\HalfSwordVR_commands.txt"
 $replays = "$mod\replays"
 if (-not $Out) { $Out = "$priv\suite-" + [IO.Path]::GetFileNameWithoutExtension($List) + "-" + (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHHmmss") + "Z" }
 function Get-Sha1($f) { (Get-FileHash $f -Algorithm SHA1).Hash.ToLower() }
+$bakDir = $(if ($Copy) { "$Out\master" } else { $priv })
+$tag = $(if ($Copy) { "copy" } else { $Master })
 $files = @(
-  @{ live = "$mod\dlls\main.dll";      bak = "$priv\main.dll.bak-$Master" },
-  @{ live = "$mod\HalfSwordVR.ini";    bak = "$priv\ini.bak-$Master" },
-  @{ live = "$saves\GameProgress.sav"; bak = "$priv\save.bak-$Master" },
-  @{ live = "$saves\Settings.sav";     bak = "$priv\settings.bak-$Master" })
+  @{ live = "$mod\dlls\main.dll";      bak = "$bakDir\main.dll.bak-$tag" },
+  @{ live = "$mod\HalfSwordVR.ini";    bak = "$bakDir\ini.bak-$tag" },
+  @{ live = "$saves\GameProgress.sav"; bak = "$bakDir\save.bak-$tag" },
+  @{ live = "$saves\Settings.sav";     bak = "$bakDir\settings.bak-$tag" })
+# Processes of this game folder (by exe path), whoever started them.
+function Get-CopyGames { @(Get-CimInstance Win32_Process | Where-Object { $_.Name -like "HalfswordUE5*" -and $_.ExecutablePath -and $_.ExecutablePath.StartsWith($game + "\", [StringComparison]::OrdinalIgnoreCase) }) }
+# His own game: a Half Sword that does not run from a test copy.
+function His-GameRuns { [bool](Get-CimInstance Win32_Process | Where-Object { $_.Name -like "HalfswordUE5*" -and -not ($_.ExecutablePath -and $_.ExecutablePath -like "C:\HSTest\*") }) }
 $vrGames = "HalfswordUE5*","BladeAndSorcery*","SaintsAndSinners*","TWD*","Boneworks*","BONELAB*","VRChat*","Beat Saber*","HLA*","hlvr*","Pavlov*"
 $bad = @()
 foreach ($b in ($BadSpawn -split ";")) { if ($b -match "^\s*(-?\d+)\s*,\s*(-?\d+)\s*$") { $bad += , @([int]$matches[1], [int]$matches[2]) } }
@@ -55,17 +75,26 @@ $dupes = @($cases | Group-Object Name | Where-Object Count -gt 1)
 if ($dupes) { throw "case names must differ: " + (($dupes | ForEach-Object Name) -join ", ") }
 
 # ---- 0. preconditions -----------------------------------------------------------------------------
-if (Get-Process -Name $vrGames -ErrorAction SilentlyContinue) { throw "a game is running; not touching anything" }
-foreach ($f in $files) { if ((Get-Sha1 $f.live) -ne (Get-Sha1 $f.bak)) { throw "$($f.live) differs from the master backup; not touching anything" } }
+if ($Copy) {
+  if (Get-CopyGames) { throw "a game runs from $game; not touching anything" }
+  # The master backup of a copy is the copy itself as it is now (it never holds anything of his).
+  New-Item -ItemType Directory -Force $bakDir | Out-Null
+  foreach ($f in $files) { Copy-Item $f.live $f.bak -Force }
+} else {
+  if (Get-Process -Name $vrGames -ErrorAction SilentlyContinue) { throw "a game is running; not touching anything" }
+  foreach ($f in $files) { if ((Get-Sha1 $f.live) -ne (Get-Sha1 $f.bak)) { throw "$($f.live) differs from the master backup; not touching anything" } }
+}
 if (Test-Path $cmdPath) { throw "someone left a commands file; not touching anything" }
 if (Get-ChildItem "$mod\test-save-*.sav" -ErrorAction SilentlyContinue) { throw "save probes from another run are in the mod folder; not touching anything" }
 New-Item -ItemType Directory -Force $Out | Out-Null
 # The mod keeps only its newest 40 logs\HalfSwordVR-*.log, so test launches would push his play logs out:
 # every one not yet kept is copied to private\play-logs first (only new ones: cheap after the first run).
-$keep = "$priv\play-logs"
-New-Item -ItemType Directory -Force $keep | Out-Null
-foreach ($lg in @(Get-ChildItem "$mod\logs" -Filter "HalfSwordVR-*.log" -ErrorAction SilentlyContinue)) {
-  if (-not (Test-Path (Join-Path $keep $lg.Name))) { Copy-Item $lg.FullName $keep }
+if (-not $Copy) {
+  $keep = "$priv\play-logs"
+  New-Item -ItemType Directory -Force $keep | Out-Null
+  foreach ($lg in @(Get-ChildItem "$mod\logs" -Filter "HalfSwordVR-*.log" -ErrorAction SilentlyContinue)) {
+    if (-not (Test-Path (Join-Path $keep $lg.Name))) { Copy-Item $lg.FullName $keep }
+  }
 }
 Copy-Item $List "$Out\list.txt"
 # Progress goes to the screen and <Out>\run.txt (never into a function's return value).
@@ -73,7 +102,7 @@ function Say([string]$t) { Add-Content "$Out\run.txt" $t -Encoding ascii; Write-
 Say "out $Out"
 Say ("test dll " + (Get-Sha1 $Dll))
 $results = "$Out\results.csv"
-"case,run,launch,case_in_launch,passed,failed,result,seconds,spawn,replays" | Set-Content $results -Encoding ascii
+"case,run,launch,case_in_launch,passed,failed,result,seconds,spawn,replays,min_fps" | Set-Content $results -Encoding ascii
 
 $script:mine = @{}   # pid -> start time of the processes this run started
 $script:stopAll = ""
@@ -88,6 +117,11 @@ function Assert-Alone {
   foreach ($p in $all) {
     $n = $p.Name -replace '\.exe$', ''
     if ($script:mine.ContainsKey([int]$p.ProcessId)) { continue }
+    if ($Copy) {
+      # Only a game from THIS copy that this run did not start is in the way; his game and other copies are not.
+      if ($p.ExecutablePath -and $p.ExecutablePath.StartsWith($game + "\", [StringComparison]::OrdinalIgnoreCase)) { throw "FOREIGN GAME in $game mid-run: pid $($p.ProcessId)" }
+      continue
+    }
     foreach ($g in $vrGames) { if ($n -like $g) { throw "FOREIGN GAME mid-run: $($p.Name) pid $($p.ProcessId) started $($p.CreationDate)" } }
   }
 }
@@ -157,10 +191,18 @@ function Case-Lines($c) {
   $lines += ("{0}:hsvr.case_end" -f ($last + 0.5).ToString([Globalization.CultureInfo]::InvariantCulture))
   return $lines
 }
-function Note-Result($c, $run, $launch, $k, $pass, $fail, $result, $secs, $spawn, $reps) {
+function Note-Result($c, $run, $launch, $k, $pass, $fail, $result, $secs, $spawn, $reps, $fps = "") {
   $sp = $(if ($spawn) { "$($spawn[0]) $($spawn[1])" } else { "" })
-  "$($c.Name),$run,$launch,$k,$pass,$fail,$result,$([int]$secs),$sp,$reps" | Add-Content $results -Encoding ascii
-  Say ("{0,-40} {1,-7} {2,-9} pass {3} fail {4} {5,4} s spawn {6}" -f $c.Name, $run, $result, $pass, $fail, [int]$secs, $sp)
+  "$($c.Name),$run,$launch,$k,$pass,$fail,$result,$([int]$secs),$sp,$reps,$fps" | Add-Content $results -Encoding ascii
+  Say ("{0,-40} {1,-7} {2,-9} pass {3} fail {4} {5,4} s spawn {6} fps {7}" -f $c.Name, $run, $result, $pass, $fail, [int]$secs, $sp, $fps)
+}
+# The lowest frame rate the mod logged in a stretch of log ("Perf: <fps> fps ..."), or "" if none.
+function Min-Fps([string]$text) {
+  $ms = [regex]::Matches($text, "Perf: ([0-9.]+) fps")
+  if (-not $ms.Count) { return "" }
+  $lo = 1e9
+  foreach ($m in $ms) { $v = [double]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture); if ($v -lt $lo) { $lo = $v } }
+  return [Math]::Round($lo, 1)
 }
 
 # One launch: the given cases one after another. Returns the cases it did not get to.
@@ -170,19 +212,33 @@ function Run-Launch($group, [string]$run) {
   $L = $script:launchNo
   $extra = $group[0].Extra
   $set = @{ dev_fake_headset = "1"; dev_pose_fake_tracking = "1"; dev_fake_still = "1"; pose_body = "1"; log_frames = "0"; replay_capture = "1"; test_room = "1"; test_room_foes = "1"; dev_script = "" }
+  if ($Copy) {
+    # Picture only (nothing the game simulates): small window, half resolution, the headset's frame rate,
+    # and a frame-rate line every 2 s so a case run on a starved game is not counted.
+    $base = @(Get-Content $files[1].bak)
+    $had = (($base | Where-Object { $_ -like "extra_commands=*" } | Select-Object -First 1) -replace "^extra_commands=", "")
+    $set["mirror_window_res"] = "1280x720"
+    $set["screen_percentage"] = "50"
+    $set["perf_log_seconds"] = "2"
+    if ($MaxFps -gt 0) { $set["extra_commands"] = ((@($had, "t.MaxFPS $MaxFps") | Where-Object { $_ }) -join ";") }
+  }
   foreach ($kv in ($extra -split ";")) { if ($kv -match "^([^=]+)=(.*)$") { $set[$matches[1].Trim()] = $matches[2] } }
-  $ini = @(Get-Content "$priv\ini.bak-$Master" | Where-Object { $k = ($_ -split '=', 2)[0]; -not $set.ContainsKey($k) })
+  $ini = @(Get-Content $files[1].bak | Where-Object { $k = ($_ -split '=', 2)[0]; -not $set.ContainsKey($k) })
   foreach ($k in $set.Keys) { $ini += "$k=$($set[$k])" }
   Set-Content "$mod\HalfSwordVR.ini" $ini -Encoding ascii
   Copy-Item $Dll "$mod\dlls\main.dll" -Force
   Assert-Alone
-  if (Get-Process -Name $vrGames -ErrorAction SilentlyContinue) { throw "FOREIGN: a game started meanwhile; not launching" }
+  if ($Copy) { if (Get-CopyGames) { throw "FOREIGN: a game runs from $game; not launching" } }
+  elseif (Get-Process -Name $vrGames -ErrorAction SilentlyContinue) { throw "FOREIGN: a game started meanwhile; not launching" }
   $script:logPos = 0L
   [void]$script:logText.Clear()
   $launchDir = "$Out\launch-$L"
   New-Item -ItemType Directory -Force $launchDir | Out-Null
   $t0 = Get-Date
-  $lp = Start-Process "$game\HalfswordUE5.exe" -PassThru
+  if ($Copy) {
+    # Minimized, so it does not take the keyboard from his game.
+    $lp = Start-Process "$game\HalfswordUE5.exe" -ArgumentList "-UserDir=`"$userDir`"" -WindowStyle Minimized -PassThru
+  } else { $lp = Start-Process "$game\HalfswordUE5.exe" -PassThru }
   $script:mine[[int]$lp.Id] = $t0.AddSeconds(-2)
   $left = @()
   try {
@@ -197,6 +253,16 @@ function Run-Launch($group, [string]$run) {
     }
     $script:logPos = 0L
     [void]$script:logText.Clear()
+    if ($Copy) {
+      # The room copies and puts back the save the game uses: it must be this copy's, never his.
+      $sv = Wait-Log "TestRoom: the game saves in .*" 0 150
+      if ($sv -lt 0) { throw "the mod never said where the game saves (needs the mod with game_saved_dir)" }
+      $m = [regex]::Match($script:logText.ToString(), "TestRoom: the game saves in (.*)")
+      $where = $m.Groups[1].Value.Trim()
+      if (-not $where.StartsWith($userDir + "\", [StringComparison]::OrdinalIgnoreCase)) { throw "the test game saves in '$where', not in $userDir: stopped before anything ran" }
+      # While he plays, his game gets the processor first.
+      if (His-GameRuns) { foreach ($p in @(Get-MineAlive)) { try { $p.PriorityClass = "BelowNormal" } catch {} } }
+    }
     $at = Wait-Log "TestRoom: \d+ passive foe" 0 150
     if ($at -lt 0) { throw "no test room after 150 s" }
     Say ("launch $L ($run): test room after " + [int]((Get-Date) - $t0).TotalSeconds + " s")
@@ -261,8 +327,12 @@ function Run-Launch($group, [string]$run) {
       $m = [regex]::Match($slice, "Case: end .*: (\d+) check\(s\) passed, (\d+) failed")
       $pass = [int]$m.Groups[1].Value; $fail = [int]$m.Groups[2].Value
       $res = $(if ($fail -gt 0) { "FAIL" } else { "pass" })
-      Note-Result $c $run $L ($k + 1) $pass $fail $res $secs $spawn ($reps -join " ")
-      if ($fail -gt 0) { $script:failed += $c }
+      $fps = Min-Fps $slice
+      # A starved game (his game or another copy took the machine) proves nothing either way: run it again later.
+      if ($Copy -and $fps -ne "" -and $fps -lt $MinFps) { $res = "SLOW" }
+      Note-Result $c $run $L ($k + 1) $pass $fail $res $secs $spawn ($reps -join " ") $fps
+      if ($res -eq "SLOW") { $script:slow += $c }
+      elseif ($fail -gt 0) { $script:failed += $c }
     }
     return , @{ Left = @(); Failed = @() }
   }
@@ -280,8 +350,9 @@ function Run-Launch($group, [string]$run) {
     Remove-Item $cmdPath -ErrorAction SilentlyContinue
     Get-ChildItem "$mod\test-save-*.sav" -ErrorAction SilentlyContinue | ForEach-Object { Move-Item $_.FullName $launchDir }
     if (Test-Path "$saves\GameProgress.sav") { Copy-Item "$saves\GameProgress.sav" "$launchDir\after-GameProgress.sav" -ErrorAction SilentlyContinue }
-    # Each launch starts from his exact files again.
-    if (-not (Get-Process -Name "HalfswordUE5*" -ErrorAction SilentlyContinue)) {
+    # Each launch starts from the exact files again.
+    $running = $(if ($Copy) { Get-CopyGames } else { Get-Process -Name "HalfswordUE5*" -ErrorAction SilentlyContinue })
+    if (-not $running) {
       foreach ($f in $files[2..3]) { Copy-Item $f.bak $f.live -Force }
     }
   }
@@ -306,6 +377,7 @@ function Make-Groups($list) {
 }
 
 $script:failed = @()
+$script:slow = @()
 $tAll = Get-Date
 try {
   $queue = [System.Collections.ArrayList]@(Make-Groups $cases)
@@ -325,9 +397,14 @@ try {
 }
 catch { $script:stopAll = "$_"; Say "RUN ERROR: $_" }
 finally {
-  $other = @(Get-Process -Name "HalfswordUE5*" -ErrorAction SilentlyContinue)
+  if ($script:slow.Count) {
+    # For run-parallel.ps1 (or a person): these cases ran on a starved game and need another go.
+    @($script:slow | ForEach-Object Name | Select-Object -Unique) | Set-Content "$Out\slow.txt" -Encoding ascii
+    Say "SLOW (game below $MinFps fps, not counted): $(@($script:slow | ForEach-Object Name) -join ', ')"
+  }
+  $other = $(if ($Copy) { Get-CopyGames } else { @(Get-Process -Name "HalfswordUE5*" -ErrorAction SilentlyContinue) })
   if ($other) {
-    Say ("RESTORE PENDING: a Half Sword this run did not start is running (pid " + (($other | ForEach-Object Id) -join ",") + "); nothing restored")
+    Say ("RESTORE PENDING: a Half Sword this run did not start is running (pid " + (($other | ForEach-Object { if ($_.ProcessId) { $_.ProcessId } else { $_.Id } }) -join ",") + "); nothing restored")
   }
   else {
     foreach ($f in $files) {
