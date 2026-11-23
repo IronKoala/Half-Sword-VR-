@@ -196,7 +196,7 @@ namespace hsvr
         bool test_room_wall_layout = true;  // cellar: tables and books against the north wall (Matthew 2026-11-23)
         bool test_room_freeze_props = true; // cellar: hay bundles and barrels hold still (they are authored overlapping)
         // The small light over each book's page (the engine's unitless light intensity; 0 = none).
-        double test_room_book_light = 40.0;
+        double test_room_book_light = 0.0; // 0: bright self-lit text reads best on the dark wood (2026-11-23)
         double test_room_fight_x = 1720.0; // where fighting Willies from the book appear (the cellar's coffin corner)
         double test_room_fight_y = 40.0;
         int test_room_foes = 4;
@@ -321,6 +321,16 @@ namespace hsvr
         // 1 = while the controllers are tracked, the mouse neither turns him nor tilts his look (the
         // control pitch is held at 0); with mouse and keyboard play the mouse works as before.
         bool pose_mouse_off_with_controllers = true;
+        // Who drives the arms in VR: "auto" (mouse and keyboard take over when you click or press a
+        // key while the controllers have had no button, trigger or grip for input_kbm_quiet_s; any
+        // controller button gives them back), "controllers" (always the controllers when tracked) or
+        // "keyboard" (always the game's own mouse-and-keyboard arms; head still tracked).
+        std::string input_mode = "auto";
+        double input_kbm_quiet_s = 1.0;
+        // Key that flips between controllers and mouse and keyboard (0x21 = Page Up; 0 = none).
+        int input_mode_key = 0x21;
+        // 1 = on mouse and keyboard, mouse up and down tilts the view (and aims, as in the flat game).
+        bool input_kbm_mouse_pitch = true;
         double pose_turn_dead_zone_deg = 60.0;
         double pose_turn_speed_dps = 150.0;
         // The most your head can be turned from his hips (a neck's reach): past it the hips come
@@ -720,6 +730,11 @@ namespace hsvr
         // taken off and hung back by it.
         bool pose_pavise_strap = true;
         double pose_pavise_mount_cm = 15.0;
+        // The mounted arm's own hand closing (nothing else in reach) (Matthew 2026-11-23): 1 takes the shield's
+        // handle nearest the palm (within pose_mount_handle_cm) in that hand, as any handle is held; 2 the
+        // game's own forearm grip; 0 only closes the hand on the strap. Opening it leaves the shield mounted.
+        int pose_mount_fist_grip = 1;
+        double pose_mount_handle_cm = 8.0;
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;
@@ -893,6 +908,14 @@ namespace hsvr
         // scales a sliding contact by the weapon's cutting rate, ~0 for a fist ball, so without this
         // a hard punch reached his damage as impulse ~1 (playtest 2026-11-22).
         bool pose_fist_full_impulse = true;
+        // Every new punch counts (Matthew 2026-11-23, "Only fix ignored punches"). The game drops a hit on
+        // the bone it last damaged unless it is bigger than the last one that counted (Deal Complex Damage:
+        // |impulse| x (cutting + 1) >= Last Complex Damage Impulse; Get Damage: damage >= Last Damage Taken),
+        // so a run of head punches of about the same strength mostly did nothing (38 of 58 in the playtest).
+        // A fist contact on a Willie more than pose_fist_new_punch_gap_s after that fist's last contact on
+        // him clears both, for that punch only; the contacts within one punch keep the game's rule.
+        bool pose_fist_new_punch_counts = true;
+        double pose_fist_new_punch_gap_s = 0.25;
         // Grabbing a weapon someone else holds: a tug of war under the game's own grip rule; his hand
         // lets go when its joint is pulled harder than his grip strength T x disarm_grip_scale (pain
         // weakens it, out cold he has none) for disarm_hold_s, and it is yours.

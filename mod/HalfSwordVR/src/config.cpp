@@ -447,6 +447,10 @@ namespace hsvr
         flag("pose_hold_capsule", c.pose_hold_capsule);
         flag("pose_body_turn", c.pose_body_turn);
         flag("pose_mouse_off_with_controllers", c.pose_mouse_off_with_controllers);
+        text("input_mode", c.input_mode);
+        num("input_kbm_quiet_s", c.input_kbm_quiet_s);
+        integer("input_mode_key", c.input_mode_key);
+        flag("input_kbm_mouse_pitch", c.input_kbm_mouse_pitch);
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);
@@ -594,6 +598,8 @@ namespace hsvr
         flag("pose_pavise_forearm", c.pose_pavise_forearm);
         flag("pose_pavise_strap", c.pose_pavise_strap);
         num("pose_pavise_mount_cm", c.pose_pavise_mount_cm);
+        integer("pose_mount_fist_grip", c.pose_mount_fist_grip);
+        num("pose_mount_handle_cm", c.pose_mount_handle_cm);
         flag("pose_two_hand", c.pose_two_hand);
         num("pose_two_hand_strength", c.pose_two_hand_strength);
         num("pose_two_hand_blade_gap_cm", c.pose_two_hand_blade_gap_cm);
@@ -723,6 +729,8 @@ namespace hsvr
         num("pose_drop_ignore_s", c.pose_drop_ignore_s);
         num("pose_drop_ignore_clear_cm", c.pose_drop_ignore_clear_cm);
         flag("pose_fist_full_impulse", c.pose_fist_full_impulse);
+        flag("pose_fist_new_punch_counts", c.pose_fist_new_punch_counts);
+        num("pose_fist_new_punch_gap_s", c.pose_fist_new_punch_gap_s);
         flag("disarm", c.disarm);
         num("disarm_grip_scale", c.disarm_grip_scale);
         num("disarm_hold_s", c.disarm_hold_s);

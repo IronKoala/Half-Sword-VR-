@@ -106,3 +106,41 @@ Judge scripts that read a run folder's `HalfSwordVR.log` work on a case folder a
 - Every launch with the test room adds one save copy (~5 MB) to the mod's `save_backups` (3.3 GB on
   2026-11-22). Nothing deletes them.
 - Worked examples (steps with waits): `HalfSwordDecomp\private\pctest-check\wait\`.
+
+## Test copies: background and parallel runs (2026-11-23)
+
+Matthew 2026-11-23: "When I'm at my computer, I only want one test running in the background. That way I
+can also play Half Sword at the same time. ... when I'm away from my computer, you can run multiple tests
+simultaneously." Tests run on the worst picture settings, and nothing may change what a test measures.
+
+**Needs the mod with `game_saved_dir` (dllmain.cpp).** Older dlls build the save path from `%LOCALAPPDATA%`
+and would copy and put back HIS save; the runner stops at once if the mod does not say where the game saves
+or names a folder outside the copy.
+
+- `tools/pctest/new-testcopy.ps1 -Name A` makes `C:\HSTest\A`:
+  - `game\`: his install, files of 50 MB and more hard-linked (paks, exe; no disk used, read only), the rest
+    copied, the `ue4ss` folder (mod dll, ini, log, commands, replays) always a real copy.
+  - `user\`: the game's `-UserDir=` (checked in the shipping exe: an absolute path is used as is, and
+    `Saved\SaveGames` and `Saved\Config` move with it). Its own save and settings, copied from his.
+  - Picture: every `sg.*` group 0 except view distance and foliage (left as he has them), a 1280x720
+    window, and `testcopy-Engine.ini` (render-only lines; the file lists what was left out and why).
+  - `-Refresh` after an install or a game update (copies his mod folder, save and settings again, links
+    the updated big files again).
+- `run-suite.ps1 -Copy C:\HSTest\A -List ... -Dll ...` runs a list in that copy. No `-Master`: the copy's
+  own files are the master backup. Only a game running from THIS copy stops it: his own game and other
+  copies don't. The test game starts minimized; while his game runs it gets lower processor priority.
+  Picture keys in the copy's mod ini: `mirror_window_res=1280x720`, `screen_percentage=50`,
+  `extra_commands` + `t.MaxFPS 72` (the headset's rate; `-MaxFps 0` = no cap), `perf_log_seconds=2`.
+  A case whose game logged a frame rate below `-MinFps` (65) is **SLOW**: neither pass nor fail.
+- `run-parallel.ps1 -List ... -Dll ... [-Slots 2]` hands chunks of the list (`-Chunk 8`) to copies A, B, ...
+  Keyboard or mouse used in the last `-IdleMinutes` (10), or his own Half Sword open = ONE test game.
+  Otherwise up to `-Slots`. A running copy is never stopped when he comes back; its chunk is short.
+  SLOW cases are queued again (up to `-SlowTries` 3). `<Out>\STOP` stops everything.
+- His install, mod ini and save are never written by any of this.
+
+**Incident 2026-11-23 19:03-19:14Z:** the first `new-testcopy.ps1` copied his whole mod folder (31.9 GB:
+25.2 GB logs, 4.7 GB save backups, 1 GB replays) before deleting them. C: was swamped, and SteamVR's watchdog
+killed vrserver/vrcompositor three times while he started VR ("Failed Watchdog timeout ... CVRLog::LogDirect").
+Now: logs, save_backups and replays are never copied (robocopy /XD), the copy runs at Idle priority, it refuses
+to run while SteamVR or his Half Sword runs, and it stops if the copied mod folder is over 2 GB. A test copy
+loading a level still READS GBs from C:; while he plays, the runner keeps one test game at lower priority.

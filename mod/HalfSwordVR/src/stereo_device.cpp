@@ -36,6 +36,7 @@ namespace hsvr
             FramePose pose;
             Vec3 anchor;           // world position of the point between the eyes at recenter pose
             double base_yaw = 0.0; // world heading that "straight ahead" maps to
+            double base_pitch = 0.0; // mouse look up/down on mouse and keyboard (PlayerAnchor::view_pitch)
             Recenter recenter;
             double cm_per_metre = 100.0; // world centimetres per real metre (last seen)
             Vec3 eye_at[2];              // each eye as the engine last drew it (world), for the helmet probe
@@ -66,6 +67,7 @@ namespace hsvr
             }
 
             g_view.base_yaw = camera_rotation.Yaw;
+            g_view.base_pitch = 0.0;
             Vec3 camera{camera_location.X, camera_location.Y, camera_location.Z};
             g_view.anchor = camera;
             PlayerAnchor player;
@@ -78,6 +80,7 @@ namespace hsvr
                 // the camera trails the aim and shakes on hits, which in a headset would swing
                 // the whole world around.
                 if (cfg.heading == "aim" && player.has_heading) g_view.base_yaw = player.heading_yaw;
+                g_view.base_pitch = player.view_pitch;
                 Vec3 exact = cfg.anchor_room_unsmoothed ? player.exact_offset : Vec3{};
                 Vec3 offset = player.head_position - player.actor_position - exact;
                 if (!g_have_smoothed || cfg.anchor_smoothing <= 0.0)
@@ -263,7 +266,7 @@ namespace hsvr
                 Vec3 eye_real_cm = xr_to_ue_position(eye.px, eye.py, eye.pz, 100.0);
                 Vec3 relative = recenter_inverse.rotate(eye_real_cm - g_view.recenter.position_cm) * (cm_per_metre / 100.0);
                 Quat relative_rotation = recenter_inverse * xr_to_ue_rotation(eye.qx, eye.qy, eye.qz, eye.qw);
-                Quat base = quat_from_yaw_deg(g_view.base_yaw);
+                Quat base = rot_to_quat(g_view.base_pitch, g_view.base_yaw, 0.0);
                 Vec3 location = g_view.anchor + base.rotate(relative);
                 Rot rotation = quat_to_rot((base * relative_rotation).normalized());
                 if (shared().photo_on.load())
@@ -424,7 +427,7 @@ namespace hsvr
         Vec3 real_cm = xr_to_ue_position(pose.px, pose.py, pose.pz, 100.0);
         Vec3 relative = recenter_inverse.rotate(real_cm - g_view.recenter.position_cm) * (g_view.cm_per_metre / 100.0);
         Quat relative_rotation = recenter_inverse * xr_to_ue_rotation(pose.qx, pose.qy, pose.qz, pose.qw);
-        Quat base = quat_from_yaw_deg(base_yaw);
+        Quat base = rot_to_quat(g_view.base_pitch, base_yaw, 0.0); // the eyes' own tilt (mouse look on mouse and keyboard)
         location = anchor + base.rotate(relative);
         rotation = (base * relative_rotation).normalized();
         return true;
