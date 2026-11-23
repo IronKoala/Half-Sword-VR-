@@ -1,0 +1,4 @@
+# Bare-fist punches: every new punch counts (Matthew 2026-11-23 "Only fix ignored punches"). Right-hand head
+# punches every 2.2 s (arm_move 16) on the test room's passive foe. Second case: the game's old rule, to compare.
+punch_repeat_counts|steps-punch_repeat.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+punch_repeat_game_rule|steps-punch_repeat_old.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_fist_new_punch_counts=0

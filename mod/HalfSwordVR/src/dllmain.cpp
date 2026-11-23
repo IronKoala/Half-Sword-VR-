@@ -2324,6 +2324,7 @@ namespace
     // Test counters since the last hsvr.mark (for hsvr.expect): stuck let-goes, kicks (a held weapon
     // ending a tick more than 8 cm from where it was sent) and the worst hold lag (cm) per hand.
     std::atomic<int> g_count_letgo{0}, g_count_kicks{0};
+    std::atomic<int> g_count_punches{0}, g_count_punches_counted{0}; // tests: fist blows that started a new punch / of them, ones that took consciousness or health
     std::atomic<double> g_worst_lag[2] = {0.0, 0.0};
     // Two-hand test measures (joint hold, two hands): worst since hsvr.two_reset of the angle between the weapon's
     // grip-to-grip line and the line between where the hands want them (deg), and of either hand's point off the
@@ -10161,6 +10162,9 @@ namespace
     };
     FistBoost g_fist_boost[2];
     double g_punch_c0 = 0.0, g_punch_h0 = 0.0;
+    // Test counters: punches (a fist's contacts on one Willie less than pose_fist_new_punch_gap_s apart)
+    // with a blow in them, and of those the ones where a contact took consciousness or health.
+    int g_punch_serial = 0, g_punch_blow_serial = -1, g_punch_counted_serial = -1;
     // Watches every 'Deal Complex Damage' a Willie gets: the player's fist hits are learnt (and logged).
     void punch_watch_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
@@ -10210,6 +10214,21 @@ namespace
             write_three(locals + imp->GetOffset_Internal(), imp, ni.x, ni.y, ni.z);
             g_fist_boost[side].at = -10.0; // once per contact
         }
+        // A new punch clears the game's "not bigger than the last hit on that bone" checks (fists only).
+        static UObject* punch_last_victim[2] = {nullptr, nullptr};
+        static double punch_last_t[2] = {-10.0, -10.0};
+        double t_hit = hsvr::now_seconds();
+        bool new_punch = victim != punch_last_victim[side] || t_hit - punch_last_t[side] > config().pose_fist_new_punch_gap_s;
+        punch_last_victim[side] = victim;
+        punch_last_t[side] = t_hit;
+        double last_cdi = read_number_variable(victim, STR("Last Complex Damage Impulse")), last_taken = read_number_variable(victim, STR("Last Damage Taken"));
+        bool cleared = false;
+        if (new_punch && config().pose_fist_new_punch_counts)
+        {
+            set_variable(victim, STR("Last Complex Damage Impulse"), 0.0);
+            set_variable(victim, STR("Last Damage Taken"), 0.0);
+            cleared = true;
+        }
         double speed = length(v), r = read_param_number(locals, rig), c = cut ? read_param_number(locals, cut) : 0.0, s = stab ? read_param_number(locals, stab) : 0.0;
         // The hand's own speed when it hit (to learn the fist's velocity factor).
         double hand_speed = g_swing_v[side] * 100.0;
@@ -10241,13 +10260,21 @@ namespace
         double cos_ni = speed > 1.0 && length(ni) > 1e-6 ? dot(v, ni) / (speed * length(ni)) : 0.0;
         double cos_n = speed > 1.0 && length(nrm) > 1e-6 ? dot(v, nrm) / (speed * length(nrm)) : 0.0;
         g_punch_victim = victim;
+        if (new_punch) ++g_punch_serial;
+        if (blow && g_punch_blow_serial != g_punch_serial)
+        {
+            g_punch_blow_serial = g_punch_serial;
+            g_count_punches.fetch_add(1);
+        }
         g_punch_c0 = read_number_variable(victim, STR("Consciousness"));
         g_punch_h0 = read_number_variable(victim, STR("Health"));
         std::wstring b = bone ? reinterpret_cast<FName*>(locals + bone->GetOffset_Internal())->ToString() : STR("?");
         HSVR_LOG("Punch: %s fist %s %ls (%ls): velocity %.0f cm/s (hand %.0f), impulse %.0f (game's %.0f), rigidity %.2f, cut %.2f, stab %.2f, kick %.2f, blunt %.0f, draw %.2f, "
-                 "lower %d, parent %d, extra %d, cos(velocity, impulse) %.2f, cos(velocity, normal) %.2f; learnt from %d hits: rigidity %.2f, cut %.2f, impulse/velocity %.3f, velocity/hand %.2f",
+                 "lower %d, parent %d, extra %d, cos(velocity, impulse) %.2f, cos(velocity, normal) %.2f; learnt from %d hits: rigidity %.2f, cut %.2f, impulse/velocity %.3f, velocity/hand %.2f; "
+                 "%s (game's last counted: complex impulse %.0f, damage %.2f; this one %.0f)",
                  side == 0 ? "left" : "right", blow ? "blow on" : "touch on", victim->GetName().c_str(), b.c_str(), speed, hand_speed, length(ni), game_ni, r, c, s, P.kick, P.blunt_int, P.draw_cut,
-                 (int)P.lower_threshold, (int)P.damage_parent, (int)P.extra_high, cos_ni, cos_n, P.n, P.rigidity, P.cut, P.impulse_per_v, P.v_per_speed);
+                 (int)P.lower_threshold, (int)P.damage_parent, (int)P.extra_high, cos_ni, cos_n, P.n, P.rigidity, P.cut, P.impulse_per_v, P.v_per_speed,
+                 cleared ? "new punch, checks cleared" : new_punch ? "new punch" : "same punch", last_cdi, last_taken, length(ni) * (c + 1.0));
     }
 
     // After his Deal Complex Damage: what the blow (or touch) did to him.
@@ -10258,8 +10285,13 @@ namespace
         if (!g_punch_victim || context.Context != g_punch_victim) return;
         UObject* w = g_punch_victim;
         g_punch_victim = nullptr;
-        HSVR_LOG("Punch: -> %ls health %.2f -> %.2f, consciousness %.2f -> %.2f", w->GetName().c_str(), g_punch_h0, read_number_variable(w, STR("Health")), g_punch_c0,
-                 read_number_variable(w, STR("Consciousness")));
+        double h1 = read_number_variable(w, STR("Health")), c1 = read_number_variable(w, STR("Consciousness"));
+        if (g_punch_blow_serial == g_punch_serial && g_punch_counted_serial != g_punch_serial && (g_punch_c0 - c1 > 1.0 || g_punch_h0 - h1 > 0.05))
+        {
+            g_punch_counted_serial = g_punch_serial;
+            g_count_punches_counted.fetch_add(1);
+        }
+        HSVR_LOG("Punch: -> %ls health %.2f -> %.2f, consciousness %.2f -> %.2f", w->GetName().c_str(), g_punch_h0, h1, g_punch_c0, c1);
     }
 
     void install_punch_watch()
@@ -27944,6 +27976,8 @@ namespace
         g_carry_log_until.store(0.0);
         g_count_letgo.store(0);
         g_count_kicks.store(0);
+        g_count_punches.store(0);
+        g_count_punches_counted.store(0);
         g_fake_continue.store(false);
         g_fake_x.store(false);
         g_floor_miss_until = -1.0;
@@ -28140,6 +28174,8 @@ namespace
         else if (w == "grabbed_l") value = bool_property(pawn, STR("Grabbed L")) ? 1.0 : 0.0;
         else if (w == "letgo") value = g_count_letgo.load();
         else if (w == "kicks") value = g_count_kicks.load();
+        else if (w == "punches") value = g_count_punches.load();               // punches with a blow in them
+        else if (w == "punches_counted") value = g_count_punches_counted.load(); // of them, ones that took consciousness or health
         else if (w == "lag_r") value = g_worst_lag[1].load();
         else if (w == "lag_l") value = g_worst_lag[0].load();
         else if (w == "stamina") value = read_number_variable(pawn, STR("Stamina"));
