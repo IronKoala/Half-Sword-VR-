@@ -2794,7 +2794,6 @@ namespace
         return p;
     }
 
-    bool right_hold_target_axis(UObject* held, hsvr::Vec3& axis); // the right hold's target blade axis (BaseMesh +Z), world
     bool xbow_test_grip(int side, hsvr::Vec3& grip, hsvr::Quat& grip_rot);
     // Test aid hsvr.ctl_replay <track file> [blend s] / off: both pretend controllers play back Matthew's own recorded motion,
     // in his body's frame (position from the actor, yaw only), looped. A track is a replay capture cut down by
@@ -2988,12 +2987,9 @@ namespace
                     Vec3 along{0, 0, 1};
                     UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
                     if (UObject* wb = held ? object_property(held, STR("BaseMesh")) : nullptr) along = body.inverse().rotate(component_rotation(wb).rotate(Vec3{0, 0, 1}));
-                    // Along where the right hand WANTS the weapon (its hold's target), not where it hangs: a long weapon droops in one
-                    // hand, and a left hand put along the droop disagreed with the right wrist from the start (run 57719a0, B&S two
-                    // hands: polehammer 59 deg between the wrist's aim and the hands' line at rest). A real second hand goes where
-                    // the weapon is meant to point.
-                    Vec3 want_axis;
-                    if (right_hold_target_axis(held, want_axis)) along = body.inverse().rotate(want_axis);
+                    // Along where the weapon actually hangs, as a real hand reaches for the handle where it is. (456cfc5 used the right
+                    // hold's target axis instead: the left hand then missed drooping long weapons by 12-29 cm and never took them,
+                    // run 2 2026-11-23: polehammer, war staff, mace, crossbow.)
                     // Once both hands hold it, the left target stays where it was put (in his body's frame), as
                     // a real hand would: following the weapon's own axis let a drooping weapon pull the hand
                     // down after it (joint-hold test 2026-11-22: the staff fell 87 deg and kept wandering).
@@ -6264,12 +6260,6 @@ namespace
         double far_since = -1.0, far_logged = 0.0;
     };
     HoldState g_hold[2];
-    bool right_hold_target_axis(UObject* held, hsvr::Vec3& axis)
-    {
-        if (!held || g_hold[1].weapon != held || !g_hold[1].have_last) return false;
-        axis = g_hold[1].last_target_rot.rotate(hsvr::Vec3{0, 0, 1});
-        return true;
-    }
     bool hand_has_weapon(int side) { return g_hold[side].weapon != nullptr && !is_fist(g_hold[side].weapon); }
     bool hand_is_fist(int side) { return is_fist(g_hold[side].weapon); }
 
