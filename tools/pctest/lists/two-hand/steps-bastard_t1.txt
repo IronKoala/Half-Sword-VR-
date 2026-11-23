@@ -42,4 +42,15 @@
 27.5:hsvr.expect two_line_max < 6 rest: along the hands
 27.5:hsvr.expect two_off_max < 3 rest: hands on its line
 27.6:hsvr.expect two_gap >= 8.9 rest: hands apart
-28:quit
+28:hsvr.xbow_hand 0 off
+28:hsvr.arm_move 7 -12
+28.1:hsvr.two_reset
+29:hsvr.xbow_wrist 1 pitch 35 1
+31:hsvr.expect two_hand = 1 wrist point: still held
+31:hsvr.expect two_wrist < 12 wrist point: the tip goes where the main wrist points it
+31.1:hsvr.xbow_wrist 1 pitch -15 0.15
+31.2:hsvr.two_reset
+32:hsvr.expect two_hand = 1 wrist cut: still held
+32.5:hsvr.expect two_wrist < 12 wrist cut: settled where the wrist points
+32.6:hsvr.xbow_wrist 1 pitch 0 0.5
+34:quit

@@ -72,6 +72,22 @@ BODY = """10:hsvr.expect two_hand = 1 second hand took it
 27.6:hsvr.expect two_gap >= 8.9 rest: hands apart
 28:quit
 """
+# Swords only (grips close together): the main wrist alone points the tip, the second hand stays put
+# (playtest 2026-11-23: "I can't properly point the tip outward"). The left controller stops riding the
+# right one and holds where it is; the right wrist pitches 35 deg, then a fast 50 deg cut and back.
+WRIST = """28:hsvr.xbow_hand 0 off
+28:hsvr.arm_move 7 {along}
+28.1:hsvr.two_reset
+29:hsvr.xbow_wrist 1 pitch 35 1
+31:hsvr.expect two_hand = 1 wrist point: still held
+31:hsvr.expect two_wrist < 12 wrist point: the tip goes where the main wrist points it
+31.1:hsvr.xbow_wrist 1 pitch -15 0.15
+31.2:hsvr.two_reset
+32:hsvr.expect two_hand = 1 wrist cut: still held
+32.5:hsvr.expect two_wrist < 12 wrist cut: settled where the wrist points
+32.6:hsvr.xbow_wrist 1 pitch 0 0.5
+34:quit
+"""
 
 
 def main():
@@ -82,6 +98,8 @@ def main():
             continue
         name, path, along = [p.strip() for p in line.split("|")]
         steps = HEAD.format(path=path) + (TAKE_FRONT if along == "front" else TAKE_ALONG.format(along=along)) + BODY
+        if along != "front" and abs(float(along)) <= 15.0:
+            steps = steps.replace("28:quit\n", "") + WRIST.format(along=along)
         (HERE / ("steps-%s.txt" % name)).write_text(steps, newline="\n")
         rows.append(name)
     lst = ["# Two hands with real-hand conditions (playtest 2026-11-23). Control run: the same with pose_two_hand_joint_line=0 must FAIL."]

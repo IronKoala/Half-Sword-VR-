@@ -2330,6 +2330,7 @@ namespace
     // weapon's grip line (cm, across it). hsvr.hand_spread <side> <cm> puts that fake controller this much further
     // from the other one along the line between them (real hands are never exactly on the grips).
     std::atomic<double> g_two_line_deg{0.0}, g_two_off_cm{0.0}, g_two_line_now{0.0}, g_two_off_now{0.0};
+    std::atomic<double> g_two_wrist_deg{0.0}, g_two_wrist_now{0.0}; // the weapon's grip line against where the main wrist points it (deg)
     std::atomic<double> g_hand_spread[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     double g_jump_until = -1.0;               // a jump released by left X: until then the capsule's rise is the game's jump, not a climb
@@ -16049,13 +16050,37 @@ namespace
                 tw = n > 1e-9 ? Quat{tw.x / n, tw.y / n, tw.z / n, tw.w / n} : Quat{};
                 line_rot = (tw * aligned).normalized();
             }
+            // Close-together grips point with the WRISTS (playtest 2026-11-23, 37e2bcf: the swords sat 19-51 deg off where
+            // his main wrist pointed them and within 2-12 deg of the hands' line, which on a sword grip is 10-18 cm long:
+            // "I can't properly point the tip outward ... can't properly do strikes"). So the pose is the main wrist's
+            // turned toward the hands' line by f = s^2 / (s^2 + ref^2) of the way (s = the grips' distance): a sword grip
+            // (10-16 cm) mostly the wrist, a polearm (50 cm) mostly the line. Fixed grips (the crossbow) keep the line.
+            double f_line = 1.0;
+            if (!(g_two.use_rel && !g_two.has_handle) && cfg.pose_two_hand_line_ref_cm > 0.0)
+            {
+                double sd = length(d_local), ref = cfg.pose_two_hand_line_ref_cm;
+                f_line = sd * sd / (sd * sd + ref * ref);
+                Vec3 sw = scaled_axis((line_rot * target_rot.inverse()).normalized());
+                double ang = length(sw);
+                if (ang < 150.0 / 57.2958)
+                    line_rot = (from_scaled_axis(sw * (1.0 - f_line)).inverse() * line_rot).normalized(); // = from target_rot, f_line of the way to the line
+                else
+                    f_line = 1.0; // the wrist far round from the line (half a turn): the line, as before
+            }
             Vec3 miss = between - line_rot.rotate(d_local); // along the line: hands further apart (or closer) than the grips
             double w2 = (std::max)(0.0, s2b.total) / (std::max)(0.05, (std::max)(0.0, body.total) + (std::max)(0.0, s2b.total));
+            if (f_line < 1.0)
+            {
+                // Across the line the main hand stays where it is (the wrist points it) and the second takes most of the miss.
+                Vec3 u = normalized(line_rot.rotate(d_local));
+                Vec3 m_along = u * dot(miss, u), m_across = miss - m_along;
+                miss = m_along + m_across * f_line;
+            }
             line_main = target_pivot + miss * w2;
             s_rot = line_rot;
             s_pos = line_main - line_rot.rotate(pivot);
-            HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls (two hands, one pose): along the hands' line, %.0f deg from the main wrist's turn (only its roll is used); hands %.1f cm %s than the grips (%.0f%% of it on the main hand)",
-                           side == 0 ? "left" : "right", weapon->GetName().c_str(), length(scaled_axis((line_rot * target_rot.inverse()).normalized())) * 57.2958,
+            HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls (two hands, one pose): %.0f%% toward the hands' line from the main wrist, %.0f deg from the main wrist's turn; hands %.1f cm %s than the grips (%.0f%% of it on the main hand)",
+                           side == 0 ? "left" : "right", weapon->GetName().c_str(), f_line * 100.0, length(scaled_axis((line_rot * target_rot.inverse()).normalized())) * 57.2958,
                            std::fabs(length(between) - length(d_local)), length(between) >= length(d_local) ? "further apart" : "closer", w2 * 100.0);
         }
         if (two && !line && cfg.pose_two_hand_twist_only && !both_turn)
@@ -16138,6 +16163,10 @@ namespace
                         Vec3 u = normalized(wl);
                         auto across = [&](const Vec3& q) { Vec3 d = q - g1; return length(d - u * dot(d, u)); };
                         double off = (std::max)(across(h1), across(h2));
+                        Vec3 wz = normalized(target_rot.rotate(g_two.bs_local - pivot)), az = normalized(g2 - g1);
+                        double wang = std::acos((std::min)(1.0, (std::max)(-1.0, dot(wz, az)))) * 57.2958;
+                        g_two_wrist_now.store(wang);
+                        if (wang > g_two_wrist_deg.load()) g_two_wrist_deg.store(wang);
                         g_two_line_now.store(ang);
                         g_two_off_now.store(off);
                         if (ang > g_two_line_deg.load()) g_two_line_deg.store(ang);
@@ -27559,6 +27588,7 @@ namespace
         }
         g_two_line_deg.store(0.0);
         g_two_off_cm.store(0.0);
+        g_two_wrist_deg.store(0.0);
     }
 
     void case_end_log()
@@ -27737,6 +27767,8 @@ namespace
         else if (w == "strength_l") value = g_hold[0].body_strength;
         else if (w == "two_hand") value = g_two.active ? 1.0 : 0.0;
         else if (w == "two_line_max") value = g_two_line_deg.load();
+        else if (w == "two_wrist_max") value = g_two_wrist_deg.load();
+        else if (w == "two_wrist") value = g_two_wrist_now.load();
         else if (w == "two_off_max") value = g_two_off_cm.load();
         else if (w == "two_line") value = g_two_line_now.load();
         else if (w == "two_off") value = g_two_off_now.load();
@@ -29927,6 +29959,7 @@ namespace
             {
                 g_two_line_deg.store(0.0);
                 g_two_off_cm.store(0.0);
+                g_two_wrist_deg.store(0.0);
                 HSVR_LOG("Script: hsvr.two_reset");
                 continue;
             }
