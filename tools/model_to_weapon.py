@@ -1160,9 +1160,9 @@ def main(argv=None):
         grams = sum(v * (WOOD if shield else grip_density if s == "Grip" else STEEL) for s, v in volume.items())
         enclosed = 0.0
         for _, g in ([] if args.preview else meshes):
-            gm = g.copy()
-            gm.merge_vertices(merge_tex=True, merge_norm=True)
-            enclosed += abs(float(gm.volume))
+            # trimesh's volume works on the triangles alone: joining the vertices first (as before) gives
+            # the same number and took seconds on big models.
+            enclosed += abs(float(g.volume))
         enclosed *= scale ** 3
         convex = sum(volume.values())
         if 0.2 * convex < enclosed <= convex:

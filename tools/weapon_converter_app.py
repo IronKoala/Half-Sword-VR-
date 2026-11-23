@@ -289,6 +289,9 @@ class App:
         self.cur = None
         self.quiet = False  # True while the editor is being filled in by code
         self.batch_running = False
+        self.child_lock = threading.Lock()
+        self.spare = None
+        root.after(500, self.start_spare_child)  # the first conversion's process loads while the user picks
 
         root.title("Half Sword Weapon Converter")
         root.minsize(760, 560)
@@ -1098,6 +1101,38 @@ class App:
         self.batch_running = True
         self.run(self.convert_all_worker, todo)
 
+    def start_spare_child(self):
+        """Starts a conversion process ready for the next job (one at a time)."""
+        with self.child_lock:
+            if self.spare is not None and self.spare[0].is_alive():
+                return
+            ctx = multiprocessing.get_context("spawn")
+            jobs, q = ctx.Queue(), ctx.Queue()
+            proc = ctx.Process(target=convert_in_child, args=(jobs, q), daemon=True)
+            proc.start()
+            self.spare = (proc, jobs, q)
+
+    def take_child(self):
+        with self.child_lock:
+            spare, self.spare = self.spare, None
+        if spare is None or not spare[0].is_alive():
+            self.start_spare_child()
+            with self.child_lock:
+                spare, self.spare = self.spare, None
+        return spare
+
+    def stop_spare_child(self):
+        with self.child_lock:
+            spare, self.spare = self.spare, None
+        if spare is not None and spare[0].is_alive():
+            try:
+                spare[1].put(None)
+                spare[0].join(2)
+            except Exception:
+                pass
+            if spare[0].is_alive():
+                spare[0].terminate()
+
     def convert_all_worker(self, todo):
         for n, (it, values) in enumerate(todo, 1):
             self.events.put(("progress", it, f"converting ({n} of {len(todo)})..."))
@@ -1113,10 +1148,11 @@ class App:
 
         # The conversion runs in a process of its own: a big model takes a few GB while converting, and a
         # process that ends gives all of it back (in this one it stayed taken, conversion after conversion).
-        ctx = multiprocessing.get_context("spawn")
-        q = ctx.Queue()
-        proc = ctx.Process(target=convert_in_child, args=(argv, q), daemon=True)
-        proc.start()
+        # A process started ahead of time (its Python and libraries already loaded) takes the job; the
+        # next one starts loading as soon as this one has its job, so back-to-back conversions don't wait.
+        proc, jobs, q = self.take_child()
+        jobs.put(argv)
+        self.start_spare_child()
         problem, finished = None, False
         while not finished:
             try:
@@ -1728,12 +1764,17 @@ class App:
             self.root.config(cursor="")
 
     def close(self):
+        self.stop_spare_child()
         shutil.rmtree(self.work_root, ignore_errors=True)
         self.root.destroy()
 
 
-def convert_in_child(argv, q):
-    """Runs model_to_weapon in the conversion process; its printout and the outcome go back through q."""
+def convert_in_child(jobs, q):
+    """Runs model_to_weapon in the conversion process: started ahead of time, it waits for its one job
+    (argv) on jobs; its printout and the outcome go back through q. One job per process (memory)."""
+    argv = jobs.get()
+    if argv is None:
+        return
     class Out(io.TextIOBase):
         def write(s, text):
             q.put(("log", text))

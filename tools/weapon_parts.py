@@ -15,16 +15,19 @@ from scipy.spatial import ConvexHull
 def write_visual_obj(path, title, pos, nrm, uvs, tris):
     """pos, nrm: (n, 3) in the weapon frame; uvs: (n, 2) with v pointing up the image (OBJ/Unity/glTF-
     flipped convention: the mod uses 1 - v); tris: (m, 3) counter-clockwise from outside."""
+    # One format per block instead of one per line (same text, about 4x faster on a million triangles).
+    pos, nrm, uvs = (np.asarray(a, dtype=np.float64) for a in (pos, nrm, uvs))
+    t1 = np.asarray(tris, dtype=np.int64) + 1
     with open(path, "w", newline="\n") as f:
         f.write(f"# {title}; Unreal axes, cm, weapon frame\n")
-        for p in pos:
-            f.write("v %.4f %.4f %.4f\n" % tuple(p))
-        for n in nrm:
-            f.write("vn %.5f %.5f %.5f\n" % tuple(n))
-        for uv in uvs:
-            f.write("vt %.5f %.5f\n" % (uv[0], uv[1]))
-        for a, b, c in tris:
-            f.write(f"f {a+1}/{a+1}/{a+1} {b+1}/{b+1}/{b+1} {c+1}/{c+1}/{c+1}\n")
+        if len(pos):
+            f.write(("v %.4f %.4f %.4f\n" * len(pos)) % tuple(pos[:, :3].ravel()))
+        if len(nrm):
+            f.write(("vn %.5f %.5f %.5f\n" * len(nrm)) % tuple(nrm[:, :3].ravel()))
+        if len(uvs):
+            f.write(("vt %.5f %.5f\n" * len(uvs)) % tuple(uvs[:, :2].ravel()))
+        if len(t1):
+            f.write(("f %d/%d/%d %d/%d/%d %d/%d/%d\n" * len(t1)) % tuple(np.repeat(t1, 3, axis=1).ravel()))
 
 
 def width_profile(pos, lo, hi, step):
@@ -58,14 +61,26 @@ def section_widths(pos, tris, lo, hi, step, both=False):
     edges = _edges(tris)
     z = pos[:, 2]
     za, zb = z[edges[:, 0]], z[edges[:, 1]]
+    # Only edges that can cross a plane are tested at it (same result, much faster on dense models): short
+    # edges sorted by their low end are looked up in a window below the plane, long ones always tested.
+    zmin, span = np.minimum(za, zb), np.abs(zb - za)
+    win = max(4.0 * step, float(np.percentile(span, 99)) if len(span) else 0.0)
+    long_ = np.nonzero(span > win)[0]
+    short = np.nonzero(span <= win)[0]
+    short = short[np.argsort(zmin[short], kind="stable")]
+    smin = zmin[short]
     out = []
     for c in np.arange(lo, hi, step):
-        cross = (za - c) * (zb - c) < 0
+        a, b = np.searchsorted(smin, c - win, side="left"), np.searchsorted(smin, c, side="right")
+        cand = np.concatenate([short[a:b], long_])
+        cza, czb = za[cand], zb[cand]
+        cross = (cza - c) * (czb - c) < 0
         if not cross.any():
             out.append((float(c), 0.0))
             continue
-        pa, pb = pos[edges[cross, 0]], pos[edges[cross, 1]]
-        t = ((c - za[cross]) / (zb[cross] - za[cross]))[:, None]
+        ei = edges[cand[cross]]
+        pa, pb = pos[ei[:, 0]], pos[ei[:, 1]]
+        t = ((c - cza[cross]) / (czb[cross] - cza[cross]))[:, None]
         pts = pa + (pb - pa) * t
         w = float(np.ptp(pts[:, 0]))
         if both:
@@ -75,11 +90,16 @@ def section_widths(pos, tris, lo, hi, step, both=False):
 
 
 def _edges(tris):
-    e = set()
-    for a, b, c in tris:
-        for u, w in ((a, b), (b, c), (c, a)):
-            e.add((min(u, w), max(u, w)))
-    return np.array(sorted(e))
+    """The mesh's edges, each once as (low index, high index), sorted (as sorted(set) gave them)."""
+    t = np.asarray(tris, dtype=np.int64).reshape(-1, 3)
+    if not len(t):
+        return np.zeros((0, 2), dtype=np.int64)
+    e = np.concatenate([t[:, [0, 1]], t[:, [1, 2]], t[:, [2, 0]]])
+    e.sort(axis=1)
+    n = int(e.max()) + 1
+    key = np.sort(e[:, 0] * n + e[:, 1])  # one number per edge: sorting it sorts by (low, high)
+    key = key[np.concatenate([[True], key[1:] != key[:-1]])]
+    return np.stack([key // n, key % n], axis=1)
 
 
 def build_pieces(pos, tris, handle_bottom, guard_bottom, guard_top, slice_cm=15.0):
@@ -249,7 +269,8 @@ def save_rgb(path, a, encode):
     a = np.clip(a, 0, 1)
     if encode:
         a = lin_to_srgb(a)
-    Image.fromarray((a * 255 + 0.5).astype(np.uint8), "RGB").save(path)
+    # Fastest PNG compression: the same pixels (PNG is lossless), written several times faster.
+    Image.fromarray((a * 255 + 0.5).astype(np.uint8), "RGB").save(path, compress_level=1)
     print(f"wrote {path.replace(chr(92), '/').split('/')[-1]} {a.shape[1]}x{a.shape[0]}")
 
 
