@@ -1,5 +1,6 @@
 0.5:hsvr.wait room_ready = 1 6 0 room revealed
 0.6:hsvr.expect room_books = 2 two books
+0.65:hsvr.expect room_wall = 1 tables and books against the north wall
 0.7:hsvr.expect room_tables = 2 two tables
 0.8:hsvr.expect room_lost = 0 no weapon fell out of the world
 0.9:hsvr.expect room_on_tables >= 6 weapons lying on the tables

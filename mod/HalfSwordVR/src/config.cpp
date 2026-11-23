@@ -393,6 +393,8 @@ namespace hsvr
         text("test_room_map", c.test_room_map);
         flag("test_room_blackout", c.test_room_blackout);
         flag("test_room_books", c.test_room_books);
+        flag("test_room_wall_layout", c.test_room_wall_layout);
+        flag("test_room_freeze_props", c.test_room_freeze_props);
         num("test_room_book_light", c.test_room_book_light);
         num("test_room_fight_x", c.test_room_fight_x);
         num("test_room_fight_y", c.test_room_fight_y);
