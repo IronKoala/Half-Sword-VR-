@@ -48,6 +48,9 @@ namespace hsvr
         // Per-eye render size in pixels (after render_scale).
         std::atomic<int> eye_width{0};
         std::atomic<int> eye_height{0};
+        // The game window's picture size (its swap chain), seen at the last Present.
+        std::atomic<int> window_width{0};
+        std::atomic<int> window_height{0};
         // True once our stereo device is installed in the engine.
         std::atomic<bool> stereo_installed{false};
         // Asked by the game thread (recenter key); consumed where the head pose is known.
