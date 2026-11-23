@@ -834,6 +834,9 @@ namespace hsvr
         bool pose_fist_clear = true;
         double pose_fist_clear_margin_cm = 2.0;
         double pose_fist_clear_retry_s = 0.03;
+        // Nor inside what that hand just let go of (playtest 2026-11-23: a shield let go with the fingers
+        // still curled was shoved out of the hand by the fist made inside it), until the ball is clear of it.
+        bool pose_fist_clear_dropped = true;
         // A fist blow's assisted impulse (hit_assist) goes into the victim's damage as is. The game
         // scales a sliding contact by the weapon's cutting rate, ~0 for a fist ball, so without this
         // a hard punch reached his damage as impulse ~1 (playtest 2026-11-22).

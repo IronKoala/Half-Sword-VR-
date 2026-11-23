@@ -528,6 +528,7 @@ LAYOUT = [
         ('pose_fist_clear', 'No fist while the hand is inside another Willie.'),
         ('pose_fist_clear_margin_cm', 'Extra clearance the fist needs from him (cm).'),
         ('pose_fist_clear_retry_s', 'How often it checks again (s).'),
+        ('pose_fist_clear_dropped', 'No fist inside what that hand just let go of (it shoved dropped shields away).'),
         ('pose_fist_full_impulse', "1 = a punch's full force reaches his damage (the game cut a sliding fist contact to almost nothing)."),
         ('disarm', "1 = grab a weapon out of an enemy's hand: pull harder than his grip and he lets go."),
         ('disarm_grip_scale', 'His grip against your pull: his grip strength x this (higher = harder to disarm).'),

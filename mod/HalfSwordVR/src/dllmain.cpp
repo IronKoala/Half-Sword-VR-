@@ -6377,6 +6377,71 @@ namespace
         return false;
     }
 
+    // The item each hand last let go of, until the hand's fist ball is clear of it (make_fist). Matthew's
+    // playtest 2026-11-23 ("anytime I let go of a shield, it just jolts out of my hand"): his fingers stay
+    // curled as the grip opens, so the hand became a fist 2 ms after the drop, and the fist's 13 cm physics
+    // ball was made inside the shield and shoved it away (log 400.143 -> 400.145, buckler at the hand).
+    struct JustDropped
+    {
+        UObject* item = nullptr;
+        double at = -10.0;
+    };
+    JustDropped g_just_dropped[2];
+    bool g_just_dropped_tracked = track_freed(&g_just_dropped[0].item) && track_freed(&g_just_dropped[1].item);
+
+    // For 0.5 s after a hand lets go of an item, where it goes (drop_trace): the most its BaseMesh moved
+    // sideways (x/y, so falling is left out) in the first 0.3 s, for hsvr.expect drop_xy_l / drop_xy_r.
+    struct DropTrace
+    {
+        UObject* item = nullptr;
+        UObject* base = nullptr;
+        double t0 = -10.0;
+        hsvr::Vec3 p0{};
+        double max_xy = 0.0;
+        double next_log = 0.0;
+    };
+    DropTrace g_drop_trace[2];
+    bool g_drop_trace_tracked = track_freed(&g_drop_trace[0].item) && track_freed(&g_drop_trace[0].base) && track_freed(&g_drop_trace[1].item) &&
+                                track_freed(&g_drop_trace[1].base);
+    hsvr::Vec3 component_location(UObject* component);
+
+    void drop_trace_start(int side, UObject* item)
+    {
+        DropTrace& d = g_drop_trace[side];
+        d = DropTrace{};
+        d.item = item;
+        d.base = item ? object_property(item, STR("BaseMesh")) : nullptr;
+        if (!d.base) return;
+        d.t0 = hsvr::now_seconds();
+        d.p0 = component_location(d.base);
+    }
+
+    void drop_trace(UObject* pawn)
+    {
+        for (int side = 0; side < 2; ++side)
+        {
+            DropTrace& d = g_drop_trace[side];
+            if (!d.base) continue;
+            double age = hsvr::now_seconds() - d.t0;
+            if (age > 0.5 || !object_alive(d.item) || object_property(pawn, STR("Weapon L")) == d.item || object_property(pawn, STR("Weapon R")) == d.item)
+            {
+                HSVR_LOG("Drop trace: %s hand's %ls moved at most %.1f cm sideways in its first 0.3 s", side == 0 ? "left" : "right",
+                         d.item && object_alive(d.item) ? d.item->GetName().c_str() : STR("item"), d.max_xy);
+                d.base = nullptr;
+                continue;
+            }
+            hsvr::Vec3 m = component_location(d.base) - d.p0;
+            double xy = std::sqrt(m.x * m.x + m.y * m.y);
+            if (age <= 0.3) d.max_xy = (std::max)(d.max_xy, xy);
+            if (age >= d.next_log)
+            {
+                d.next_log = age + 0.05;
+                HSVR_LOG("Drop trace %.3f s: %s hand's %ls moved (%.1f, %.1f, %.1f) cm, %.1f sideways", age, side == 0 ? "left" : "right", d.item->GetName().c_str(), m.x, m.y,
+                         m.z, xy);
+            }
+        }
+    }
+
     void drop_weapon(int side, UObject* pawn, bool thrown = false)
     {
         UObject* held = pawn ? object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) : nullptr;
@@ -6438,6 +6503,11 @@ namespace
             }
         }
         pawn->ProcessEvent(fn, parameters);
+        if (held)
+        {
+            g_just_dropped[side] = JustDropped{held, hsvr::now_seconds()};
+            drop_trace_start(side, held);
+        }
         if (kept_scab)
         {
             *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(held) + scab_prop->GetOffset_Internal()) = kept_scab;
@@ -7955,6 +8025,24 @@ namespace
                     return false;
                 }
             }
+        // Not inside what this hand just let go of (g_just_dropped): wait until the ball is clear of it.
+        if (cfg.pose_fist_clear_dropped && g_just_dropped[side].item)
+        {
+            UObject* item = g_just_dropped[side].item;
+            UObject* mesh = object_property(pawn, STR("Mesh"));
+            double d = -1.0;
+            if (mesh && object_alive(item) && object_property(pawn, STR("Weapon L")) != item && object_property(pawn, STR("Weapon R")) != item)
+                d = closest_on_weapon(item, hand_grab_point(mesh, side));
+            double need = g_fist_radius_cm + (std::max)(0.0, cfg.pose_fist_clear_margin_cm);
+            if (d >= 0.0 && d < need)
+            {
+                g_fist_blocked[side] = true;
+                HSVR_LOG_EVERY(0.5, "Fist: %s hand waits: its %.0f cm ball would be inside %ls, which it let go of %.2f s ago (%.1f cm from the hand, needs %.0f)",
+                               side == 0 ? "left" : "right", g_fist_radius_cm, item->GetName().c_str(), hsvr::now_seconds() - g_just_dropped[side].at, d, need);
+                return false;
+            }
+            g_just_dropped[side] = JustDropped{};
+        }
         set_up_hand(side, pawn, cls, false, false, true);
         UObject* now = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
         bool ok = is_fist(now);
@@ -8407,10 +8495,15 @@ namespace
         {L"Shield_Pavise_Heavy", "long strap", {{-7, 0, 16, 0, -5, -20}, {17, 0, 16, 0, 5, -20}}},
         {L"Shield_Pavise_Light", "lower strap", {{0, 0, 6, -90, 0, 0}, {0, 0, 6, 90, 0, 0}}},
         {L"Shield_Pavise_Tower", "crossed strap's middle", {{-7, 0, 0, 0, -5, -20}, {7, 0, 0, 0, 5, -20}}},
+        // Matthew 2026-11-23: his "pavise" was the small shoulder shield, so the targe (the other SheathSlot 2
+        // shield) gets the same rules. Held by its big strap: the loop that stands off the back, the one the
+        // game's own right-hand pose closes the fist on (shield_grab_points.md, screenshot 112). On the
+        // forearm: the game's own scenes, L (0.18, 0, -4.67) and R (-3.05, 0, -1.54), both P-45 (shield_grips.md).
+        {L"Shield_Tagre", "big strap", {{0.18, 0, -4.67, -45, 0, 0}, {-3.05, 0, -1.54, -45, 0, 0}}},
     };
     const PaviseSpec* pavise_spec(UObject* item)
     {
-        if (!item || !class_name_starts(item, STR("Shield_Pavise"))) return nullptr;
+        if (!item || !class_name_starts(item, STR("Shield_"))) return nullptr;
         std::wstring cls = shield_class(item);
         for (const PaviseSpec& p : k_pavises)
             if (cls == p.shield) return &p;
@@ -8427,7 +8520,7 @@ namespace
     bool pavise_on_forearm(UObject* shield, int side, const hsvr::Config& cfg)
     {
         if (cfg.pose_pavise_strap && pavise_spec(shield)) return false; // held by the strap, mounted by the player
-        if (!cfg.pose_pavise_forearm || !shield || !class_name_starts(shield, STR("Shield_Pavise"))) return false;
+        if (!cfg.pose_pavise_forearm || !shield || !(class_name_starts(shield, STR("Shield_Pavise")) || class_name_starts(shield, STR("Shield_Tagre")))) return false;
         double g = read_number_variable(shield, side == 0 ? STR("Grip L Hand Default") : STR("Grip R Hand Default"));
         return g == 6.0 || g == 7.0;
     }
@@ -8770,12 +8863,14 @@ namespace
         static const FName wrist[2] = {bone_fname("hand_l"), bone_fname("hand_r")};
         Vec3 palm = hand_grab_point(mesh, side), on;
         double d = to_segment(palm, socket_location(mesh, lower[arm]), socket_location(mesh, wrist[arm]), &on);
-        // The socket's +Y is out of the back of the forearm (a shield's face there).
+        // The socket's +Y is out of the back of the forearm (a shield's face there). Logged only: requiring
+        // the palm on that side (>= -3 cm) failed every one of Matthew's mounts (playtest 2026-11-23 00:3xZ,
+        // 6 of 6, his palm 3.4-8.1 cm on the palm side at 3.5-8.9 cm from the forearm). Distance alone.
         double behind = dot(palm - on, socket_rotation(mesh, sockets[arm]).rotate(Vec3{0, 1, 0}));
-        if (d > cfg.pose_pavise_mount_cm || behind < -3.0)
+        if (d > cfg.pose_pavise_mount_cm)
         {
             if (d < 40.0)
-                HSVR_LOG("Pavise: %s hand let go of the strap %.1f cm from the other forearm, %.1f cm to its back (needs %.0f cm, on the back): not mounted", hand, d, behind,
+                HSVR_LOG("Pavise: %s hand let go of the strap %.1f cm from the other forearm, %.1f cm to its back (needs %.0f cm): not mounted", hand, d, behind,
                          cfg.pose_pavise_mount_cm);
             return false;
         }
@@ -8833,7 +8928,7 @@ namespace
         }
         controllers_buzz(side, 0.4f);
         controllers_buzz(arm, 0.3f);
-        HSVR_LOG("Pavise: %s hand let go of the %s %.1f cm from the back of the %s forearm: %ls mounted there, that hand free", hand, spec->strap, d,
+        HSVR_LOG("Pavise: %s hand let go of the %s %.1f cm from the %s forearm: %ls mounted there, that hand free", hand, spec->strap, d,
                  arm == 0 ? "left" : "right", w->GetName().c_str());
         return true;
     }
@@ -13685,6 +13780,7 @@ namespace
         keep_brought_object(pawn, mesh);
         slot_take_tick(pawn);
         fist_trace(pawn);
+        drop_trace(pawn);
         body_grab_tick(pawn, cfg);
         for (int side = 0; side < 2; ++side) check_object_grab(side, pawn);
         if (cfg.disarm) disarm_tick(pawn, cfg);
@@ -26653,6 +26749,7 @@ namespace
         else if (w == "two_hand") value = g_two.active ? 1.0 : 0.0;
         else if (w == "fist_r") value = is_fist(object_property(pawn, STR("Weapon R"))) ? 1.0 : 0.0;
         else if (w == "fist_l") value = is_fist(object_property(pawn, STR("Weapon L"))) ? 1.0 : 0.0;
+        else if (w == "drop_xy_l" || w == "drop_xy_r") value = g_drop_trace[w.back() == 'l' ? 0 : 1].max_xy; // cm sideways, last drop's first 0.3 s
         else if (w == "food") value = read_number_variable(pawn, STR("Nutrients Due"));
         else if (w == "liquid") value = read_number_variable(pawn, STR("Body Liquid"));
         else if (w == "actor_z") value = pawn ? actor_location(pawn).z : 0.0;
