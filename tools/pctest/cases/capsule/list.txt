@@ -1,0 +1,4 @@
+# Capsule kept on the floor (kick thread, playtest 2026-11-23 851-869 s: after a kick over loose items he sank
+# into the floor and stood up only on a jump). Cellar, like the playtest.
+capsule_drop_recover|steps-capsule_drop_recover.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+kick_loose_items|steps-kick_loose_items.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar

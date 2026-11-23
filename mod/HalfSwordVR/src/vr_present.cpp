@@ -18,6 +18,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -484,6 +486,13 @@ cbuffer Constants : register(b0)
     float4 uvRect;   // xy = offset, zw = scale
     float4 params;   // x: decode sRGB, y: 1 = key black to transparent, 2 = same plus the source's alpha, z: alpha gain, w: minimum alpha (backdrop)
     float4 cursor;   // xy = uv (negative = none), z = aspect (w/h), w = radius (fraction of height)
+    // Monitor picture as a camera of its own (view0.w > 0): rows of the turn from that camera
+    // into the eye, the camera's half-width/height as tangents in .w, and the eye's tangent
+    // extents (left, right, up, down) in eyeTan. uvRect is then the eye's rectangle.
+    float4 view0;
+    float4 view1;
+    float4 view2;
+    float4 eyeTan;
 };
 Texture2D sourceTexture : register(t0);
 SamplerState linearSampler : register(s0);
@@ -505,6 +514,16 @@ float3 SrgbToLinear(float3 c)
 float4 PSMain(VSOut i) : SV_Target
 {
     float2 uv = uvRect.xy + i.uv * uvRect.zw;
+    if (view0.w > 0.0)
+    {
+        float3 ds = float3((i.uv.x * 2.0 - 1.0) * view0.w, (1.0 - i.uv.y * 2.0) * view1.w, -1.0);
+        float3 de = float3(dot(view0.xyz, ds), dot(view1.xyz, ds), dot(view2.xyz, ds));
+        if (de.z > -1e-4) return float4(0.0, 0.0, 0.0, 1.0);
+        float2 t = de.xy / -de.z;
+        float2 e = float2((t.x - eyeTan.x) / (eyeTan.y - eyeTan.x), (eyeTan.z - t.y) / (eyeTan.z - eyeTan.w));
+        if (any(e < 0.0) || any(e > 1.0)) return float4(0.0, 0.0, 0.0, 1.0);
+        uv = uvRect.xy + e * uvRect.zw;
+    }
     float4 texel = sourceTexture.SampleLevel(linearSampler, uv, 0);
     float3 rgb = saturate(texel.rgb);
     float a = 1.0;
@@ -529,6 +548,8 @@ float4 PSMain(VSOut i) : SV_Target
             a = 1.0;
         }
     }
+    // No cursor: cursor.y dims the picture (0 as it is .. 1 black), for the test room being built.
+    if (cursor.x < 0.0 && cursor.y > 0.0) rgb *= 1.0 - saturate(cursor.y);
     if (params.x > 0.5)
     {
         rgb = SrgbToLinear(rgb);
@@ -542,6 +563,8 @@ float4 PSMain(VSOut i) : SV_Target
             float uv_rect[4];
             float params[4];
             float cursor[4];
+            float view[3][4]; // see the shader: zero = a plain copy of uv_rect
+            float eye_tan[4];
         };
 
         DXGI_FORMAT sampling_format(DXGI_FORMAT f, bool& is_float)
@@ -1258,10 +1281,228 @@ float4 PSMain(VSOut i) : SV_Target
             return rtv;
         }
 
+        // ---- the monitor picture's own camera --------------------------------------------------
+        // mirror_view 1: the monitor shows a cut-out of the left eye shaped like the window (no black
+        // bars), centred on where the eye looks, mirror_fov_deg wide at most. Its camera can follow
+        // the head smoothed (mirror_smooth_s) and level (mirror_level): every output pixel is a ray
+        // of that camera, turned into the eye and looked up in the eye's picture, so the cut-out moves
+        // inside the eye picture to hide the head's small shakes. The camera is never let turn so far
+        // that a corner of the cut-out leaves the eye picture.
+        struct MQuat
+        {
+            double x = 0, y = 0, z = 0, w = 1;
+        };
+
+        MQuat mq_norm(MQuat q)
+        {
+            double n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+            if (n < 1e-12) return MQuat{};
+            return {q.x / n, q.y / n, q.z / n, q.w / n};
+        }
+
+        // Rotation matrix (columns = the turned X, Y, Z axes).
+        void mq_matrix(const MQuat& q, double m[3][3])
+        {
+            double x = q.x, y = q.y, z = q.z, w = q.w;
+            m[0][0] = 1 - 2 * (y * y + z * z);
+            m[0][1] = 2 * (x * y - z * w);
+            m[0][2] = 2 * (x * z + y * w);
+            m[1][0] = 2 * (x * y + z * w);
+            m[1][1] = 1 - 2 * (x * x + z * z);
+            m[1][2] = 2 * (y * z - x * w);
+            m[2][0] = 2 * (x * z - y * w);
+            m[2][1] = 2 * (y * z + x * w);
+            m[2][2] = 1 - 2 * (x * x + y * y);
+        }
+
+        MQuat mq_from_matrix(const double m[3][3])
+        {
+            MQuat q;
+            double tr = m[0][0] + m[1][1] + m[2][2];
+            if (tr > 0)
+            {
+                double s = std::sqrt(tr + 1.0) * 2;
+                q.w = 0.25 * s;
+                q.x = (m[2][1] - m[1][2]) / s;
+                q.y = (m[0][2] - m[2][0]) / s;
+                q.z = (m[1][0] - m[0][1]) / s;
+            }
+            else if (m[0][0] > m[1][1] && m[0][0] > m[2][2])
+            {
+                double s = std::sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2;
+                q.w = (m[2][1] - m[1][2]) / s;
+                q.x = 0.25 * s;
+                q.y = (m[0][1] + m[1][0]) / s;
+                q.z = (m[0][2] + m[2][0]) / s;
+            }
+            else if (m[1][1] > m[2][2])
+            {
+                double s = std::sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2;
+                q.w = (m[0][2] - m[2][0]) / s;
+                q.x = (m[0][1] + m[1][0]) / s;
+                q.y = 0.25 * s;
+                q.z = (m[1][2] + m[2][1]) / s;
+            }
+            else
+            {
+                double s = std::sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2;
+                q.w = (m[1][0] - m[0][1]) / s;
+                q.x = (m[0][2] + m[2][0]) / s;
+                q.y = (m[1][2] + m[2][1]) / s;
+                q.z = 0.25 * s;
+            }
+            return mq_norm(q);
+        }
+
+        MQuat mq_slerp(MQuat a, MQuat b, double t)
+        {
+            double d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+            if (d < 0)
+            {
+                b = {-b.x, -b.y, -b.z, -b.w};
+                d = -d;
+            }
+            if (d > 0.9995)
+                return mq_norm({a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t});
+            double th = std::acos(std::min(1.0, d));
+            double s = std::sin(th);
+            double wa = std::sin((1 - t) * th) / s, wb = std::sin(t * th) / s;
+            return mq_norm({a.x * wa + b.x * wb, a.y * wa + b.y * wb, a.z * wa + b.z * wb, a.w * wa + b.w * wb});
+        }
+
+        double mq_angle(const MQuat& a, const MQuat& b)
+        {
+            double d = std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
+            return 2.0 * std::acos(std::min(1.0, d));
+        }
+
+        // The same view with its roll taken out (its right side level with the floor; OpenXR +Y is up).
+        MQuat mq_level(const MQuat& q)
+        {
+            double m[3][3];
+            mq_matrix(q, m);
+            double f[3] = {-m[0][2], -m[1][2], -m[2][2]}; // looking along -Z
+            double r[3] = {-f[2], 0.0, f[0]};             // forward x up(0,1,0)
+            double rl = std::sqrt(r[0] * r[0] + r[2] * r[2]);
+            if (rl < 1e-3) return q; // looking straight up or down: leave it
+            r[0] /= rl;
+            r[2] /= rl;
+            double u[3] = {r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]};
+            double out[3][3] = {{r[0], u[0], -f[0]}, {r[1], u[1], -f[1]}, {r[2], u[2], -f[2]}};
+            return mq_from_matrix(out);
+        }
+
+        struct MirrorCamera
+        {
+            bool have = false;
+            MQuat smoothed;
+            std::chrono::steady_clock::time_point last{};
+            bool logged = false;
+        };
+        MirrorCamera g_mirror_cam;
+
+        // The turn from the monitor camera into the eye: rows of eye^-1 * camera.
+        void mirror_turn(const MQuat& eye, const MQuat& cam, double out[3][3])
+        {
+            double e[3][3], c[3][3];
+            mq_matrix(eye, e);
+            mq_matrix(cam, c);
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) out[i][j] = e[0][i] * c[0][j] + e[1][i] * c[1][j] + e[2][i] * c[2][j];
+        }
+
+        // Do all four corners of the cut-out land inside the eye picture?
+        bool mirror_fits(const double t[3][3], double tx, double ty, const double tan[4])
+        {
+            for (int k = 0; k < 4; ++k)
+            {
+                double ds[3] = {(k & 1) ? tx : -tx, (k & 2) ? ty : -ty, -1.0};
+                double de[3];
+                for (int i = 0; i < 3; ++i) de[i] = t[i][0] * ds[0] + t[i][1] * ds[1] + t[i][2] * ds[2];
+                if (de[2] > -1e-4) return false;
+                double ex = de[0] / -de[2], ey = de[1] / -de[2];
+                if (ex < tan[0] || ex > tan[1] || ey > tan[2] || ey < tan[3]) return false;
+            }
+            return true;
+        }
+
+        // Fills `c` (uv_rect must already be the eye's rectangle) for the window-shaped cut-out.
+        // Returns false when there is no usable eye pose (then the caller fits the whole eye).
+        bool mirror_camera(const Config& cfg, const XrEyeRaw& eye, bool pose_valid, double out_w, double out_h, BlitConstants& c)
+        {
+            if (!pose_valid || out_w < 1 || out_h < 1) return false;
+            double tan[4] = {std::tan((double)eye.angle_left), std::tan((double)eye.angle_right), std::tan((double)eye.angle_up),
+                             std::tan((double)eye.angle_down)};
+            if (!(tan[0] < -0.05 && tan[1] > 0.05 && tan[2] > 0.05 && tan[3] < -0.05)) return false;
+            // The largest window-shaped cut-out around straight ahead, no wider than mirror_fov_deg.
+            double fov = std::clamp(cfg.mirror_fov_deg, 20.0, 170.0) * 3.14159265358979 / 360.0;
+            double aspect = out_w / out_h;
+            double tx = std::tan(fov);
+            tx = std::min(tx, std::min(-tan[0], tan[1]));
+            double ty = tx / aspect;
+            double ty_max = std::min(tan[2], -tan[3]);
+            if (ty > ty_max)
+            {
+                ty = ty_max;
+                tx = ty * aspect;
+            }
+            MQuat actual = mq_norm({eye.qx, eye.qy, eye.qz, eye.qw});
+            MQuat cam = actual;
+            auto now = std::chrono::steady_clock::now();
+            MirrorCamera& mc = g_mirror_cam;
+            bool smooth = cfg.mirror_smooth_s > 0.0 || cfg.mirror_level;
+            if (smooth)
+            {
+                double dt = mc.have ? std::chrono::duration<double>(now - mc.last).count() : 1.0;
+                // A long gap (loading, paused headset) or a big jump (recenter): start over at the head.
+                if (!mc.have || dt > 0.5 || mq_angle(mc.smoothed, actual) > 0.8) cam = actual;
+                else if (cfg.mirror_smooth_s > 0.0) cam = mq_slerp(mc.smoothed, actual, 1.0 - std::exp(-dt / cfg.mirror_smooth_s));
+                else cam = actual;
+                if (cfg.mirror_level) cam = mq_level(cam);
+                double turn[3][3];
+                mirror_turn(actual, cam, turn);
+                if (!mirror_fits(turn, tx, ty, tan))
+                {
+                    // Move the camera back toward the head just far enough for the cut-out to fit.
+                    double lo = 0.0, hi = 1.0; // share of the way from the head to the wanted camera
+                    for (int it = 0; it < 12; ++it)
+                    {
+                        double mid = (lo + hi) * 0.5;
+                        mirror_turn(actual, mq_slerp(actual, cam, mid), turn);
+                        if (mirror_fits(turn, tx, ty, tan)) lo = mid;
+                        else hi = mid;
+                    }
+                    cam = mq_slerp(actual, cam, lo);
+                }
+                mc.smoothed = cam;
+                mc.have = true;
+                mc.last = now;
+            }
+            else
+            {
+                mc.have = false;
+            }
+            double turn[3][3];
+            mirror_turn(actual, cam, turn);
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) c.view[i][j] = (float)turn[i][j];
+            c.view[0][3] = (float)tx;
+            c.view[1][3] = (float)ty;
+            for (int i = 0; i < 4; ++i) c.eye_tan[i] = (float)tan[i];
+            if (!mc.logged)
+            {
+                mc.logged = true;
+                HSVR_LOG("Monitor: window-shaped cut-out of the left eye, %.0fx%.0f deg (eye spans %.0f..%.0f x %.0f..%.0f deg), smoothing %.2f s, level %d",
+                         std::atan(tx) * 360.0 / 3.14159265358979, std::atan(ty) * 360.0 / 3.14159265358979, eye.angle_left * 57.29578,
+                         eye.angle_right * 57.29578, eye.angle_down * 57.29578, eye.angle_up * 57.29578, cfg.mirror_smooth_s, (int)cfg.mirror_level);
+            }
+            return true;
+        }
+
         // While the eyes have their own target, nothing but the flat menus and HUD is drawn into
         // the game window. This puts the left eye's picture behind them so the monitor still shows
         // the game. `scene_srv`/`ui_srv` are the already prepared source textures (ptr 0 = none).
-        void draw_monitor_picture(IDXGISwapChain* swapchain, const PresentItem* item, ID3D12Resource* scene,
+        void draw_monitor_picture(const Config& cfg, IDXGISwapChain* swapchain, const PresentItem* item, ID3D12Resource* scene,
                                   D3D12_GPU_DESCRIPTOR_HANDLE scene_srv, D3D12_GPU_DESCRIPTOR_HANDLE ui_srv)
         {
             if (g.window_pipeline_failed) return;
@@ -1298,21 +1539,34 @@ float4 PSMain(VSOut i) : SV_Target
                     x1 = item->rect[0][2];
                     y1 = item->rect[0][3];
                 }
-                // Fit the eye picture inside the window, keeping its shape.
-                double eye_aspect = (x1 - x0) / std::max(1.0, y1 - y0);
-                double out_h = (double)bd.Height, out_w = out_h * eye_aspect;
-                if (out_w > (double)bd.Width)
-                {
-                    out_w = (double)bd.Width;
-                    out_h = out_w / eye_aspect;
-                }
-                D3D12_VIEWPORT vp{(float)(((double)bd.Width - out_w) * 0.5), (float)(((double)bd.Height - out_h) * 0.5), (float)out_w, (float)out_h, 0.0f, 1.0f};
                 BlitConstants c{};
                 c.uv_rect[0] = (float)(x0 / (double)sd.Width);
                 c.uv_rect[1] = (float)(y0 / (double)sd.Height);
                 c.uv_rect[2] = (float)((x1 - x0) / (double)sd.Width);
                 c.uv_rect[3] = (float)((y1 - y0) / (double)sd.Height);
                 c.cursor[0] = -1.0f;
+                // mirror_view 1: a cut-out of the eye shaped mirror_aspect (16:9 by default, the YouTube
+                // player; 0 = the window's own shape), as big as fits in the window, centred, never
+                // stretched. 0 (or no head pose): the whole eye fitted inside the window.
+                double pic_w = (double)bd.Width, pic_h = (double)bd.Height;
+                if (cfg.mirror_aspect > 0.1)
+                {
+                    pic_w = std::min(pic_w, pic_h * cfg.mirror_aspect);
+                    pic_h = std::min(pic_h, pic_w / cfg.mirror_aspect);
+                }
+                D3D12_VIEWPORT vp{(float)(((double)bd.Width - pic_w) * 0.5), (float)(((double)bd.Height - pic_h) * 0.5), (float)pic_w, (float)pic_h, 0.0f, 1.0f};
+                if (cfg.mirror_view != 1 || !mirror_camera(cfg, item->pose.eye[0], item->pose.valid, pic_w, pic_h, c))
+                {
+                    double eye_aspect = (x1 - x0) / std::max(1.0, y1 - y0);
+                    double out_h = (double)bd.Height, out_w = out_h * eye_aspect;
+                    if (out_w > (double)bd.Width)
+                    {
+                        out_w = (double)bd.Width;
+                        out_h = out_w / eye_aspect;
+                    }
+                    vp = {(float)(((double)bd.Width - out_w) * 0.5), (float)(((double)bd.Height - out_h) * 0.5), (float)out_w, (float)out_h, 0.0f, 1.0f};
+                    std::memset(c.view, 0, sizeof(c.view));
+                }
                 g.cmd->SetPipelineState(g.window_pipeline.get());
                 g.cmd->RSSetViewports(1, &vp);
                 g.cmd->SetGraphicsRootDescriptorTable(0, scene_srv);
@@ -1747,6 +2001,8 @@ float4 PSMain(VSOut i) : SV_Target
                 {
                     DXGI_SWAP_CHAIN_DESC scd{};
                     swapchain->GetDesc(&scd);
+                    shared().window_width.store((int)scd.BufferDesc.Width);
+                    shared().window_height.store((int)scd.BufferDesc.Height);
                     CURSORINFO ci{};
                     ci.cbSize = sizeof(ci);
                     RECT client{};
@@ -1824,6 +2080,7 @@ float4 PSMain(VSOut i) : SV_Target
                         c.uv_rect[3] = (float)((y1 - y0) / (double)sd.Height);
                         c.params[0] = decode ? 1.0f : 0.0f;
                         c.cursor[0] = -1.0f;
+                        c.cursor[1] = (std::min)(1.0f, (std::max)(0.0f, shared().blackout.load())); // the test room hides its building
                         eyes_acquired[e] = blit_to_swapchain(g.eye[e], srv, c);
                         const XrEyeRaw& eye = item.pose.eye[e];
                         views[e].pose.position = {eye.px, eye.py, eye.pz};
@@ -1845,6 +2102,99 @@ float4 PSMain(VSOut i) : SV_Target
                     shared().frames_without_image.fetch_add(1);
                 }
 
+                // ---- pointing at the panel with a controller ----
+                // While a menu is up, the controller's pointing ray (its aim pose) is met with the
+                // panel; where it lands moves the Windows mouse pointer to that spot in the game
+                // window, and the trigger is the left mouse button there (held = drag, for sliders).
+                // The game's menus take only the mouse (menus_and_prompts.md), so this is how they
+                // are used from VR. The right hand points unless only the left one is on the panel.
+                float pointer_uv[2] = {-1.0f, -1.0f};
+                {
+                    static bool pressed = false;
+                    static int pressed_hand = -1;
+                    DXGI_SWAP_CHAIN_DESC scd{};
+                    swapchain->GetDesc(&scd);
+                    HWND game_window = scd.OutputWindow;
+                    bool active = cfg.ui_pointer && want_ui && menu_showing && game_window && g.ui_copy_width > 0;
+                    int hit_hand = -1;
+                    float hit_u = 0, hit_v = 0;
+                    ControllerState cs = controllers_state();
+                    if (active && cs.focused)
+                    {
+                        float pos0[3];
+                        float yaw;
+                        {
+                            std::lock_guard<std::mutex> lock(g_recenter_mutex);
+                            memcpy(pos0, g_recenter_xr_pos, sizeof(pos0));
+                            yaw = g_recenter_xr_yaw;
+                        }
+                        float d = (float)cfg.ui_distance_m;
+                        float P[3] = {pos0[0] - d * std::sin(yaw), pos0[1] + (float)cfg.ui_height_offset_m, pos0[2] - d * std::cos(yaw)};
+                        float aspect = (float)g.ui_copy_height / (float)std::max<UINT>(1, g.ui_copy_width);
+                        float W = (float)cfg.ui_width_m, H = W * aspect;
+                        // The quad turned by yaw about +Y: its right, up and facing (+Z) directions.
+                        float right[3] = {std::cos(yaw), 0.0f, -std::sin(yaw)};
+                        float up[3] = {0.0f, 1.0f, 0.0f};
+                        float n[3] = {std::sin(yaw), 0.0f, std::cos(yaw)};
+                        int order[2] = {1, 0};
+                        for (int k = 0; k < 2 && hit_hand < 0; ++k)
+                        {
+                            int h = pressed ? pressed_hand : order[k]; // a held click stays with its hand
+                            if (pressed && k > 0) break;
+                            const HandState& hs = cs.hand[h];
+                            if (!hs.aim_valid) continue;
+                            const XrPoseRaw& a = hs.aim;
+                            // Forward of the aim pose is its -Z.
+                            float qx = a.qx, qy = a.qy, qz = a.qz, qw = a.qw;
+                            float dir[3] = {-(2.0f * (qx * qz + qw * qy)), -(2.0f * (qy * qz - qw * qx)), -(1.0f - 2.0f * (qx * qx + qy * qy))};
+                            float denom = dir[0] * n[0] + dir[1] * n[1] + dir[2] * n[2];
+                            if (std::fabs(denom) < 1e-4f) continue;
+                            float t = ((P[0] - a.px) * n[0] + (P[1] - a.py) * n[1] + (P[2] - a.pz) * n[2]) / denom;
+                            if (t <= 0.0f) continue;
+                            float hp[3] = {a.px + dir[0] * t - P[0], a.py + dir[1] * t - P[1], a.pz + dir[2] * t - P[2]};
+                            float u = (hp[0] * right[0] + hp[1] * right[1] + hp[2] * right[2]) / W + 0.5f;
+                            float v = 0.5f - (hp[0] * up[0] + hp[1] * up[1] + hp[2] * up[2]) / H;
+                            if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) continue;
+                            hit_hand = h;
+                            hit_u = u;
+                            hit_v = v;
+                        }
+                    }
+                    RECT client{};
+                    if (hit_hand >= 0 && GetClientRect(game_window, &client) && client.right > 0 && client.bottom > 0)
+                    {
+                        POINT p{(LONG)(hit_u * client.right), (LONG)(hit_v * client.bottom)};
+                        LPARAM at = MAKELPARAM(p.x, p.y);
+                        POINT screen = p;
+                        ClientToScreen(game_window, &screen);
+                        SetCursorPos(screen.x, screen.y);
+                        PostMessageW(game_window, WM_MOUSEMOVE, pressed ? MK_LBUTTON : 0, at);
+                        pointer_uv[0] = hit_u;
+                        pointer_uv[1] = hit_v;
+                        float trig = cs.hand[hit_hand].trigger;
+                        if (!pressed && trig > 0.7f)
+                        {
+                            pressed = true;
+                            pressed_hand = hit_hand;
+                            PostMessageW(game_window, WM_LBUTTONDOWN, MK_LBUTTON, at);
+                            controllers_buzz(hit_hand, 0.3f);
+                            HSVR_LOG("Pointer: %s hand clicks the panel at (%ld, %ld) of %ld x %ld", hit_hand == 0 ? "left" : "right", (long)p.x, (long)p.y,
+                                     (long)client.right, (long)client.bottom);
+                        }
+                        else if (pressed && trig < 0.3f)
+                        {
+                            pressed = false;
+                            PostMessageW(game_window, WM_LBUTTONUP, 0, at);
+                        }
+                    }
+                    else if (pressed)
+                    {
+                        // Off the panel or the menu closed while held: let the button go.
+                        pressed = false;
+                        if (game_window) PostMessageW(game_window, WM_LBUTTONUP, 0, 0);
+                    }
+                }
+
                 // ---- flat UI panel ----
                 if (render && want_ui && ui_srv.ptr)
                 {
@@ -1857,6 +2207,15 @@ float4 PSMain(VSOut i) : SV_Target
                     c.params[1] = cfg.ui_use_alpha ? 2.0f : 1.0f;
                     c.params[2] = (float)cfg.ui_opacity_gain;
                     c.cursor[0] = -1.0f;
+                    if (pointer_uv[0] >= 0.0f)
+                    {
+                        // Where the controller points, drawn on the panel (the game's own pointer
+                        // follows, but may be hidden in some menus).
+                        c.cursor[0] = pointer_uv[0];
+                        c.cursor[1] = pointer_uv[1];
+                        c.cursor[2] = (float)g.ui_copy_width / (float)std::max<UINT>(1, g.ui_copy_height);
+                        c.cursor[3] = 0.012f;
+                    }
                     // A menu (the game is paused or wants a mouse pointer): put a dark sheet behind
                     // the panel so every button can be read whatever is behind it.
                     if (pointer_showing || game_pointer || shared().game_paused.load()) c.params[3] = (float)cfg.ui_menu_backdrop;
@@ -1884,7 +2243,7 @@ float4 PSMain(VSOut i) : SV_Target
                     }
                 }
 
-                if (want_monitor && have_back_buffer) draw_monitor_picture(swapchain, have_item ? &item : nullptr, scene, scene_srv, ui_srv);
+                if (want_monitor && have_back_buffer) draw_monitor_picture(cfg, swapchain, have_item ? &item : nullptr, scene, scene_srv, ui_srv);
 
                 if (separate && have_back_buffer)
                 {
@@ -2253,13 +2612,42 @@ float4 PSMain(VSOut i) : SV_Target
             HSVR_LOG("TEST MODE: pretend headset (dev_fake_headset=1). No SteamVR is used; both eye views show in the game window.");
             return true;
         }
-        if (cfg.require_steamvr_running && !process_running(L"vrserver.exe") && !process_running(L"vrmonitor.exe"))
+        // Decided once, here, before anything of OpenXR is loaded: opening an OpenXR instance is what
+        // starts SteamVR when it is closed (the game itself has no XR plugin).
+        if (cfg.vr_auto != 0 && cfg.require_steamvr_running)
         {
-            HSVR_LOG("SteamVR is not running, so the game starts flat. Start SteamVR first to play in VR.");
-            return false;
+            std::string found;
+            const std::string& list = cfg.vr_auto_processes;
+            size_t start = 0;
+            while (found.empty())
+            {
+                size_t comma = list.find(',', start);
+                std::string name = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                size_t a = name.find_first_not_of(" \t"), b = name.find_last_not_of(" \t");
+                if (a != std::string::npos)
+                {
+                    name = name.substr(a, b - a + 1);
+                    std::wstring wide(name.begin(), name.end());
+                    if (process_running(wide.c_str())) found = name;
+                }
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+            if (found.empty())
+            {
+                HSVR_LOG("SteamVR is not running (none of %s), so the game starts flat and the mod stays off this session "
+                         "(vr_auto=1). Start SteamVR before the game to play in VR.", list.c_str());
+                return false;
+            }
+            HSVR_LOG("SteamVR is running (%s), so the game starts in VR (vr_auto=1)", found.c_str());
+        }
+        else
+        {
+            HSVR_LOG("vr_auto=0: starting VR whether or not SteamVR is running (OpenXR opens SteamVR if it is closed)");
         }
         if (!xr_load_runtime(xr)) return false;
 
+        std::vector<std::string> offered_extensions;
         if (xr.EnumerateInstanceExtensionProperties)
         {
             uint32_t count = 0;
@@ -2270,6 +2658,7 @@ float4 PSMain(VSOut i) : SV_Target
             for (auto& e : exts)
             {
                 if (strcmp(e.extensionName, XR_KHR_D3D12_ENABLE_EXTENSION_NAME) == 0) has_d3d12 = true;
+                offered_extensions.push_back(e.extensionName);
             }
             if (!has_d3d12)
             {
@@ -2278,14 +2667,15 @@ float4 PSMain(VSOut i) : SV_Target
             }
         }
 
-        const char* extensions[] = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
+        std::vector<const char*> extensions = {XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
+        for (const char* e : controllers_wanted_extensions(offered_extensions)) extensions.push_back(e);
         XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
         strncpy(ici.applicationInfo.applicationName, "Half Sword VR", XR_MAX_APPLICATION_NAME_SIZE - 1);
         ici.applicationInfo.applicationVersion = 1;
         strncpy(ici.applicationInfo.engineName, "HalfSwordVR mod", XR_MAX_ENGINE_NAME_SIZE - 1);
         ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
-        ici.enabledExtensionCount = 1;
-        ici.enabledExtensionNames = extensions;
+        ici.enabledExtensionCount = (uint32_t)extensions.size();
+        ici.enabledExtensionNames = extensions.data();
         XrResult r = xr.CreateInstance(&ici, &g_instance);
         if (XR_FAILED(r))
         {
@@ -2309,7 +2699,10 @@ float4 PSMain(VSOut i) : SV_Target
             return false;
         }
         XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
+        XrSystemHandTrackingPropertiesEXT hand_props{XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT};
+        if (extensions.size() > 1) sp.next = &hand_props;
         if (XR_SUCCEEDED(xr.GetSystemProperties(g_instance, g_system, &sp))) HSVR_LOG("OpenXR: headset %s", sp.systemName);
+        controllers_system_hand_tracking(extensions.size() > 1 && hand_props.supportsHandTracking);
         controllers_create(xr, g_instance);
 
         uint32_t view_count = 0;
