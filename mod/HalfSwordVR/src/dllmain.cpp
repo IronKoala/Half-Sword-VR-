@@ -6472,15 +6472,18 @@ namespace
     JustDropped g_just_dropped[2];
     bool g_just_dropped_tracked = track_freed(&g_just_dropped[0].item) && track_freed(&g_just_dropped[1].item);
 
-    // For 0.5 s after a hand lets go of an item, where it goes (drop_trace): the most its BaseMesh moved
-    // sideways (x/y, so falling is left out) in the first 0.3 s, for hsvr.expect drop_xy_l / drop_xy_r.
+    // For 0.5 s after a hand lets go of an item, where it goes (drop_trace): the most its centre of mass
+    // moved sideways (x/y, so falling is left out) off the path its own velocity at the let-go gives it,
+    // in the first 0.3 s, for hsvr.expect drop_xy_l / drop_xy_r.
     struct DropTrace
     {
         UObject* item = nullptr;
         UObject* base = nullptr;
         double t0 = -10.0;
-        hsvr::Vec3 p0{};
-        double max_xy = 0.0;
+        hsvr::Vec3 p0{};   // its centre of mass at the let-go
+        hsvr::Vec3 b0{};   // BaseMesh (the grip dummy) at the let-go
+        double max_xy = 0.0;      // centre of mass, off the path its own velocity would take it
+        double max_base_xy = 0.0; // the grip dummy, plain (it swings with any spin)
         double next_log = 0.0;
         hsvr::Vec3 v0{};   // its own velocity over the last ~60 ms in the hand (recent_com_velocity)
         bool have_v0 = false;
@@ -6500,10 +6503,16 @@ namespace
         d.base = item ? object_property(item, STR("BaseMesh")) : nullptr;
         if (!d.base) return;
         d.t0 = hsvr::now_seconds();
-        d.p0 = component_location(d.base);
+        d.b0 = component_location(d.base);
+        Call cm(d.base, STR("GetCenterOfMass"));
+        d.p0 = cm.run() ? cm.vec() : d.b0;
         d.thrown = thrown;
         d.v0 = v0;
         d.have_v0 = have_v0;
+        Call av(d.base, STR("GetPhysicsAngularVelocityInRadians"));
+        hsvr::Vec3 w = av.run() ? av.vec() : hsvr::Vec3{};
+        HSVR_LOG("Drop trace 0.000 s: %ls let go: own velocity %.0f cm/s (%s), spin %.2f rad/s, centre of mass %.1f cm from the grip", item->GetName().c_str(),
+                 hsvr::length(v0), have_v0 ? "measured" : "unknown", hsvr::length(w), hsvr::length(d.p0 - d.b0));
     }
 
     void drop_trace(UObject* pawn)
@@ -6515,8 +6524,8 @@ namespace
             double age = hsvr::now_seconds() - d.t0;
             if (age > 0.5 || !object_alive(d.item) || object_property(pawn, STR("Weapon L")) == d.item || object_property(pawn, STR("Weapon R")) == d.item)
             {
-                HSVR_LOG("Drop trace: %s hand's %ls moved at most %.1f cm sideways in its first 0.3 s", side == 0 ? "left" : "right",
-                         d.item && object_alive(d.item) ? d.item->GetName().c_str() : STR("item"), d.max_xy);
+                HSVR_LOG("Drop trace: %s hand's %ls: centre of mass at most %.1f cm sideways off its own path in its first 0.3 s (grip dummy %.1f cm plain)",
+                         side == 0 ? "left" : "right", d.item && object_alive(d.item) ? d.item->GetName().c_str() : STR("item"), d.max_xy, d.max_base_xy);
                 d.base = nullptr;
                 continue;
             }
@@ -6544,14 +6553,24 @@ namespace
                              d.item->GetName().c_str(), hsvr::length(v), hsvr::length(d.v0));
                 }
             }
-            hsvr::Vec3 m = component_location(d.base) - d.p0;
+            // Judged by the centre of mass against the path its own velocity at the let-go gives it: a tall
+            // shield tips as it falls, so its grip dummy (at the strap, off the centre) drifts 3-4 cm with no
+            // push at all (PC run 559ae80, light Pavise: smooth 11-18 cm/s, z at free fall, no step).
+            Call cm(d.base, STR("GetCenterOfMass"));
+            hsvr::Vec3 c = cm.run() ? cm.vec() : component_location(d.base);
+            hsvr::Vec3 own = d.have_v0 && !d.thrown ? d.v0 * age : hsvr::Vec3{};
+            hsvr::Vec3 m = c - d.p0 - own;
             double xy = std::sqrt(m.x * m.x + m.y * m.y);
-            if (age <= 0.3) d.max_xy = (std::max)(d.max_xy, xy);
+            hsvr::Vec3 mb = component_location(d.base) - d.b0;
+            double bxy = std::sqrt(mb.x * mb.x + mb.y * mb.y);
+            if (age <= 0.3) d.max_xy = (std::max)(d.max_xy, xy), d.max_base_xy = (std::max)(d.max_base_xy, bxy);
             if (age >= d.next_log)
             {
                 d.next_log = age + 0.05;
-                HSVR_LOG("Drop trace %.3f s: %s hand's %ls moved (%.1f, %.1f, %.1f) cm, %.1f sideways", age, side == 0 ? "left" : "right", d.item->GetName().c_str(), m.x, m.y,
-                         m.z, xy);
+                Call av(d.base, STR("GetPhysicsAngularVelocityInRadians"));
+                double spin = av.run() ? hsvr::length(av.vec()) : -1.0;
+                HSVR_LOG("Drop trace %.3f s: %s hand's %ls centre of mass off its own path (%.1f, %.1f, %.1f) cm, %.1f sideways; grip dummy %.1f sideways; spin %.2f rad/s",
+                         age, side == 0 ? "left" : "right", d.item->GetName().c_str(), m.x, m.y, c.z - d.p0.z, xy, bxy, spin);
             }
         }
     }
