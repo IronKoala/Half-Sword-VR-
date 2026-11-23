@@ -355,6 +355,11 @@ namespace hsvr
         num("ui_menu_backdrop", c.ui_menu_backdrop);
         flag("ui_use_alpha", c.ui_use_alpha);
         flag("mirror_window", c.mirror_window);
+        integer("mirror_view", c.mirror_view);
+        num("mirror_aspect", c.mirror_aspect);
+        num("mirror_fov_deg", c.mirror_fov_deg);
+        num("mirror_smooth_s", c.mirror_smooth_s);
+        flag("mirror_level", c.mirror_level);
         integer("recenter_key", c.recenter_key);
         integer("toggle_ui_key", c.toggle_ui_key);
         integer("toggle_view_key", c.toggle_view_key);

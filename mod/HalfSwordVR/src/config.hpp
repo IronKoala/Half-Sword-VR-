@@ -71,6 +71,18 @@ namespace hsvr
         bool ui_use_alpha = false;
         // Show the left eye's picture (with menus) in the game window on the monitor.
         bool mirror_window = true;
+        // 1 = the monitor shows a window-shaped cut-out of the left eye (fills the window, no black
+        // bars); 0 = the whole left eye fitted inside the window (black bars at the sides).
+        int mirror_view = 1;
+        // Shape of the monitor picture, width / height (1.7778 = 16:9, the YouTube player). In a window
+        // of another shape it is centred with black around it, never stretched. 0 = the window's shape.
+        double mirror_aspect = 1.7778;
+        // Widest the monitor picture is, degrees side to side (less when the eye does not cover it).
+        double mirror_fov_deg = 90.0;
+        // The monitor picture follows the head smoothed over this many seconds (0 = exactly the head).
+        double mirror_smooth_s = 0.1;
+        // 1 = keep the monitor picture's horizon level (head tilt taken out).
+        bool mirror_level = false;
         // Virtual key codes. 0x24 = Home, 0x23 = End, 0x2D = Insert.
         int recenter_key = 0x24;
         int toggle_ui_key = 0x23;
