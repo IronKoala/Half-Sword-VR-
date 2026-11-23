@@ -728,7 +728,7 @@ namespace hsvr
         // handle nearest the palm (within pose_mount_handle_cm) in that hand, as any handle is held; 2 the
         // game's own forearm grip; 0 only closes the hand on the strap. Opening it leaves the shield mounted.
         int pose_mount_fist_grip = 1;
-        double pose_mount_handle_cm = 15.0;
+        double pose_mount_handle_cm = 8.0;
         bool pose_grab_release_drops = true;
         // Squeezing near a loose object or a body (no weapon in reach) grabs it through the game's own grab.
         bool pose_grab_objects = true;

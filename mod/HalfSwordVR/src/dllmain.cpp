@@ -9355,7 +9355,31 @@ namespace
                 Mount keep = m;
                 unjoin_mount(m);
                 m = Mount{};
-                bool ok = take_by_strap(side, pawn, keep.mesh, w, keep.base, hd, palm);
+                // Held as it is on the forearm: the handle's point nearest the palm, the shield NOT turned to lie
+                // along the hand's grip line (as take_by_strap turns it). Turned so, the light pavise swung 14 cm
+                // and the heavy 18 cm off the forearm as the hand took it (PC run 229b88c), its strap off the arm.
+                bool ok = give_hand_weapon(side, pawn, w) && object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) == w;
+                if (ok)
+                {
+                    Vec3 ab = hd.b - hd.a;
+                    double len2 = dot(ab, ab);
+                    Vec3 local = bq.inverse().rotate(palm - bp);
+                    double u = len2 > 1e-6 ? (std::min)(1.0, (std::max)(0.0, dot(local - hd.a, ab) / len2)) : 0.0;
+                    Vec3 on = bp + bq.rotate(hd.a + ab * u);
+                    FreeGrip g = make_free_grip(side, keep.mesh, bp, bq, palm, on, nullptr, hd.name.c_str());
+                    g.grip_type = clamp_grip_type(side, side == 1 ? hd.grip_r : hd.grip_l);
+                    g.handle = hd.name;
+                    g.ha = hd.a;
+                    g.hb = hd.b;
+                    g.t = u;
+                    g.hold_at = cfg.pose_grab_settle_s > 0.0;
+                    g.at_pos = bp;
+                    g.at_rot = bq;
+                    g.place = !g.hold_at;
+                    g_pending_free[side] = g;
+                    g_pending_item[side] = w;
+                    set_component_transform(keep.base, bp, bq, true); // back from where the game's set-up snapped it
+                }
                 if (ok)
                 {
                     g_mount_fist[side] = w;
