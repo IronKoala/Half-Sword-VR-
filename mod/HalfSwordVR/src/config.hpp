@@ -321,6 +321,14 @@ namespace hsvr
         // 1 = while the controllers are tracked, the mouse neither turns him nor tilts his look (the
         // control pitch is held at 0); with mouse and keyboard play the mouse works as before.
         bool pose_mouse_off_with_controllers = true;
+        // Who drives the arms in VR: "auto" (mouse and keyboard take over when you click or press a
+        // key while the controllers have had no button, trigger or grip for input_kbm_quiet_s; any
+        // controller button gives them back), "controllers" (always the controllers when tracked) or
+        // "keyboard" (always the game's own mouse-and-keyboard arms; head still tracked).
+        std::string input_mode = "auto";
+        double input_kbm_quiet_s = 1.0;
+        // Key that flips between controllers and mouse and keyboard (0x21 = Page Up; 0 = none).
+        int input_mode_key = 0x21;
         double pose_turn_dead_zone_deg = 60.0;
         double pose_turn_speed_dps = 150.0;
         // The most your head can be turned from his hips (a neck's reach): past it the hips come

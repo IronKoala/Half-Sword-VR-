@@ -1,0 +1,6 @@
+# Controllers or mouse and keyboard in VR (input_mode, thread "Support flat, VR+keyboard, and full VR modes").
+kbm_auto_switch|steps-kbm_auto_switch.txt
+kbm_blocked_while_gripping|steps-kbm_blocked_while_gripping.txt
+kbm_keeps_weapon|steps-kbm_keeps_weapon.txt
+kbm_game_arms|steps-kbm_game_arms.txt
+kbm_forced_ini|steps-kbm_forced_ini.txt|input_mode=keyboard
