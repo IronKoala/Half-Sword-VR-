@@ -178,6 +178,8 @@ namespace hsvr
         // Two Blade & Sorcery style spawn books on lecterns beside the tables (weapons left, Willies
         // right): point at a line with an empty hand and pull the trigger.
         bool test_room_books = true;
+        bool test_room_wall_layout = true;  // cellar: tables and books against the north wall (Matthew 2026-11-23)
+        bool test_room_freeze_props = true; // cellar: hay bundles and barrels hold still (they are authored overlapping)
         // The small light over each book's page (the engine's unitless light intensity; 0 = none).
         double test_room_book_light = 40.0;
         double test_room_fight_x = 1720.0; // where fighting Willies from the book appear (the cellar's coffin corner)
