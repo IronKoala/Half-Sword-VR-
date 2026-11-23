@@ -608,6 +608,7 @@ namespace hsvr
         num("crossbow_trigger_release", c.crossbow_trigger_release);
         num("crossbow_trigger_grip_cm", c.crossbow_trigger_grip_cm);
         num("pose_holster_zone_cm", c.pose_holster_zone_cm);
+        flag("pose_holster_by_item", c.pose_holster_by_item);
         num("pose_holster_max_speed", c.pose_holster_max_speed);
         num("pose_throw_multiplier", c.pose_throw_multiplier);
         flag("pose_draw", c.pose_draw);

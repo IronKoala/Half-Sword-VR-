@@ -19442,11 +19442,21 @@ namespace
             std::string socket;
             uint8_t slot;     // Sheath Slot <S> / Create Sheath Constraint's Slot byte
             double d;
+            double palm_d = -1.0, item_d = -1.0;
         };
         Vec3 palm = hand_grab_point(mesh, side);
         std::vector<Cand> cands;
+        // How near: the palm OR any part of the item (B&S holders take an item whose own collider is in the
+        // zone). Playtest 2026-11-23: a hammer, a mace and an axe let go at the hip all dropped, the palm
+        // 19-23 cm from the slot socket each time (needs 15): he puts the item where it hangs, not his palm.
         auto add = [&](int ts, const std::string& sock, uint8_t slot) {
-            cands.push_back({ts, sock, slot, length(palm - socket_location(mesh, bone_fname(sock)))});
+            Vec3 at = socket_location(mesh, bone_fname(sock));
+            double pd = length(palm - at), id = cfg.pose_holster_by_item ? closest_on_weapon(w, at) : -1.0;
+            Cand c{ts, sock, slot, pd};
+            c.palm_d = pd;
+            c.item_d = id;
+            if (id >= 0.0 && id < c.d) c.d = id;
+            cands.push_back(c);
         };
         for (int ts = 0; ts < 2; ++ts)
         {
@@ -19499,7 +19509,8 @@ namespace
         double d = best->d;
         if (d > cfg.pose_holster_zone_cm)
         {
-            HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s (needs %.0f): dropped", hand, w->GetName().c_str(), d, socket.c_str(), cfg.pose_holster_zone_cm);
+            HSVR_LOG("Holster: %s hand let go of %ls %.0f cm from %s (needs %.0f; palm %.0f, item %.0f): dropped", hand, w->GetName().c_str(), d, socket.c_str(),
+                     cfg.pose_holster_zone_cm, best->palm_d, best->item_d);
             return false;
         }
         double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));

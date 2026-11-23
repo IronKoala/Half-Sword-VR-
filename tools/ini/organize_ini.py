@@ -448,6 +448,7 @@ LAYOUT = [
         ('pose_scabbard_block_auto', "1 = the game's own teleporting off-hand scabbard grab can't fire."),
         ('pose_holster_snap', 'Holster snap for weapons without a scabbard.'),
         ('pose_holster_zone_cm', 'Let go of a scabbard-less weapon within this of its free belt slot (cm) to hang it there.'),
+        ('pose_holster_by_item', '1 = that distance counts from any part of the item too, not only your palm (B&S-style).'),
         ('pose_holster_max_speed', '...moving slower than this (m/s; faster is a throw).'),
         ('pose_keep_scabbard_on_drop', '1 = a drawn weapon dropped or thrown leaves its scabbard on the belt.'),
     ]),

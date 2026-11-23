@@ -751,6 +751,9 @@ namespace hsvr
         // The hand on the rear grip (by the trigger) is the one that fires: within this of it (cm).
         double crossbow_trigger_grip_cm = 8.0;
         double pose_holster_zone_cm = 15.0;
+        // 1 = the zone counts from any part of the item as well as the palm (B&S holders take the item's own
+        // collider); 0 = the palm only (playtest 2026-11-23: his palm stayed 19-23 cm off, items dropped).
+        bool pose_holster_by_item = true;
         double pose_holster_max_speed = 3.0;
         double pose_throw_speed = 2.0;
         double pose_throw_multiplier = 2.0;
