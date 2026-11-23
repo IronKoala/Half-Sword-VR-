@@ -24,3 +24,7 @@ ctl_bastard_knight2|steps-line-bastard_knight2.txt|pose_two_hand_bs=0
 ctl_rp_sword_waggle|steps-rp_sword_waggle.txt|pose_two_hand_bs=0
 ctl_rp_polearm|steps-rp_polearm.txt|pose_two_hand_bs=0
 ctl_rp_mace2h|steps-rp_mace2h.txt|pose_two_hand_bs=0
+auto_polehammer|steps-auto_polehammer.txt
+auto_warstaff|steps-auto_warstaff.txt
+ctl_auto_polehammer|steps-auto_polehammer.txt|pose_two_hand_auto_slide_cm=0
+ctl_auto_warstaff|steps-auto_warstaff.txt|pose_two_hand_auto_slide_cm=0

@@ -150,6 +150,20 @@ REPLAY = """10:hsvr.expect two_hand = 1 second hand took it
 """
 
 
+# Auto slide (pose_two_hand_auto_slide_cm, playtest 2026-11-23 4:59 PM polearm): two hands on a haft, then the left hand moves
+# 18 cm along the shaft toward the right without the trigger: its spot must follow it (B&S rest gap 6-9 cm), not stay and stretch.
+AUTO = [("polehammer", 30, 12), ("warstaff", 30, 12)]
+AUTO_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
+10.5:hsvr.arm_move 7 {to}
+13:hsvr.expect two_hand = 1 hand moved along the shaft: still held
+13:hsvr.expect two_spot_off < 6 hand moved along the shaft: its spot followed it (B&S rest gap 6-9 cm)
+13.5:hsvr.arm_move 7 {back}
+16:hsvr.expect two_hand = 1 hand moved back: still held
+16:hsvr.expect two_spot_off < 6 hand moved back: its spot followed it
+16.5:quit
+"""
+
+
 def main():
     rows = []
     for line in Path(sys.argv[1]).read_text().splitlines():
@@ -176,12 +190,19 @@ def main():
         steps = HEAD.format(path=paths[weapon]) + TAKE_ALONG.format(along=along) + REPLAY.format(track=tracks + "\\" + track, turn=turn, lag=lag)
         (HERE / ("steps-rp_%s.txt" % name)).write_text(steps, newline="\n")
         rp.append(name)
+    auto = []
+    for weapon, along, to in AUTO:
+        steps = HEAD.format(path=paths[weapon]) + TAKE_ALONG.format(along=along) + AUTO_STEPS.format(to=to, back=along)
+        (HERE / ("steps-auto_%s.txt" % weapon)).write_text(steps, newline="\n")
+        auto.append(weapon)
     lst = ["# Two hands with real-hand conditions (playtest 2026-11-23); two hands are held as B&S holds them (pose_two_hand_bs=1).",
            "# rp_: his own recorded controller motion. ctl_: the same cases in the previous line mode (pose_two_hand_bs=0), for comparison."]
     lst += ["two_%s|steps-%s.txt" % (n, n) for n in rows]
     lst += ["rp_%s|steps-rp_%s.txt" % (n, n) for n in rp]
     lst += ["ctl_%s|steps-line-%s.txt|pose_two_hand_bs=0" % (n, n) for n in rows]
     lst += ["ctl_rp_%s|steps-rp_%s.txt|pose_two_hand_bs=0" % (n, n) for n in rp]
+    lst += ["auto_%s|steps-auto_%s.txt" % (n, n) for n in auto]
+    lst += ["ctl_auto_%s|steps-auto_%s.txt|pose_two_hand_auto_slide_cm=0" % (n, n) for n in auto]
     (HERE / "list.txt").write_text("\n".join(lst) + "\n", newline="\n")
     print("wrote %d cases (+%d control)" % (len(rows), len(rows)))
 
