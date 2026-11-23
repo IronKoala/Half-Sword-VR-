@@ -1,0 +1,8 @@
+# The trap itself: the capsule put 40 cm down (as after falling through a missed floor). The game lifts it back
+# more than 30 cm in a tick; before the fix the mod undid that as a "climb" every tick and he sank.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.player_immortal
+2.0:hsvr.expect actor_z > 80 standing before
+2.1:hsvr.capsule_drop 40
+2.3:hsvr.wait actor_z > 80 3 0.3 back to standing height without a jump
+6.0:hsvr.expect actor_z > 80 still standing 4 s later
