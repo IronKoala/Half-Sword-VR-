@@ -21571,9 +21571,17 @@ namespace
                 continue;
             }
             // Only a seated weapon (the game first pulls a new weapon into the hand over a short distance).
-            if (side == 1)
+            // (Not a weapon the hold already has: the game sets this mid-swing too, and skipping those ticks removed the
+            // hold's joint for 2-4 ticks during fast two-hand swings, throwing the weapon 31-61 cm off the hands in tests
+            // 2026-11-23, every ~1 s with a slap logged on that hand.)
+            if (side == 1 && !(g_hold[1].weapon == weapon && g_hold[1].have_last))
                 if (FProperty* p = prop_chain(pawn, STR("R Hand Soft Attach Distance")))
                     if (number_property(pawn, p) > 0.0) continue;
+            if (side == 1 && g_hold[1].weapon == weapon && g_hold[1].have_last)
+                if (FProperty* p = prop_chain(pawn, STR("R Hand Soft Attach Distance")))
+                    if (double sa = number_property(pawn, p); sa > 0.0)
+                        HSVR_LOG_EVERY(0.25, "Hold: right hand: the game's soft attach distance is %.1f on %ls it already holds: held on (that tick used to be skipped)", sa,
+                                       weapon->GetName().c_str());
             if (bool_property(weapon, STR("Is Sheathed")) || bool_property(pawn, STR("Sheathing R")) || bool_property(pawn, STR("Unsheathing R"))) continue;
             UObject* base = object_property(weapon, STR("BaseMesh"));
             if (!base) continue;
