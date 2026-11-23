@@ -196,7 +196,7 @@ namespace hsvr
         bool test_room_wall_layout = true;  // cellar: tables and books against the north wall (Matthew 2026-11-23)
         bool test_room_freeze_props = true; // cellar: hay bundles and barrels hold still (they are authored overlapping)
         // The small light over each book's page (the engine's unitless light intensity; 0 = none).
-        double test_room_book_light = 40.0;
+        double test_room_book_light = 0.0; // 0: bright self-lit text reads best on the dark wood (2026-11-23)
         double test_room_fight_x = 1720.0; // where fighting Willies from the book appear (the cellar's coffin corner)
         double test_room_fight_y = 40.0;
         int test_room_foes = 4;
@@ -321,6 +321,14 @@ namespace hsvr
         // 1 = while the controllers are tracked, the mouse neither turns him nor tilts his look (the
         // control pitch is held at 0); with mouse and keyboard play the mouse works as before.
         bool pose_mouse_off_with_controllers = true;
+        // Who drives the arms in VR: "auto" (mouse and keyboard take over when you click or press a
+        // key while the controllers have had no button, trigger or grip for input_kbm_quiet_s; any
+        // controller button gives them back), "controllers" (always the controllers when tracked) or
+        // "keyboard" (always the game's own mouse-and-keyboard arms; head still tracked).
+        std::string input_mode = "auto";
+        double input_kbm_quiet_s = 1.0;
+        // Key that flips between controllers and mouse and keyboard (0x21 = Page Up; 0 = none).
+        int input_mode_key = 0x21;
         double pose_turn_dead_zone_deg = 60.0;
         double pose_turn_speed_dps = 150.0;
         // The most your head can be turned from his hips (a neck's reach): past it the hips come
@@ -551,6 +559,7 @@ namespace hsvr
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
         bool pose_two_hand_twist_only = true;
+        double pose_two_hand_line_ref_cm = 25.0; // two hands: grips this far apart aim half by the wrist, half by the hands' line (closer = more the wrist)
         bool pose_two_hand_joint_line = true; // joint hold, two hands: one pose along the hands' line, both joints to it (playtest 2026-11-23)
         bool pose_two_hand_joint_both_turn = true; // joint hold, both hands on fixed grips: both wrists turn it (rerun 388ca67: 60 deg pitch followed, 2.5-3.3 cm / 5-6 deg off; off: 27-37 deg, creeps back)
         bool pose_two_hand_fixed_rebase = true; // fixed grips, both wrists: the second hand's turn and spot taken from the first hand at the grab
@@ -891,6 +900,14 @@ namespace hsvr
         // scales a sliding contact by the weapon's cutting rate, ~0 for a fist ball, so without this
         // a hard punch reached his damage as impulse ~1 (playtest 2026-11-22).
         bool pose_fist_full_impulse = true;
+        // Every new punch counts (Matthew 2026-11-23, "Only fix ignored punches"). The game drops a hit on
+        // the bone it last damaged unless it is bigger than the last one that counted (Deal Complex Damage:
+        // |impulse| x (cutting + 1) >= Last Complex Damage Impulse; Get Damage: damage >= Last Damage Taken),
+        // so a run of head punches of about the same strength mostly did nothing (38 of 58 in the playtest).
+        // A fist contact on a Willie more than pose_fist_new_punch_gap_s after that fist's last contact on
+        // him clears both, for that punch only; the contacts within one punch keep the game's rule.
+        bool pose_fist_new_punch_counts = true;
+        double pose_fist_new_punch_gap_s = 0.25;
         // Grabbing a weapon someone else holds: a tug of war under the game's own grip rule; his hand
         // lets go when its joint is pulled harder than his grip strength T x disarm_grip_scale (pain
         // weakens it, out cold he has none) for disarm_hold_s, and it is yours.
