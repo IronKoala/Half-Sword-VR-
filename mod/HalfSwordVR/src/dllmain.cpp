@@ -15513,6 +15513,7 @@ namespace
         hsvr::Quat rel2;
         hsvr::Vec3 off2{0, 0, 0};
         int drives = -1; // which angular drives are on: bit 0 twist, bit 1 swing (-1 = not set yet)
+        int missed = 0;  // ticks in a row the hold skipped it while its weapon stayed in the hand
     };
     JointHand g_jh[2][2]; // [side][0 = the hand's own joint, 1 = its joint as the second hand on the other's weapon]
     // A hand's own joint removed while its weapon stays in hand (a tick the hold skipped: a fist, a stab's
@@ -15682,6 +15683,7 @@ namespace
         {
             j.made_t = g_jh_gone[side].made_t;
             j.fade_until = g_jh_gone[side].fade_until;
+            j.fresh = false; // keeps the speed it has: the old hold's restart speed mid-swing threw it (two_polehammer)
             HSVR_LOG("Joint hold: %s hand's joint on %ls remade %.0f ms after it went: keeps its age", side == 0 ? "left" : "right", weapon->GetName().c_str(),
                      (hsvr::now_seconds() - g_jh_gone[side].at) * 1000.0);
         }
@@ -15838,6 +15840,19 @@ namespace
             for (int i = 0; i < 2; ++i)
             {
                 JointHand& j = g_jh[s][i];
+                // A tick or two the hold skips (a fist set up in the other hand) with the weapon still in this hand: the
+                // joint is kept, still pulling to its last target. Removing and remaking it mid-swing restarted it at the
+                // old hold's speed (two_polehammer: 1070 -> 156 cm/s) and threw the weapon 61 cm off the hands for a tick.
+                bool still_held = pawn && j.weapon && !gone(j.weapon) &&
+                                  (i == 0 ? object_property(pawn, s == 0 ? STR("Weapon L") : STR("Weapon R")) == j.weapon
+                                          : g_two.active && g_two.second == s && g_two.weapon == j.weapon);
+                if ((j.sphere || j.con) && !j.touched && still_held && !gone(j.sphere) && !gone(j.con) && j.missed < 3)
+                {
+                    if (j.missed++ == 0)
+                        HSVR_LOG("Joint hold: %s hand's joint on %ls kept through a tick the hold skipped", s == 0 ? "left" : "right", j.weapon->GetName().c_str());
+                    continue;
+                }
+                if (j.touched) j.missed = 0;
                 if ((j.sphere || j.con) && (!j.touched || gone(j.weapon) || gone(j.sphere) || gone(j.con)))
                 {
                     if (j.weapon && !gone(j.weapon))
