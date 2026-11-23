@@ -16155,7 +16155,16 @@ namespace
                 jh_drive(o, pk * st / mm2, pc * dst / mm2, fcap2, o_turns ? ka : 0.0, o_turns ? ca : 0.0, tcap2);
                 {
                     // Test measures: the weapon's grip line against the hands' line, and each hand off the weapon's line.
+                    // With the one pose on, against the pose asked for (its grip line and both grip spots): on close-together
+                    // grips that pose is aimed mostly by the main wrist (pose_two_hand_line_ref_cm), so it leaves the hands'
+                    // line by design and the hands' line is no longer the yardstick (run 5cb1bb6: wrist aim passed, and a
+                    // sword at rest read 12-13 deg off the rig's hands' line). Without it, against the hands as before.
                     Vec3 g1 = pivot_world, g2 = at_world, h1 = target_pivot, h2 = g_two.bs_p2;
+                    if (line)
+                    {
+                        h1 = line_main;
+                        h2 = line_main + line_rot.rotate(g_two.bs_local - pivot);
+                    }
                     Vec3 wl = g2 - g1, hl = h2 - h1;
                     if (length(wl) > 5.0 && length(hl) > 5.0)
                     {
@@ -16171,8 +16180,8 @@ namespace
                         g_two_off_now.store(off);
                         if (ang > g_two_line_deg.load()) g_two_line_deg.store(ang);
                         if (off > g_two_off_cm.load()) g_two_off_cm.store(off);
-                        HSVR_LOG_EVERY(0.5, "Two hands measure: weapon line %.1f deg off the hands' line; hands %.1f / %.1f cm off the weapon's line (worst %.1f deg, %.1f cm)", ang,
-                                       across(h1), across(h2), g_two_line_deg.load(), g_two_off_cm.load());
+                        HSVR_LOG_EVERY(0.5, "Two hands measure: weapon line %.1f deg off the %s; %s %.1f / %.1f cm off the weapon's line (worst %.1f deg, %.1f cm); %.1f deg from where the main wrist points it", ang,
+                                       line ? "two-hand pose's" : "hands' line", line ? "its grip spots" : "hands", across(h1), across(h2), g_two_line_deg.load(), g_two_off_cm.load(), wang);
                     }
                 }
                 HSVR_LOG_EVERY(0.5, "Joint hold: second hand on %ls%s: %.1f cm from its spot, its turn %.0f deg from the first hand's",

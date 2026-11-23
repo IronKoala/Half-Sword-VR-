@@ -8,8 +8,10 @@ Each case: weapon in the right hand, the left hand takes it near its second spot
   static (hands on it), spread (left controller 20 cm further away + wrist rolled 70 deg),
   slow swing, fast swing (the left controller rigid to the right one), back to rest.
 Checks (hsvr.expect on the mod's measures, worst since hsvr.two_reset):
-  two_line_max  deg between the weapon's grip-to-grip line and the hands' line
-  two_off_max   cm either hand is off the weapon's line (across it)
+  two_line_max  deg between the weapon's grip-to-grip line and the two-hand pose the mod asks for (the hands'
+                line on wide grips and the crossbow; mostly the main wrist on close sword grips)
+  two_off_max   cm either grip spot of that pose is off the weapon's line (across it)
+  two_wrist     deg between the weapon and where the main wrist alone points it (swords' wrist phase)
   two_gap       cm between the two hands' points on the weapon (>= 9: never inside each other)
   two_hand      the second hand still holds it
 
@@ -44,31 +46,31 @@ BODY = """10:hsvr.expect two_hand = 1 second hand took it
 10:hsvr.expect two_gap >= 8.9 hands a hand's width apart, never inside each other
 10.1:hsvr.xbow_hand 0 keep
 10.2:hsvr.two_reset
-12:hsvr.expect two_line_max < 6 static: along the hands
-12:hsvr.expect two_off_max < 3 static: hands on its line
+12:hsvr.expect two_line_max < 6 static: follows the two-hand pose
+12:hsvr.expect two_off_max < 3 static: grips on the pose
 12.1:hsvr.hand_spread 0 20
 12.1:hsvr.xbow_wrist 0 roll 70 1
 13.5:hsvr.two_reset
 15.5:hsvr.expect two_hand = 1 spread + wrist: still held
-15.5:hsvr.expect two_line_max < 8 spread + wrist: along the hands
-15.5:hsvr.expect two_off_max < 5 spread + wrist: hands on its line
+15.5:hsvr.expect two_line_max < 8 spread + wrist: follows the two-hand pose
+15.5:hsvr.expect two_off_max < 5 spread + wrist: grips on the pose
 15.6:hsvr.arm_move 2
 15.7:hsvr.two_reset
 20:hsvr.expect two_hand = 1 slow swing: still held
-20:hsvr.expect two_line_max < 15 slow swing: along the hands
-20:hsvr.expect two_off_max < 8 slow swing: hands on its line
+20:hsvr.expect two_line_max < 15 slow swing: follows the two-hand pose
+20:hsvr.expect two_off_max < 8 slow swing: grips on the pose
 20.1:hsvr.arm_move 3
 20.2:hsvr.two_reset
 24:hsvr.expect two_hand = 1 fast swing: still held
-24:hsvr.expect two_line_max < 30 fast swing: along the hands
-24:hsvr.expect two_off_max < 15 fast swing: hands on its line
+24:hsvr.expect two_line_max < 30 fast swing: follows the two-hand pose
+24:hsvr.expect two_off_max < 15 fast swing: grips on the pose
 24.1:hsvr.arm_move 1
 24.1:hsvr.hand_spread 0 0
 24.1:hsvr.xbow_wrist 0 roll 0 0.5
 25.5:hsvr.two_reset
 27.5:hsvr.expect two_hand = 1 rest: still held
-27.5:hsvr.expect two_line_max < 6 rest: along the hands
-27.5:hsvr.expect two_off_max < 3 rest: hands on its line
+27.5:hsvr.expect two_line_max < 6 rest: follows the two-hand pose
+27.5:hsvr.expect two_off_max < 3 rest: grips on the pose
 27.6:hsvr.expect two_gap >= 8.9 rest: hands apart
 28:quit
 """
