@@ -25,7 +25,7 @@ import sys
 
 FLAG_NAMES = {1: "head tracked", 2: "two hands", 4: "slow-mo", 8: "fallen", 16: "kicking L", 32: "kicking R", 64: "button crouch",
               128: "headset lost focus"}
-BUTTON_NAMES = {1: "A/X", 2: "B/Y", 4: "stick click", 8: "menu"}
+BUTTON_NAMES = {1: "A/X (Frame left: D-pad Down)", 2: "B/Y (Frame left: D-pad Up)", 4: "stick click", 8: "menu (Frame left: View)", 64: "marker button (Frame left: D-pad Left)"}
 HOLD_NAMES = {1: "force capped", 2: "torque capped", 4: "sliding", 8: "drawing", 16: "sheathing", 32: "scabbard held", 64: "free grip",
               128: "flipped"}
 SIDE = {"l": "left", "r": "right"}

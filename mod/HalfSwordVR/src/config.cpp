@@ -513,6 +513,8 @@ namespace hsvr
         num("pose_hold_joint_fade_after_s", c.pose_hold_joint_fade_after_s);
         flag("pose_hold_joint_slerp", c.pose_hold_joint_slerp);
         flag("pose_hold_joint_mod_turn", c.pose_hold_joint_mod_turn);
+        num("pose_hold_joint_target_max_speed", c.pose_hold_joint_target_max_speed);
+        flag("pose_hold_joint_draw_wound", c.pose_hold_joint_draw_wound);
         flag("pose_hold_joint_turn_by_grip", c.pose_hold_joint_turn_by_grip);
         flag("pose_hold_joint_speed_limit", c.pose_hold_joint_speed_limit);
         num("pose_hold_contact_cm", c.pose_hold_contact_cm);
@@ -549,6 +551,7 @@ namespace hsvr
         flag("pose_slide_fixed_1h_sword", c.pose_slide_fixed_1h_sword);
         integer("pose_grip_two_zones_2h_sword", c.pose_grip_two_zones_2h_sword);
         num("pose_grip_pommel_top_cm", c.pose_grip_pommel_top_cm);
+        num("pose_grip_hands_overlap_cm", c.pose_grip_hands_overlap_cm);
         flag("pose_grip_dagger_fixed", c.pose_grip_dagger_fixed);
         num("pose_slide_rate_min", c.pose_slide_rate_min);
         num("pose_slide_rate_max", c.pose_slide_rate_max);
@@ -565,6 +568,8 @@ namespace hsvr
         flag("pose_slide_bs_damper", c.pose_slide_bs_damper);
         flag("draw_seat_ref_fix", c.draw_seat_ref_fix);
         num("pose_grab_settle_s", c.pose_grab_settle_s);
+        flag("pose_grab_joint", c.pose_grab_joint);
+        num("pose_grab_joint_hz", c.pose_grab_joint_hz);
         flag("pose_shield_free_grip", c.pose_shield_free_grip);
         flag("pose_weapon_free_grip", c.pose_weapon_free_grip);
         num("pose_weapon_free_cm", c.pose_weapon_free_cm);
@@ -673,6 +678,7 @@ namespace hsvr
         }
         flag("pose_two_hand_twist_only", c.pose_two_hand_twist_only);
         flag("pose_two_hand_joint_both_turn", c.pose_two_hand_joint_both_turn);
+        flag("pose_two_hand_fixed_rebase", c.pose_two_hand_fixed_rebase);
         num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
         flag("pose_fists", c.pose_fists);
         text("pose_fist_class", c.pose_fist_class);
@@ -775,6 +781,7 @@ namespace hsvr
         num("pose_grab_body_slip_below_t", c.pose_grab_body_slip_below_t);
         num("pose_grab_body_let_go_cm", c.pose_grab_body_let_go_cm);
         flag("input_hand_tracking", c.input_hand_tracking);
+        flag("input_frame_layout", c.input_frame_layout);
         flag("pose_eat", c.pose_eat);
         num("pose_eat_cm", c.pose_eat_cm);
         num("pose_drink_tip", c.pose_drink_tip);

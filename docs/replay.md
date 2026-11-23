@@ -5,7 +5,7 @@ While you play in VR the mod keeps the last few seconds of your headset, both co
 bones, both held items (name, pose, hold lag/force/torque, sliding, drawing), his capsule and
 every physics-body bone of his visible body in memory. Nothing goes to disk until you ask.
 
-**Hold the left Y button (left B on Valve Index) for about 0.8 s** the moment something looks
+**Hold the bug-marker button for about 0.8 s**: on Steam Frame controllers that is **left D-pad Left** (its own button, nothing else on it); on Touch it is left Y, on Valve Index left B, the moment something looks
 wrong. Both controllers give **three strong pulses** (nothing else in the mod buzzes like that):
 the marker is in and it is recording. While the pattern plays every other vibration on both controllers is muted, so it never blurs into hit or grip buzzes. The pulses confirm the recording; the "Replay: saved" log line confirms the file. It keeps recording 5 more seconds, then writes the 10 s
 before the press and the 5 s after it to
@@ -13,8 +13,8 @@ before the press and the 5 s after it to
     Mods\HalfSwordVR\replays\replay-<date>_<time>.csv
 
 with the mod's log lines of that window at the end. Pressing again within those 5 s adds a second
-mark to the same file and records 5 s past it. A quick tap of Y still flips the left grip; holding
-Y with right B (the arm measure) makes no marker, unless Y went down 0.8 s or more before B (that only saves an extra capture).
+mark to the same file and records 5 s past it. On Touch/Index a quick tap of Y/B still flips the left grip; holding
+it with right B (the arm measure) makes no marker, unless Y went down 0.8 s or more before B (that only saves an extra capture).
 
 Settings (`[Logging]` section): `replay_capture`, `replay_hold_s`, `replay_before_s`,
 `replay_after_s`. Test scripts can press it with `hsvr.replay_mark`.
@@ -36,3 +36,12 @@ index), then a CSV header and one row per tick, then `#log` lines. Bone columns 
 Cost: one fixed ~1.5 KB frame per tick into a preallocated ring (4096 ticks, ~6 MB), one engine
 call per recorded bone with reused call buffers; item names are read only when a hand's item
 changes. The file is written on a helper thread.
+
+## Steam Frame controllers
+
+The mod suggests SteamVR's native Steam Frame layout (`/interaction_profiles/valve/frame_controller`,
+extension `XR_VALVE_frame_controller_interaction`) when SteamVR offers it (`input_frame_layout=1`).
+Left hand: D-pad Down = jump (A/X), D-pad Up = grip flip (B/Y), D-pad Left = bug marker, D-pad Right
+free, View = menu. Right hand: A/B as on Touch. Without it SteamVR runs the mod as Touch and remaps
+left Y onto D-pad Up, Left and Right together. The log says which layout each hand uses
+("Controllers: left hand uses layout ...").
