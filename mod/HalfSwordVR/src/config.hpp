@@ -71,6 +71,21 @@ namespace hsvr
         bool ui_use_alpha = false;
         // Show the left eye's picture (with menus) in the game window on the monitor.
         bool mirror_window = true;
+        // 1 = the monitor shows a window-shaped cut-out of the left eye (fills the window, no black
+        // bars); 0 = the whole left eye fitted inside the window (black bars at the sides).
+        int mirror_view = 1;
+        // Shape of the monitor picture, width / height (1.7778 = 16:9, the YouTube player). In a window
+        // of another shape it is centred with black around it, never stretched. 0 = the window's shape.
+        double mirror_aspect = 1.7778;
+        // Size the mod sets the game window to, "<width>x<height>" (windowed), e.g. 2560x1440 for a
+        // 16:9 recording on an ultrawide monitor. Empty = the game's own window size.
+        std::string mirror_window_res;
+        // Widest the monitor picture is, degrees side to side (less when the eye does not cover it).
+        double mirror_fov_deg = 90.0;
+        // The monitor picture follows the head smoothed over this many seconds (0 = exactly the head).
+        double mirror_smooth_s = 0.1;
+        // 1 = keep the monitor picture's horizon level (head tilt taken out).
+        bool mirror_level = false;
         // Virtual key codes. 0x24 = Home, 0x23 = End, 0x2D = Insert.
         int recenter_key = 0x24;
         int toggle_ui_key = 0x23;
@@ -530,11 +545,14 @@ namespace hsvr
         double pose_hold_joint_fade_after_s = 0.0;  // s: no ease to B&S's cap this soon after a joint is made (was 0.3 before the grab's speed was zeroed)
         bool pose_hold_joint_slerp = true; // 1 = the joint turns the weapon by one SLERP drive (0 = twist and swing drives)
         bool pose_hold_joint_mod_turn = true; // one hand: 1 = the old hold's turn (spin set each tick), the joint only pulls; 0 = the joint's turn drive
+        double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)
+        bool pose_hold_joint_draw_wound = true; // drawing/sheathing and a blade in a wound stay on the joint (sent where the old rules put it)
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
         // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
         // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
         bool pose_two_hand_twist_only = true;
-        bool pose_two_hand_joint_both_turn = false; // joint hold, both hands on fixed grips: both wrists turn it (test)
+        bool pose_two_hand_joint_both_turn = true; // joint hold, both hands on fixed grips: both wrists turn it (rerun 388ca67: 60 deg pitch followed, 2.5-3.3 cm / 5-6 deg off; off: 27-37 deg, creeps back)
+        bool pose_two_hand_fixed_rebase = true; // fixed grips, both wrists: the second hand's turn and spot taken from the first hand at the grab
         double pose_two_hand_swing_share = 0.0;
         // Whoosh judged on the weapon's speed against your body: the game's whoosh threshold for a weapon in
         // a tracked hand is raised by your walking speed x this (0 = off).
@@ -619,6 +637,7 @@ namespace hsvr
         // The lower zone sits just above the pommel (Matthew 2026-11-22: "you grab just above the pommel"): the
         // pommel's top is this far above its origin (measured 4.7 on a Grip_15 pommel, 8 cm long).
         double pose_grip_pommel_top_cm = 4.7;
+        double pose_grip_hands_overlap_cm = 3.5; // short two-zone grips: the hands may overlap each other this much to stay off the pommel
         // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
         bool pose_grip_dagger_fixed = true;
         double pose_slide_rate_min = 3.0;
@@ -653,6 +672,8 @@ namespace hsvr
         // A grab leaves the item where it was and the hold pulls it into the hand over this long (B&S);
         // also a hand-over. 0 = put it in the hand at once.
         double pose_grab_settle_s = 0.08;
+        bool pose_grab_joint = true; // loose objects (cups, rocks) held on a joint like weapons (with pose_hold_joint)
+        double pose_grab_joint_hz = 12.0; // that joint's spring frequency
         // Shields: every measured strap and handle is a grab point; anywhere else (the rim, an edge)
         // the hand holds it where it touched (pose_shield_free_grip; 0 = always the game's grip).
         bool pose_shield_free_grip = true;
