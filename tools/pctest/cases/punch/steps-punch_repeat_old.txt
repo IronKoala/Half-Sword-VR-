@@ -2,6 +2,11 @@
 0.6:hsvr.expect room_foes = 1 the one passive foe
 1.0:hsvr.player_immortal
 1.2:hsvr.foe_front 55
+1.3:hsvr.squeeze 0 1
+1.3:hsvr.squeeze 1 1
+1.7:hsvr.squeeze 0 0
+1.7:hsvr.squeeze 1 0
+1.95:hsvr.expect held_r = 0 right hand empty (the test room starts him with a crossbow)
 2.0:hsvr.arm_move 1
 2.5:hsvr.squeeze 1 1
 2.5:hsvr.trigger 1 1
