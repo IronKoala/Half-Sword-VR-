@@ -3,6 +3,9 @@
 #include "config.hpp"
 #include "log.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -24,6 +27,22 @@ namespace hsvr
         XrAction g_secondary = XR_NULL_HANDLE;
         XrAction g_menu = XR_NULL_HANDLE;
         XrAction g_haptic = XR_NULL_HANDLE;
+        XrAction g_trigger_touch = XR_NULL_HANDLE;
+        XrAction g_thumb_touch = XR_NULL_HANDLE;
+        XrAction g_marker = XR_NULL_HANDLE; // bug-marker button (only on layouts with a spare one: Steam Frame left D-pad Left)
+        std::atomic<bool> g_frame_active{false}; // left hand's current layout is the Steam Frame one
+        bool g_ext_frame = false;           // XR_VALVE_frame_controller_interaction enabled (Steam Frame layout)
+        const char* kFrameExt = "XR_VALVE_frame_controller_interaction";
+
+        // SteamVR's hand skeleton (XR_EXT_hand_tracking): its estimate of each finger from the
+        // controller's sensors (or real finger tracking where the controller has it).
+        bool g_ext_hand_tracking = false;
+        bool g_ext_motion_range = false;
+        bool g_system_hand_tracking = false;
+        PFN_xrCreateHandTrackerEXT g_create_hand_tracker = nullptr;
+        PFN_xrDestroyHandTrackerEXT g_destroy_hand_tracker = nullptr;
+        PFN_xrLocateHandJointsEXT g_locate_hand_joints = nullptr;
+        XrHandTrackerEXT g_hand_tracker[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
         XrSpace g_grip_space[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
         XrSpace g_aim_space[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
         XrSession g_attached_session = XR_NULL_HANDLE;
@@ -32,6 +51,54 @@ namespace hsvr
         std::mutex g_state_mutex;
         ControllerState g_state;
         bool g_trigger_was_down[2] = {false, false};
+        std::atomic<float> g_buzz[2] = {0.0f, 0.0f};
+        // Hit envelopes playing on each hand (controllers_hit).
+        struct HitEnvelope
+        {
+            std::vector<float> t, v;
+            double start = 0.0, seconds = 0.1;
+            float volume = 0.0f;
+        };
+        std::mutex g_hit_mutex;
+        std::vector<HitEnvelope> g_hits[2];
+        // A signature pattern (controllers_signature): while it plays, nothing else buzzes that hand.
+        HitEnvelope g_sig[2];
+        bool g_sig_on[2] = {false, false};
+
+        float envelope_at(const HitEnvelope& e, double u)
+        {
+            if (e.t.empty()) return 0.0f;
+            if (u <= e.t.front()) return e.v.front();
+            for (size_t i = 1; i < e.t.size(); ++i)
+                if (u <= e.t[i])
+                {
+                    double span = e.t[i] - e.t[i - 1];
+                    double f = span > 1e-6 ? (u - e.t[i - 1]) / span : 1.0;
+                    return (float)(e.v[i - 1] + (e.v[i] - e.v[i - 1]) * f);
+                }
+            return e.v.back();
+        }
+
+        // The sum of the hand's envelopes now (B&S Hand.UpdateHaptic), dropping finished ones.
+        float hit_amplitude(int h)
+        {
+            double now = now_seconds();
+            std::lock_guard<std::mutex> lock(g_hit_mutex);
+            auto& list = g_hits[h];
+            float sum = 0.0f;
+            for (size_t i = 0; i < list.size();)
+            {
+                double u = (now - list[i].start) / list[i].seconds;
+                if (u >= 1.0)
+                {
+                    list.erase(list.begin() + i);
+                    continue;
+                }
+                sum += envelope_at(list[i], (std::max)(0.0, u)) * list[i].volume;
+                ++i;
+            }
+            return (std::min)(1.0f, sum);
+        }
 
         const char* kHandName[2] = {"left", "right"};
 
@@ -71,7 +138,7 @@ namespace hsvr
             const char* right; // path below /user/hand/right, or nullptr
         };
 
-        void suggest(const XrApi& xr, const char* profile, const std::vector<Binding>& bindings)
+        bool suggest(const XrApi& xr, const char* profile, const std::vector<Binding>& bindings)
         {
             std::vector<XrActionSuggestedBinding> list;
             for (const Binding& b : bindings)
@@ -94,6 +161,7 @@ namespace hsvr
             suggested.suggestedBindings = list.data();
             XrResult r = xr.SuggestInteractionProfileBindings(g_instance, &suggested);
             HSVR_LOG("Controllers: bindings for %s %s (%d inputs)", profile, XR_SUCCEEDED(r) ? "accepted" : result_name(xr, g_instance, r), (int)list.size());
+            return XR_SUCCEEDED(r);
         }
 
         bool read_bool(const XrApi& xr, XrSession session, XrAction action, int hand)
@@ -148,6 +216,73 @@ namespace hsvr
             return true;
         }
 
+        float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+        // One finger's bend: the angles between its consecutive bones, summed (degrees).
+        float finger_bend(const XrHandJointLocationEXT* j, const int* chain, int n)
+        {
+            float total = 0.0f;
+            for (int k = 0; k + 2 < n; ++k)
+            {
+                const XrVector3f& a = j[chain[k]].pose.position;
+                const XrVector3f& b = j[chain[k + 1]].pose.position;
+                const XrVector3f& c = j[chain[k + 2]].pose.position;
+                float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+                float vx = c.x - b.x, vy = c.y - b.y, vz = c.z - b.z;
+                float lu = std::sqrt(ux * ux + uy * uy + uz * uz), lv = std::sqrt(vx * vx + vy * vy + vz * vz);
+                if (lu < 1e-5f || lv < 1e-5f) continue;
+                float d = (ux * vx + uy * vy + uz * vz) / (lu * lv);
+                d = d < -1.0f ? -1.0f : (d > 1.0f ? 1.0f : d);
+                total += std::acos(d) * 57.29578f;
+            }
+            return total;
+        }
+
+        // The skeleton's finger curls. Full bend (a fist): about 250 deg over a finger's three joints,
+        // about 110 over the thumb's two (normal human ranges; logged in degrees to calibrate).
+        bool read_joints(XrSpace space, XrTime time, int h, HandState& hand)
+        {
+            if (g_hand_tracker[h] == XR_NULL_HANDLE || !g_locate_hand_joints) return false;
+            XrHandJointLocationEXT joints[XR_HAND_JOINT_COUNT_EXT];
+            XrHandJointLocationsEXT locations{XR_TYPE_HAND_JOINT_LOCATIONS_EXT};
+            locations.jointCount = XR_HAND_JOINT_COUNT_EXT;
+            locations.jointLocations = joints;
+            XrHandJointsLocateInfoEXT info{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT};
+            info.baseSpace = space;
+            info.time = time;
+            XrHandJointsMotionRangeInfoEXT range{XR_TYPE_HAND_JOINTS_MOTION_RANGE_INFO_EXT};
+            range.handJointsMotionRange = XR_HAND_JOINTS_MOTION_RANGE_UNOBSTRUCTED_EXT; // a closed hand reads as a fist, not wrapped on the controller
+            if (g_ext_motion_range) info.next = &range;
+            if (XR_FAILED(g_locate_hand_joints(g_hand_tracker[h], &info, &locations)) || !locations.isActive) return false;
+            for (int k = 0; k < XR_HAND_JOINT_COUNT_EXT; ++k)
+                if (!(joints[k].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) return false;
+            static const int thumb[] = {XR_HAND_JOINT_THUMB_METACARPAL_EXT, XR_HAND_JOINT_THUMB_PROXIMAL_EXT, XR_HAND_JOINT_THUMB_DISTAL_EXT, XR_HAND_JOINT_THUMB_TIP_EXT};
+            static const int index[] = {XR_HAND_JOINT_INDEX_METACARPAL_EXT, XR_HAND_JOINT_INDEX_PROXIMAL_EXT, XR_HAND_JOINT_INDEX_INTERMEDIATE_EXT,
+                                        XR_HAND_JOINT_INDEX_DISTAL_EXT, XR_HAND_JOINT_INDEX_TIP_EXT};
+            static const int middle[] = {XR_HAND_JOINT_MIDDLE_METACARPAL_EXT, XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT, XR_HAND_JOINT_MIDDLE_INTERMEDIATE_EXT,
+                                         XR_HAND_JOINT_MIDDLE_DISTAL_EXT, XR_HAND_JOINT_MIDDLE_TIP_EXT};
+            static const int ring[] = {XR_HAND_JOINT_RING_METACARPAL_EXT, XR_HAND_JOINT_RING_PROXIMAL_EXT, XR_HAND_JOINT_RING_INTERMEDIATE_EXT,
+                                       XR_HAND_JOINT_RING_DISTAL_EXT, XR_HAND_JOINT_RING_TIP_EXT};
+            static const int little[] = {XR_HAND_JOINT_LITTLE_METACARPAL_EXT, XR_HAND_JOINT_LITTLE_PROXIMAL_EXT, XR_HAND_JOINT_LITTLE_INTERMEDIATE_EXT,
+                                         XR_HAND_JOINT_LITTLE_DISTAL_EXT, XR_HAND_JOINT_LITTLE_TIP_EXT};
+            hand.joint_deg[0] = finger_bend(joints, thumb, 4);
+            hand.joint_deg[1] = finger_bend(joints, index, 5);
+            hand.joint_deg[2] = finger_bend(joints, middle, 5);
+            hand.joint_deg[3] = finger_bend(joints, ring, 5);
+            hand.joint_deg[4] = finger_bend(joints, little, 5);
+            // Each joint on its own (Matthew 2026-11-21: "fingers have joints"): the bend at the knuckle
+            // (metacarpal -> proximal -> intermediate), the middle joint and the end joint, over the
+            // rig's full bend there (the framework's CURL table, degrees).
+            static const float full_deg[5][3] = {{25.8f, 34.4f, 45.8f}, {69.9f, 95.1f, 60.2f}, {77.9f, 100.3f, 64.7f}, {81.9f, 100.3f, 61.9f}, {88.2f, 95.1f, 60.2f}};
+            const int* chains[5] = {thumb, index, middle, ring, little};
+            for (int f = 1; f < 5; ++f)
+                for (int k = 0; k < 3; ++k)
+                    hand.joint_frac[f][k] = clamp01(finger_bend(joints, chains[f] + k, 3) / full_deg[f][k]);
+            hand.joint_curl[0] = clamp01(hand.joint_deg[0] / 110.0f);
+            for (int f = 1; f < 5; ++f) hand.joint_curl[f] = clamp01(hand.joint_deg[f] / 250.0f);
+            return true;
+        }
+
         void pulse(const XrApi& xr, XrSession session, int hand, float amplitude, double seconds)
         {
             if (g_haptic == XR_NULL_HANDLE) return;
@@ -188,6 +323,10 @@ namespace hsvr
                   make_action(xr, XR_ACTION_TYPE_BOOLEAN_INPUT, "menu", "Menu", g_menu) &&
                   make_action(xr, XR_ACTION_TYPE_VIBRATION_OUTPUT, "vibrate", "Vibration", g_haptic);
         if (!ok) return false;
+        // Touch sensors (finger curls for fists); not fatal if a runtime refuses them.
+        make_action(xr, XR_ACTION_TYPE_BOOLEAN_INPUT, "trigger_touch", "Finger on trigger", g_trigger_touch);
+        make_action(xr, XR_ACTION_TYPE_BOOLEAN_INPUT, "thumb_touch", "Thumb resting", g_thumb_touch);
+        make_action(xr, XR_ACTION_TYPE_BOOLEAN_INPUT, "bug_marker", "Bug marker (replay)", g_marker);
 
         const char* grip = "/input/grip/pose";
         const char* aim = "/input/aim/pose";
@@ -202,6 +341,11 @@ namespace hsvr
                  {&g_stick_click, "/input/thumbstick/click", "/input/thumbstick/click"},
                  {&g_primary, "/input/a/click", "/input/a/click"},
                  {&g_secondary, "/input/b/click", "/input/b/click"},
+                 {&g_trigger_touch, "/input/trigger/touch", "/input/trigger/touch"},
+                 {&g_thumb_touch, "/input/thumbstick/touch", "/input/thumbstick/touch"},
+                 {&g_thumb_touch, "/input/a/touch", "/input/a/touch"},
+                 {&g_thumb_touch, "/input/b/touch", "/input/b/touch"},
+                 {&g_thumb_touch, "/input/trackpad/touch", "/input/trackpad/touch"},
                  {&g_haptic, haptic, haptic}});
         // Oculus / Meta Touch layout (also what many other controllers are offered as).
         suggest(xr, "/interaction_profiles/oculus/touch_controller",
@@ -214,6 +358,11 @@ namespace hsvr
                  {&g_primary, "/input/x/click", "/input/a/click"},
                  {&g_secondary, "/input/y/click", "/input/b/click"},
                  {&g_menu, "/input/menu/click", nullptr},
+                 {&g_trigger_touch, "/input/trigger/touch", "/input/trigger/touch"},
+                 {&g_thumb_touch, "/input/thumbstick/touch", "/input/thumbstick/touch"},
+                 {&g_thumb_touch, "/input/x/touch", "/input/a/touch"},
+                 {&g_thumb_touch, "/input/y/touch", "/input/b/touch"},
+                 {&g_thumb_touch, "/input/thumbrest/touch", "/input/thumbrest/touch"},
                  {&g_haptic, haptic, haptic}});
         // HTC Vive wands.
         suggest(xr, "/interaction_profiles/htc/vive_controller",
@@ -225,6 +374,35 @@ namespace hsvr
                  {&g_stick_click, "/input/trackpad/click", "/input/trackpad/click"},
                  {&g_menu, "/input/menu/click", "/input/menu/click"},
                  {&g_haptic, haptic, haptic}});
+        // Steam Frame controllers, native (Matthew's, 2026-11-22). Without this SteamVR runs the mod as
+        // Touch and puts left Y on D-pad Up, Left AND Right (frame_controller_remapping.json), so the
+        // grip flip and the bug marker shared three directions. Here: left D-pad Down = A/X (jump),
+        // Up = B/Y (grip flip), Left = bug marker only, Right free; View = menu; right A/B as Touch.
+        // Paths from SteamVR's vrclient_x64.dll table and the Frame driver profile. One unknown path
+        // refuses the whole layout, so a smaller set is tried next; if both fail, the Touch remap stays.
+        if (g_ext_frame)
+        {
+            const char* fp = "/interaction_profiles/valve/frame_controller";
+            std::vector<Binding> core = {{&g_grip_pose, grip, grip},
+                                         {&g_aim_pose, aim, aim},
+                                         {&g_trigger, "/input/trigger/value", "/input/trigger/value"},
+                                         {&g_squeeze, "/input/squeeze/value", "/input/squeeze/value"},
+                                         {&g_stick, "/input/thumbstick", "/input/thumbstick"},
+                                         {&g_stick_click, "/input/thumbstick/click", "/input/thumbstick/click"},
+                                         {&g_primary, "/input/dpad_down/click", "/input/a/click"},
+                                         {&g_secondary, "/input/dpad_up/click", "/input/b/click"},
+                                         {&g_marker, "/input/dpad_left/click", nullptr},
+                                         {&g_menu, "/input/view/click", nullptr},
+                                         {&g_haptic, haptic, haptic}};
+            std::vector<Binding> full = core;
+            full.push_back({&g_trigger_touch, "/input/trigger/touch", "/input/trigger/touch"});
+            full.push_back({&g_thumb_touch, "/input/thumbstick/touch", "/input/thumbstick/touch"});
+            full.push_back({&g_thumb_touch, "/input/dpad_up/touch", "/input/a/touch"});
+            full.push_back({&g_thumb_touch, "/input/dpad_down/touch", "/input/b/touch"});
+            full.push_back({&g_thumb_touch, "/input/dpad_left/touch", "/input/x/touch"});
+            full.push_back({&g_thumb_touch, "/input/dpad_right/touch", "/input/y/touch"});
+            if (!suggest(xr, fp, full) && !suggest(xr, fp, core)) HSVR_LOG("Controllers: Steam Frame layout refused; SteamVR will remap the Touch layout instead");
+        }
         // The minimal layout every runtime supports.
         suggest(xr, "/interaction_profiles/khr/simple_controller",
                 {{&g_grip_pose, grip, grip},
@@ -260,6 +438,24 @@ namespace hsvr
         }
         g_attached_session = session;
         HSVR_LOG("Controllers: action set attached");
+        if (g_ext_hand_tracking && g_system_hand_tracking && config().input_hand_tracking && xr.GetInstanceProcAddr)
+        {
+            xr.GetInstanceProcAddr(g_instance, "xrCreateHandTrackerEXT", reinterpret_cast<PFN_xrVoidFunction*>(&g_create_hand_tracker));
+            xr.GetInstanceProcAddr(g_instance, "xrDestroyHandTrackerEXT", reinterpret_cast<PFN_xrVoidFunction*>(&g_destroy_hand_tracker));
+            xr.GetInstanceProcAddr(g_instance, "xrLocateHandJointsEXT", reinterpret_cast<PFN_xrVoidFunction*>(&g_locate_hand_joints));
+            for (int h = 0; h < 2 && g_create_hand_tracker && g_locate_hand_joints; ++h)
+            {
+                XrHandTrackerCreateInfoEXT info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+                info.hand = h == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+                info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+                XrResult hr = g_create_hand_tracker(session, &info, &g_hand_tracker[h]);
+                HSVR_LOG("Controllers: %s hand skeleton %s", kHandName[h], XR_SUCCEEDED(hr) ? "tracked (XR_EXT_hand_tracking)" : result_name(xr, g_instance, hr));
+                if (XR_FAILED(hr)) g_hand_tracker[h] = XR_NULL_HANDLE;
+            }
+        }
+        else
+            HSVR_LOG("Controllers: no hand skeleton (extension %d, system %d, input_hand_tracking %d): finger curls from the trigger, grip and touch sensors",
+                     (int)g_ext_hand_tracking, (int)g_system_hand_tracking, (int)config().input_hand_tracking);
         return true;
     }
 
@@ -297,6 +493,18 @@ namespace hsvr
             hand.primary = read_bool(xr, session, g_primary, h);
             hand.secondary = read_bool(xr, session, g_secondary, h);
             hand.menu = read_bool(xr, session, g_menu, h);
+            hand.marker = read_bool(xr, session, g_marker, h);
+            hand.trigger_touch = read_bool(xr, session, g_trigger_touch, h);
+            hand.thumb_touch = read_bool(xr, session, g_thumb_touch, h);
+            // Sensor curls (as Matthew's framework, ik/fingers.rs): the thumb resting on a control is
+            // closed, pressing one is fully closed; the index follows the trigger (a finger resting on
+            // it is a little curled); the other three follow the grip.
+            bool thumb_press = hand.stick_click || hand.primary || hand.secondary;
+            hand.sensor_curl[0] = thumb_press ? 1.0f : (hand.thumb_touch ? 0.8f : 0.1f);
+            hand.sensor_curl[1] = (std::max)(hand.trigger, hand.trigger_touch ? 0.25f : 0.0f);
+            hand.sensor_curl[2] = hand.sensor_curl[3] = hand.sensor_curl[4] = hand.squeeze;
+            hand.joints_valid = read_joints(space, (XrTime)time, h, hand);
+            for (int f = 0; f < 5; ++f) hand.curl[f] = hand.joints_valid ? (std::max)(hand.joint_curl[f], hand.sensor_curl[f]) : hand.sensor_curl[f];
 
             // Vibration check: a short buzz each time the trigger is pulled all the way.
             bool down = hand.trigger > 0.9f;
@@ -306,7 +514,28 @@ namespace hsvr
                 HSVR_LOG("Controllers: test buzz on the %s hand", kHandName[h]);
             }
             g_trigger_was_down[h] = down;
+            float buzz = g_buzz[h].exchange(0.0f);
+            float hit = hit_amplitude(h);
+            {
+                std::lock_guard<std::mutex> lock(g_hit_mutex);
+                if (g_sig_on[h])
+                {
+                    double u = (now_seconds() - g_sig[h].start) / g_sig[h].seconds;
+                    if (u >= 1.0) g_sig_on[h] = false;
+                    else
+                    {
+                        // Only the pattern: other buzzes and hits are dropped, so its gaps stay silent.
+                        float v = envelope_at(g_sig[h], (std::max)(0.0, u)) * g_sig[h].volume;
+                        if (v > 0.01f) pulse(xr, session, h, v, 1.0 / 30.0); // as hits: holds down to 30 fps
+                        continue;
+                    }
+                }
+            }
+            // A hit plays as B&S sends it: the summed envelope, 1/30 s at a time, every frame.
+            if (hit > 0.01f && hit >= buzz) pulse(xr, session, h, hit, 1.0 / 30.0);
+            else if (buzz > 0.01f) pulse(xr, session, h, (std::min)(1.0f, buzz), 0.02);
         }
+        s.frame_layout = g_frame_active.load();
         std::lock_guard<std::mutex> lock(g_state_mutex);
         g_state = s;
     }
@@ -332,12 +561,74 @@ namespace hsvr
             uint32_t length = 0;
             xr.PathToString(instance, state.interactionProfile, XR_MAX_PATH_LENGTH, &length, text);
             HSVR_LOG("Controllers: %s hand uses layout %s", kHandName[h], text);
+            if (h == 0) g_frame_active.store(std::strcmp(text, "/interaction_profiles/valve/frame_controller") == 0);
         }
+    }
+
+    std::vector<const char*> controllers_wanted_extensions(const std::vector<std::string>& offered)
+    {
+        std::vector<const char*> want;
+        g_ext_hand_tracking = g_ext_motion_range = false;
+        g_ext_frame = false;
+        for (const std::string& e : offered)
+            if (e == kFrameExt && config().input_frame_layout) g_ext_frame = true;
+        if (g_ext_frame) want.push_back(kFrameExt);
+        HSVR_LOG("Controllers: Steam Frame controller layout %s", g_ext_frame ? "offered: using it" : "not used (not offered or input_frame_layout=0)");
+        if (!config().input_hand_tracking) return want;
+        for (const std::string& e : offered)
+        {
+            if (e == XR_EXT_HAND_TRACKING_EXTENSION_NAME) g_ext_hand_tracking = true;
+            if (e == XR_EXT_HAND_JOINTS_MOTION_RANGE_EXTENSION_NAME) g_ext_motion_range = true;
+        }
+        if (g_ext_hand_tracking) want.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+        if (g_ext_hand_tracking && g_ext_motion_range) want.push_back(XR_EXT_HAND_JOINTS_MOTION_RANGE_EXTENSION_NAME);
+        else g_ext_motion_range = false;
+        HSVR_LOG("Controllers: runtime offers hand skeleton %d, motion range %d", (int)g_ext_hand_tracking, (int)g_ext_motion_range);
+        return want;
+    }
+
+    void controllers_system_hand_tracking(bool supported)
+    {
+        g_system_hand_tracking = supported;
+        HSVR_LOG("Controllers: headset system %s hand tracking", supported ? "supports" : "does not support");
     }
 
     ControllerState controllers_state()
     {
         std::lock_guard<std::mutex> lock(g_state_mutex);
         return g_state;
+    }
+
+    void controllers_hit(int hand, const float* key_t, const float* key_v, int keys, double seconds, float volume)
+    {
+        if (hand < 0 || hand > 1 || keys <= 0 || seconds <= 0.0 || volume <= 0.0f) return;
+        HitEnvelope e;
+        e.t.assign(key_t, key_t + keys);
+        e.v.assign(key_v, key_v + keys);
+        e.start = now_seconds();
+        e.seconds = seconds;
+        e.volume = volume;
+        std::lock_guard<std::mutex> lock(g_hit_mutex);
+        if (g_hits[hand].size() >= 16) g_hits[hand].erase(g_hits[hand].begin());
+        g_hits[hand].push_back(std::move(e));
+    }
+
+    void controllers_signature(int hand, const float* key_t, const float* key_v, int keys, double seconds, float volume)
+    {
+        if (hand < 0 || hand > 1 || keys <= 0 || seconds <= 0.0) return;
+        std::lock_guard<std::mutex> lock(g_hit_mutex);
+        g_sig[hand].t.assign(key_t, key_t + keys);
+        g_sig[hand].v.assign(key_v, key_v + keys);
+        g_sig[hand].start = now_seconds();
+        g_sig[hand].seconds = seconds;
+        g_sig[hand].volume = volume;
+        g_sig_on[hand] = true;
+    }
+
+    void controllers_buzz(int hand, float amplitude)
+    {
+        if (hand < 0 || hand > 1) return;
+        float old = g_buzz[hand].load();
+        while (amplitude > old && !g_buzz[hand].compare_exchange_weak(old, amplitude)) {}
     }
 } // namespace hsvr
