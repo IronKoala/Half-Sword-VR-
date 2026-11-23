@@ -804,6 +804,11 @@ namespace hsvr
         num("joint_break_free_min", c.joint_break_free_min);
         flag("joint_break_legs", c.joint_break_legs);
         num("joint_break_scale", c.joint_break_scale);
+        flag("joint_break_twist_needs_wrist", c.joint_break_twist_needs_wrist);
+        num("joint_break_wrench_nm_per_deg", c.joint_break_wrench_nm_per_deg);
+        num("joint_break_wrench_from_deg", c.joint_break_wrench_from_deg);
+        num("joint_break_wrench_max_nm", c.joint_break_wrench_max_nm);
+        num("joint_break_min_s", c.joint_break_min_s);
         flag("log_body_hits", c.log_body_hits);
         integer("pose_grab_body_hold", c.pose_grab_body_hold);
         num("pose_grab_body_spring", c.pose_grab_body_spring);
@@ -822,6 +827,8 @@ namespace hsvr
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
         flag("pose_grab_objects", c.pose_grab_objects);
         flag("pose_grab_world", c.pose_grab_world);
+        flag("pose_grab_world_no_floor", c.pose_grab_world_no_floor);
+        num("pose_grab_world_floor_cm", c.pose_grab_world_floor_cm);
         flag("pose_ghost_hand", c.pose_ghost_hand);
         num("pose_ghost_from_cm", c.pose_ghost_from_cm);
         text("pose_ghost_mesh", c.pose_ghost_mesh);
@@ -851,8 +858,11 @@ namespace hsvr
         num("pose_teleport_above_cm", c.pose_teleport_above_cm);
         flag("pose_crouch", c.pose_crouch);
         num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
+        flag("pose_crouch_at_neck_base", c.pose_crouch_at_neck_base);
         num("pose_crouch_max_cm", c.pose_crouch_max_cm);
         flag("pose_crouch_bend_for_depth", c.pose_crouch_bend_for_depth);
+        num("pose_crouch_bend_max_deg", c.pose_crouch_bend_max_deg);
+        num("pose_crouch_bend_neck_follow", c.pose_crouch_bend_neck_follow);
         num("pose_crouch_button_cm", c.pose_crouch_button_cm);
         num("pose_crouch_button_cms", c.pose_crouch_button_cms);
         flag("kick_on_a", c.kick_on_a);
@@ -882,6 +892,8 @@ namespace hsvr
         num("pose_step_time_s", c.pose_step_time_s);
         num("pose_step_lift_cm", c.pose_step_lift_cm);
         num("pose_step_lead_s", c.pose_step_lead_s);
+        num("pose_step_crouch_scale", c.pose_step_crouch_scale);
+        num("pose_step_crouch_full_cm", c.pose_step_crouch_full_cm);
         flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
         flag("dev_grip_trace", c.dev_grip_trace);
         flag("stab_log", c.stab_log);

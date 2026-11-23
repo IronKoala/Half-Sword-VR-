@@ -1279,6 +1279,7 @@ namespace
         double t = 0.0;
         double held = 1.0;       // share of the wanted bend allowed by the head height
         double reach_fwd = 0.0;  // forward bend forced by a crouch deeper than his legs go (pose_crouch_bend_for_depth)
+        double depth_free = 0.0; // of the forward bend, degrees whose neck counter-bend is dropped (pose_crouch_bend_neck_follow), smoothed
         hsvr::Vec3 offset;       // your neck away from where his hips stand (body frame, cm; pose_lean_step_radius_cm)
         hsvr::Vec3 aim;          // where his head is leaned to: offset, less the chest-back of looking down
         double look_back = 0.0;  // that chest-back now (cm; pose_lean_look_down_back_cm)
@@ -1301,18 +1302,23 @@ namespace
     // The bend and twist of the 6 bones, and where they carry the head (body frame). Each bone turns
     // about its own joint and carries everything above it, as the end-of-graph Modify Bone nodes do
     // in component space (Additive).
-    hsvr::Vec3 lean_fk(double fwd_deg, double side_deg, double twist_deg, hsvr::Quat out[6])
+    hsvr::Vec3 lean_fk(double fwd_deg, double side_deg, double twist_deg, hsvr::Quat out[6], double depth_free = -1.0)
     {
         using namespace hsvr;
         Vec3 p[7];
         for (int i = 0; i < 7; ++i) p[i] = g_lean.pts[i];
         const Vec3 up{0, 0, 1}, right{0, 1, 0}, fwd{1, 0, 0};
+        // A bend for depth (reaching down past his legs' crouch) takes the head down with it: that part of
+        // the bend has no neck counter-bend (playtest 2026-11-23 17:05 local: bent 85 deg, his neck bent
+        // back 64 and kept his head 17 cm above your kneeling view, hands 20-30 cm off the floor).
+        if (depth_free < 0.0) depth_free = g_lean.depth_free;
+        double neck_fwd = fwd_deg - (std::max)(0.0, (std::min)(fwd_deg, depth_free));
         for (int i = 0; i < 6; ++i)
         {
             // Half Sword's Bend_F: spine_02..05 +20 deg each, neck_01 and neck_02 -30 each (of 80);
             // Bend_L/R: spine 22.5 each, neck -30 each (of 90). Forward is a turn about right; a lean to
             // the right is a turn about forward by minus the angle.
-            double f = i < 4 ? fwd_deg / 4.0 : -fwd_deg * 0.375;
+            double f = i < 4 ? fwd_deg / 4.0 : -neck_fwd * 0.375;
             double sd = i < 4 ? side_deg / 4.0 : -side_deg / 3.0;
             Quat bend = (quat_axis_angle(right, f * kDegToRad) * quat_axis_angle(fwd, -sd * kDegToRad)).normalized();
             Quat q = (quat_axis_angle(up, twist_deg * kTwistWeight[i] * kDegToRad) * bend).normalized();
@@ -1337,6 +1343,7 @@ namespace
     double g_physics_watch_until = -1.0;
     bool g_body_turning = false;
     // Crouch: how far your headset is below where you stood at recentering (cm, 0 standing).
+    std::atomic<int> g_count_steps{0}; // foot steps since hsvr.mark (hsvr.expect steps)
     double g_crouch_drop = 0.0;
     // Button crouch (B&S: the stick crouches as well as bending down): left stick click toggles it; the
     // view and his body go down together by this much (cm, eased), on top of your own crouch.
@@ -1864,12 +1871,19 @@ namespace
                 velocity = {v[0], v[1], 0.0};
             }
         double speed = length(velocity);
+        // Crouched, he takes longer, slower steps, as the game does (step size MapRange(Root Height 85..70 ->
+        // 0.75..1.5) @579096: twice the standing step 15 cm down). Playtest 2026-11-23 17:23 local: his
+        // crouch walk was "way too rapid" (a step every 0.12 s at 150 cm/s with 10 cm steps).
+        double crouch_k = 1.0;
+        if (cfg.pose_step_crouch_scale > 1.0 && cfg.pose_step_crouch_full_cm > 0.0)
+            crouch_k = 1.0 + (cfg.pose_step_crouch_scale - 1.0) * (std::max)(0.0, (std::min)(1.0, g_crouch_drop / cfg.pose_step_crouch_full_cm));
+        double step_distance = cfg.pose_step_distance_cm * crouch_k;
         Vec3 want[2];
         double need[2];
         for (int side = 0; side < 2; ++side)
         {
             Vec3 home = g_pose.foot_home_local[side];
-            want[side] = actor + body.rotate(Vec3{home.x, home.y, 0.0}) + velocity * cfg.pose_step_lead_s;
+            want[side] = actor + body.rotate(Vec3{home.x, home.y, 0.0}) + velocity * (cfg.pose_step_lead_s * crouch_k);
             want[side].z = 0.0;
             FootState& f = g_feet[side];
             if (!f.valid)
@@ -1888,7 +1902,7 @@ namespace
                 f.stepping = false;
                 d = 0.0;
             }
-            need[side] = (std::max)(d / (std::max)(1.0, cfg.pose_step_distance_cm), std::fabs(wrap_deg(heading - f.yaw)) / (std::max)(1.0, cfg.pose_step_angle_deg));
+            need[side] = (std::max)(d / (std::max)(1.0, step_distance), std::fabs(wrap_deg(heading - f.yaw)) / (std::max)(1.0, cfg.pose_step_angle_deg));
         }
         bool any_stepping = g_feet[0].stepping || g_feet[1].stepping;
         if (!any_stepping)
@@ -1904,10 +1918,11 @@ namespace
                 f.from = f.at;
                 f.yaw_from = f.yaw;
                 // Quicker steps when moving faster.
-                f.duration = cfg.pose_step_time_s / (1.0 + speed / 150.0);
-                f.duration = (std::max)(0.12, f.duration);
+                f.duration = cfg.pose_step_time_s * crouch_k / (1.0 + speed / 150.0);
+                f.duration = (std::max)(0.12 * crouch_k, f.duration);
                 g_last_foot = pick;
                 ++f.steps;
+                g_count_steps.fetch_add(1);
             }
         }
         for (int side = 0; side < 2; ++side)
@@ -2317,6 +2332,7 @@ namespace
     std::atomic<double> g_fake_thrust_pitch{60.0};
     std::atomic<double> g_fake_thrust_up{-5.0};
     std::atomic<double> g_fake_roll_deg[2]{0.0, 0.0}; // test aid hsvr.hand_roll: the fake hand turned about the forward axis
+    std::atomic<double> g_fake_yaw_deg[2]{0.0, 0.0}; // test aid hsvr.hand_yaw: the fake hand turned about the vertical (a neck wrench)
     std::atomic<double> g_carry_log_until{0.0};       // test aid hsvr.carry_log <s>: every-tick carry lines until then
     double blade_length(UObject* w);
     bool mouth_point(UObject* pawn, hsvr::Vec3& out); // hsvr.arm_move 7 <cm>: the left hand this far above the right
@@ -2337,6 +2353,7 @@ namespace
     // Test counters since the last hsvr.mark (for hsvr.expect): stuck let-goes, kicks (a held weapon
     // ending a tick more than 8 cm from where it was sent) and the worst hold lag (cm) per hand.
     std::atomic<int> g_count_letgo{0}, g_count_kicks{0};
+    std::atomic<int> g_count_neck_snaps{0}, g_count_joint_breaks{0}; // joint_break_tick's snaps / all breaks (hsvr.expect neck_snaps, joint_breaks)
     std::atomic<int> g_count_punches{0}, g_count_punches_counted{0}; // tests: fist blows that started a new punch / of them, ones that took consciousness or health
     std::atomic<double> g_worst_lag[2] = {0.0, 0.0};
     // Two-hand test measures (joint hold, two hands): worst since hsvr.two_reset of the angle between the weapon's
@@ -3316,6 +3333,8 @@ namespace
             if (mode == 9) grip_rot = (body * quat_axis_angle(Vec3{0, 1, 0}, std::fmod(now, 6.0) / 6.0 * 2.0 * 3.14159265358979) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
             if (double roll = g_fake_roll_deg[side].load(); roll != 0.0)
                 grip_rot = (body * quat_axis_angle(Vec3{1, 0, 0}, roll / 57.29578) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
+            if (double yaw = g_fake_yaw_deg[side].load(); yaw != 0.0)
+                grip_rot = (quat_axis_angle(Vec3{0, 0, 1}, yaw / 57.29578) * grip_rot).normalized();
             xbow_test_grip(side, grip, grip_rot); // test: hsvr.xbow_hand / xbow_wrist / keep, arm_move switches eased
             ctl_track_grip(side, grip, grip_rot);  // test: hsvr.ctl_replay (his own recorded controllers)
         }
@@ -3954,6 +3973,10 @@ namespace
             if (down > 5.0 && length(ahead) > 0.05)
             {
                 g_lean.look_back = cfg.pose_lean_look_down_back_cm * (std::min)(1.0, (down - 5.0) / 55.0);
+                // Not while he bends down for depth: reaching for the floor, his chest goes over his knees,
+                // not back out of your view (it pushed his shoulders 16 cm further from your hands).
+                if (cfg.pose_crouch_bend_for_depth && cfg.pose_crouch_bend_neck_follow > 0.0)
+                    g_lean.look_back *= (std::max)(0.0, 1.0 - deficit / 10.0);
                 Vec3 a = quat_from_yaw_deg(heading).inverse().rotate(normalized(ahead));
                 g_lean.aim = g_lean.offset - Vec3{a.x, a.y, 0.0} * g_lean.look_back;
             }
@@ -3990,16 +4013,17 @@ namespace
         // his shoulders and hands come down with your view (playtest 2026-11-21: crouch button plus a real
         // crouch, and his hands still could not reach the ground).
         g_lean.reach_fwd = 0.0;
+        double share = (std::max)(0.0, (std::min)(1.0, cfg.pose_crouch_bend_neck_follow));
         if (cfg.pose_lean && g_lean.calibrated && cfg.pose_crouch_bend_for_depth && deficit > 0.5)
         {
             Quat tq[6];
-            double lo = 0.0, hi = (std::max)(cfg.pose_lean_max_deg, 85.0);
-            if (lean_fk(hi, want_s, 0.0, tq).z > -deficit) lo = hi; // even the deepest bend is not enough
+            double lo = 0.0, hi = (std::max)(cfg.pose_lean_max_deg, cfg.pose_crouch_bend_max_deg);
+            if (lean_fk(hi, want_s, 0.0, tq, hi * share).z > -deficit) lo = hi; // even the deepest bend is not enough
             else
                 for (int it = 0; it < 12; ++it)
                 {
                     double mid = 0.5 * (lo + hi);
-                    if (lean_fk(mid, want_s, 0.0, tq).z > -deficit) lo = mid;
+                    if (lean_fk(mid, want_s, 0.0, tq, mid * share).z > -deficit) lo = mid;
                     else hi = mid;
                 }
             g_lean.reach_fwd = lo;
@@ -4009,6 +4033,7 @@ namespace
         g_lean.want_side = want_s;
         double a = (cfg.pose_lean_smooth_s > 1e-4 && dt > 0.0 && dt < 0.2) ? 1.0 - std::exp(-dt / cfg.pose_lean_smooth_s) : 1.0;
         double f = g_lean.fwd + (want_f - g_lean.fwd) * a, sd = g_lean.side + (want_s - g_lean.side) * a;
+        g_lean.depth_free += (g_lean.reach_fwd * share - g_lean.depth_free) * a;
         g_lean.twist = twist;
         if (!g_lean.calibrated)
         {
@@ -4303,10 +4328,15 @@ namespace
             if (stereo_view_anchor(view_anchor, unused_yaw) && head_pose_world(cfg, state, head_world, head_rot))
             {
                 double scale = component_scale_z(mesh);
-                // Measured at the neck too, so looking down is not crouching.
+                // Measured at the neck too, so looking down is not crouching: at the base of the neck
+                // (pose_room_neck_base_cm below the head joint, as walking measures it), not at the head
+                // joint, which drops ~7 cm about the neck base when you look 66 deg down (playtest
+                // 2026-11-23 17:22 local: standing and looking at his legs read as a 10 cm crouch, "my
+                // Willie is standing weird, as if he's squatted"). pose_crouch_at_neck_base=0: the head joint.
                 Vec3 eye_offset{cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
+                if (cfg.pose_crouch_at_neck_base) eye_offset.z += (std::max)(0.0, cfg.pose_room_neck_base_cm);
                 double neck_now_z = (head_world - head_rot.rotate(eye_offset)).z;
-                double neck_then_z = view_anchor.z - cfg.eye_up_cm;
+                double neck_then_z = view_anchor.z - eye_offset.z;
                 double drop = (neck_then_z - neck_now_z) - cfg.pose_crouch_dead_zone_cm;
                 (void)scale;
                 g_crouch_drop = (std::max)(0.0, drop);
@@ -7113,8 +7143,29 @@ namespace
                 have_bounds = true;
             }
             std::wstring span = have_bounds ? STR(", z ") + std::to_wstring(lo) + STR(" .. ") + std::to_wstring(hi) : std::wstring();
-            HSVR_LOG("Dump:   comp %ls (%ls) at %.1f %.1f %.1f%ls tags [%ls]", c->GetName().c_str(), c->GetClassPrivate()->GetName().c_str(), o.x, o.y, o.z,
-                     span.c_str(), tags.c_str());
+            // Physics of a primitive: simulating, its mass (kg, its own body; welded ones are in their root's),
+            // and what it is attached to (a dangling chain's links pull on what holds them).
+            std::wstring phys;
+            if (func_chain(c, STR("GetMass")))
+            {
+                Call sim(c, STR("IsSimulatingPhysics"));
+                sim.name(STR("BoneName"), FName(STR("None"), FNAME_Add));
+                sim.run();
+                FProperty* sp = sim.param(STR("ReturnValue"));
+                bool simulating = sp && *(sim.buffer.data() + sp->GetOffset_Internal());
+                Call gm(c, STR("GetMass"));
+                gm.run();
+                Call ce(c, STR("GetCollisionEnabled"));
+                ce.run();
+                FProperty* cr = ce.param(STR("ReturnValue"));
+                int coll = cr ? *(ce.buffer.data() + cr->GetOffset_Internal()) : -1;
+                wchar_t buf[96];
+                swprintf(buf, 96, L", sim %d mass %.2f kg collision %d", simulating ? 1 : 0, gm.number(), coll);
+                phys = buf;
+            }
+            if (UObject* parent = object_property(c, STR("AttachParent"))) phys += STR(", on ") + parent->GetName();
+            HSVR_LOG("Dump:   comp %ls (%ls) at %.1f %.1f %.1f%ls%ls tags [%ls]", c->GetName().c_str(), c->GetClassPrivate()->GetName().c_str(), o.x, o.y, o.z,
+                     span.c_str(), phys.c_str(), tags.c_str());
         }
         Call sn(base, STR("GetAllSocketNames"));
         if (sn.run())
@@ -7494,6 +7545,19 @@ namespace
                 double d = closest_point_any(c, bone, at, cfg.pose_grab_radius_cm, &sp);
                 seen += STR("(") + std::to_wstring((int)std::lround(d)) + STR(" cm) ");
                 if (d < 0.0 || d > still_d) continue;
+                // Not the ground you stand on: a surface below the hand at his feet's height (playtest
+                // 2026-11-23 17:23 local: reaching for a lantern on the floor, the grip took hold of the
+                // floor and pinned his hand there). Ledges, walls, rails and table tops still hold.
+                if (cfg.pose_grab_world_no_floor && mesh)
+                {
+                    double feet_z = (std::min)(socket_location(mesh, bone_fname("foot_l")).z, socket_location(mesh, bone_fname("foot_r")).z);
+                    Vec3 up = d > 0.5 ? normalized(at - sp) : Vec3{0.0, 0.0, 0.0};
+                    if (sp.z < feet_z + cfg.pose_grab_world_floor_cm && (d <= 0.5 || up.z > 0.6))
+                    {
+                        seen += STR("(the floor) ");
+                        continue;
+                    }
+                }
                 still_d = d;
                 still = c;
                 still_point = sp;
@@ -9816,6 +9880,10 @@ namespace
         bool softened = false;
         double force = 0.0, torque = 0.0, release_rate = 0.0, stretch = 0.0, strangle = 0.0, choke = 0.0, conscious = 0.0;
         double grip_t = 121.0; // his grip strength T as the game's slip rule computes it
+        // Your controller's hand turn when you took hold (g_pose.hand_rot, before the hand rides the
+        // body): joint_break_tick counts a twist of his neck/arm only as far as your own wrist turned it.
+        hsvr::Quat ctl0;
+        bool ctl0_ok = false;
     };
     BodyGrab g_body_grab[2];
     std::atomic<int> g_body_hold_test{-99}; // test: hsvr.body_hold <n> (-99 = pose_grab_body_hold)
@@ -10060,6 +10128,27 @@ namespace
         return true;
     }
 
+    // The world X axis of a bone's parent (the axis bone_bend_twist measures its twist about).
+    bool bone_parent_axis(UObject* mesh, const char* bone_text, hsvr::Vec3& axis)
+    {
+        using namespace hsvr;
+        Call pb(mesh, STR("GetParentBone"));
+        pb.name(STR("BoneName"), bone_fname(bone_text));
+        pb.run();
+        FProperty* rp = pb.param(STR("ReturnValue"));
+        if (!rp) return false;
+        FName parent = *reinterpret_cast<FName*>(pb.buffer.data() + rp->GetOffset_Internal());
+        axis = normalized(socket_rotation(mesh, parent).rotate({1.0, 0.0, 0.0}));
+        return length(axis) > 0.5;
+    }
+
+    // A rotation's turn about a unit axis (swing-twist split), degrees, -180..180.
+    double quat_twist_deg(const hsvr::Quat& q, const hsvr::Vec3& axis)
+    {
+        double d = q.x * axis.x + q.y * axis.y + q.z * axis.z;
+        return hsvr::normalize_axis(2.0 * std::atan2(d, q.w) * 57.29577951308232);
+    }
+
     double map_range_clamped(double v, double in_a, double in_b, double out_a, double out_b)
     {
         double t = (v - in_a) / (in_b - in_a);
@@ -10111,15 +10200,17 @@ namespace
             // turns while you hold his wrist are not you wrenching his neck). The torque test counts
             // as holding everything.
             bool on_limb[4] = {side == 2, side == 2, side == 2, side == 2}; // neck, arm R, arm L, back
+            int hand_limb[2] = {-1, -1};
             for (int h = 0; h < 2; ++h)
             {
                 if (!g_body_grab[h].on || g_body_grab[h].victim != w) continue;
                 std::wstring bn = g_body_grab[h].bone.ToString();
                 for (auto& ch : bn) ch = (wchar_t)towlower(ch);
-                if (bn == STR("head") || bn.rfind(STR("neck"), 0) == 0) on_limb[0] = true;
-                else if (bn == STR("upperarm_r") || bn == STR("lowerarm_r") || bn == STR("hand_r")) on_limb[1] = true;
-                else if (bn == STR("upperarm_l") || bn == STR("lowerarm_l") || bn == STR("hand_l")) on_limb[2] = true;
-                else if (bn.rfind(STR("spine"), 0) == 0) on_limb[3] = true;
+                if (bn == STR("head") || bn.rfind(STR("neck"), 0) == 0) hand_limb[h] = 0;
+                else if (bn == STR("upperarm_r") || bn == STR("lowerarm_r") || bn == STR("hand_r")) hand_limb[h] = 1;
+                else if (bn == STR("upperarm_l") || bn == STR("lowerarm_l") || bn == STR("hand_l")) hand_limb[h] = 2;
+                else if (bn.rfind(STR("spine"), 0) == 0) hand_limb[h] = 3;
+                if (hand_limb[h] >= 0) on_limb[hand_limb[h]] = true;
             }
             // How well he can resist (Matthew 2026-11-22: easier as his pain rises and his consciousness
             // drops): his Consciousness 0..100 -> 0..1, times his Pain on the game's own 0..10 scale
@@ -10154,7 +10245,52 @@ namespace
                 int limb = p.kind == 0 ? 0 : p.kind == 1 ? (i == 1 ? 1 : 2) : p.kind == 2 ? 3 : -1;
                 if (limb < 0 || !on_limb[limb]) free = 1e9; // no hand on it: the old bend rule only
                 free *= free_scale;
-                double excess = (std::max)(0.0, std::fabs(normalize_axis(twist - rest.twist[i])) - free);
+                // Only the twist your own wrist puts in counts (Matthew 2026-11-23 17:14/17:15 local: grabbing
+                // a neck was all it took to snap it). His head flopping while you drag or choke him turned his
+                // neck 47-63 deg from where it sat with your hand still; his consciousness fell to 0 in 0.5 s, so
+                // the free range shrank to 40 % and the neck went in 0.15 s. Now the twist counts only in the
+                // direction your controller turned (about the part's axis, since you took hold), and no further
+                // than it turned. And your wrist turns him: past joint_break_wrench_from_deg, a torque on his head
+                // (or upper arm) toward your wrist's turn, as strong as your grip.
+                double limb_tw = normalize_axis(twist - rest.twist[i]);
+                double counted = limb_tw, ctl_tw = 0.0;
+                bool gated = false;
+                Vec3 axis;
+                if (cfg.joint_break_twist_needs_wrist && side < 2 && limb >= 0 && on_limb[limb] && bone_parent_axis(mesh, p.bone, axis))
+                {
+                    gated = true;
+                    double best = 0.0;
+                    double grip_t = 121.0;
+                    for (int h = 0; h < 2; ++h)
+                    {
+                        const BodyGrab& bg = g_body_grab[h];
+                        if (hand_limb[h] != limb || !bg.on || bg.victim != w || !bg.ctl0_ok || !g_pose.hand_valid[h]) continue;
+                        double t = quat_twist_deg((g_pose.hand_rot[h] * bg.ctl0.inverse()).normalized(), axis);
+                        if (std::fabs(t) > std::fabs(best)) { best = t; grip_t = bg.grip_t; }
+                    }
+                    ctl_tw = best;
+                    counted = limb_tw * ctl_tw > 0.0 ? std::copysign((std::min)(std::fabs(limb_tw), std::fabs(ctl_tw)), limb_tw) : 0.0;
+                    const char* drive_bone = p.kind == 0 ? "head" : p.kind == 1 ? p.bone : nullptr;
+                    if (drive_bone && cfg.joint_break_wrench_nm_per_deg > 0.0 && std::fabs(ctl_tw) >= cfg.joint_break_wrench_from_deg)
+                    {
+                        double cap = cfg.joint_break_wrench_max_nm * (std::max)(0.2, grip_t / 121.0);
+                        double nm = (std::max)(-cap, (std::min)(cap, (ctl_tw - limb_tw) * cfg.joint_break_wrench_nm_per_deg));
+                        Vec3 tq = axis * (nm * 10000.0); // N m -> kg cm^2 / s^2
+                        Call c(mesh, STR("AddTorqueInRadians"));
+                        c.three(STR("Torque"), tq.x, tq.y, tq.z);
+                        c.name(STR("BoneName"), bone_fname(drive_bone));
+                        c.flag(STR("bAccelChange"), false);
+                        c.run();
+                        static double wlog[3] = {};
+                        if (now - wlog[(std::min)(2, (int)p.kind)] > 0.5)
+                        {
+                            wlog[(std::min)(2, (int)p.kind)] = now;
+                            HSVR_LOG("Joints: your wrist turns %ls's %s: wrist %.0f deg, his %.0f deg, %.0f N m on %s (cap %.0f)", w->GetName().c_str(), p.bone, ctl_tw,
+                                     limb_tw, nm, drive_bone, cap);
+                        }
+                    }
+                }
+                double excess = (std::max)(0.0, std::fabs(counted) - free);
                 double twist_dot = std::cos((std::min)(180.0, excess * cfg.joint_break_twist_gain) * kDegToRad);
                 double d = (std::min)(dot, twist_dot);
                 double strain = read_number_variable(w, p.strain);
@@ -10170,13 +10306,18 @@ namespace
                     if (health >= 0.0) set_variable(w, p.health, (std::max)(0.0, (std::min)(100.0, health - bd * 666.0 * dt)));
                     if (pain >= 0.0) set_variable(w, p.pain, pain + bd * 1000.0 * dt);
                     set_variable(w, p.strain, (std::min)(1.0, strain + bd * 100.0 * dt));
-                    state = (std::min)(1.0, state + (std::min)(0.1, bd * 666.0 * dt));
+                    // No quicker than joint_break_min_s from nothing to gone: a snap takes a held wrench.
+                    double step = (std::min)(0.1, bd * 666.0 * dt);
+                    if (cfg.joint_break_min_s > 0.0) step = (std::min)(step, dt / cfg.joint_break_min_s);
+                    state = (std::min)(1.0, state + step);
                     if (state >= 1.0)
                     {
-                        HSVR_LOG("Joints: %ls's %s goes (bend dot %.2f, twist %.0f deg from rest, strain %.2f)", w->GetName().c_str(), p.bone, dot,
-                                 normalize_axis(twist - rest.twist[i]), strain);
+                        HSVR_LOG("Joints: %ls's %s goes (bend dot %.2f, twist %.0f deg from rest, counted %.0f, your wrist %.0f%s, strain %.2f)", w->GetName().c_str(), p.bone,
+                                 dot, limb_tw, counted, ctl_tw, gated ? "" : " (not gated)", strain);
+                        g_count_joint_breaks.fetch_add(1);
                         if (p.kind == 0)
                         {
+                            g_count_neck_snaps.fetch_add(1);
                             Call c(w, STR("Snap Neck"));
                             c.run();
                         }
@@ -10217,9 +10358,9 @@ namespace
                 if (bd >= 0.005 && now - log_at[side][i] > 0.5)
                 {
                     log_at[side][i] = now;
-                    HSVR_LOG("Joints: %ls %s strains: BD %.3f (bend dot %.2f, twist %.0f deg from rest, free %.0f -> dot %.2f), strain %.2f, state %.2f; his resistance %.2f "
-                             "(consciousness %.0f, pain %.1f)",
-                             w->GetName().c_str(), p.bone, bd, dot, normalize_axis(twist - rest.twist[i]), (std::min)(999.0, free), twist_dot, strain, state, resist, conscious,
+                    HSVR_LOG("Joints: %ls %s strains: BD %.3f (bend dot %.2f, twist %.0f deg from rest, counted %.0f, your wrist %.0f, free %.0f -> dot %.2f), strain %.2f, "
+                             "state %.2f; his resistance %.2f (consciousness %.0f, pain %.1f)",
+                             w->GetName().c_str(), p.bone, bd, dot, limb_tw, counted, ctl_tw, (std::min)(999.0, free), twist_dot, strain, state, resist, conscious,
                              pain_all);
                 }
             }
@@ -11245,6 +11386,8 @@ namespace
                 oc.run();
                 b.victim = oc.object_result();
                 b.rest = length(hb - socket_location(b.comp, b.bone));
+                b.ctl0_ok = g_pose.hand_valid[side];
+                if (b.ctl0_ok) b.ctl0 = g_pose.hand_rot[side];
                 HSVR_LOG("Body grab: %s hand holds %ls bone %ls (%.1f cm from the hand bone)", hand, b.victim ? b.victim->GetName().c_str() : STR("?"),
                          b.bone.ToString().c_str(), b.rest);
             }
@@ -28455,6 +28598,7 @@ namespace
         for (int i = 0; i < 2; ++i)
         {
             g_fake_roll_deg[i].store(0.0);
+            g_fake_yaw_deg[i].store(0.0);
             g_fake_trigger[i].store(-1.0f);
             g_fake_squeeze[i].store(-1.0f);
             g_fake_thumb[i].store(-1.0f);
@@ -28462,6 +28606,9 @@ namespace
         }
         g_carry_log_until.store(0.0);
         g_count_letgo.store(0);
+        g_count_neck_snaps.store(0);
+        g_count_joint_breaks.store(0);
+        g_count_steps.store(0);
         g_count_kicks.store(0);
         g_count_punches.store(0);
         g_count_punches_counted.store(0);
@@ -28690,6 +28837,17 @@ namespace
         else if (w == "grabbed_r") value = bool_property(pawn, STR("Grabbed R")) ? 1.0 : 0.0;
         else if (w == "grabbed_l") value = bool_property(pawn, STR("Grabbed L")) ? 1.0 : 0.0;
         else if (w == "letgo") value = g_count_letgo.load();
+        else if (w == "neck_snaps") value = g_count_neck_snaps.load();
+        else if (w == "hand_floor_l" || w == "hand_floor_r")
+        {
+            // his hand bone's height above the floor he stands on (capsule bottom), cm
+            if (!pawn || !g_pose.mesh) known = false;
+            else value = socket_location(g_pose.mesh, bone_fname(w.back() == 'l' ? "hand_l" : "hand_r")).z - room_floor_z(pawn);
+        }
+        else if (w == "scenery_l" || w == "scenery_r") value = g_world[w.back() == 'l' ? 0 : 1].on ? 1.0 : 0.0; // the hand holds fixed scenery
+        else if (w == "crouch_drop") value = g_crouch_drop; // cm his body is down this frame (your crouch + button, past the lean)
+        else if (w == "joint_breaks") value = g_count_joint_breaks.load();
+        else if (w == "steps") value = g_count_steps.load();
         else if (w == "kicks") value = g_count_kicks.load();
         else if (w == "punches") value = g_count_punches.load();               // punches with a blow in them
         else if (w == "punches_counted") value = g_count_punches_counted.load(); // of them, ones that took consciousness or health
@@ -29205,6 +29363,9 @@ namespace
             if (entry.command == "hsvr.mark")
             {
                 g_count_letgo.store(0);
+                g_count_neck_snaps.store(0);
+                g_count_joint_breaks.store(0);
+                g_count_steps.store(0);
                 g_count_kicks.store(0);
                 g_worst_lag[0].store(0.0);
                 g_worst_lag[1].store(0.0);
@@ -30021,6 +30182,16 @@ namespace
                 UObject* pawn = nullptr;
                 find_pawn_mesh(&pawn);
                 if (pawn) weapon_dump(entry.command.size() > 17 && entry.command[17] == '0' ? 0 : 1, pawn);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.hand_yaw ", 0) == 0)
+            {
+                // "hsvr.hand_yaw <side> <deg>": the fake hand turned this far about the vertical, on top of its
+                // arm_move pose (0 = back). Steps a few degrees apart make a steady wrench.
+                int sd = 1;
+                double deg = 0.0;
+                sscanf(entry.command.c_str() + 14, "%d %lf", &sd, &deg);
+                if (sd == 0 || sd == 1) g_fake_yaw_deg[sd].store(deg);
                 continue;
             }
             if (entry.command.rfind("hsvr.hand_roll ", 0) == 0)

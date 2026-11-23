@@ -742,6 +742,11 @@ namespace hsvr
         // his drawn hand stays put on it with the fingers wrapped round it until you let go or pull your
         // hand pose_grab_ride_max_cm away from it.
         bool pose_grab_world = true;
+        // 1 = the ground under his feet is not scenery to grab: a surface below the hand and less than
+        // pose_grab_world_floor_cm above his feet (the floor) is skipped, so a grip near the floor takes
+        // what lies there or nothing.
+        bool pose_grab_world_no_floor = true;
+        double pose_grab_world_floor_cm = 12.0;
         // Two hands on one weapon (B&S rules): squeeze the free hand on a weapon the other hand holds,
         // on its grip or anywhere along its blade (half-swording, Matthew 2026-11-18). The weapon then
         // lies along the line between the hands, the first hand sets its roll, and the hold is
@@ -1069,6 +1074,19 @@ namespace hsvr
         bool joint_break_legs = false;
         // Every part's strain rate x this (1 = the old game).
         double joint_break_scale = 1.0;
+        // 1 = a twist counts only in the direction your own wrist (controller) turned since you took hold,
+        // and no further than it turned (playtest 2026-11-23: his head flopping as you dragged or choked him
+        // snapped his neck with your hand still). 0 = any twist of his while you hold him counts (old).
+        bool joint_break_twist_needs_wrist = true;
+        // Your wrist turns him: once your controller has turned past joint_break_wrench_from_deg about his
+        // neck (or upper arm), a torque on his head (upper arm) toward your wrist's turn, this many N m per
+        // degree he lags, at most joint_break_wrench_max_nm x your grip strength (T/121). 0 = off.
+        double joint_break_wrench_nm_per_deg = 1.5;
+        double joint_break_wrench_from_deg = 20.0;
+        double joint_break_wrench_max_nm = 150.0;
+        // The quickest a joint can go from unstrained to gone (seconds): a snap takes a held wrench, never
+        // a single jolt (the neck went in 0.15 s before). 0 = no limit (old).
+        double joint_break_min_s = 0.5;
         // Every other Willie's body hits (impulse, health, consciousness, what hit him), when they change.
         bool log_body_hits = true;
         // 1 = the game's grab joint is made soft (a capped spring, B&S-like) 0.25 s after it latches, so
@@ -1150,11 +1168,21 @@ namespace hsvr
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;
         double pose_crouch_dead_zone_cm = 3.0;
+        // 1 = the crouch is measured at the base of your neck (pose_room_neck_base_cm below the head joint),
+        // so looking down at your feet is not a crouch; 0 = at the head joint (looking 60 deg down read as
+        // a 7-10 cm crouch).
+        bool pose_crouch_at_neck_base = true;
         // How far his legs crouch him (cm, times his size). Deeper than that (your view lower still), he
         // bends forward until his head is down with your view, so his hands reach as low as yours
         // (pose_crouch_bend_for_depth; playtest 2026-11-21: he could not reach the ground).
         double pose_crouch_max_cm = 62.0; // was a fixed 55; playtest 2026-11-21: view 114 cm down, his head bone 35 cm above it
         bool pose_crouch_bend_for_depth = true;
+        // That bend for depth: at most this many degrees, and this share of it (0..1) takes his head down
+        // with it instead of his neck bending back to keep the head up (0 = old: the neck bends back
+        // 0.375 x the bend twice, so at 85 deg his head stayed 17 cm above a kneeling view). Also, while he
+        // bends for depth, looking down no longer pushes his chest back (pose_lean_look_down_back_cm).
+        double pose_crouch_bend_max_deg = 85.0;
+        double pose_crouch_bend_neck_follow = 1.0;
         // Left stick click toggles a button crouch this deep (cm, eased at _cms); 0 = off.
         double pose_crouch_button_cm = 40.0;
         double pose_crouch_button_cms = 120.0;
@@ -1215,6 +1243,10 @@ namespace hsvr
         double pose_step_time_s = 0.3;  // how long a step takes standing (shorter when moving)
         double pose_step_lift_cm = 10.0; // how high the foot lifts
         double pose_step_lead_s = 0.2;   // how far ahead (in seconds of movement) a foot lands when walking
+        // Crouched: step distance, lead and time x up to pose_step_crouch_scale, reached at
+        // pose_step_crouch_full_cm of crouch (the game: crouched steps twice the standing size). 1 = off.
+        double pose_step_crouch_scale = 2.0;
+        double pose_step_crouch_full_cm = 15.0;
         // How quickly the elbow's swing around the arm follows (seconds; the hand is never smoothed).
         double pose_swivel_smooth_s = 0.06;
         // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and

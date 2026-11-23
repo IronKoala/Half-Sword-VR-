@@ -1,0 +1,13 @@
+# Thread "Fix ground pickups, neck snaps and stance" (playtest 2026-11-23 17:05-17:25 local). Cellar test room.
+neck_hold_still|steps-neck_hold_still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+neck_drag|steps-neck_drag.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+neck_wrench_right|steps-neck_wrench_right.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+neck_wrench_left|steps-neck_wrench_left.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+floor_reach|steps-floor_reach.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+floor_no_grab|steps-floor_no_grab.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+neck_drag_old_rule|steps-neck_drag.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;joint_break_twist_needs_wrist=0;joint_break_min_s=0;joint_break_wrench_nm_per_deg=0
+floor_reach_old|steps-floor_reach_old.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_bend_neck_follow=0
+look_down_stance|steps-look_down_stance.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;dev_pose_fake_tracking=0
+look_down_stance_old|steps-look_down_stance_old.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;dev_pose_fake_tracking=0;pose_crouch_at_neck_base=0
+crouch_walk|steps-crouch_walk.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+crouch_walk_old|steps-crouch_walk.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_step_crouch_scale=1
