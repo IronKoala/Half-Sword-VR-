@@ -420,7 +420,9 @@ LAYOUT = [
         ('pose_shield_grab_rim', '1 = a shield can also be taken by its rim; 0 = straps and handles only.'),
         ('pose_shield_rim_cm', 'How near an outer edge the hand must be for a rim grab (cm).'),
         ('pose_shield_grab_face', '1 = a shield can be taken anywhere, flat faces too (old way).'),
-        ('pose_pavise_forearm', '1 = pavises strap onto the forearm (light: either arm; heavy: left arm), not held in the hand.'),
+        ('pose_pavise_forearm', '1 = pavises strap onto the forearm (light: either arm; heavy: left arm), not held in the hand. Only with pose_pavise_strap=0.'),
+        ('pose_pavise_strap', '1 = a pavise goes by its rear strap: the hand across from it takes it off your back and hangs it back; let go of the strap at the back of your other forearm to mount it there (that hand stays free); grab the strap to take it off or pass it.'),
+        ('pose_pavise_mount_cm', 'How near the back of the other forearm you let go of the strap to mount a pavise (cm).'),
     ]),
     ('Drawing, sheathing, belt', '', [
         ('pose_draw', "1 = squeeze near a sheathed weapon's grip to draw it."),
@@ -436,6 +438,7 @@ LAYOUT = [
         ('pose_sheathe', "1 = put a held weapon's tip into its belt scabbard's mouth to sheathe it."),
         ('pose_sheathe_mouth_cm', 'Tip within this of the scabbard mouth (cm).'),
         ('pose_sheathe_angle_deg', "Blade within this angle of the scabbard's line (degrees)."),
+        ('pose_sheathe_two_hand', "1 = sheathing takes two hands: hold the sword's scabbard on your belt with the other hand, then put the blade in. 0 = the blade goes into any free mouth by itself."),
         ('pose_sheathe_cross', '1 = a weapon whose scabbard is on the other hip goes back across.'),
         ('pose_scabbard_grab', '1 = the off hand can take a belt scabbard and angle it.'),
         ('pose_scabbard_handle', '1 = a belt scabbard is a handle (taken along its length, trigger slides).'),
@@ -450,14 +453,13 @@ LAYOUT = [
         ('pose_holster_max_speed', '...moving slower than this (m/s; faster is a throw).'),
         ('pose_keep_scabbard_on_drop', '1 = a drawn weapon dropped or thrown leaves its scabbard on the belt.'),
     ]),
-    ('Crossbow', 'Two fixed grips; a free hand pulls the string back to cock it; a bolt from the hip quiver goes into the cradle; the trigger fires.', [
+    ('Crossbow', 'Two fixed grips (grip button); the free hand\'s TRIGGER takes the string, pull it back to cock; a bolt from the hip quiver goes into the cradle; the rear-grip hand\'s trigger fires.', [
         ('crossbow', '1 = crossbow handling on.'),
-        ('crossbow_string_reach_cm', 'How near the string your hand must close to take it (cm).'),
-        ('crossbow_string_margin_cm', '...and at least this much nearer the string than a grip (the front grip is 6 cm from it).'),
+        ('crossbow_string_reach_cm', 'Pull the free hand\'s trigger this near the string to take it (cm); grip takes the fore end.'),
         ('crossbow_quiver_reach_cm', 'How near the quiver your hand must close to take a bolt (cm).'),
         ('crossbow_bolt_seat_cm', "A bolt this near the cradle is loaded (cm; the game's own is 10)."),
-        ('crossbow_trigger_fire', 'Trigger pull that fires (0-1).'),
-        ('crossbow_trigger_release', 'Trigger must come back under this before it fires again.'),
+        ('crossbow_trigger_fire', 'Trigger pull that fires (rear-grip hand) or takes the string (free hand) (0-1).'),
+        ('crossbow_trigger_release', 'Trigger under this re-arms the shot, or lets go of the string.'),
         ('crossbow_trigger_grip_cm', 'Only the hand on the rear grip fires: within this of it (cm).'),
     ]),
     ('Swinging, throwing, whoosh', '', [
