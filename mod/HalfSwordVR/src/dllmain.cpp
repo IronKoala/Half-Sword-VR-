@@ -24169,6 +24169,49 @@ namespace
         return false;
     }
 
+    // Where a fighting Willie from the book appears: far off, in the cellar's coffin corner
+    // (test_room_fight_x/y; Matthew 2026-11-23: "it's way too crowded ... aggressive ones need to spawn
+    // further away", coffin loot points at (1785, -339) and (1681, -352), defaults\cellar_spawns.md).
+    // The first free floor spot on rings of 0, 80 and 160 cm round it, facing him.
+    bool room_fight_spot(UObject* player, TestRoom::Slot& out)
+    {
+        using hsvr::Vec3;
+        const hsvr::Config& cfg = hsvr::config();
+        if (cfg.test_room_fight_x == 0.0 && cfg.test_room_fight_y == 0.0) return false;
+        double floor_z = room_floor_z(player);
+        std::vector<UObject*> willies;
+        UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+        std::vector<Vec3> taken;
+        for (UObject* w : willies)
+        {
+            if (!w || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            Vec3 a = actor_location(w);
+            if (a.x == 0.0 && a.y == 0.0 && a.z == 0.0) continue;
+            UObject* m = object_property(w, STR("Mesh"));
+            taken.push_back(m ? socket_location(m, pelvis_bone) : a);
+        }
+        Vec3 me = actor_location(player);
+        Vec3 centre{cfg.test_room_fight_x, cfg.test_room_fight_y, floor_z};
+        for (double radius : {0.0, 80.0, 160.0})
+            for (int k = 0; k < (radius == 0.0 ? 1 : 8); ++k)
+            {
+                double a = k * 3.14159265358979 / 4.0;
+                Vec3 at = centre + Vec3{std::cos(a), std::sin(a), 0.0} * radius;
+                bool ok = true;
+                for (const Vec3& t : taken)
+                    if (std::hypot(t.x - at.x, t.y - at.y) < 100.0) ok = false;
+                double gz = 0.0;
+                if (ok && (!ground_below(player, at.x, at.y, floor_z + 150.0, gz) || std::fabs(gz - floor_z) > 25.0)) ok = false;
+                if (!ok) continue;
+                at.z = me.z; // as the other slots (room_spawn_foe stands him on the floor)
+                out = TestRoom::Slot{at, std::atan2(me.y - at.y, me.x - at.x) * 57.29577951308232, nullptr, -1.0, {}};
+                return true;
+            }
+        HSVR_LOG("TestRoom: book: no free floor near the fight spot (%.0f, %.0f); round you instead", centre.x, centre.y);
+        return false;
+    }
+
     // Every Willie but you goes (bodies you are using stay); the room's slots go too, so nobody comes back.
     void room_remove_all_willies(UObject* player)
     {
@@ -24323,7 +24366,7 @@ namespace
         }
         int tier = row == 11 ? -1 : row - 2;
         TestRoom::Slot slot;
-        if (!room_willie_spot(player, slot))
+        if (!(b.fights && room_fight_spot(player, slot)) && !room_willie_spot(player, slot))
         {
             HSVR_LOG("TestRoom: book: no free spot for a Willie");
             return;
@@ -25115,6 +25158,20 @@ namespace
             UObject* gm = room_game_mode();
             value = gm && (bool_property(gm, STR("Match Won")) || bool_property(gm, STR("All Enemies Dead"))) ? 1.0 : 0.0;
             return gm != nullptr;
+        }
+        if (w == "room_fighter_d")
+        {
+            // How far the nearest fighting book Willie is from him (cm; 1e9 with none).
+            static const FName pelvis_bone(STR("pelvis"), FNAME_Add);
+            value = 1e9;
+            for (const TestRoom::Slot& s : g_room.slots)
+                if (s.fights && s.foe && object_alive(s.foe))
+                {
+                    UObject* m = object_property(s.foe, STR("Mesh"));
+                    Vec3 p = m ? socket_location(m, pelvis_bone) : actor_location(s.foe);
+                    value = (std::min)(value, std::hypot(p.x - me.x, p.y - me.y));
+                }
+            return true;
         }
         if (w == "room_page_clip")
         {
