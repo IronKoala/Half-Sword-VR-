@@ -519,6 +519,9 @@ namespace
     hsvr::Vec3 g_pose_room_moved_local;
     // Body turning (see "Your body faces where you face"): the turn you make with the mouse or
     // stick (the view's straight ahead), and the body's yaw relative to it.
+    // Mouse and keyboard drive the arms (input_mode, input_mode_tick): the arms are the game's own and
+    // the controllers are ignored (grips, fingers, mouse lock), the head stays tracked.
+    std::atomic<bool> g_kbm{false};
     bool g_turn_valid = false;
     double g_turn_yaw = 0.0, g_body_rel = 0.0, g_last_written_yaw = 0.0, g_turn_time = 0.0;
 
@@ -559,6 +562,15 @@ namespace
                 out.has_heading = true;
                 body_yaw = rotation->Yaw; // with body turning on, the mod writes the body's yaw here
                 out.heading_yaw = (g_pose_anchor_fixed && g_turn_valid) ? g_turn_yaw : rotation->Yaw;
+                // Mouse and keyboard: mouse up and down tilts the view (Matthew 2026-11-23 playtest: "I need
+                // the ability to look up and down with my mouse"). The game's own pitch, as it aims with it.
+                if (g_kbm.load() && hsvr::config().input_kbm_mouse_pitch)
+                {
+                    double p = std::fmod((double)rotation->Pitch, 360.0);
+                    if (p > 180.0) p -= 360.0;
+                    if (p < -180.0) p += 360.0;
+                    out.view_pitch = p;
+                }
             }
         }
         // The view sits where his head is: the head's spot on his body turns with his body, while the
@@ -2336,9 +2348,6 @@ namespace
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     double g_jump_until = -1.0;               // a jump released by left X: until then the capsule's rise is the game's jump, not a climb
     std::atomic<bool> g_fake_x{false};        // test: hsvr.press_x 1 holds left X (jump)
-    // Mouse and keyboard drive the arms (input_mode, input_mode_tick): the arms are the game's own and
-    // the controllers are ignored (grips, fingers, mouse lock), the head stays tracked.
-    std::atomic<bool> g_kbm{false};
     std::atomic<int> g_kbm_force{-1};         // test: hsvr.input_mode auto|controllers|keyboard (-1 = the ini)
     std::atomic<bool> g_fake_kbm_use{false};  // test: hsvr.kbm_use: one mouse-and-keyboard press
     std::atomic<bool> g_fake_ctl_use{false};  // test: hsvr.controller_use: one controller button press
@@ -23593,7 +23602,15 @@ namespace
                 std::memset(reinterpret_cast<uint8_t*>(context) + p->GetOffset_Internal(), 0, p->GetSize());
         }
         // His speed is cleared so the game's pull doesn't carry over, except while you walk with the
-        // stick (and half a second after, so he slows down by the game's own braking).
+        // stick or the game's own keys (WASD set "Movement Input Vector", Willie @768801; cleared, every
+        // tick restarted from standing: 3-4 cm/s, playtest 2026-11-23 19:2xZ "walking extremely slow"),
+        // and half a second after, so he slows down by the game's own braking.
+        if (FProperty* mp = prop_chain(context, STR("Movement Input Vector")))
+        {
+            double mv[3] = {0, 0, 0};
+            read_three(reinterpret_cast<uint8_t*>(context) + mp->GetOffset_Internal(), mp, mv);
+            if (mv[0] * mv[0] + mv[1] * mv[1] > 1e-4) g_stick_walk_until = (std::max)(g_stick_walk_until, now_seconds() + 0.5);
+        }
         if (!g_stick_walking && now_seconds() > g_stick_walk_until)
             if (UObject* movement = object_property(context, STR("CharacterMovement")))
                 if (FProperty* vp = prop_chain(movement, STR("Velocity")))
@@ -28352,6 +28369,28 @@ namespace
         bool known = true;
         if (w == "held_r") value = object_property(pawn, STR("Weapon R")) ? 1.0 : 0.0;
         else if (w == "input_kbm") value = g_kbm.load() ? 1.0 : 0.0;
+        else if (w == "walk_speed")
+        {
+            // his capsule's speed along the ground, cm/s (CharacterMovement Velocity)
+            double v[3] = {0, 0, 0};
+            if (UObject* movement = pawn ? object_property(pawn, STR("CharacterMovement")) : nullptr)
+                if (FProperty* vp = prop_chain(movement, STR("Velocity"))) read_three(reinterpret_cast<uint8_t*>(movement) + vp->GetOffset_Internal(), vp, v);
+            value = std::sqrt(v[0] * v[0] + v[1] * v[1]);
+        }
+        else if (w == "view_pitch" || w == "view_pitch_abs")
+        {
+            hsvr::PlayerAnchor a;
+            value = provide_anchor(a) ? a.view_pitch : -999.0;
+            if (w == "view_pitch_abs") value = std::fabs(value);
+        }
+        else if (w == "control_pitch" || w == "control_pitch_abs")
+        {
+            UObject* pc = find_player_controller();
+            ue::FRotator* r = pc ? value_ptr<ue::FRotator>(pc, STR("ControlRotation")) : nullptr;
+            double p = r ? std::fmod((double)r->Pitch, 360.0) : 0.0;
+            value = p > 180.0 ? p - 360.0 : p;
+            if (w == "control_pitch_abs") value = std::fabs(value);
+        }
         else if (w == "mouse_off") value = g_mouse_off_now.load() ? 1.0 : 0.0;
         else if (w == "hand_valid_l" || w == "hand_valid_r") value = g_pose.hand_valid[w.back() == 'l' ? 0 : 1] ? 1.0 : 0.0;
         else if (w == "hand_speed_l" || w == "hand_speed_r")

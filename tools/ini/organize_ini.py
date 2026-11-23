@@ -126,6 +126,7 @@ LAYOUT = [
         ('input_mode', 'Who drives the arms in VR: auto (a mouse click or game key while the controllers sit idle gives mouse and keyboard the arms; any controller button, trigger, grip or stick gives them back), controllers, or keyboard (the game\'s own arms; head still tracked).'),
         ('input_kbm_quiet_s', 'auto: seconds with no controller button, trigger, grip or stick before a mouse click or key switches to mouse and keyboard.'),
         ('input_mode_key', 'Key that flips between controllers and mouse and keyboard (33 = Page Up; 0 = none). Flipping with a grip held keeps what that hand holds.'),
+        ('input_kbm_mouse_pitch', '1 = on mouse and keyboard, mouse up and down tilts the view (and aims, as in the flat game).'),
         ('pose_turn_dead_zone_deg', '...once you look this far away.'),
         ('pose_turn_speed_dps', 'How fast his body turns to catch up with your head (degrees per second).'),
         ('pose_turn_max_deg', 'Past this the hips come round at once.'),

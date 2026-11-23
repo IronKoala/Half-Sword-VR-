@@ -329,6 +329,8 @@ namespace hsvr
         double input_kbm_quiet_s = 1.0;
         // Key that flips between controllers and mouse and keyboard (0x21 = Page Up; 0 = none).
         int input_mode_key = 0x21;
+        // 1 = on mouse and keyboard, mouse up and down tilts the view (and aims, as in the flat game).
+        bool input_kbm_mouse_pitch = true;
         double pose_turn_dead_zone_deg = 60.0;
         double pose_turn_speed_dps = 150.0;
         // The most your head can be turned from his hips (a neck's reach): past it the hips come
