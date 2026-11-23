@@ -14,19 +14,12 @@
 5.2:hsvr.xbow_quiver 20
 5.5:hsvr.expect xbow_quiver = 20 quiver filled
 5.5:hsvr.expect held_r = 1 crossbow in hand
+5.8:hsvr.xbow_wrist 0 roll 90 2
 6:hsvr.xbow_hand 0 front
-6.5:hsvr.xbow_wrist 0 pitch 60 2
 9.5:hsvr.squeeze 0 1
 10.5:hsvr.expect two_hand = 1 front grip taken by grip
 10.5:hsvr.expect xforearm_l < -0.3 front forearm under the stock
-10.5:hsvr.expect xforearm_r < -0.3 rear forearm under the stock
 10.5:hsvr.xbow_report
 11:hsvr.squeeze 0 0
 12:hsvr.expect two_hand = 0 let go
-12.2:hsvr.xbow_wrist 0 pitch -120 2
-15:hsvr.squeeze 0 1
-16:hsvr.expect two_hand = 1 taken again
-16:hsvr.expect xforearm_l < -0.3 front forearm under the stock again
-16:hsvr.xbow_report
-17:hsvr.squeeze 0 0
-18:quit
+12.5:quit

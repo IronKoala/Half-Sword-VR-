@@ -15064,15 +15064,24 @@ namespace
             const char* flip_name[4] = {"as the game seats it", "edge turned", "blade reversed", "blade reversed, edge turned"};
             int best = 0;
             double best_a = 1e9, best_cost = 1e9;
-            // The forearm (hand bone to elbow) in the hand bone's frame, for a fixed pose.
+            // For a fixed pose: where the forearm goes from a straight wrist, in the hand bone's frame (back
+            // along the fingers' line). Not the live elbow: the arm solver picks the elbow AFTER the seat,
+            // for the hand as it is drawn, keeping the wrist's bend small (PC test d1858a9: the live
+            // elbow's fit did not predict where the forearm ended up). A straight-wrist forearm under
+            // the stock makes the solver put the elbow there.
             Vec3 forearm_h{0, 0, 0};
             if (fixed_pose)
             {
-                Vec3 hand_p = socket_location(mesh, bone_fname(side == 0 ? "hand_l" : "hand_r"));
-                Vec3 elbow = socket_location(mesh, bone_fname(side == 0 ? "lowerarm_l" : "lowerarm_r"));
-                if (length(elbow - hand_p) > 1.0) forearm_h = normalized(a_rot.inverse().rotate(elbow - hand_p));
+                const ArmCalibration& ac = g_pose.arm[side];
+                if (ac.valid && length(ac.fingers_local) > 0.5) forearm_h = normalized(ac.fingers_local) * -1.0;
                 else fixed_pose = false;
             }
+            Vec3 thumb_h = fixed_pose ? g_pose.arm[side].thumb_local : Vec3{0, 0, 0};
+            // The stock's forward line in the item's frame: the forearm's back part is against it, so
+            // without that part this is the seat's forward (the thumb side goes forward, as on a rifle's
+            // handguard and a trigger grip).
+            Vec3 fwd = hd.seat_forearm - (hd.seat_forearm - normalized(hd.b - hd.a) * dot(hd.seat_forearm, normalized(hd.b - hd.a)));
+            fwd = length(fwd) > 1e-3 ? normalized(fwd) * -1.0 : normalized(hd.b - hd.a);
             double fit[4] = {0, 0, 0, 0};
             for (int i = 0; i < 4; ++i)
             {
@@ -15084,7 +15093,7 @@ namespace
                 if (fixed_pose)
                 {
                     // c = the item in the hand's frame: the forearm in the item's frame is c^-1 (forearm_h).
-                    fit[i] = dot(c.inverse().rotate(forearm_h), hd.seat_forearm);
+                    fit[i] = dot(c.inverse().rotate(forearm_h), hd.seat_forearm) + 0.5 * dot(c.inverse().rotate(thumb_h), fwd);
                     cost = -fit[i];
                 }
                 if (cost < best_cost)
