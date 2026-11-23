@@ -698,6 +698,7 @@ namespace hsvr
         num("pose_two_hand_bs_rot_k", c.pose_two_hand_bs_rot_k);
         num("pose_two_hand_bs_rot_c", c.pose_two_hand_bs_rot_c);
         num("pose_two_hand_bs_rot_max", c.pose_two_hand_bs_rot_max);
+        flag("pose_two_hand_bs_solve_pulls", c.pose_two_hand_bs_solve_pulls);
         flag("pose_two_hand_fixed_rebase", c.pose_two_hand_fixed_rebase);
         num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
         flag("pose_fists", c.pose_fists);

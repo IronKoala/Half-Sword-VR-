@@ -16031,6 +16031,10 @@ namespace
         {
             pk = cfg.pose_two_hand_bs_pos_k, pc = cfg.pose_two_hand_bs_pos_c, pf = cfg.pose_two_hand_bs_pos_max;
             rk = cfg.pose_two_hand_bs_rot_k, rc = cfg.pose_two_hand_bs_rot_c, rf = cfg.pose_two_hand_bs_rot_max;
+            // The mod's solve does both hands' pulls (pose_two_hand_bs_solve_pulls): the joints then pull nothing. With the joints
+            // pulling too, every pull acted twice a tick, once in the mod's spin and again in the physics step (run 4750e14: his
+            // waggle reversed the sword's spin on 15.3% of ticks that his hands did not, line mode 3.3%, B&S 1.2%).
+            if (cfg.pose_two_hand_bs_solve_pulls && cfg.pose_hold_joint_mod_turn) pk = pc = 0.0; // (the solve runs only with the mod turning)
         }
         double st = (std::max)(0.0, cfg.pose_hold_strength) * (std::max)(0.0, cfg.pose_hold_joint_stiffness);
         double dst = (std::max)(0.0, cfg.pose_hold_strength) * (std::max)(0.0, cfg.pose_hold_joint_damping);
@@ -17482,6 +17486,8 @@ namespace
             {
                 // The turn about the GRIP: the grip's own velocity is kept (the joint pulls it), only the spin changes.
                 Vec3 ev = lv.vec(), ew = av.vec();
+                Vec3 bs_v;
+                bool have_bs_v = false;
                 if (jm.bs2)
                 {
                     // Two hands as B&S: only the main hand's turn, B&S's two-hand angular drive (a soft spring and damper toward
@@ -17518,17 +17524,22 @@ namespace
                         p.c = cfg.pose_two_hand_bs_pos_c * stb;
                         p.fmax = cfg.pose_two_hand_bs_pos_max * (std::max)(0.0, cfg.pose_hold_joint_max) * (std::max)(0.0, s2.total) * 100.0;
                     }
-                    Vec3 vb = ev, wb = ew, ang;
+                    // (solve_pulls: the whole motion is this solve's, as the old B&S hold's: gravity this frame in, taken off after,
+                    // the physics adds it; the joints pull nothing. Off: only the spin is kept and the joints pull in the physics.)
+                    bool own = cfg.pose_two_hand_bs_solve_pulls;
+                    Vec3 gravity{0.0, 0.0, g_weapon_gravity.load() == 0 ? 0.0 : -980.0};
+                    Vec3 vb = own ? ev + gravity * DTb : ev, wb = ew, ang;
                     bs_solve(mass, about_com.inverse(), vb, wb, pts, 2, err_rot, target_ang, cfg.pose_two_hand_bs_rot_k * stb * 1e4, cfg.pose_two_hand_bs_rot_c * stb * 1e4, tmax,
                              DTb, (std::max)(1, cfg.pose_bs_iterations), ang);
                     w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
+                    if (own) bs_v = clamp_length(vb - gravity * DTb, 2000.0), have_bs_v = true;
                     h.torque_nm = length(ang) / DTb / 1e4;
                     h.torque_capped = length(ang) >= tmax * DTb * 0.999;
                     HSVR_LOG_EVERY(0.5, "Joint hold: %s %ls (two hands, B&S): main wrist %.0f deg off, turn %.1f N m%s of %.0f; spin %.0f -> %.0f deg/s",
                                    side == 0 ? "left" : "right", weapon->GetName().c_str(), length(err_rot) * 57.2958, h.torque_nm, h.torque_capped ? " (cap)" : "", tmax / 1e4,
                                    length(ew) * 57.2958, length(w_next) * 57.2958);
                 }
-                Vec3 nv = ev + cross(ew - w_next, pivot_now - com);
+                Vec3 nv = have_bs_v ? bs_v : ev + cross(ew - w_next, pivot_now - com);
                 Call slv(base, STR("SetPhysicsLinearVelocity"));
                 slv.three(STR("NewVel"), nv.x, nv.y, nv.z);
                 slv.flag(STR("bAddToCurrent"), false);
