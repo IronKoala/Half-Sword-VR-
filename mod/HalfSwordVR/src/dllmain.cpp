@@ -30817,12 +30817,14 @@ namespace
             static hsvr::Vec3 last[2];
             static double last_t[2] = {-1.0, -1.0};
             double t = hsvr::now_seconds();
-            hsvr::Vec3 at = g_pose.mesh ? socket_location(g_pose.mesh, bone_fname(side == 0 ? "hand_l" : "hand_r")) : hsvr::Vec3{};
+            // His posed mesh, or unposed (mouse and keyboard: the plain game) the pawn's own mesh.
+            UObject* hm = g_pose.mesh ? g_pose.mesh : find_pawn_mesh();
+            hsvr::Vec3 at = hm ? socket_location(hm, bone_fname(side == 0 ? "hand_l" : "hand_r")) : hsvr::Vec3{};
             double dt = t - last_t[side];
             value = last_t[side] >= 0.0 && dt > 1e-4 && dt < 0.5 ? hsvr::length(at - last[side]) / dt : 1e9;
             last[side] = at;
             last_t[side] = t;
-            if (!g_pose.mesh) known = false;
+            if (!hm) known = false;
         }
         else if (w == "held_l") value = object_property(pawn, STR("Weapon L")) ? 1.0 : 0.0;
         else if (w.rfind("room_", 0) == 0) known = room_value(w, value);
@@ -30833,8 +30835,9 @@ namespace
         else if (w == "hand_floor_l" || w == "hand_floor_r")
         {
             // his hand bone's height above the floor he stands on (capsule bottom), cm
-            if (!pawn || !g_pose.mesh) known = false;
-            else value = socket_location(g_pose.mesh, bone_fname(w.back() == 'l' ? "hand_l" : "hand_r")).z - room_floor_z(pawn);
+            UObject* hm = g_pose.mesh ? g_pose.mesh : find_pawn_mesh();
+            if (!pawn || !hm) known = false;
+            else value = socket_location(hm, bone_fname(w.back() == 'l' ? "hand_l" : "hand_r")).z - room_floor_z(pawn);
         }
         else if (w == "reach_short_l" || w == "reach_short_r")
         {
