@@ -80,6 +80,9 @@ namespace hsvr
         // Size the mod sets the game window to, "<width>x<height>" (windowed), e.g. 2560x1440 for a
         // 16:9 recording on an ultrawide monitor. Empty = the game's own window size.
         std::string mirror_window_res;
+        // Keep the mouse pointer inside the game window while playing (no menu up), so aiming with
+        // the mouse never runs out of the window when it does not cover the whole monitor.
+        bool mouse_clip_window = true;
         // Widest the monitor picture is, degrees side to side (less when the eye does not cover it).
         double mirror_fov_deg = 90.0;
         // The monitor picture follows the head smoothed over this many seconds (0 = exactly the head).
