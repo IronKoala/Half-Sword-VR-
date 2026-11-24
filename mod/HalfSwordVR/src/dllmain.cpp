@@ -9914,7 +9914,7 @@ namespace
         {
         case 0: case 2: bones = {"head"}; break;
         case 1: bones = {"hand_l", "hand_r"}; break;
-        case 3: case 4: case 5: bones = {"neck_01", "head"}; break;
+        case 3: case 4: case 5: bones = {"neck_01", "neck_02"}; break;
         case 6: bones = {"upperarm_l", "upperarm_r", "lowerarm_l", "lowerarm_r"}; break;
         case 7: bones = {"clavicle_l", "clavicle_r", "upperarm_l", "upperarm_r"}; break;
         case 8: case 9: case 10: case 12: bones = {"spine_02", "spine_03", "spine_01"}; break;
@@ -9975,7 +9975,7 @@ namespace
     }
     // Your worn piece nearest the hand (its slot's bones within radius): slot, or -1. Block Undress Slots
     // are left out, as the game's Undress key does.
-    int armour_own_near(UObject* pawn, UObject* mesh, int side, const hsvr::Vec3& hand, double radius, UObject** comp_out, double* d_out)
+    int armour_own_near(UObject* pawn, UObject* mesh, int side, const hsvr::Vec3& hand, double radius, UObject** comp_out, double* d_out, int keep = -1)
     {
         std::vector<uint8_t> blocked;
         if (RawArray* bl = value_ptr<RawArray>(pawn, STR("Block Undress Slots")); bl && bl->Data)
@@ -9988,6 +9988,7 @@ namespace
             if (std::find(blocked.begin(), blocked.end(), (uint8_t)slot) != blocked.end()) continue;
             double d = armour_slot_distance(mesh, slot, hand, side);
             if (d > radius) continue;
+            if (slot == keep) d -= 4.0; // the piece already counting stays chosen unless another is clearly nearer
             int layer = armour_layer(slot);
             // Same bones (a tie to the cm): the outer layer. Otherwise the nearer.
             if (best < 0 || d < best_d - 1.0 || (std::abs(d - best_d) <= 1.0 && layer > best_layer)) best = slot, best_d = d, best_layer = layer, best_c = c;
@@ -10053,20 +10054,26 @@ namespace
         set_variable(pawn, L ? STR("Carried Armor L Hand") : STR("Carried Armor R Hand"), 0.0, spawned);
         UObject* comp = object_property(spawned, bool_property(spawned, STR("World Mesh Static")) ? STR("Armor Mesh Static") : STR("Armor Mesh Skeletal"));
         if (!comp) comp = object_property(spawned, STR("Armor Mesh Skeletal"));
-        Call g(pawn, L ? STR("Grab Specific Object L H") : STR("Grab Specific Object R H"));
-        if (g.fn && comp)
+        // Handed to the game's own grab latch, as the grip does with a loose piece (grab_object): its tick
+        // builds the hand joint and its armour handling; 0.3 s later check_object_grab falls back to Grab
+        // Specific Object. (Test af81c12: Grab Specific Object straight away held for one tick, then the
+        // fist came back and the piece fell.)
+        set_variable(pawn, L ? STR("Grab Component L") : STR("Grab Component R"), 0, comp);
+        static const FName none_bone = FName(STR("None"), FNAME_Add);
+        set_variable(pawn, L ? STR("Grab Bone L") : STR("Grab Bone R"), 0, nullptr, &none_bone);
+        if (UObject* gp = object_property(pawn, L ? STR("GrabPoint L") : STR("GrabPoint R")))
         {
-            for (FProperty* p : g.fn->ForEachProperty())
-                if (p->GetClass().GetName() == STR("ObjectProperty")) *reinterpret_cast<UObject**>(g.buffer.data() + p->GetOffset_Internal()) = comp;
-                else if (p->GetClass().GetName() == STR("StructProperty")) write_three(g.buffer.data() + p->GetOffset_Internal(), p, hand.x, hand.y, hand.z);
-            g.run();
+            Call move(gp, STR("K2_SetWorldLocation"));
+            move.three(STR("NewLocation"), hand.x, hand.y, hand.z);
+            move.run();
         }
+        set_variable(pawn, L ? STR("Stuck Meter L Hand") : STR("Stuck Meter R Hand"), 0.0);
+        set_variable(pawn, L ? STR("Grab L Target Found") : STR("Grab R Target Found"), 1.0);
         ObjectGrab& og = g_object_grab[side];
         og = ObjectGrab{};
         og.component = comp;
         og.point = hand;
         og.since = hsvr::now_seconds();
-        og.fallback_tried = true;
         HSVR_LOG("Armour: %s hand took off your %ls: %ls (%ls), Grabbed %d", L ? "left" : "right", armour_slot_name(slot), spawned->GetName().c_str(),
                  comp ? comp->GetName().c_str() : STR("no mesh"), (int)bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R")));
         return true;
@@ -10170,7 +10177,7 @@ namespace
                 {
                     UObject* c = nullptr;
                     double d = 0.0;
-                    slot = armour_own_near(pawn, mesh, side, hb, cfg.armor_take_cm, &c, &d);
+                    slot = armour_own_near(pawn, mesh, side, hb, cfg.armor_take_cm, &c, &d, a.mode == 3 ? a.slot : -1);
                     if (slot >= 0) mode = 3, target = c;
                     else why = "no worn piece of yours near the hand";
                 }
