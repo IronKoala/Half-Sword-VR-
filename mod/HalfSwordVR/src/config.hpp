@@ -331,6 +331,7 @@ namespace hsvr
         // his posed legs never kick what lies at his feet (Matthew 2026-11-24: "I dont want willies feet kicking stuff
         // around"; PC run 10 d82b641: a crouch to 85 cm pushed a lantern 50 cm at 2.5 m/s). The game's own kick still hits.
         bool pose_legs_pass_loose = true;
+        bool pose_shoulder_slot_on_chest = true; // a shield slung on his shoulder slot hangs from his chest (spine_05), not his tracked left upper arm (Matthew 11-24: pavise jitters on his back standing still)
         // How near his legs (hip, knee, ankle or toe point) a loose weapon must come to pass through them (cm). It
         // collides with them again once 15 cm farther than this for 0.3 s, or when a hand takes it.
         double pose_legs_pass_loose_cm = 40.0;

@@ -547,6 +547,9 @@ namespace
     void crouch_push_log(UObject* pawn, UObject* mesh);
     void item_watch_tick(UObject* pawn);
     void leg_guard_tick(UObject* pawn, UObject* mesh, const hsvr::Config& cfg);
+    void shoulder_slot_tick(UObject* pawn, UObject* mesh, const hsvr::Config& cfg);
+    double g_slot_moved = 0.0, g_slot_speed = 0.0; // test: the back-slot item's move (cm) and speed (m/s) against his chest since hsvr.mark
+    std::atomic<bool> g_slot_reset{false};
     void chain_calm_tick(UObject* pawn, const hsvr::Config& cfg);
     void arm_hanging_tick(UObject* pawn);
     bool provide_anchor(hsvr::PlayerAnchor& out)
@@ -4628,6 +4631,7 @@ namespace
         if (g_crouch_drop > 10.0) crouch_push_log(pawn, mesh);
         item_watch_tick(pawn);
         leg_guard_tick(pawn, object_property(pawn, STR("Mesh")), cfg);
+        shoulder_slot_tick(pawn, object_property(pawn, STR("Mesh")), cfg);
         chain_calm_tick(pawn, cfg);
         arm_hanging_tick(pawn);
         {
@@ -8215,6 +8219,98 @@ namespace
             it = g_leg_guard.erase(it);
         }
     }
+    // pose_shoulder_slot_on_chest: a shield slung on his shoulder (SheathSlot 2, the light pavise and the targe) hangs on the game's
+    // Slot Back Constraint from Sheath_Slot_Shoulder_L, whose bone is upperarm_l (Willie skeleton sockets; Sheathe on Spawn
+    // @6884 SetConstrainedComponents(BaseMesh, None, Mesh, GetSocketBoneName(socket))). In the flat game that arm is animated and
+    // still; in VR it is his tracked left arm, posed every frame with the controller's noise and every move, and the shield,
+    // jointed to it with a limited (X motion 1) joint, twitched on his back while he stood still (playtest 11-24 12:02 and his
+    // note: "I'm just standing here still, but the pavise is jittering, twitching, and freaking out"). So the joint's second body
+    // becomes his chest (spine_05), its frame moved so the shield stays exactly where it hangs now.
+    void shoulder_slot_tick(UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        static std::unordered_set<UObject*> done;
+        static bool tracked = on_freed([] {
+            for (auto it = done.begin(); it != done.end();) it = gone(*it) ? done.erase(it) : std::next(it);
+        });
+        (void)tracked;
+        if (!pawn || !mesh) return;
+        // Test measure (slot_back_moved / slot_back_speed): the item on his back slot against his chest, since hsvr.mark.
+        {
+            static UObject* was_item = nullptr;
+            static bool t1 = track_freed(&was_item);
+            (void)t1;
+            static Vec3 at_mark{}, prev{};
+            static double prev_t = -1.0;
+            UObject* it = object_property(pawn, STR("Weapon Slot Back"));
+            UObject* b = it ? object_property(it, STR("BaseMesh")) : nullptr;
+            if (b)
+            {
+                FName chest = bone_fname("spine_05");
+                Vec3 rel = socket_rotation(mesh, chest).inverse().rotate(component_location(b) - socket_location(mesh, chest));
+                double tn = now_seconds();
+                if (it != was_item || g_slot_reset.exchange(false)) at_mark = rel, prev = rel, prev_t = tn, was_item = it, g_slot_moved = 0.0, g_slot_speed = 0.0;
+                g_slot_moved = (std::max)(g_slot_moved, length(rel - at_mark));
+                if (tn - prev_t > 1e-4) g_slot_speed = (std::max)(g_slot_speed, length(rel - prev) / (tn - prev_t) / 100.0);
+                prev = rel;
+                prev_t = tn;
+            }
+        }
+        if (!cfg.pose_shoulder_slot_on_chest) return;
+        static double last = -1.0;
+        double now = now_seconds();
+        if (now - last < 0.25) return;
+        last = now;
+        UObject* item = object_property(pawn, STR("Weapon Slot Back"));
+        UObject* joint = object_property(pawn, STR("Slot Back Constraint"));
+        if (!item || !joint || done.count(joint)) return;
+        Call who(joint, STR("GetConstrainedComponents"));
+        if (!who.run()) return;
+        FProperty* c1p = who.param(STR("OutComponent1"));
+        FProperty* c2p = who.param(STR("OutComponent2"));
+        FProperty* b2p = who.param(STR("OutBoneName2"));
+        if (!c1p || !c2p || !b2p) return;
+        UObject* c1 = *reinterpret_cast<UObject**>(who.buffer.data() + c1p->GetOffset_Internal());
+        UObject* c2 = *reinterpret_cast<UObject**>(who.buffer.data() + c2p->GetOffset_Internal());
+        FName b2 = *reinterpret_cast<FName*>(who.buffer.data() + b2p->GetOffset_Internal());
+        if (!c1 || c2 != mesh) return;
+        std::wstring bone = b2.ToString();
+        if (bone != STR("upperarm_l") && bone != STR("upperarm_r") && bone.find(STR("clavicle")) == std::wstring::npos)
+        {
+            done.insert(joint);
+            return;
+        }
+        // Frame 2 (position and axes) as it is now, in the world, then in spine_05's frame.
+        auto n = [&](const TCHAR* a, const TCHAR* b) { return nested_number(joint, {STR("ConstraintInstance"), a, b}); };
+        Vec3 pos2{n(STR("Pos2"), STR("X")), n(STR("Pos2"), STR("Y")), n(STR("Pos2"), STR("Z"))};
+        Vec3 pri2{n(STR("PriAxis2"), STR("X")), n(STR("PriAxis2"), STR("Y")), n(STR("PriAxis2"), STR("Z"))};
+        Vec3 sec2{n(STR("SecAxis2"), STR("X")), n(STR("SecAxis2"), STR("Y")), n(STR("SecAxis2"), STR("Z"))};
+        FName chest = bone_fname("spine_05");
+        Vec3 bp = socket_location(mesh, b2), cp = socket_location(mesh, chest);
+        Quat bq = socket_rotation(mesh, b2), cq = socket_rotation(mesh, chest);
+        Vec3 at_w = bp + bq.rotate(pos2), pri_w = bq.rotate(pri2), sec_w = bq.rotate(sec2);
+        Vec3 at_c = cq.inverse().rotate(at_w - cp);
+        Vec3 pri_c = normalized(cq.inverse().rotate(pri_w)), sec_c = normalized(cq.inverse().rotate(sec_w));
+        Call rj(joint, STR("SetConstrainedComponents"));
+        rj.object(STR("Component1"), c1);
+        rj.name(STR("BoneName1"), FName(STR("None"), FNAME_Add));
+        rj.object(STR("Component2"), mesh);
+        rj.name(STR("BoneName2"), chest);
+        bool ok = rj.run();
+        Call rp(joint, STR("SetConstraintReferencePosition"));
+        rp.byte_any({STR("Frame"), STR("frame")}, 1);
+        rp.three_any({STR("RefPosition"), STR("RefPos")}, at_c.x, at_c.y, at_c.z);
+        bool ok2 = rp.run();
+        Call ro(joint, STR("SetConstraintReferenceOrientation"));
+        ro.byte_any({STR("Frame"), STR("frame")}, 1);
+        ro.three_any({STR("PriAxis"), STR("PriAxis1")}, pri_c.x, pri_c.y, pri_c.z);
+        ro.three_any({STR("SecAxis"), STR("SecAxis1")}, sec_c.x, sec_c.y, sec_c.z);
+        bool ok3 = ro.run();
+        done.insert(joint);
+        HSVR_LOG("Slot: %ls on his shoulder slot hung from %ls: now from spine_05 (his chest), frame kept in place (%d%d%d; pos (%.1f, %.1f, %.1f))",
+                 item->GetName().c_str(), bone.c_str(), (int)ok, (int)ok2, (int)ok3, at_c.x, at_c.y, at_c.z);
+    }
+
     void crouch_push_log(UObject* pawn, UObject* mesh)
     {
         using namespace hsvr;
@@ -30012,6 +30108,8 @@ namespace
         else if (w == "lag_l") value = g_worst_lag[0].load();
         else if (w == "kick_speed") value = g_kick_speed.load(); // m/s, fastest loose weapon near his legs while crouched since hsvr.mark
         else if (w == "item_moved") value = g_watch_moved.load(); // cm the watched item moved since hsvr.mark (hsvr.watch_item)
+        else if (w == "slot_back_moved") value = g_slot_moved; // cm the back/shoulder-slot item moved against his chest since hsvr.mark
+        else if (w == "slot_back_speed") value = g_slot_speed; // m/s, the same item's worst speed against his chest since hsvr.mark
         else if (w == "item_speed") value = g_watch_speed.load(); // m/s, its fastest since hsvr.mark
         else if (w == "stamina") value = read_number_variable(pawn, STR("Stamina"));
         else if (w == "strength_r") value = g_hold[1].body_strength;
@@ -30563,6 +30661,7 @@ namespace
                 g_worst_lag[0].store(0.0);
                 g_kick_speed.store(0.0);
                 g_watch_reset.store(true);
+                g_slot_reset.store(true);
                 g_watch_moved.store(0.0);
                 g_watch_speed.store(0.0);
                 g_worst_lag[1].store(0.0);
