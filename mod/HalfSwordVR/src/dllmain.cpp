@@ -5990,6 +5990,8 @@ namespace
     void attached_meshes(UObject* root, UObject* skip, std::vector<UObject*>& out, int depth);
     std::vector<UObject*> static_parts_of(UObject* owner);
     void first_number(Call& c, double v);
+    bool physics_collides(UObject* c);
+    void weapons_from_parts(UObject* pawn, std::vector<UObject*>& out);
     UObject* no_collision_pair(UObject* pawn, UClass* cls, UObject* a, UObject* b, FName bone_b = FName());
     void drop_cm_pairs(int side, UObject* pawn, UObject* item)
     {
@@ -6052,6 +6054,18 @@ namespace
         if (!cls || !mesh) return;
         FName hand = bone_fname(side == 0 ? "hand_l" : "hand_r");
         std::wstring names;
+        // The weapon's bodies of their own too (a chain lantern's lamp and Link 1-4 hang on constraints outside BaseMesh's weld
+        // tree, so a pair with BaseMesh never covered them): run 27 pickup_both, the held lantern's lamp hit his own hand_r 1531,
+        // lowerarm_r 4763, upperarm_r 1637 in its first 0.2 s in the hand.
+        std::vector<UObject*> hanging;
+        {
+            std::vector<UObject*> tree, scab;
+            attached_meshes(base, nullptr, tree, 0);
+            attached_meshes(object_property(weapon, STR("Scabbard")), nullptr, scab, 0);
+            for (UObject* c : static_parts_of(weapon))
+                if (std::find(tree.begin(), tree.end(), c) == tree.end() && std::find(scab.begin(), scab.end(), c) == scab.end() && physics_collides(c))
+                    hanging.push_back(c);
+        }
         for (FName bone : physics_body_bones(mesh))
         {
             // The hand too (kick-test3: the hand body, 7.4 cm off the bone, sits in the grip; when the
@@ -6115,7 +6129,10 @@ namespace
             join.run();
             g_arm_ignore[side].joints.push_back(j);
             names += bone.ToString() + STR(" ");
+            for (UObject* h : hanging)
+                if (UObject* hj = no_collision_pair(pawn, cls, h, mesh, bone)) g_arm_ignore[side].joints.push_back(hj);
         }
+        if (!hanging.empty()) HSVR_LOG("Grip: %zu hanging bodies of the weapon paired with the same bones", hanging.size());
         HSVR_LOG("Grip: %s weapon no longer collides with: %ls", side == 0 ? "left" : "right", names.empty() ? STR("(no forearm bodies found)") : names.c_str());
     }
 
@@ -8041,12 +8058,11 @@ namespace
         });
         (void)list_tracked;
         static double listed = -10.0;
+        weapons_from_parts(pawn, weapons);
         if (now - listed > 1.0)
         {
             listed = now;
-            weapons.clear();
             willies.clear();
-            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
             UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
         }
         bool kicking = g_feet[0].kicking || g_feet[1].kicking;
@@ -9794,6 +9810,26 @@ namespace
             for (UObject* c : comps)
                 if (c && c->GetOuterPrivate()) g_weapon_parts[c->GetOuterPrivate()].push_back(c);
         }
+    }
+
+    // Weapons (ModularWeaponBP_C) among the owners of the static mesh parts list, rebuilt with it every 0.25 s (one FindAllOf for
+    // both): the leg guard sees a weapon that just came near his legs within 0.25 s, not the 1 s its own FindAllOf took (run 27
+    // settle_self_b fresh: a lantern spawned 2 cm from his legs was kicked at 6623 for 0.5 s before the guard found it).
+    void weapons_from_parts(UObject* pawn, std::vector<UObject*>& out)
+    {
+        out.clear();
+        refresh_weapon_parts(pawn);
+        static double built = -10.0;
+        static std::vector<UObject*> cache;
+        if (built != g_weapon_parts_time)
+        {
+            built = g_weapon_parts_time;
+            cache.clear();
+            for (auto& [owner, parts] : g_weapon_parts)
+                if (owner && !gone(owner) && is_a(owner, STR("ModularWeaponBP_C"))) cache.push_back(owner);
+        }
+        for (UObject* w : cache)
+            if (!gone(w)) out.push_back(w);
     }
 
     // Every static mesh component an actor owns (by outer), attached or not: a chain lantern's lamp ("Weapon") and
