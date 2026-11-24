@@ -5077,7 +5077,12 @@ namespace
         if (!g_swing_proxy) return;
         double now = now_seconds(), dt = g_swing_last_t > 0.0 ? now - g_swing_last_t : 0.0;
         g_swing_last_t = now;
+        // Relative to his posed chest, not his capsule: in a deep crouch the game pulls the capsule up to 27 cm a tick toward
+        // his hips (the mod puts it back), and both hands read slap speed at once (run 14 884eea8 floor_pickup: both fists
+        // made while still, then a fist knocked the lantern 5 m). A crouch moves the chest with the hands, too.
         Vec3 body = actor_location(pawn);
+        if (cfg.pose_swing_from_chest)
+            if (UObject* mesh = object_property(pawn, STR("Mesh"))) body = socket_location(mesh, bone_fname("spine_03"));
         double fastest = 0.0;
         for (int side = 0; side < 2; ++side)
         {

@@ -904,6 +904,9 @@ namespace hsvr
         double pose_grab_seat_reverse_bias_deg = 45.0; // a reversed seat must be this much nearer to win
         double pose_swing_speed_lo = 1.5;
         double pose_swing_speed_hi = 7.0;
+        // 1 = hand swing speed (slaps, the game's swing feed) is measured against his posed chest; 0 = against his capsule
+        // (which the game jerks about in a deep crouch, run 14 884eea8).
+        bool pose_swing_from_chest = true;
         double pose_swing_speed_fall_s = 0.15;
         // The second hand turns with the weapon (locked onto it as the first hand holds it, mirrored)
         // instead of with your controller.

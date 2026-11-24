@@ -700,6 +700,7 @@ namespace hsvr
         num("pose_grab_seat_reverse_bias_deg", c.pose_grab_seat_reverse_bias_deg);
         num("pose_swing_speed_lo", c.pose_swing_speed_lo);
         num("pose_swing_speed_hi", c.pose_swing_speed_hi);
+        flag("pose_swing_from_chest", c.pose_swing_from_chest);
         num("pose_swing_speed_fall_s", c.pose_swing_speed_fall_s);
         flag("pose_two_hand_lock_rotation", c.pose_two_hand_lock_rotation);
         {

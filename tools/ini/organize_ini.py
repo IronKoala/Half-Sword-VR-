@@ -527,6 +527,7 @@ LAYOUT = [
         ('pose_feed_swing_speed', "1 = the game's swing speed is fed from your controllers."),
         ('pose_swing_speed_lo', 'Hand speed that counts as no swing (m/s).'),
         ('pose_swing_speed_hi', 'Hand speed that counts as a full swing (m/s).'),
+        ('pose_swing_from_chest', '1 = hand swing speed is measured against his chest (0 = against his capsule).'),
         ('pose_swing_speed_fall_s', 'How fast the swing speed falls off (s).'),
     ]),
     ('Stabbing, cutting, hits', '', [
