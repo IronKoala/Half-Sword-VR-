@@ -7476,6 +7476,7 @@ namespace
     UObject* g_watch_item = nullptr; // the item hsvr.watch_item found (for its Collision Hit log)
     bool is_mounted(UObject* w);
     void own_gear(UObject* pawn, std::vector<UObject*>& out);
+    std::vector<UObject*> static_parts_of(UObject* owner);
     struct LegGuard
     {
         std::vector<UObject*> joints;
@@ -7485,6 +7486,7 @@ namespace
         std::vector<std::pair<UObject*, int>> responses;
         int channel = -1;
         UObject* capsule = nullptr; // his capsule, told to ignore this item when it moves (IgnoreActorWhenMoving)
+        std::vector<UObject*> parts; // the item's parts the pairs were made for (the Watch hit log names a hit from one not in it)
     };
     std::map<UObject*, LegGuard> g_leg_guard;
     void item_watch_tick(UObject* pawn)
@@ -7509,10 +7511,10 @@ namespace
             g_watch_item = item;
             // Every part reports its hits (run 18: only the lamp and the base did; a link or the holder touching him said nothing).
             if (item)
-                if (UObject* wb = object_property(item, STR("BaseMesh")))
+                if (object_property(item, STR("BaseMesh")))
                 {
                     std::vector<UObject*> wp;
-                    attached_meshes(wb, nullptr, wp, 0);
+                    wp = static_parts_of(item);
                     std::wstring was;
                     for (UObject* part : wp)
                     {
@@ -7626,6 +7628,43 @@ namespace
     // from it. So a loose weapon near his legs gets no-collide pairs with his leg and hip bodies (thigh, calf, foot, ball,
     // pelvis, spine_01, spine_02), his capsule, his leg and cuirass armour proxies and his worn gear, and loses them once it is pose_legs_pass_loose_cm + 15 cm clear for 0.3 s or
     // a hand takes it. A deliberate kick (the game's Kick, right A) makes no new pairs.
+    // Where a component of his hangs: up its attach parents to his Mesh ("Mesh:<socket>") or to the last parent (its name).
+    std::wstring attach_root(UObject* mesh, UObject* c)
+    {
+        UObject* p = c;
+        for (int i = 0; i < 8 && p; ++i)
+        {
+            Call ap(p, STR("GetAttachParent"));
+            if (!ap.fn || !ap.run()) break;
+            UObject* parent = ap.object_result();
+            if (!parent) break;
+            if (parent == mesh)
+            {
+                Call sn(p, STR("GetAttachSocketName"));
+                std::wstring sock = STR("?");
+                if (sn.fn && sn.run())
+                    if (FProperty* rp = sn.param(STR("ReturnValue"))) sock = reinterpret_cast<FName*>(sn.buffer.data() + rp->GetOffset_Internal())->ToString();
+                return STR("Mesh:") + sock;
+            }
+            p = parent;
+        }
+        return p ? p->GetName() : std::wstring(STR("?"));
+    }
+    bool physics_collides(UObject* c)
+    {
+        Call ce(c, STR("GetCollisionEnabled"));
+        if (!ce.fn || !ce.run()) return false;
+        int e = byte_result(ce);
+        return e == 2 || e == 3; // PhysicsOnly / QueryAndPhysics
+    }
+    // A hip or leg bone of his (the guard's bones).
+    bool leg_or_hip_name(std::wstring n)
+    {
+        for (wchar_t& ch : n) ch = (wchar_t)towlower(ch);
+        return n.find(L"thigh") != std::wstring::npos || n.find(L"calf") != std::wstring::npos || n.find(L"foot") != std::wstring::npos ||
+               n.find(L"ball") != std::wstring::npos || n == L"pelvis" || n == L"spine_01" || n == L"spine_02";
+    }
+
     void leg_guard_drop(UObject* item, LegGuard& g, const char* why)
     {
         for (UObject* j : g.joints)
@@ -7796,11 +7835,39 @@ namespace
             // to 82 cm over a lantern lying under him, his pelvis at z 13 and his slung pavise swinging 1-9 m/s 6-17 cm from
             // his calf, it went off at 5-6 m/s with the legs alone paired).
             auto make_pairs = [&](LegGuard& g, const char* why) {
-                std::vector<UObject*> parts, gear_parts;
-                attached_meshes(base, object_property(w, STR("Scabbard")), parts, 0);
+                // Every physics part of the item, attached or not (run 19 f4cc855: the chain lantern's lamp, its "Weapon", hangs on
+                // PhysicsConstraint6 as a body of its own outside BaseMesh's attach tree; every kick hit came from it, never paired).
+                // Its own scabbard and what hangs under it are left out (a component of the weapon that stays on a belt).
+                std::vector<UObject*> parts, gear_parts, scab_tree;
+                attached_meshes(object_property(w, STR("Scabbard")), nullptr, scab_tree, 0);
+                std::wstring part_names;
+                for (UObject* c : static_parts_of(w))
+                    if (std::find(scab_tree.begin(), scab_tree.end(), c) == scab_tree.end() && physics_collides(c))
+                    {
+                        parts.push_back(c);
+                        part_names += (part_names.empty() ? STR("") : STR(", ")) + c->GetName();
+                    }
                 for (UObject* gw : gear)
                     if (gw != w)
-                        if (UObject* gb = object_property(gw, STR("BaseMesh"))) attached_meshes(gb, nullptr, gear_parts, 0);
+                        for (UObject* c : static_parts_of(gw))
+                            if (physics_collides(c)) gear_parts.push_back(c);
+                // His own static meshes (armour the game adds to him, NODE_AddStaticMeshComponent-N): run 19 had the lantern hit
+                // his NODE_AddStaticMeshComponent-60/-61 at 405-460. Those hanging from a leg or hip bone of his, or from his
+                // CM_Leg_L/R or CM_Cuirass proxy, are paired as his legs are; every one is logged with where it hangs.
+                std::wstring own_list;
+                for (UObject* c : static_parts_of(pawn))
+                {
+                    if (!physics_collides(c)) continue;
+                    std::wstring root = attach_root(mesh, c);
+                    bool legs = (root.rfind(STR("Mesh:"), 0) == 0 && leg_or_hip_name(root.substr(5))) || root == STR("CM_Leg_L") ||
+                                root == STR("CM_Leg_R") || root == STR("CM_Cuirass");
+                    bool proxy = false;
+                    for (const TCHAR* n : k_cm_proxies)
+                        if (object_property(pawn, n) == c) proxy = true;
+                    if (proxy) continue; // CM_* proxies: paired by name below
+                    own_list += c->GetName() + STR(" on ") + root + (legs ? STR(" (paired)") : STR("")) + STR("; ");
+                    if (legs) gear_parts.push_back(c);
+                }
                 for (UObject* part : parts)
                 {
                     for (FName b : leg_bones)
@@ -7871,6 +7938,9 @@ namespace
                 HSVR_LOG("Legs: %ls %.0f cm from his legs: passes through them and his worn gear (%zu no-collide pair(s), %zu part(s) x %zu gear part(s); "
                          "crouch %.0f; %s)",
                          w->GetName().c_str(), nearest, g.joints.size(), parts.size(), gear_parts.size(), g_crouch_drop, why);
+                HSVR_LOG("Legs:   its parts: %ls", part_names.c_str());
+                HSVR_LOG("Legs:   his own static meshes with physics: %ls", own_list.empty() ? STR("(none)") : own_list.c_str());
+                g.parts = parts;
             };
             if (it == g_leg_guard.end())
             {
@@ -9428,9 +9498,8 @@ namespace
     std::unordered_map<UObject*, std::vector<UObject*>> g_weapon_parts;
     double g_weapon_parts_time = -10.0;
 
-    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part)
+    void refresh_weapon_parts(UObject* weapon)
     {
-        if (!weapon) return -1.0;
         double now = hsvr::now_seconds();
         // A weapon spawned straight into the hand (free play) is not in a list made before it existed:
         // rebuild at once for it (at most every 0.05 s), not only every 0.25 s (playtest 12:19: a fresh
@@ -9445,6 +9514,26 @@ namespace
             for (UObject* c : comps)
                 if (c && c->GetOuterPrivate()) g_weapon_parts[c->GetOuterPrivate()].push_back(c);
         }
+    }
+
+    // Every static mesh component an actor owns (by outer), attached or not: a chain lantern's lamp ("Weapon") and
+    // Link 1-4 hang off physics constraints as bodies of their own, outside BaseMesh's attach tree (run 19 f4cc855).
+    std::vector<UObject*> static_parts_of(UObject* owner)
+    {
+        if (!owner) return {};
+        refresh_weapon_parts(owner);
+        auto it = g_weapon_parts.find(owner);
+        if (it == g_weapon_parts.end()) return {};
+        std::vector<UObject*> out;
+        for (UObject* c : it->second)
+            if (c && !gone(c)) out.push_back(c);
+        return out;
+    }
+
+    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part)
+    {
+        if (!weapon) return -1.0;
+        refresh_weapon_parts(weapon);
         double best = -1.0;
         auto it = g_weapon_parts.find(weapon);
         if (it == g_weapon_parts.end()) return -1.0;
@@ -20393,8 +20482,22 @@ namespace
         double now = hsvr::now_seconds();
         if (now - said[key] < 0.1) return;
         said[key] = now;
-        HSVR_LOG("Watch hit: %ls.%ls hit %ls.%ls%ls, impulse %.0f", g_watch_item->GetName().c_str(), my_comp ? my_comp->GetName().c_str() : STR("?"),
-                 other ? other->GetName().c_str() : STR("?"), key.c_str(), his ? STR(" (HIS)") : STR(""), imp);
+        // His: whether the leg guard holds this item and paired the part that hit, and where his component hangs.
+        std::wstring extra;
+        if (his)
+        {
+            auto gi = g_leg_guard.find(g_watch_item);
+            if (gi == g_leg_guard.end() || gi->second.joints.empty()) extra = STR(" [leg guard: not guarding]");
+            else
+            {
+                const auto& ps = gi->second.parts;
+                extra = std::find(ps.begin(), ps.end(), my_comp) != ps.end() ? STR(" [leg guard: this part paired]") : STR(" [leg guard: this part NOT paired]");
+            }
+            UObject* mesh = object_property(other, STR("Mesh"));
+            if (other_comp && other_comp != mesh) extra += STR(" [") + other_comp->GetName() + STR(" hangs on ") + attach_root(mesh, other_comp) + STR("]");
+        }
+        HSVR_LOG("Watch hit: %ls.%ls hit %ls.%ls%ls, impulse %.0f%ls", g_watch_item->GetName().c_str(), my_comp ? my_comp->GetName().c_str() : STR("?"),
+                 other ? other->GetName().c_str() : STR("?"), key.c_str(), his ? STR(" (HIS)") : STR(""), imp, extra.c_str());
     }
     void stab_hit_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
