@@ -14,6 +14,9 @@
 6:hsvr.arm_move 7 30
 7.7:hsvr.arm_move 7 30
 8:hsvr.squeeze 0 1
+8.8:hsvr.if_free 0 hsvr.squeeze 0 0
+9:hsvr.if_free 0 hsvr.arm_move 7 30
+9.3:hsvr.if_free 0 hsvr.squeeze 0 1
 10:hsvr.expect two_hand = 1 second hand took it
 10.1:hsvr.arm_move 3
 12:hsvr.arm_move 7 30
@@ -24,7 +27,10 @@
 15.1:hsvr.arm_move 7 30
 16.2:hsvr.arm_move 7 30
 16.5:hsvr.squeeze 0 1
-16.85:hsvr.spin_reset 1
-19.5:hsvr.expect two_hand = 1 took it again
-19.5:hsvr.expect held_spin_max_r < 300 from 0.3 s after the left took it again (1 to 2 hands), hands still: no spin-up (deg/s)
-19.6:quit
+17.3:hsvr.if_free 0 hsvr.squeeze 0 0
+17.5:hsvr.if_free 0 hsvr.arm_move 7 30
+17.8:hsvr.if_free 0 hsvr.squeeze 0 1
+18.1:hsvr.spin_reset 1
+20.8:hsvr.expect two_hand = 1 took it again
+20.8:hsvr.expect held_spin_max_r < 300 after the left took it again (1 to 2 hands; from 0.3 s after the latest try), hands still: no spin-up (deg/s)
+20.9:quit

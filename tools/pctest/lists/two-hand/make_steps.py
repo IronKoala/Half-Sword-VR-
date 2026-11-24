@@ -40,6 +40,9 @@ HEAD = """0.5:hsvr.fake_head_drop 0
 TAKE_ALONG = """6:hsvr.arm_move 7 {along}
 7.7:hsvr.arm_move 7 {along}
 8:hsvr.squeeze 0 1
+8.8:hsvr.if_free 0 hsvr.squeeze 0 0
+9:hsvr.if_free 0 hsvr.arm_move 7 {along}
+9.3:hsvr.if_free 0 hsvr.squeeze 0 1
 """
 TAKE_FRONT = """6:hsvr.xbow_hand 0 front
 9:hsvr.squeeze 0 1
@@ -224,10 +227,13 @@ SWITCH_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
 15.1:hsvr.arm_move 7 {along}
 16.2:hsvr.arm_move 7 {along}
 16.5:hsvr.squeeze 0 1
-16.85:hsvr.spin_reset 1
-19.5:hsvr.expect two_hand = 1 took it again
-19.5:hsvr.expect held_spin_max_r < 300 from 0.3 s after the left took it again (1 to 2 hands), hands still: no spin-up (deg/s)
-19.6:quit
+17.3:hsvr.if_free 0 hsvr.squeeze 0 0
+17.5:hsvr.if_free 0 hsvr.arm_move 7 {along}
+17.8:hsvr.if_free 0 hsvr.squeeze 0 1
+18.1:hsvr.spin_reset 1
+20.8:hsvr.expect two_hand = 1 took it again
+20.8:hsvr.expect held_spin_max_r < 300 after the left took it again (1 to 2 hands; from 0.3 s after the latest try), hands still: no spin-up (deg/s)
+20.9:quit
 """
 
 # Park (2026-11-24, 885d369 run): the free left hand parked beside a weapon the right holds pushed it (and the right hand 15 cm off
@@ -317,6 +323,8 @@ def main():
                        ("old_switch2", "|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0")):
         lst += ["%s_%s|steps-switch_%s.txt%s" % (pre, n, n, extra) for n in switch]
     lst += ["park_%s|steps-park_%s.txt" % (n, n) for n in park]
+    lst += ["park_nofree_%s|steps-park_%s.txt|pose_hold_free_hand_collides=0" % (n, n) for n in park]
+    lst += ["park_whole_%s|steps-park_%s.txt|pose_hold_self_collision=0" % (n, n) for n in park]
     # (a second launch of each: the one runaway seen so far came in only one of two launches)
     lst += ["reach2_%s|steps-reach_%s.txt" % (n, n) for n in reach]
     lst += ["old_reach2_%s|steps-reach_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in reach]

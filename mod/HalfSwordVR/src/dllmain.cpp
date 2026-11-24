@@ -5766,14 +5766,17 @@ namespace
             // (pose_hold_self_collision=1): the weapon ignores only the arm(s) and hand(s) holding it (upper arm to fingers);
             // his torso, head, legs, feet and free arm push it away (playtest 2026-11-23 5:01 PM: a two-handed mace sat inside
             // his torso). Off (0, B&S's default): his whole body but the feet, and the free hand while held in one hand.
+            // pose_hold_free_hand_collides=0: the free arm (one hand holding) is ignored too (test switch: park cases 2026-11-24, the
+            // free left hand parked beside a held axe set it wobbling at 450-650 deg/s with no contact logged on the axis).
+            bool free_ignored = !ac.pose_hold_free_hand_collides && g_arm_ignore[1 - side].weapon != weapon;
             if (ac.pose_hold_ignore_body && ac.pose_hold_self_collision)
             {
-                if (!in_arm(mesh, bone, side)) continue;
+                if (!in_arm(mesh, bone, side) && !(free_ignored && in_arm(mesh, bone, 1 - side))) continue;
             }
             else if (whole)
             {
                 std::wstring bn = bone.ToString();
-                if (bn == STR("foot_l") || bn == STR("foot_r") || bn == (side == 0 ? STR("hand_r") : STR("hand_l"))) continue;
+                if (bn == STR("foot_l") || bn == STR("foot_r") || (!free_ignored && bn == (side == 0 ? STR("hand_r") : STR("hand_l")))) continue;
             }
             else if (!in_forearm(mesh, bone, side))
                 continue;
@@ -29276,6 +29279,22 @@ namespace
             GetSystemTime(&utc);
             HSVR_LOG("Script: %s%.0f s: %s (%02d:%02d:%02d.%03d UTC)", entry.after_menu ? "M+" : "", entry.at, entry.command.c_str(), (int)utc.wHour, (int)utc.wMinute, (int)utc.wSecond,
                      (int)utc.wMilliseconds);
+            // "hsvr.if_free <side> <step>": runs <step> only if that hand holds nothing (no weapon of its own, not a second hand on one):
+            // a retry of a rig take that missed, harmless when it took (2026-11-24: the rig's left hand missed 1 take in 5).
+            if (entry.command.rfind("hsvr.if_free ", 0) == 0)
+            {
+                int side = atoi(entry.command.c_str() + 13) != 0 ? 1 : 0;
+                size_t sp = entry.command.find(' ', 13);
+                UObject* pw = g_pose.pawn;
+                bool holds = (pw && object_property(pw, side == 0 ? STR("Weapon L") : STR("Weapon R"))) || (g_two.active && g_two.second == side);
+                if (sp == std::string::npos || holds)
+                {
+                    HSVR_LOG("Script: hsvr.if_free %d: %s", side, holds ? "the hand holds something: skipped" : "no step");
+                    continue;
+                }
+                entry.command = entry.command.substr(sp + 1);
+                HSVR_LOG("Script: hsvr.if_free %d: the hand is free: %s", side, entry.command.c_str());
+            }
             // Mod commands for unattended tests; everything else goes to the engine console.
             if (entry.command.rfind("hsvr.set ", 0) == 0)
             {
