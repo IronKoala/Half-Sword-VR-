@@ -1200,6 +1200,18 @@ namespace hsvr
         double pose_drink_tip = 0.0;
         // Seconds between sips while the bottle stays tipped at your mouth.
         double pose_drink_sip_s = 1.0;
+        // Armour on and off with your hands: grip held and the trigger held armor_hold_s. A carried piece
+        // within armor_equip_cm of its spot on your body is put on (the game's Equip Armor rules); a held
+        // person is stripped where you hold him (the game's own rule: only when he is down, Fallen); an
+        // empty hand within armor_take_cm of one of your worn pieces takes it off into the hand.
+        bool armor_hands = true;
+        double armor_hold_s = 2.0;
+        double armor_trigger_on = 0.6;
+        double armor_trigger_off = 0.35;
+        double armor_equip_cm = 30.0;
+        double armor_take_cm = 18.0;
+        // Taking your own piece off: the count restarts whenever the hand moves faster than this (cm/s).
+        double armor_take_still_cms = 25.0;
         // The ghost hand: while his hand stays on a stopped weapon more than pose_ghost_from_cm from
         // your real hand, a see-through glove shows where your hand is. Mesh and material are object
         // paths in the cooked game; offset (cm) and turn (deg) from the hand bone, and scale, for fitting.

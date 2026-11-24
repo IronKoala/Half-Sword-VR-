@@ -1,0 +1,4 @@
+# Thread "Armor on and off in VR" (2026-11-24): grip + trigger held 2 s puts armour on, takes yours off, strips a downed foe.
+armor_own_off_on|steps-armor_own_off_on.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+armor_strip_standing|steps-armor_strip_standing.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+armor_strip_down|steps-armor_strip_down.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar

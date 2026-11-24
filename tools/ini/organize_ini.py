@@ -645,6 +645,15 @@ LAYOUT = [
         ('pose_drink_tip', 'Bottle neck must point lower than this to drink (-1 to 1; 0 = level).'),
         ('pose_drink_sip_s', 'Seconds between sips.'),
     ]),
+    ('Armour on and off', 'Grip held + trigger held: put on, strip, take off.', [
+        ('armor_hands', '1 = grip and hold the trigger to put armour on, take yours off, or strip a downed foe you hold.'),
+        ('armor_hold_s', 'Seconds the trigger must be held (the controller buzzes while it counts).'),
+        ('armor_trigger_on', 'Trigger pull that counts as held (0-1).'),
+        ('armor_trigger_off', 'Trigger let back under this counts as released (0-1).'),
+        ('armor_equip_cm', 'A carried piece goes on when your hand is this close to its spot on your body (cm).'),
+        ('armor_take_cm', 'An empty hand this close to one of your worn pieces takes it off (cm).'),
+        ('armor_take_still_cms', 'Taking your own piece off: the 2 s count restarts if the hand moves faster than this (cm/s), so a fist held up in a guard does not undress you.'),
+    ]),
     ('Old grip spring', 'Only used when pose_grip_hold=0.', [
         ('pose_grip_spring', 'Old grip spring on (only with pose_grip_hold=0).'),
         ('pose_grip_strength_kg', 'Most it holds up (kg).'),

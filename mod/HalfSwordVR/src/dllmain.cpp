@@ -9845,6 +9845,392 @@ namespace
         }
     }
 
+    // ---- Armour on and off with your hands (Matthew 2026-11-24) ------------------------------------
+    // Grip held and the trigger held armor_hold_s (2 s), one of three things, by what the hand has:
+    // 1. A loose armour piece (the game's grab made it "Carried Armor L/R Hand", UG @537050) brought to
+    //    its spot on your body (within armor_equip_cm of that slot's bones): the game's own
+    //    "Event Equip Armor From L/R Hand" (UG @119017/@124150: it carries the piece onto him, then
+    //    Equip Armor with all its layering rules: arming points, blocked slots, the slot's old piece dropped).
+    // 2. A hold on another person (the game's grab on his body): the game's own "Event Rob With L/R Hand"
+    //    (UG @123673 -> Strip Armor From Bone with the held bone). Its rule, unchanged: a weapon or quiver
+    //    within 15 cm of your hand is taken first; otherwise the slot under the held bone comes off only if
+    //    he is worn there, it is not in his Block Undress Slots and he is Fallen (on the ground); and his
+    //    AI turns hostile (Aggression 1). The piece lands in your hand.
+    // 3. An empty hand on one of your own worn pieces (its slot's bones within armor_take_cm, the other
+    //    arm's for hands/arms/shoulders, outermost layer first): the game's Remove Armor on that slot
+    //    (as its Undress key does, UG @115471), and the piece put in your hand (Grab Specific Object).
+    // Mouse and keyboard: the game's own keys (B, and holding Q/E on a held body) do this; off here.
+    struct ArmourHold
+    {
+        int mode = 0;            // 0 nothing, 1 put on, 2 strip him, 3 take off yours
+        UObject* target = nullptr; // the piece (1), his body component (2), your worn mesh (3)
+        int slot = -1;
+        double since = -1.0;     // trigger held on this target since
+        double last_buzz = -1.0;
+        bool fired = false;      // done: the trigger must come up before the next
+        bool down = false;       // trigger past armor_trigger_on (hysteresis)
+        int check = 0;           // what was fired, checked once a little later
+        double check_at = -1.0;
+        UObject* check_obj = nullptr;
+        double why_t = -10.0;    // the last "not yet" log
+        hsvr::Vec3 last_hand{0, 0, 0}; // hand bone last tick (its speed: taking your own off needs a still hand)
+        double last_t = -1.0;
+        double speed = 0.0;      // cm/s, smoothed
+    };
+    ArmourHold g_armour[2];
+
+    const wchar_t* armour_slot_name(int s)
+    {
+        static const wchar_t* n[17] = {L"Head 2", L"Hands", L"Head 1", L"Neck 3", L"Neck 2", L"Neck 1", L"Arms", L"Shoulders", L"Body 4",
+                                       L"Body 3", L"Body 2", L"Legs 2", L"Body 1", L"Waist", L"Legs 3", L"Feet", L"Legs 1"};
+        return s >= 0 && s < 17 ? n[s] : L"?";
+    }
+    // Where the game puts a removed piece (Strip Armor From Bone @18551, its socket per slot).
+    const char* armour_slot_socket(int s)
+    {
+        static const char* n[17] = {"head", "hand_r", "head", "neck_01", "neck_01", "neck_01", "upperarm_r", "clavicle_r", "spine_03",
+                                    "spine_03", "spine_03", "thigh_r", "spine_03", "pelvis", "foot_l", "foot_r", "foot_l"};
+        return s >= 0 && s < 17 ? n[s] : "spine_03";
+    }
+    // Outer layers first when two worn pieces sit on the same bones (Head 2 over Head 1, Neck 3 over 1, Body 4 over 1, Legs 3 over 1).
+    int armour_layer(int s)
+    {
+        switch (s)
+        {
+        case 0: return 2; case 2: return 1;
+        case 3: return 3; case 4: return 2; case 5: return 1;
+        case 8: return 4; case 9: return 3; case 10: return 2; case 12: return 1;
+        case 14: return 3; case 11: return 2; case 16: return 1;
+        default: return 0;
+        }
+    }
+    // Nearest distance from a point to a slot's bones on a body. `skip_side` 0/1 leaves out that side's
+    // arm (the hand doing it is always on its own arm); -1 leaves out nothing.
+    double armour_slot_distance(UObject* mesh, int slot, const hsvr::Vec3& at, int skip_side)
+    {
+        using namespace hsvr;
+        std::vector<const char*> bones;
+        switch (slot)
+        {
+        case 0: case 2: bones = {"head"}; break;
+        case 1: bones = {"hand_l", "hand_r"}; break;
+        case 3: case 4: case 5: bones = {"neck_01", "head"}; break;
+        case 6: bones = {"upperarm_l", "upperarm_r", "lowerarm_l", "lowerarm_r"}; break;
+        case 7: bones = {"clavicle_l", "clavicle_r", "upperarm_l", "upperarm_r"}; break;
+        case 8: case 9: case 10: case 12: bones = {"spine_02", "spine_03", "spine_01"}; break;
+        case 13: bones = {"pelvis", "spine_01"}; break;
+        case 11: case 16: bones = {"thigh_l", "thigh_r", "calf_l", "calf_r", "pelvis"}; break;
+        case 14: bones = {"calf_l", "calf_r", "thigh_l", "thigh_r"}; break;
+        case 15: bones = {"foot_l", "foot_r"}; break;
+        default: return 1e9;
+        }
+        double best = 1e9;
+        for (const char* b : bones)
+        {
+            size_t n = strlen(b);
+            if (skip_side >= 0 && n > 2 && b[n - 2] == '_' && b[n - 1] == (skip_side == 0 ? 'l' : 'r') &&
+                (strncmp(b, "hand", 4) == 0 || strncmp(b, "lowerarm", 8) == 0 || strncmp(b, "upperarm", 8) == 0 || strncmp(b, "clavicle", 8) == 0))
+                continue;
+            double d = length(socket_location(mesh, bone_fname(b)) - at);
+            if (d < best) best = d;
+        }
+        return best;
+    }
+    // Your worn piece nearest the hand: slot, or -1. Worn Armor's components carry the slot's name as a
+    // tag (Set Up Armor, armor_equip.md section 1); the game's panties (Sk_Clothing_Underwear_C) and
+    // Block Undress Slots are left out, as its Undress key does.
+    // A person's worn pieces: slot -> its mesh. Worn Armor's components carry the slot's name as a tag
+    // (Set Up Armor, armor_equip.md section 1); hidden ones and the game's panties (Sk_Clothing_Underwear_C)
+    // are left out, as its Undress key leaves the panties.
+    std::vector<std::pair<int, UObject*>> armour_worn(UObject* willie)
+    {
+        std::vector<std::pair<int, UObject*>> out;
+        RawArray* worn = willie ? value_ptr<RawArray>(willie, STR("Worn Armor")) : nullptr;
+        if (!worn || !worn->Data) return out;
+        bool seen[17] = {};
+        for (int32_t i = 0; i < worn->Num; ++i)
+        {
+            UObject* c = reinterpret_cast<UObject**>(worn->Data)[i];
+            if (!object_alive(c)) continue;
+            Call vis(c, STR("IsVisible"));
+            if (vis.fn && vis.run())
+                if (FProperty* rp = vis.param(STR("ReturnValue")); rp && !*(vis.buffer.data() + rp->GetOffset_Internal())) continue;
+            UObject* sk = object_property(c, STR("SkeletalMeshAsset"));
+            if (!sk) sk = object_property(c, STR("SkeletalMesh"));
+            if (sk && sk->GetName() == STR("Sk_Clothing_Underwear_C")) continue;
+            RawArray* tags = value_ptr<RawArray>(c, STR("ComponentTags"));
+            if (!tags || !tags->Data) continue;
+            int slot = -1;
+            for (int32_t t = 0; t < tags->Num && slot < 0; ++t)
+            {
+                std::wstring tag = reinterpret_cast<const FName*>(tags->Data)[t].ToString();
+                for (int s = 0; s < 17; ++s)
+                    if (tag == armour_slot_name(s)) { slot = s; break; }
+            }
+            if (slot < 0 || seen[slot]) continue;
+            seen[slot] = true;
+            out.push_back({slot, c});
+        }
+        return out;
+    }
+    // Your worn piece nearest the hand (its slot's bones within radius): slot, or -1. Block Undress Slots
+    // are left out, as the game's Undress key does.
+    int armour_own_near(UObject* pawn, UObject* mesh, int side, const hsvr::Vec3& hand, double radius, UObject** comp_out, double* d_out)
+    {
+        std::vector<uint8_t> blocked;
+        if (RawArray* bl = value_ptr<RawArray>(pawn, STR("Block Undress Slots")); bl && bl->Data)
+            for (int32_t i = 0; i < bl->Num; ++i) blocked.push_back(reinterpret_cast<const uint8_t*>(bl->Data)[i]);
+        int best = -1, best_layer = -1;
+        double best_d = 1e9;
+        UObject* best_c = nullptr;
+        for (auto& [slot, c] : armour_worn(pawn))
+        {
+            if (std::find(blocked.begin(), blocked.end(), (uint8_t)slot) != blocked.end()) continue;
+            double d = armour_slot_distance(mesh, slot, hand, side);
+            if (d > radius) continue;
+            int layer = armour_layer(slot);
+            // Same bones (a tie to the cm): the outer layer. Otherwise the nearer.
+            if (best < 0 || d < best_d - 1.0 || (std::abs(d - best_d) <= 1.0 && layer > best_layer)) best = slot, best_d = d, best_layer = layer, best_c = c;
+        }
+        if (comp_out) *comp_out = best_c;
+        if (d_out) *d_out = best_d;
+        return best;
+    }
+    // Takes your own worn piece off into that hand: Remove Armor (spawned where the game spawns it), then
+    // the hand's grab given the piece, as Strip Armor From Bone does for another's (@19066, @20519).
+    bool armour_take_own(UObject* pawn, UObject* mesh, int side, int slot, const hsvr::Vec3& hand)
+    {
+        bool L = side == 0;
+        Call ra(pawn, STR("Remove Armor"));
+        if (!ra.fn)
+        {
+            HSVR_LOG("Armour: no Remove Armor function on %ls", pawn->GetName().c_str());
+            return false;
+        }
+        static bool listed = false;
+        FProperty *tp = nullptr, *sp = nullptr, *cp = nullptr, *outp = nullptr;
+        std::wstring names;
+        for (FProperty* p : ra.fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName(), k = p->GetClass().GetName();
+            names += n + STR(" (") + k + STR("), ");
+            if (n == STR("SpawnTransform")) tp = p;
+            else if (n == STR("Slot")) sp = p;
+            else if (n == STR("Disable Collision With")) cp = p;
+            else if (n == STR("Spawned Armor1")) outp = p;
+        }
+        if (!listed)
+        {
+            listed = true;
+            HSVR_LOG("Armour: Remove Armor has %ls", names.c_str());
+        }
+        if (!tp || !sp || !outp)
+        {
+            HSVR_LOG("Armour: Remove Armor's parameters not found (transform %d, slot %d, out %d)", tp != nullptr, sp != nullptr, outp != nullptr);
+            return false;
+        }
+        Call st(mesh, STR("GetSocketTransform"));
+        st.name(STR("InSocketName"), bone_fname(armour_slot_socket(slot)));
+        FProperty* rp = st.param(STR("ReturnValue"));
+        if (!st.run() || !rp || rp->GetSize() != tp->GetSize())
+        {
+            HSVR_LOG("Armour: no socket transform for %s", armour_slot_socket(slot));
+            return false;
+        }
+        memcpy(ra.buffer.data() + tp->GetOffset_Internal(), st.buffer.data() + rp->GetOffset_Internal(), tp->GetSize());
+        *(ra.buffer.data() + sp->GetOffset_Internal()) = (uint8_t)slot;
+        if (cp) *reinterpret_cast<UObject**>(ra.buffer.data() + cp->GetOffset_Internal()) = mesh;
+        ra.run();
+        UObject* spawned = *reinterpret_cast<UObject**>(ra.buffer.data() + outp->GetOffset_Internal());
+        if (!object_alive(spawned))
+        {
+            HSVR_LOG("Armour: Remove Armor on your %ls gave nothing", armour_slot_name(slot));
+            return false;
+        }
+        if (bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R"))) Call(pawn, L ? STR("Release Grab L") : STR("Release Grab R")).run();
+        // A closed hand (grip + trigger + thumb) is the game's fist weapon: gone before the hand takes the piece.
+        if (is_fist(object_property(pawn, L ? STR("Weapon L") : STR("Weapon R")))) remove_fist(side, pawn, "taking armour off");
+        set_variable(pawn, L ? STR("Carried Armor L Hand") : STR("Carried Armor R Hand"), 0.0, spawned);
+        UObject* comp = object_property(spawned, bool_property(spawned, STR("World Mesh Static")) ? STR("Armor Mesh Static") : STR("Armor Mesh Skeletal"));
+        if (!comp) comp = object_property(spawned, STR("Armor Mesh Skeletal"));
+        Call g(pawn, L ? STR("Grab Specific Object L H") : STR("Grab Specific Object R H"));
+        if (g.fn && comp)
+        {
+            for (FProperty* p : g.fn->ForEachProperty())
+                if (p->GetClass().GetName() == STR("ObjectProperty")) *reinterpret_cast<UObject**>(g.buffer.data() + p->GetOffset_Internal()) = comp;
+                else if (p->GetClass().GetName() == STR("StructProperty")) write_three(g.buffer.data() + p->GetOffset_Internal(), p, hand.x, hand.y, hand.z);
+            g.run();
+        }
+        ObjectGrab& og = g_object_grab[side];
+        og = ObjectGrab{};
+        og.component = comp;
+        og.point = hand;
+        og.since = hsvr::now_seconds();
+        og.fallback_tried = true;
+        HSVR_LOG("Armour: %s hand took off your %ls: %ls (%ls), Grabbed %d", L ? "left" : "right", armour_slot_name(slot), spawned->GetName().c_str(),
+                 comp ? comp->GetName().c_str() : STR("no mesh"), (int)bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R")));
+        return true;
+    }
+
+    void armour_tick(UObject* pawn, UObject* mesh, const hsvr::ControllerState& state, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        if (!cfg.armor_hands || !pawn || !mesh || g_kbm.load()) return;
+        double now = now_seconds();
+        for (int side = 0; side < 2; ++side)
+        {
+            bool L = side == 0;
+            const char* hand_name = L ? "left" : "right";
+            ArmourHold& a = g_armour[side];
+            // A result to read back, a moment after the game's event ran.
+            if (a.check && now >= a.check_at)
+            {
+                UObject* carried = object_property(pawn, L ? STR("Carried Armor L Hand") : STR("Carried Armor R Hand"));
+                if (a.check == 1)
+                    HSVR_LOG("Armour: %s hand put on: %ls (the piece is %ls)", hand_name,
+                             object_alive(a.check_obj) && carried == a.check_obj ? STR("NOT taken (still in the hand: its slot is blocked or needs the layer under it)") : STR("done"),
+                             object_alive(a.check_obj) ? STR("still in the world") : STR("gone into his armour"));
+                else if (a.check == 2)
+                {
+                    UObject* comp = object_property(pawn, L ? STR("Grab Component L") : STR("Grab Component R"));
+                    if (object_alive(carried))
+                    {
+                        HSVR_LOG("Armour: %s hand stripped %ls off %ls (in your hand)", hand_name, carried->GetName().c_str(),
+                                 object_alive(a.check_obj) ? a.check_obj->GetName().c_str() : STR("him"));
+                        ObjectGrab& og = g_object_grab[side];
+                        og = ObjectGrab{};
+                        og.component = comp;
+                        og.since = now;
+                        og.fallback_tried = true;
+                    }
+                    else
+                        HSVR_LOG("Armour: %s hand: nothing came off %ls (Fallen %d; the game strips only someone on the ground, and only a worn slot under the held bone; a weapon near your hand is taken instead)",
+                                 hand_name, object_alive(a.check_obj) ? a.check_obj->GetName().c_str() : STR("him"), object_alive(a.check_obj) ? (int)bool_property(a.check_obj, STR("Fallen")) : -1);
+                }
+                a.check = 0;
+            }
+            float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : state.hand[side].trigger;
+            float sq = g_fake_squeeze[side].load() >= 0.0f ? g_fake_squeeze[side].load() : state.hand[side].squeeze;
+            {
+                Vec3 hp = socket_location(mesh, bone_fname(L ? "hand_l" : "hand_r"));
+                double dt = a.last_t < 0.0 ? 0.0 : now - a.last_t;
+                if (dt > 0.0 && dt < 0.5)
+                {
+                    double v = length(hp - a.last_hand) / dt;
+                    double k = (std::min)(1.0, dt / 0.15);
+                    a.speed += (v - a.speed) * k;
+                }
+                a.last_hand = hp, a.last_t = now;
+            }
+            a.down = a.down ? trig >= cfg.armor_trigger_off : trig >= cfg.armor_trigger_on;
+            if (!a.down || sq < 0.6f)
+            {
+                if (a.mode && a.since >= 0.0 && !a.fired) HSVR_LOG("Armour: %s hand let go of the trigger after %.1f s (needs %.1f)", hand_name, now - a.since, cfg.armor_hold_s);
+                a.mode = 0, a.target = nullptr, a.since = -1.0, a.fired = false;
+                continue;
+            }
+            if (a.fired) continue;
+            // What this hand can do now.
+            int mode = 0, slot = -1;
+            UObject* target = nullptr;
+            Vec3 hb = socket_location(mesh, bone_fname(L ? "hand_l" : "hand_r"));
+            bool grabbed = bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R"));
+            UObject* carried = object_property(pawn, L ? STR("Carried Armor L Hand") : STR("Carried Armor R Hand"));
+            std::string why;
+            char buf[200];
+            if (grabbed && object_alive(carried))
+            {
+                uint8_t* sp = value_ptr<uint8_t>(carried, STR("Armor Slot"));
+                slot = sp ? *sp : -1;
+                double d = armour_slot_distance(mesh, slot, hb, side);
+                if (d <= cfg.armor_equip_cm) mode = 1, target = carried;
+                else
+                {
+                    snprintf(buf, sizeof buf, "the %ls piece is %.0f cm from its spot (bring it within %.0f)", armour_slot_name(slot), d, cfg.armor_equip_cm);
+                    why = buf;
+                }
+            }
+            else if (grabbed)
+            {
+                UObject* comp = object_property(pawn, L ? STR("Grab Component L") : STR("Grab Component R"));
+                UObject* owner = nullptr;
+                if (comp)
+                {
+                    Call oc(comp, STR("GetOwner"));
+                    oc.run();
+                    owner = oc.object_result();
+                }
+                if (owner && owner != pawn && is_a(owner, STR("Willie_BP_C"))) mode = 2, target = owner;
+            }
+            else
+            {
+                UObject* own = object_property(pawn, L ? STR("Weapon L") : STR("Weapon R"));
+                bool empty = !(own && !is_fist(own)) && !g_world[side].on && !scabbard_held(side);
+                if (empty)
+                {
+                    UObject* c = nullptr;
+                    double d = 0.0;
+                    slot = armour_own_near(pawn, mesh, side, hb, cfg.armor_take_cm, &c, &d);
+                    if (slot >= 0) mode = 3, target = c;
+                    else why = "no worn piece of yours near the hand";
+                }
+            }
+            if (mode != a.mode || target != a.target)
+            {
+                a.mode = mode, a.target = target, a.slot = slot, a.since = mode ? now : -1.0, a.last_buzz = -1.0;
+                if (mode)
+                    HSVR_LOG("Armour: %s hand, grip and trigger held: %s %ls (%ls); hold %.1f s", hand_name,
+                             mode == 1 ? "put on" : mode == 2 ? "strip" : "take off your", mode == 2 ? target->GetName().c_str() : armour_slot_name(slot),
+                             mode == 2 ? (bool_property(target, STR("Fallen")) ? STR("he is down") : STR("he is STANDING: the game will refuse")) : STR("in reach"), cfg.armor_hold_s);
+            }
+            if (!mode)
+            {
+                if (!why.empty() && now - a.why_t > 2.0)
+                {
+                    a.why_t = now;
+                    HSVR_LOG("Armour: %s hand, grip and trigger held: nothing to do (%s)", hand_name, why.c_str());
+                }
+                continue;
+            }
+            // Your own piece: the hand must stay still on it (a fist held up in a guard is grip + trigger too).
+            if (mode == 3 && a.speed > cfg.armor_take_still_cms)
+            {
+                if (now - a.since > 0.5) HSVR_LOG("Armour: %s hand moved (%.0f cm/s) while taking off your %ls: the count starts again", hand_name, a.speed, armour_slot_name(a.slot));
+                a.since = now;
+            }
+            double held = now - a.since;
+            if (held < cfg.armor_hold_s)
+            {
+                // A rising buzz while it counts down.
+                if (a.last_buzz < 0.0 || now - a.last_buzz >= 0.25)
+                {
+                    a.last_buzz = now;
+                    controllers_buzz(side, (float)(0.08 + 0.3 * held / cfg.armor_hold_s));
+                }
+                continue;
+            }
+            a.fired = true;
+            controllers_buzz(side, 0.8f);
+            if (mode == 1)
+            {
+                bool ok = Call(pawn, L ? STR("Event Equip Armor From L Hand") : STR("Event Equip Armor From R Hand")).run();
+                HSVR_LOG("Armour: %s hand puts on %ls (%ls): Event Equip Armor From %s Hand %s", hand_name, target->GetName().c_str(), armour_slot_name(a.slot),
+                         L ? "L" : "R", ok ? "called" : "MISSING");
+                a.check = 1, a.check_at = now + 1.2, a.check_obj = target;
+            }
+            else if (mode == 2)
+            {
+                bool ok = Call(pawn, L ? STR("Event Rob With L Hand") : STR("Event Rob With R Hand")).run();
+                FName* gb = value_ptr<FName>(pawn, L ? STR("Grab Bone L") : STR("Grab Bone R"));
+                HSVR_LOG("Armour: %s hand strips %ls at %ls (Fallen %d): Event Rob With %s Hand %s", hand_name, target->GetName().c_str(), gb ? gb->ToString().c_str() : STR("?"),
+                         (int)bool_property(target, STR("Fallen")), L ? "L" : "R", ok ? "called" : "MISSING");
+                a.check = 2, a.check_at = now + 0.9, a.check_obj = target;
+            }
+            else
+                armour_take_own(pawn, mesh, side, a.slot, hb);
+        }
+    }
+
     // A weapon's real shape. Its BaseMesh is a 2 cm grip dummy (SM_Grip_Dummy); the blade, grip, guard,
     // pommel or shield plate are child static meshes welded into its body, and a closest-point query
     // on the root skips welded shapes (PhysInterface_Chaos GetSquaredDistanceToBody, IsShapeBoundToBody)
@@ -16042,6 +16428,7 @@ namespace
         for (int side = 0; side < 2; ++side) check_object_grab(side, pawn);
         if (cfg.disarm) disarm_tick(pawn, cfg);
         eat_and_drink(pawn, cfg);
+        armour_tick(pawn, mesh, state, cfg);
         for (int side = 0; side < 2; ++side)
         {
             float squeeze = g_fake_squeeze[side].load() >= 0.0f ? g_fake_squeeze[side].load() : state.hand[side].squeeze;
@@ -30849,6 +31236,19 @@ namespace
         }
         else if (w == "held_l") value = object_property(pawn, STR("Weapon L")) ? 1.0 : 0.0;
         else if (w.rfind("room_", 0) == 0) known = room_value(w, value);
+        else if (w == "carried_l" || w == "carried_r") value = object_alive(object_property(pawn, w.back() == 'l' ? STR("Carried Armor L Hand") : STR("Carried Armor R Hand"))) ? 1.0 : 0.0;
+        else if (w == "worn") value = (double)armour_worn(pawn).size(); // your worn pieces (panties not counted)
+        else if (w == "foe_worn" || w == "foe_fallen")
+        {
+            // the first other Willie: his worn pieces / whether he is down
+            UObject* foe = nullptr;
+            std::vector<UObject*> all;
+            UObjectGlobals::FindAllOf(STR("Willie_BP_C"), all);
+            for (UObject* o : all)
+                if (o && o != pawn && object_alive(o) && o->GetName().rfind(STR("Default__"), 0) != 0) { foe = o; break; }
+            if (!foe) known = false;
+            else value = w == "foe_worn" ? (double)armour_worn(foe).size() : (bool_property(foe, STR("Fallen")) ? 1.0 : 0.0);
+        }
         else if (w == "grabbed_r") value = bool_property(pawn, STR("Grabbed R")) ? 1.0 : 0.0;
         else if (w == "grabbed_l") value = bool_property(pawn, STR("Grabbed L")) ? 1.0 : 0.0;
         else if (w == "letgo") value = g_count_letgo.load();
