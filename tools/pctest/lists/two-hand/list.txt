@@ -58,6 +58,10 @@ switch2_axe2h|steps-switch_axe2h.txt
 switch2_polehammer|steps-switch_polehammer.txt
 switch2_warstaff|steps-switch_warstaff.txt
 switch2_longsword|steps-switch_longsword.txt
+grip_switch_axe2h|steps-switch_axe2h.txt|pose_hold_joint_turn_couple=0
+grip_switch_polehammer|steps-switch_polehammer.txt|pose_hold_joint_turn_couple=0
+grip_switch_warstaff|steps-switch_warstaff.txt|pose_hold_joint_turn_couple=0
+grip_switch_longsword|steps-switch_longsword.txt|pose_hold_joint_turn_couple=0
 old_switch_axe2h|steps-switch_axe2h.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0
 old_switch_polehammer|steps-switch_polehammer.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0
 old_switch_warstaff|steps-switch_warstaff.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0

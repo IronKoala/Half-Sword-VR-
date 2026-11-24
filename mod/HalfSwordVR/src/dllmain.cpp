@@ -18088,7 +18088,8 @@ namespace
                                      "pull lever %.1f N m (%s); grip %.1f cm / %.0f deg off; pull %.0f N",
                                      side == 0 ? "left" : "right", weapon->GetName().c_str(), length(w_now) * 57.2958, length(target_ang) * 57.2958,
                                      length(w_next) * 57.2958, length(w_before) * 57.2958, length(ang) / DT / 1e4, back, length(lever) / DT / 1e4,
-                                     pull_once ? "joint only" : "set and joint", length(pts[0].err), el * 57.2958, length(pts[0].acc) / DT / 100.0);
+                                     pull_once ? "joint only" : "set and joint", length(pts[0].err), el * 57.2958,
+                                     pull_once ? g_pull_full[side].force_n : length(pts[0].acc) / DT / 100.0);
                         }
                     }
                     else
@@ -18265,7 +18266,13 @@ namespace
                                    side == 0 ? "left" : "right", weapon->GetName().c_str(), length(err_rot) * 57.2958, h.torque_nm, h.torque_capped ? " (cap)" : "", tmax / 1e4,
                                    length(ew) * 57.2958, length(w_next) * 57.2958);
                 }
-                Vec3 nv = have_bs_v ? bs_v : ev + cross(ew - w_next, pivot_now - com);
+                // pose_hold_joint_turn_couple: the turn set is a pure couple (the centre of mass keeps its speed), as a B&S joint's angular
+                // drive is; the joint answers at the grip in the physics. Keeping the GRIP's speed instead (0) moved the centre of mass by
+                // (spin taken off) x (grip from centre): braking a mace spinning about its head threw the whole mace at the grip's speed,
+                // and the joint turned that back into spin (8db1a93 switch cases: the set 3-10x below the read, the next read high again,
+                // the controllers still, longsword up to 1357 deg/s).
+                bool couple = cfg.pose_hold_joint_turn_couple && !have_bs_v;
+                Vec3 nv = have_bs_v ? bs_v : couple ? ev : ev + cross(ew - w_next, pivot_now - com);
                 Call slv(base, STR("SetPhysicsLinearVelocity"));
                 slv.three(STR("NewVel"), nv.x, nv.y, nv.z);
                 slv.flag(STR("bAddToCurrent"), false);
