@@ -470,8 +470,9 @@ LAYOUT = [
         ('pose_pavise_forearm', '1 = pavises strap onto the forearm (light: either arm; heavy: left arm), not held in the hand. Only with pose_pavise_strap=0.'),
         ('pose_pavise_strap', '1 = a pavise goes by its rear strap: the hand across from it takes it off your back and hangs it back; let go of the strap at the back of your other forearm to mount it there (that hand stays free); grab the strap to take it off or pass it.'),
         ('pose_pavise_mount_cm', 'How near the back of the other forearm you let go of the strap to mount a pavise (cm).'),
-        ('pose_mount_fist_grip', 'Closing the hand of the arm a shield is mounted on: 1 = takes the handle by your palm in that hand; 2 = the game\'s own forearm grip; 0 = only closes on the strap. Opening the hand leaves it mounted.'),
+        ('pose_mount_fist_grip', 'Closing the hand of the arm a shield is mounted on: 1 = the fist closes on the handle by your palm and the shield stays strapped on; 3 = the handle is taken into that hand (the strap comes off until the hand opens); 2 = the game\'s own forearm grip; 0 = only closes on the strap. Opening the hand leaves it mounted.'),
         ('pose_mount_handle_cm', 'How near your palm a mounted shield\'s handle must be for that hand to take it (cm).'),
+        ('pose_mount_head_ignore', '1 = a shield strapped on your forearm is ignored by the game\'s head-room check, as held and sheathed weapons are (else it can make Willie crouch when it goes on). 0 = off.'),
     ]),
     ('Drawing, sheathing, belt', '', [
         ('pose_draw', "1 = squeeze near a sheathed weapon's grip to draw it."),
@@ -656,6 +657,7 @@ LAYOUT = [
         ('log_frames', '1 = record every tick to logs\\frames-<time>.csv (headset, controllers, hands, held items).'),
         ('replay_capture', '1 = bug marker: hold left D-pad Left (Steam Frame; left Y on Touch, left B on Index) to save the last seconds of play to replays\\replay-<time>.csv; three strong pulses on both controllers say it is recording.'),
         ('replay_hold_s', 'How long to hold the bug-marker button (seconds). On Touch/Index it is left Y/B, whose shorter tap flips the grip.'),
+        ('jump_marker_guard_s', 'Steam Frame: a jump press (left D-pad Down) waits this long (seconds) and is dropped when the bug marker (D-pad Left) comes with it, since one thumb clicks both. 0 = no wait (a press that comes with the marker is still dropped).'),
         ('replay_before_s', 'Seconds before the press that the bug marker saves.'),
         ('replay_after_s', 'Seconds after the press that the bug marker keeps recording.'),
         ('log_input', '1 = log input: keyboard focus, Esc and menu clicks, sticks, turn speed.'),

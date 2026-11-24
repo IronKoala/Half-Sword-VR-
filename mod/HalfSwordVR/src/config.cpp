@@ -608,6 +608,7 @@ namespace hsvr
         num("pose_pavise_mount_cm", c.pose_pavise_mount_cm);
         integer("pose_mount_fist_grip", c.pose_mount_fist_grip);
         num("pose_mount_handle_cm", c.pose_mount_handle_cm);
+        flag("pose_mount_head_ignore", c.pose_mount_head_ignore);
         flag("pose_two_hand", c.pose_two_hand);
         num("pose_two_hand_strength", c.pose_two_hand_strength);
         num("pose_two_hand_blade_gap_cm", c.pose_two_hand_blade_gap_cm);
@@ -626,6 +627,7 @@ namespace hsvr
         flag("log_frames", c.log_frames);
         flag("replay_capture", c.replay_capture);
         num("replay_hold_s", c.replay_hold_s);
+        num("jump_marker_guard_s", c.jump_marker_guard_s);
         num("replay_before_s", c.replay_before_s);
         num("replay_after_s", c.replay_after_s);
         flag("pose_keep_scabbard_on_drop", c.pose_keep_scabbard_on_drop);
