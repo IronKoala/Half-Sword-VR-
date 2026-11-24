@@ -2259,6 +2259,10 @@ namespace
         bool have_floor[2] = {false, false};
         hsvr::Vec3 target_prev_world[2];
         hsvr::Vec3 target_prev_cs[2]; // where the foot was sent last frame, his component space (unscaled)
+        bool locked[2] = {false, false}; // foot lock (world spot while the clip has the foot planted)
+        hsvr::Vec3 anchor[2], ease_off[2];
+        double ease_t[2] = {1.0, 1.0};
+        double lock_gap_worst = 0.0;     // for the log: farthest a locked/easing foot was from the clip's spot (cm)
         bool target_prev_ok[2] = {false, false};
         // log stats since the last line
         double slip_sum = 0.0, slip_worst = 0.0;
@@ -2275,7 +2279,8 @@ namespace
         double chest_sum = 0, chest_worst = 0; int chest_n = 0;
         double hips_sum = 0; int hips_n = 0;
         double moving_sum = 0; int moving_n = 0;
-        double floor_gap_worst = 0; // planted foot's drawn ankle above (or below: negative kept as abs) the floor plus its clip height
+        double floor_gap_worst = 0;
+        double lock_gap_sum = 0, lock_gap_worst = 0; int lock_gap_n = 0; // locked foot vs the clip's own spot, cm // planted foot's drawn ankle above (or below: negative kept as abs) the floor plus its clip height
     };
     CrouchAnimStats g_canim_stats;
     void crouch_anim_stats_reset() { g_canim_stats = CrouchAnimStats{}; g_canim_frames.store(0); }
@@ -2521,6 +2526,8 @@ namespace
                 if (std::string(b) == "pelvis" || std::string(b).rfind("foot", 0) != 0) node_release(*n);
             }
         A.target_prev_ok[0] = A.target_prev_ok[1] = false;
+        A.locked[0] = A.locked[1] = false;
+        A.ease_t[0] = A.ease_t[1] = 1.0;
     }
 
     // Called at the end of feet_after_anim_update (his animation update, after the body pose).
@@ -2688,8 +2695,49 @@ namespace
                 foot_rel.y = m.y + (foot_rel.y - m.y) * k;
             }
             Vec3 F{pelvis_cs.x + foot_rel.x, pelvis_cs.y + foot_rel.y, 0.0};
-            // The floor under that spot (looking through him, weapons and people), from a step above his last floor.
             Vec3 Fw = loc + crot.rotate(F * scale);
+            // Foot lock: while the clip has this foot planted it stays on its spot on the floor, so his body
+            // turning or a speed the clips don't match can't drag it; when it lifts, it eases from that spot
+            // back onto the clip's path over 0.15 s. Let go early if the clip's spot runs 30 cm from it.
+            {
+                bool planted = pose.planted[s] > 0.5 && A.fade > 0.0;
+                Vec3 flat_t{Fw.x, Fw.y, 0.0};
+                if (planted)
+                {
+                    if (!A.locked[s]) { A.locked[s] = true; A.anchor[s] = flat_t; }
+                    else if (length(A.anchor[s] - flat_t) > 30.0 * scale)
+                    {
+                        A.locked[s] = false;
+                        A.ease_off[s] = A.anchor[s] - flat_t;
+                        A.ease_t[s] = 0.0;
+                    }
+                }
+                else if (A.locked[s])
+                {
+                    A.locked[s] = false;
+                    A.ease_off[s] = A.anchor[s] - flat_t;
+                    A.ease_t[s] = 0.0;
+                }
+                Vec3 use = flat_t;
+                if (A.locked[s]) use = A.anchor[s];
+                else if (A.ease_t[s] < 0.15)
+                {
+                    double u = A.ease_t[s] / 0.15;
+                    use = flat_t + A.ease_off[s] * (1.0 - u * u * (3.0 - 2.0 * u));
+                    A.ease_t[s] += dt;
+                }
+                A.lock_gap_worst = (std::max)(A.lock_gap_worst, length(use - flat_t) / scale);
+                if (A.fade >= 1.0 && A.locked[s])
+                {
+                    double g = length(use - flat_t) / scale;
+                    g_canim_stats.lock_gap_sum += g, ++g_canim_stats.lock_gap_n;
+                    g_canim_stats.lock_gap_worst = (std::max)(g_canim_stats.lock_gap_worst, g);
+                }
+                Fw.x = use.x, Fw.y = use.y;
+                Vec3 back = cinv.rotate(Vec3{Fw.x - loc.x, Fw.y - loc.y, 0.0}) * (1.0 / scale);
+                F.x = back.x, F.y = back.y;
+            }
+            // The floor under that spot (looking through him, weapons and people), from a step above his last floor.
             double from_z = A.have_floor[s] ? A.floor_z[s] + 40.0 * scale : socket_location(driver, bone_fname("pelvis")).z;
             if (g_feet[s].have_ground) from_z = (std::min)(from_z, g_feet[s].ground_z - g_pose.ankle_height[s] + 40.0 * scale);
             double fz = 0.0;
@@ -2780,10 +2828,10 @@ namespace
                 if (walk_w[i] > 0.05) { char part[32]; std::snprintf(part, sizeof(part), " %s %.2f", wn[i], walk_w[i]); top += part; }
             double hips_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(hips.w))) * kRadToDeg;
             HSVR_LOG("CrouchAnim: shown %.2f, head %.2f of standing (%.0f cm down, legs %.0f), moving %.2f at %.0f cm/s (%.0f, %.0f) walk[%s ] phase %.2f x%.2f stride x%.2f; "
-                     "still: L %.2f loop %.2f R %.2f (turn %.0f deg/s); hips turned %.0f deg; planted foot slides %.1f cm/s mean, %.1f worst; leg short of the floor %.1f cm",
+                     "still: L %.2f loop %.2f R %.2f (turn %.0f deg/s); hips turned %.0f deg; planted foot slides %.1f cm/s mean, %.1f worst; leg short of the floor %.1f cm; locked foot off the clip's spot %.1f cm worst",
                      A.fade, h, g_crouch_want_cm, g_crouch_drop, A.moving, speed, A.vel.x, A.vel.y, top.c_str(), A.walk_phase, walk_rate, stride, idle_w[0], idle_w[1], idle_w[2],
-                     A.yaw_rate, hips_deg, A.slip_n ? A.slip_sum / A.slip_n : 0.0, A.slip_worst, A.reach_short_worst);
-            A.slip_sum = A.slip_worst = A.reach_short_worst = 0.0;
+                     A.yaw_rate, hips_deg, A.slip_n ? A.slip_sum / A.slip_n : 0.0, A.slip_worst, A.reach_short_worst, A.lock_gap_worst);
+            A.slip_sum = A.slip_worst = A.reach_short_worst = A.lock_gap_worst = 0.0;
             A.slip_n = 0;
         }
     }
@@ -30842,6 +30890,8 @@ namespace
             else if (w == "canim_chest") value = mean(S.chest_sum, S.chest_n); // chest turned off his body's heading, deg mean
             else if (w == "canim_chest_worst") value = S.chest_worst;
             else if (w == "canim_hips") value = mean(S.hips_sum, S.hips_n);    // the clips' hip turn shown, deg mean
+            else if (w == "canim_lock_gap") value = mean(S.lock_gap_sum, S.lock_gap_n); // locked foot off the clip's spot, cm mean
+            else if (w == "canim_lock_gap_worst") value = S.lock_gap_worst;
             else if (w == "canim_moving") value = mean(S.moving_sum, S.moving_n); // walking tree share, mean
             else known = false;
         }
