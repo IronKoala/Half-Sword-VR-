@@ -1,0 +1,43 @@
+0.5:hsvr.fake_head_drop 0
+0.7:hsvr.watch_vars all
+1:hsvr.squeeze 1 1
+1.5:hsvr.squeeze 1 0
+2.5:hsvr.clear_belt
+3:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Shield_Pavise_Light.Shield_Pavise_Light_C
+4.5:hsvr.sheathe_spawn 2
+6:hsvr.arm_move 1
+7:hsvr.slot_state
+7.2:hsvr.hand_at 1 strap 0
+10.7:hsvr.squeeze 1 1
+10.8:hsvr.wait strap_r = 1 2 0 in the hand by the strap
+10.9:hsvr.expect strap_r = 1 B1: in the hand by the strap
+10.9:hsvr.expect mount_r = 0 B1: not on the forearm
+10.9:hsvr.hand_at 1 off 0
+13.4:hsvr.slot_state
+13.6:hsvr.hand_at 1 forearm 6
+17.6:hsvr.slot_state
+17.8:hsvr.squeeze 1 0
+19.3:hsvr.hand_at 1 off 0
+21.3:hsvr.expect mount_l = 1 B3: on the other forearm
+21.3:hsvr.expect item_r = 0 B3: let go
+21.3:hsvr.expect item_l = 0 B3: Weapon of that side stays None
+21.8:hsvr.slot_state
+22.8:hsvr.slot_state
+24.8:hsvr.slot_state
+25:hsvr.arm_move 1
+26:hsvr.slot_state
+26.2:hsvr.squeeze 0 1
+26.8:hsvr.expect mount_handle_l = 1 grip: fist on its handle
+26.8:hsvr.expect mount_l = 1 grip: still strapped
+27:hsvr.hand_at 1 strap 0
+30.5:hsvr.squeeze 1 1
+30.6:hsvr.wait strap_r = 1 2 0 in the right hand by the strap
+30.7:hsvr.expect strap_r = 1 unmount: the other hand took it by its back strap
+30.7:hsvr.expect mount_l = 0 unmount: off the forearm
+30.7:hsvr.expect held_l = 0 unmount: the left fist does not hold it
+30.8:hsvr.hand_at 1 off 0
+31.2:hsvr.squeeze 0 0
+32.5:hsvr.expect strap_r = 1 unmount: the left opening does nothing to it
+32.5:hsvr.expect mount_l = 0 unmount: not mounted again
+32.6:hsvr.slot_state
+33.5:quit

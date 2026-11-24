@@ -1,0 +1,52 @@
+0.5:hsvr.fake_head_drop 0
+0.7:hsvr.watch_vars all
+1:hsvr.squeeze 1 1
+1.5:hsvr.squeeze 1 0
+2.5:hsvr.clear_belt
+3:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Shield_Pavise_Light.Shield_Pavise_Light_C
+4.5:hsvr.sheathe_spawn 2
+6:hsvr.arm_move 1
+7:hsvr.slot_state
+7.2:hsvr.hand_at 1 strap 0
+10.7:hsvr.squeeze 1 1
+10.8:hsvr.wait strap_r = 1 2 0 in the hand by the strap
+10.9:hsvr.expect strap_r = 1 B1: in the hand by the strap
+10.9:hsvr.expect mount_r = 0 B1: not on the forearm
+10.9:hsvr.hand_at 1 off 0
+13.4:hsvr.slot_state
+13.6:hsvr.hand_at 1 forearm 6
+17.6:hsvr.slot_state
+17.8:hsvr.squeeze 1 0
+19.3:hsvr.hand_at 1 off 0
+21.3:hsvr.expect mount_l = 1 B3: on the other forearm
+21.3:hsvr.expect item_r = 0 B3: let go
+21.3:hsvr.expect item_l = 0 B3: Weapon of that side stays None
+21.8:hsvr.slot_state
+22.8:hsvr.slot_state
+24.8:hsvr.slot_state
+25:hsvr.arm_move 1
+25.5:hsvr.squeeze 1 1
+26:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Tiers/ModularWeaponBP_Hafted_Mid_Tier_Long.ModularWeaponBP_Hafted_Mid_Tier_Long_C
+27.5:hsvr.expect held_r = 1 weapon in the right hand
+27.6:hsvr.expect mount_l = 1 still strapped on the left forearm
+28:hsvr.arm_move 7 30
+30:hsvr.squeeze 0 1
+32:hsvr.expect two_hand = 1 left hand took it as the second hand
+32:hsvr.expect mount_l = 1 two hands: pavise still strapped
+32.1:hsvr.two_reset
+34:hsvr.expect two_line_max < 44 static: weapon on the hands line (no shield knocks)
+34:hsvr.expect mount_off_l < 5 static: pavise on its place
+34.1:hsvr.arm_move 2
+34.2:hsvr.two_reset
+38.5:hsvr.expect two_hand = 1 slow swing: still held
+38.5:hsvr.expect two_line_max < 61 slow swing: weapon on the hands line
+38.5:hsvr.expect mount_l = 1 slow swing: pavise still strapped
+38.5:hsvr.expect mount_off_l < 6 slow swing: pavise on its place
+38.6:hsvr.arm_move 3
+38.7:hsvr.two_reset
+42.5:hsvr.expect two_hand = 1 fast swing: still held
+42.5:hsvr.expect two_line_max < 57 fast swing: weapon on the hands line
+42.5:hsvr.expect mount_l = 1 fast swing: pavise still strapped
+42.5:hsvr.expect mount_off_l < 8 fast swing: pavise on its place
+42.6:hsvr.arm_move 1
+44:quit
