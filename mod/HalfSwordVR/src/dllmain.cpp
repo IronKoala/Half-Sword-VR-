@@ -548,6 +548,7 @@ namespace
     void item_watch_tick(UObject* pawn);
     void leg_guard_tick(UObject* pawn, UObject* mesh, const hsvr::Config& cfg);
     void chain_calm_tick(UObject* pawn, const hsvr::Config& cfg);
+    void arm_hanging_tick(UObject* pawn);
     bool provide_anchor(hsvr::PlayerAnchor& out)
     {
         if (!g_engine) return false;
@@ -4622,6 +4623,7 @@ namespace
         item_watch_tick(pawn);
         leg_guard_tick(pawn, object_property(pawn, STR("Mesh")), cfg);
         chain_calm_tick(pawn, cfg);
+        arm_hanging_tick(pawn);
         {
             // pose_capsule_no_push: the engine's character physics interaction off (touch impulses and repulsion on loose
             // things by the capsule); the game's own push factors are already 0. Set once per pawn, and back when switched off.
@@ -5830,6 +5832,9 @@ namespace
         std::vector<UObject*> joints;
         double dropped_at = -1.0; // let go of by a plain let-go at this time: kept until it is clear of him
         std::vector<UObject*> cm_joints; // that dropped item's no-collide pairs with his CM_* armour proxies
+        std::vector<FName> bones;        // his bones the weapon was paired with (its hanging bodies get the same, see arm_hanging_tick)
+        std::vector<UObject*> hanging;   // its hanging bodies already paired
+        double made_at = -1.0;
     };
     ArmIgnore g_arm_ignore[2];
     UObject* arm_ignore_weapon(int side) { return g_arm_ignore[side].weapon; }
@@ -5982,6 +5987,9 @@ namespace
         g_arm_ignore[side].cm_joints.clear();
         g_arm_ignore[side].weapon = nullptr;
         g_arm_ignore[side].dropped_at = -1.0;
+        g_arm_ignore[side].bones.clear();
+        g_arm_ignore[side].hanging.clear();
+        g_arm_ignore[side].made_at = -1.0;
     }
 
     // His armour proxies (spheres the game keeps on him, channel 20, blocking weapons): a dropped item is
@@ -6128,11 +6136,14 @@ namespace
             join.name(STR("BoneName2"), bone);
             join.run();
             g_arm_ignore[side].joints.push_back(j);
+            g_arm_ignore[side].bones.push_back(bone);
             names += bone.ToString() + STR(" ");
             for (UObject* h : hanging)
                 if (UObject* hj = no_collision_pair(pawn, cls, h, mesh, bone)) g_arm_ignore[side].joints.push_back(hj);
         }
         if (!hanging.empty()) HSVR_LOG("Grip: %zu hanging bodies of the weapon paired with the same bones", hanging.size());
+        g_arm_ignore[side].hanging = hanging;
+        g_arm_ignore[side].made_at = hsvr::now_seconds();
         HSVR_LOG("Grip: %s weapon no longer collides with: %ls", side == 0 ? "left" : "right", names.empty() ? STR("(no forearm bodies found)") : names.c_str());
     }
 
@@ -7900,6 +7911,41 @@ namespace
         if (item && !gone(item)) HSVR_LOG("Legs: %ls collides with his legs again (%s)", item->GetName().c_str(), why);
         g.joints.clear();
     }
+    // A weapon given straight into the hand can have no hanging bodies in the parts list yet when its pairs are made (run 28
+    // lantern_hold, 3rd lantern of a launch: none paired, "hanging: none", it trailed 16-17 cm; the other three 0.8-2.4 cm).
+    // So for 3 s after, every 0.25 s, any hanging body not yet paired gets the same bones.
+    void arm_hanging_tick(UObject* pawn)
+    {
+        static double last = -1.0;
+        double now = hsvr::now_seconds();
+        if (now - last < 0.25 || !pawn) return;
+        last = now;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+        if (!mesh || !cls) return;
+        for (int side = 0; side < 2; ++side)
+        {
+            ArmIgnore& a = g_arm_ignore[side];
+            if (!a.weapon || gone(a.weapon) || a.bones.empty() || a.dropped_at >= 0.0 || now - a.made_at > 3.0) continue;
+            UObject* base = object_property(a.weapon, STR("BaseMesh"));
+            if (!base) continue;
+            std::vector<UObject*> tree, scab;
+            attached_meshes(base, nullptr, tree, 0);
+            attached_meshes(object_property(a.weapon, STR("Scabbard")), nullptr, scab, 0);
+            int added = 0;
+            for (UObject* c : static_parts_of(a.weapon))
+            {
+                if (std::find(tree.begin(), tree.end(), c) != tree.end() || std::find(scab.begin(), scab.end(), c) != scab.end()) continue;
+                if (std::find(a.hanging.begin(), a.hanging.end(), c) != a.hanging.end() || !physics_collides(c)) continue;
+                for (FName b : a.bones)
+                    if (UObject* j = no_collision_pair(pawn, cls, c, mesh, b)) a.joints.push_back(j);
+                a.hanging.push_back(c);
+                ++added;
+            }
+            if (added) HSVR_LOG("Grip: %s weapon: %d more hanging bodies found and paired (%.2f s after its pairs)", side == 0 ? "left" : "right", added, now - a.made_at);
+        }
+    }
+
     // ---- Chain items (pose_chain_no_self_collision, pose_chain_damping) ---------------------------------
     // A chain lantern's lamp and Link 1-4 hang on PhysicsConstraint1-6, bodies of their own outside BaseMesh's weld tree. Run 26
     // (2741646): spawned on the floor 45 cm from him, nothing of his touching it in 10 of 12 runs, it rolled 0.5-2.6 m and sped up
@@ -25499,6 +25545,8 @@ namespace
             g_pending_free[side] = FreeGrip{};
             g_arm_ignore[side].joints.clear();
             g_arm_ignore[side].weapon = nullptr;
+            g_arm_ignore[side].bones.clear();
+            g_arm_ignore[side].hanging.clear();
         }
         g_two = TwoHand{};
         g_anim_grip_two_side = -1;

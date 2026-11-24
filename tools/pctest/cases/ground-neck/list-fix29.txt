@@ -1,0 +1,9 @@
+# Held chain lantern, several per launch (run 28: the 3rd in a launch got no hanging pairs and trailed 18 cm)
+lantern_hold_a|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold_still_a|steps-lantern_hold_still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold_b|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold_still_b|steps-lantern_hold_still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold_c|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold_still_c|steps-lantern_hold_still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold_d|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold_still_d|steps-lantern_hold_still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
