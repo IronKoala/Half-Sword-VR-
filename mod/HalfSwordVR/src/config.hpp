@@ -798,6 +798,7 @@ namespace hsvr
         // game's own forearm grip; 0 only closes the hand on the strap. Opening it leaves the shield mounted.
         int pose_mount_fist_grip = 1;
         double pose_mount_handle_cm = 8.0;
+        double pose_mount_forward_cm = 16.0; // the forward grip (light pavise upright handle, heavy centre handle) is taken within this of the palm, the shield slid so it sits in the hand (Matthew 11-24)
         // A shield on his forearm goes in his Ignore Pick Up Array, as a held or sheathed weapon does, so the
         // game's head-room trace doesn't hit it and crouch him (Head Hitting Ceiling).
         bool pose_mount_head_ignore = true;
