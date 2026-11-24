@@ -2327,7 +2327,8 @@ namespace
     bool hand_rides_grab(int side);
     bool hand_on_scenery(int side); // the hand is pinned on fixed scenery (a world grab)
     bool hand_has_weapon(int side); // the game's hold has a weapon in this hand (his fist doesn't count)
-    UObject* held_weapon_of(int side); // the weapon the mod's hold has in this hand (or null)
+    UObject* held_weapon_of(int side);
+    hsvr::Vec3 g_thumb_world[2]; // each hand's thumb-ward line through the fist this frame (the grip's direction on a handle) // the weapon the mod's hold has in this hand (or null)
     double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part);
     bool hand_is_fist(int side);    // the game's hold has his fist in this hand
     bool g_wrap_on_side(int side);
@@ -2351,6 +2352,16 @@ namespace
     std::atomic<double> g_two_wrist_sum{0.0}, g_two_lag_sum{0.0}; // sums since hsvr.two_reset: weapon off the main wrist (deg), main grip off its hand (cm)
     std::atomic<double> g_two_turn_sum{0.0}, g_two_hlag_sum{0.0}; // the main hold's turn_deg and lag (the replay's columns), summed
     std::atomic<int> g_two_mean_n{0};
+    // Test measure (hsvr.expect one_gap_r_* / one_turn_r_*, cleared by hsvr.two_reset): one hand's grip gap (cm) and turn off the hand (deg)
+    // each tick, binned by the hand's speed as B&S's logs are (bs_hold_measured.md: under 1, 1-3, over 3 m/s), for medians.
+    std::mutex g_one_bins_mu;
+    std::vector<double> g_one_gap[2][3], g_one_turn[2][3];
+    double one_bin_median(std::vector<double> v)
+    {
+        if (v.empty()) return -1.0;
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    }
     std::atomic<int> g_two_ticks{0}, g_two_revs{0}, g_two_revs_own{0}; // two-hand ticks since hsvr.two_reset, those where the weapon's spin reversed (jitter), and those not matched by his hands' own reversal
     std::atomic<double> g_two_spin_max{0.0}; // deg/s, the weapon's worst sustained spin (least of 3 ticks) since hsvr.two_reset (test measure)
     std::atomic<double> g_held_spin[2] = {0.0, 0.0};     // deg/s, each hand's held weapon's spin this tick (test measure)
@@ -3389,6 +3400,7 @@ namespace
         double k = cfg.pose_knuckle_deg * 3.14159265358979323846 / 180.0;
         Vec3 fingers_world = hand_grip.rotate(Vec3{std::sin(k), 0.0, -std::cos(k)});
         Vec3 thumb_world = hand_grip.rotate(Vec3{std::cos(k), 0.0, std::sin(k)});
+        g_thumb_world[side] = thumb_world;
         Quat Wh = (quat_from_two(fingers_world, thumb_world) * quat_from_two(a.fingers_local, a.thumb_local).inverse()).normalized();
         g_pose.hand_rot[side] = Wh;
         g_pose.hand_valid[side] = true;
@@ -18467,6 +18479,28 @@ namespace
                     }
                     // (solve_pulls: the whole motion is this solve's, as the old B&S hold's: gravity this frame in, taken off after,
                     // the physics adds it; the joints pull nothing. Off: only the spin is kept and the joints pull in the physics.)
+                    // B&S (Handle.cs:1778/1783): two grips facing opposite ways along the handle (one hand reversed, as on a spear
+                    // taken thumbs toward each other) turn it at x0.1 (220 / 9 / 50): neither wrist can lever it against the other.
+                    double opp = 1.0;
+                    {
+                        static bool was_opp = false;
+                        static UObject* opp_for = nullptr;
+                        if (opp_for != weapon) was_opp = false, opp_for = weapon;
+                        double sc = cfg.pose_two_hand_bs_opposite_scale;
+                        if (sc > 0.0 && sc < 1.0)
+                        {
+                            Vec3 ax = normalized(rot.rotate(Vec3{0.0, 0.0, 1.0}));
+                            double d1 = dot(normalized(g_thumb_world[side]), ax), d2 = dot(normalized(g_thumb_world[g_two.second]), ax);
+                            bool now_opp = was_opp;
+                            if (std::fabs(d1) > 0.3 && std::fabs(d2) > 0.3) now_opp = d1 * d2 < 0.0; // (between: as before)
+                            if (now_opp != was_opp)
+                                HSVR_LOG("Two hands: %ls grips %s (thumbs %.2f / %.2f along it): turn x%.2f", weapon->GetName().c_str(),
+                                         now_opp ? "face opposite ways" : "face the same way", d1, d2, now_opp ? sc : 1.0);
+                            was_opp = now_opp;
+                            if (now_opp) opp = sc;
+                        }
+                    }
+                    tmax *= opp;
                     bool own = cfg.pose_two_hand_bs_solve_pulls;
                     Vec3 gravity{0.0, 0.0, g_weapon_gravity.load() == 0 ? 0.0 : -980.0};
                     Vec3 vb = own ? ev + gravity * DTb : ev, wb = ew, ang;
@@ -18474,7 +18508,7 @@ namespace
                     // comes from the physics step once, not also from this set. Three of his runaway spins (2026-11-23 markers 4/5, 9/10, 11)
                     // came 0.8-1.1 s after a switch between one and two hands.)
                     bs_solve(mass, about_com.inverse(), vb, wb, pts, (!own && cfg.pose_hold_joint_pull_once) ? 0 : 2, err_rot, tang,
-                             cfg.pose_two_hand_bs_rot_k * stb * 1e4, cfg.pose_two_hand_bs_rot_c * stb * 1e4, tmax, DTb, (std::max)(1, cfg.pose_bs_iterations), ang);
+                             cfg.pose_two_hand_bs_rot_k * stb * opp * 1e4, cfg.pose_two_hand_bs_rot_c * stb * opp * 1e4, tmax, DTb, (std::max)(1, cfg.pose_bs_iterations), ang);
                     w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
                     if (own) bs_v = clamp_length(vb - gravity * DTb, 2000.0), have_bs_v = true;
                     h.torque_nm = length(ang) / DTb / 1e4;
@@ -18602,6 +18636,22 @@ namespace
             h.far_since = -1.0;
         Quat dq = (target_rot * rot.inverse()).normalized();
         h.turn_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(dq.w))) * 180.0 / 3.14159265358979;
+        {
+            // (test measure one_gap_r_* / one_turn_r_*: one hand only, not sliding or drawing; the hand's own speed, unsmoothed)
+            static Vec3 prev_tp[2];
+            static double prev_tt[2] = {-1.0, -1.0};
+            double tn = now_seconds();
+            bool one = !(g_two.active && g_two.weapon == weapon) && !h.handle_slide && !(g_draw[side].active && g_draw[side].weapon == weapon);
+            if (one && prev_tt[side] > 0.0 && tn - prev_tt[side] > 1e-4 && tn - prev_tt[side] < 0.1)
+            {
+                double sp = length(target_pivot - prev_tp[side]) / (tn - prev_tt[side]) / 100.0; // m/s
+                int b = sp < 1.0 ? 0 : sp < 3.0 ? 1 : 2;
+                std::lock_guard<std::mutex> lk(g_one_bins_mu);
+                if (g_one_gap[side][b].size() < 200000) g_one_gap[side][b].push_back(h.lag), g_one_turn[side][b].push_back(h.turn_deg);
+            }
+            prev_tp[side] = target_pivot;
+            prev_tt[side] = tn;
+        }
     }
 
     // The kick hunt (kick-test1): the game's Check Stuck In Static Mesh (MW @77374), run on a 1 s
@@ -29266,6 +29316,15 @@ namespace
         else if (w == "two_turn_mean") value = g_two_mean_n.load() > 0 ? g_two_turn_sum.load() / g_two_mean_n.load() : 0.0;
         else if (w == "two_hold_lag_mean") value = g_two_mean_n.load() > 0 ? g_two_hlag_sum.load() / g_two_mean_n.load() : 0.0;
         else if (w == "two_off_max") value = g_two_off_cm.load();
+        else if (w.rfind("one_gap_r_", 0) == 0 || w.rfind("one_turn_r_", 0) == 0 || w.rfind("one_n_r_", 0) == 0)
+        {
+            // one hand (right), by the hand's speed: _slow under 1 m/s, _mid 1-3, _fast over 3 (B&S's bins); median cm / deg, or the tick count
+            std::string bin = w.substr(w.rfind('_') + 1);
+            int b = bin == "slow" ? 0 : bin == "mid" ? 1 : 2;
+            std::lock_guard<std::mutex> lk(g_one_bins_mu);
+            if (w.rfind("one_n_r_", 0) == 0) value = (double)g_one_gap[1][b].size();
+            else value = one_bin_median(w.rfind("one_gap_r_", 0) == 0 ? g_one_gap[1][b] : g_one_turn[1][b]);
+        }
         else if (w == "two_line") value = g_two_line_now.load();
         else if (w == "two_off") value = g_two_off_now.load();
         else if (w == "two_gap")
@@ -31615,6 +31674,11 @@ namespace
                 g_two_mean_n.store(0);
                 g_two_turn_sum.store(0.0);
                 g_two_hlag_sum.store(0.0);
+                {
+                    std::lock_guard<std::mutex> lk(g_one_bins_mu);
+                    for (int i = 0; i < 2; ++i)
+                        for (int b = 0; b < 3; ++b) g_one_gap[i][b].clear(), g_one_turn[i][b].clear();
+                }
                 HSVR_LOG("Script: hsvr.two_reset");
                 continue;
             }

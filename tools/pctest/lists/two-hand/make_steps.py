@@ -246,6 +246,31 @@ PARK_STEPS = """6:hsvr.arm_move 7 {along}
 10.1:quit
 """
 
+# One hand with his recorded motion (right controller of each track), B&S-pure (pose_hold_bs_pure=1) vs our tuned hold (2026-11-24):
+# one_gap_r_* / one_turn_r_* = medians of the grip gap (cm) and turn off the hand (deg) by the hand's speed. B&S's own medians
+# (bs_hold_measured.md, n 9092 / 4682 / 1715 ticks): under 1 m/s 2.0 cm / 6.9 deg, 1-3 m/s 6.8 / 16.3, over 3 m/s 14.6 / 32.9.
+# All report-only (< 1000) but the hold itself.
+ONE_WEAPONS = ["longsword", "mace", "axe2h"]
+ONE_TRACKS = [("waggle", "sword2h-waggle.csv"), ("polearm", "polearm.csv"), ("mace", "mace2h.csv")]
+ONE_STEPS = """6:hsvr.ctl_replay {track} 0.5
+7.1:hsvr.hold_rebase 1
+7.3:hsvr.two_reset
+7.3:hsvr.spin_reset 1
+17.3:hsvr.expect held_r = 1 his motion: still held
+17.3:hsvr.expect one_n_r_slow < 1000000 (report) ticks under 1 m/s
+17.3:hsvr.expect one_n_r_mid < 1000000 (report) ticks 1-3 m/s
+17.3:hsvr.expect one_n_r_fast < 1000000 (report) ticks over 3 m/s
+17.3:hsvr.expect one_gap_r_slow < 1000 (report) median cm under 1 m/s (B&S 2.0)
+17.3:hsvr.expect one_gap_r_mid < 1000 (report) median cm 1-3 m/s (B&S 6.8)
+17.3:hsvr.expect one_gap_r_fast < 1000 (report) median cm over 3 m/s (B&S 14.6)
+17.3:hsvr.expect one_turn_r_slow < 1000 (report) median deg under 1 m/s (B&S 6.9)
+17.3:hsvr.expect one_turn_r_mid < 1000 (report) median deg 1-3 m/s (B&S 16.3)
+17.3:hsvr.expect one_turn_r_fast < 1000 (report) median deg over 3 m/s (B&S 32.9)
+17.3:hsvr.expect held_spin_max_r < 100000 (report) worst sustained spin deg/s
+17.4:hsvr.ctl_replay off
+18:quit
+"""
+
 
 def main():
     rows = []
@@ -303,6 +328,12 @@ def main():
     for weapon, along in PARK:
         (HERE / ("steps-park_%s.txt" % weapon)).write_text(HEAD.format(path=paths[weapon]) + PARK_STEPS.format(along=along), newline="\n")
         park.append(weapon)
+    one = []
+    for weapon in ONE_WEAPONS:
+        for tname, track in ONE_TRACKS:
+            n = "%s_%s" % (weapon, tname)
+            (HERE / ("steps-one_%s.txt" % n)).write_text(HEAD.format(path=paths[weapon]) + ONE_STEPS.format(track=tracks + "\\" + track), newline="\n")
+            one.append(n)
     lst = ["# Two hands with real-hand conditions (playtest 2026-11-23); two hands are held as B&S holds them (pose_two_hand_bs=1).",
            "# rp_: his own recorded controller motion. ctl_: the same cases in the previous line mode (pose_two_hand_bs=0), for comparison."]
     lst += ["two_%s|steps-%s.txt" % (n, n) for n in rows]
@@ -332,6 +363,11 @@ def main():
     lst += ["old_reach2_%s|steps-reach_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in reach]
     # (auto slide is off by default since Matthew 2026-11-24 00:08Z chose B&S's trigger-only slide; these turn it on)
     lst += ["auto_%s|steps-auto_%s.txt|pose_two_hand_auto_slide_cm=10" % (n, n) for n in auto]
+    # (B&S-pure one hand, 2026-11-24: one_ = our tuned hold, pure_one_ = pose_hold_bs_pure=1; pure_switch_ / pure_reach_ = the spin gates with it on)
+    lst += ["one_%s|steps-one_%s.txt" % (n, n) for n in one]
+    lst += ["pure_one_%s|steps-one_%s.txt|pose_hold_bs_pure=1" % (n, n) for n in one]
+    lst += ["pure_switch_%s|steps-switch_%s.txt|pose_hold_bs_pure=1" % (n, n) for n in switch]
+    lst += ["pure_reach_%s|steps-reach_%s.txt|pose_hold_bs_pure=1" % (n, n) for n in reach]
     (HERE / "list.txt").write_text("\n".join(lst) + "\n", newline="\n")
     print("wrote %d cases (+%d control)" % (len(rows), len(rows)))
 

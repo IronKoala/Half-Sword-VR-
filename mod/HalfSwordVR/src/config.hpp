@@ -570,6 +570,12 @@ namespace hsvr
         // its speed (before 2026-11-24), which could turn braking a spin into a throw the joint then turned back into spin.
         bool pose_hold_joint_turn_couple = true;
         // A weapon held in one hand collides with the free hand (B&S: the free hand stays solid). 0 = the free arm is ignored too.
+        // One hand held exactly as Blade & Sorcery holds it (bs_vs_hsvr_hold.md, docs/bs-melee-reference.md; Matthew 2026-11-24
+        // 03:56Z: "getting the weapons to handle and physicaly behave like blade and sorcery"): B&S's fixed spring 5000 N/m, 100,
+        // 3000 N and turn 1100 N m/rad, 45, 250 N m (caps still x his strength), with none of our layers: no arm lag or heft lag,
+        // no shoulder cap, no weight carried outside the cap, no smoothing of the hand's speed, no wrist stop, spin brake or
+        // turn-by-grip limit. On, it overrides those settings when the ini is read. 0 = our hold as tuned.
+        bool pose_hold_bs_pure = false;
         bool pose_hold_free_hand_collides = false; // (0 since 2026-11-24: a free hand parked beside a held axe set it wobbling at ~500 deg/s; 0 = 0.4)
         double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)
         bool pose_hold_joint_draw_wound = true; // drawing/sheathing and a blade in a wound stay on the joint (sent where the old rules put it)
@@ -585,7 +591,8 @@ namespace hsvr
         double pose_two_hand_bs_pos_k = 10000.0, pose_two_hand_bs_pos_c = 150.0, pose_two_hand_bs_pos_max = 6000.0; // each hand's pull: N/m, N s/m, N
         double pose_two_hand_bs_rot_k = 2200.0, pose_two_hand_bs_rot_c = 90.0, pose_two_hand_bs_rot_max = 500.0;    // the main hand's turn: N m/rad, N m s/rad, N m
         bool pose_two_hand_bs_solve_pulls = false; // (off: run 6cec1f5 no better on the waggle, and lost the war staff once) the mod's solve does both hands' pulls (the joints pull nothing)
-        bool pose_two_hand_bs_front_turns = true; // B&S two hands: the hand further up the weapon turns it (AutoFront), not always the first
+        bool pose_two_hand_bs_front_turns = true;
+        double pose_two_hand_bs_opposite_scale = 0.1; // B&S two hands whose grips face opposite ways along the handle: the turn x this (Handle.cs:1778). 1 = off // B&S two hands: the hand further up the weapon turns it (AutoFront), not always the first
         double pose_two_hand_auto_slide_cm = 0.0; // (off: Matthew 2026-11-24 00:08Z "do it just like Blade and Sorcery", trigger-only slide) B&S two hands on a haft: a hand this far from its spot along the shaft follows your hand without the trigger (0 = off)
         bool pose_two_hand_joint_both_turn = true; // joint hold, both hands on fixed grips: both wrists turn it (rerun 388ca67: 60 deg pitch followed, 2.5-3.3 cm / 5-6 deg off; off: 27-37 deg, creeps back)
         bool pose_two_hand_fixed_rebase = true; // fixed grips, both wrists: the second hand's turn and spot taken from the first hand at the grab
