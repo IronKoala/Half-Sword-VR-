@@ -3115,8 +3115,14 @@ namespace
                         if (d < best) { best = d; item = w; }
                     }
                 }
-                // In his hand the controller holds where it was at the pickup (following the item would chase itself).
+                // In his hand the controller goes to where his hand is at the pickup and stays (following the item would chase
+                // itself; staying on the floor left the crouched arm at cap 62 stretched 48-58 cm, and the stretch let-go dropped
+                // it 1.3 s later, run 12 floor_pickup_62: a player lifts what he picked up).
                 static Vec3 last_grip{};
+                static bool was_in_hand = false;
+                if (in_hand && !was_in_hand)
+                    if (UObject* pm = object_property(g_pose.pawn, STR("Mesh"))) last_grip = socket_location(pm, bone_fname("hand_r"));
+                was_in_hand = in_hand;
                 if (item && in_hand) grip = last_grip;
                 else if (item)
                     if (UObject* b = object_property(item, STR("BaseMesh"))) grip = last_grip = component_location(b) + Vec3{0, 0, g_arm_floor[2]};
@@ -8996,6 +9002,40 @@ namespace
                     HSVR_LOG_EVERY(0.5, "Fist: %s hand waits: its %.0f cm ball would be inside %ls (%ls %.1f cm from the hand, needs %.0f)",
                                    side == 0 ? "left" : "right", g_fist_radius_cm, who.c_str(), bone.c_str(), d, need);
                     return false;
+                }
+            }
+        // Not inside any loose weapon either (run 12 floor_pickup: reaching down fast at a lantern on the floor made the
+        // slap fist with the lantern 0.7 cm from the hand, and the ball threw it 61 cm at 6.2 m/s).
+        if (cfg.pose_fist_clear_dropped)
+            if (UObject* mesh = object_property(pawn, STR("Mesh")))
+            {
+                static std::vector<UObject*> loose;
+                static double listed = -10.0;
+                static bool loose_tracked = on_freed([] { loose.erase(std::remove_if(loose.begin(), loose.end(), [](UObject* o) { return gone(o); }), loose.end()); });
+                (void)loose_tracked;
+                double tn = hsvr::now_seconds();
+                if (tn - listed > 1.0)
+                {
+                    listed = tn;
+                    loose.clear();
+                    UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), loose);
+                }
+                hsvr::Vec3 at = hand_grab_point(mesh, side);
+                double need = g_fist_radius_cm + (std::max)(0.0, cfg.pose_fist_clear_margin_cm);
+                for (UObject* w : loose)
+                {
+                    if (!w || gone(w) || w->GetName().rfind(STR("Default__"), 0) == 0 || is_fist(w) || bool_property(w, STR("Is Sheathed"))) continue;
+                    if (object_property(pawn, STR("Weapon L")) == w || object_property(pawn, STR("Weapon R")) == w || in_own_slot(pawn, w)) continue;
+                    UObject* b = object_property(w, STR("BaseMesh"));
+                    if (!b || hsvr::length(component_location(b) - at) > 250.0) continue;
+                    double d = closest_on_weapon(w, at);
+                    if (d >= 0.0 && d < need)
+                    {
+                        g_fist_blocked[side] = true;
+                        HSVR_LOG_EVERY(0.5, "Fist: %s hand waits: its %.0f cm ball would be inside loose %ls (%.1f cm from the hand, needs %.0f)",
+                                       side == 0 ? "left" : "right", g_fist_radius_cm, w->GetName().c_str(), d, need);
+                        return false;
+                    }
                 }
             }
         // Not inside what this hand just let go of (g_just_dropped): wait until the ball is clear of it.
