@@ -166,7 +166,7 @@ AUTO_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
 
 # Still hands far from the grips (playtest 2026-11-23 17:09-17:10: a two-handed war hammer spun up to 3500-9000 deg/s with
 # both controllers still and the second hand 19-31 cm from its spot): left controller 25 cm further than its spot, held still.
-SPREAD = [("warhammer_long", -30), ("polehammer", 30), ("warstaff", 30), ("longsword", -12)]
+SPREAD = [("axe2h", -25), ("polehammer", 30), ("warstaff", 30), ("longsword", -12)]
 SPREAD_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
 10.3:hsvr.hand_spread 0 25
 11.8:hsvr.two_reset
@@ -180,7 +180,7 @@ SPREAD_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
 
 # Spin brake (one hand; playtest 2026-11-23 17:01: a one-handed mace spun end over end at 1300-1700 deg/s for 10 s in a still
 # hand): the held weapon is set spinning 1500 deg/s end over end, the hand still; it must come to rest with the hand.
-SPIN = ["warhammer_long", "polehammer", "longsword"]
+SPIN = ["mace", "axe2h", "polehammer", "longsword"]
 SPIN_STEPS = """6:hsvr.spin_kick 1 1500
 6.5:hsvr.expect held_spin_max_r > 300 (check) the kick took: it spun
 8.5:hsvr.expect held_r = 1 still in the hand
@@ -195,7 +195,7 @@ SPIN_STEPS = """6:hsvr.spin_kick 1 1500
 # Reach (2026-11-24): his mace spin started with his controller ~40 cm past where the drawn hand could be (log 250.4:
 # "42 cm from hand_r"), a swing that stopped, one hand. The kick cases never reproduced it (the kick died in a tick in every
 # mode). arm_move 6 holds the hand 54-70 cm out (past his 53 cm arm); then a fast cut and a stop out there.
-REACH = ["warhammer_long", "polehammer", "longsword"]
+REACH = ["mace", "axe2h", "polehammer", "longsword"]
 REACH_STEPS = """6:hsvr.arm_move 6
 6.5:hsvr.spin_reset 1
 9.5:hsvr.expect held_spin_max_r < 400 reaching past his arm: the weapon does not spin up on its own (deg/s)
@@ -217,6 +217,8 @@ def main():
         if not line or line.startswith("#"):
             continue
         name, path, along = [p.strip() for p in line.split("|")]
+        if along == "-":
+            continue  # one hand only
         steps = HEAD.format(path=path) + (TAKE_FRONT if along == "front" else TAKE_ALONG.format(along=along)) + BODY
         if along != "front" and abs(float(along)) <= 15.0:
             steps = steps.replace("28:quit\n", "") + WRIST.format(along=along)
@@ -271,6 +273,9 @@ def main():
     lst += ["pull2_spin_%s|steps-spin_%s.txt|pose_hold_joint_pull_once=0" % (n, n) for n in spin]
     lst += ["reach_%s|steps-reach_%s.txt" % (n, n) for n in reach]
     lst += ["old_reach_%s|steps-reach_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in reach]
+    # (a second launch of each: the one runaway seen so far came in only one of two launches)
+    lst += ["reach2_%s|steps-reach_%s.txt" % (n, n) for n in reach]
+    lst += ["old_reach2_%s|steps-reach_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in reach]
     # (auto slide is off by default since Matthew 2026-11-24 00:08Z chose B&S's trigger-only slide; these turn it on)
     lst += ["auto_%s|steps-auto_%s.txt|pose_two_hand_auto_slide_cm=10" % (n, n) for n in auto]
     (HERE / "list.txt").write_text("\n".join(lst) + "\n", newline="\n")

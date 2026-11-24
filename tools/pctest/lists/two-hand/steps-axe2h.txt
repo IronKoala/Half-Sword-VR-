@@ -7,10 +7,10 @@
 2.4:hsvr.expect held_r = 0 right hand empty
 2.5:hsvr.arm_move 1
 3:hsvr.squeeze 1 1
-3.5:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/ModularWeaponBP_GreatSword.ModularWeaponBP_GreatSword_C
+3.5:hsvr.give_weapon passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight 5
 5:hsvr.weapon_dump 1
 5.5:hsvr.expect held_r = 1 weapon in the right hand
-6:hsvr.arm_move 7 -12
+6:hsvr.arm_move 7 -25
 8:hsvr.squeeze 0 1
 10:hsvr.expect two_hand = 1 second hand took it
 10:hsvr.expect two_gap >= 8.9 hands a hand's width apart, never inside each other
@@ -43,15 +43,4 @@
 27.5:hsvr.expect two_line_max < 44 rest: within B&S's own gap to the hands' line
 27.5:hsvr.expect two_off_max < 11 rest: second grip within B&S's gap
 27.6:hsvr.expect two_gap >= 8.9 rest: hands apart
-28:hsvr.xbow_hand 0 off
-28:hsvr.arm_move 7 -12
-28.1:hsvr.two_reset
-29:hsvr.xbow_wrist 1 pitch 35 1
-31:hsvr.expect two_hand = 1 wrist point: still held
-31:hsvr.expect two_wrist < 12 wrist point: the tip goes where the main wrist points it
-31.1:hsvr.xbow_wrist 1 pitch -15 0.15
-31.2:hsvr.two_reset
-32:hsvr.expect two_hand = 1 wrist cut: still held
-32.5:hsvr.expect two_wrist < 12 wrist cut: settled where the wrist points
-32.6:hsvr.xbow_wrist 1 pitch 0 0.5
-34:quit
+28:quit
