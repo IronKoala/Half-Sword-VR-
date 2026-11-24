@@ -1192,7 +1192,9 @@ namespace hsvr
         // How far his legs crouch him (cm, times his size). Deeper than that (your view lower still), he
         // bends forward until his head is down with your view, so his hands reach as low as yours
         // (pose_crouch_bend_for_depth; playtest 2026-11-21: he could not reach the ground).
-        double pose_crouch_max_cm = 62.0; // was a fixed 55; playtest 2026-11-21: view 114 cm down, his head bone 35 cm above it
+        // 85 (2026-11-24): hips nearly down on the heels, as you are kneeling to the floor; at 62 his head stayed
+        // 16-18 cm above a kneeling view even bent 85 deg, his hand 15-24 cm off the floor (test 04e802e).
+        double pose_crouch_max_cm = 85.0; // was a fixed 55, then 62; playtest 2026-11-21: view 114 cm down, his head bone 35 cm above it
         bool pose_crouch_bend_for_depth = true;
         // That bend for depth: at most this many degrees, and this share of it (0..1) takes his head down
         // with it instead of his neck bending back to keep the head up (0 = old: the neck bends back

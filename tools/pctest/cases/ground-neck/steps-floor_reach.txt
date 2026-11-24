@@ -10,7 +10,8 @@
 1.9:hsvr.expect held_r = 0 right hand empty (the test room starts him with a crossbow)
 1.9:hsvr.expect held_l = 0 left hand empty
 2.0:hsvr.fake_head_drop 95
-2.1:hsvr.arm_floor 45 15 0
+# The controller 5 cm up: your fist around it is that thick when your knuckles touch the floor (it was at 0, inside the floor).
+2.1:hsvr.arm_floor 45 15 5
 4.0:hsvr.wait hand_floor_r < 12 3 0.3 his right hand gets within 12 cm of the floor
 6.5:hsvr.expect hand_floor_r < 12 and stays there
 6.6:hsvr.fake_head_drop -1

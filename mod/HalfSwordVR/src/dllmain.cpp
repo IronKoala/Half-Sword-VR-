@@ -2335,6 +2335,8 @@ namespace
     std::atomic<double> g_fake_thrust_up{-5.0};
     std::atomic<double> g_fake_roll_deg[2]{0.0, 0.0}; // test aid hsvr.hand_roll: the fake hand turned about the forward axis
     std::atomic<double> g_fake_yaw_deg[2]{0.0, 0.0}; // test aid hsvr.hand_yaw: the fake hand turned about the vertical (a neck wrench)
+    std::atomic<bool> g_fake_yaw_neck[2]{false, false}; // ... or about the axis of the neck that hand holds ("hsvr.hand_yaw <side> <deg> neck")
+    bool held_neck_axis(int side, hsvr::Vec3& axis); // that axis (his neck_01's parent X), while the hand holds a body
     std::atomic<double> g_carry_log_until{0.0};       // test aid hsvr.carry_log <s>: every-tick carry lines until then
     double blade_length(UObject* w);
     bool mouth_point(UObject* pawn, hsvr::Vec3& out); // hsvr.arm_move 7 <cm>: the left hand this far above the right
@@ -3341,7 +3343,11 @@ namespace
             if (double roll = g_fake_roll_deg[side].load(); roll != 0.0)
                 grip_rot = (body * quat_axis_angle(Vec3{1, 0, 0}, roll / 57.29578) * rot_to_quat(60.0, 0.0, 0.0)).normalized();
             if (double yaw = g_fake_yaw_deg[side].load(); yaw != 0.0)
-                grip_rot = (quat_axis_angle(Vec3{0, 0, 1}, yaw / 57.29578) * grip_rot).normalized();
+            {
+                Vec3 ax{0, 0, 1};
+                if (g_fake_yaw_neck[side].load()) held_neck_axis(side, ax);
+                grip_rot = (quat_axis_angle(ax, yaw / 57.29578) * grip_rot).normalized();
+            }
             xbow_test_grip(side, grip, grip_rot); // test: hsvr.xbow_hand / xbow_wrist / keep, arm_move switches eased
             ctl_track_grip(side, grip, grip_rot);  // test: hsvr.ctl_replay (his own recorded controllers)
         }
@@ -7216,6 +7222,18 @@ namespace
             if (UObject* parent = object_property(c, STR("AttachParent"))) phys += STR(", on ") + parent->GetName();
             HSVR_LOG("Dump:   comp %ls (%ls) at %.1f %.1f %.1f%ls%ls tags [%ls]", c->GetName().c_str(), c->GetClassPrivate()->GetName().c_str(), o.x, o.y, o.z,
                      span.c_str(), phys.c_str(), tags.c_str());
+            // A joint: what it joins (an empty name is the world: a tether), and its limits.
+            if (c->GetClassPrivate()->GetName().find(STR("PhysicsConstraint")) != std::wstring::npos)
+                HSVR_LOG("Dump:     joint %ls joins '%s' bone '%s' to '%s' bone '%s'; linear motion %.0f/%.0f/%.0f limit %.1f, swing %.0f/%.0f twist %.0f (0 free, 1 limited, 2 locked)", c->GetName().c_str(),
+                         nested_name(c, {STR("ComponentName1"), STR("ComponentName")}).c_str(), nested_name(c, {STR("ConstraintInstance"), STR("ConstraintBone1")}).c_str(),
+                         nested_name(c, {STR("ComponentName2"), STR("ComponentName")}).c_str(), nested_name(c, {STR("ConstraintInstance"), STR("ConstraintBone2")}).c_str(),
+                         nested_number(c, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("XMotion")}),
+                         nested_number(c, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("YMotion")}),
+                         nested_number(c, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("ZMotion")}),
+                         nested_number(c, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("LinearLimit"), STR("Limit")}),
+                         nested_number(c, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("ConeLimit"), STR("Swing1Motion")}),
+                         nested_number(c, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("ConeLimit"), STR("Swing2Motion")}),
+                         nested_number(c, {STR("ConstraintInstance"), STR("ProfileInstance"), STR("TwistLimit"), STR("TwistMotion")}));
         }
         Call sn(base, STR("GetAllSocketNames"));
         if (sn.run())
@@ -9950,6 +9968,12 @@ namespace
         bool ctl0_ok = false;
     };
     BodyGrab g_body_grab[2];
+    bool bone_parent_axis(UObject* mesh, const char* bone_text, hsvr::Vec3& axis);
+    bool held_neck_axis(int side, hsvr::Vec3& axis)
+    {
+        const BodyGrab& b = g_body_grab[side];
+        return b.on && b.comp && bone_parent_axis(b.comp, "neck_01", axis);
+    }
     std::atomic<int> g_body_hold_test{-99}; // test: hsvr.body_hold <n> (-99 = pose_grab_body_hold)
 
     // The spring's cap: pose_grab_body_cap_per_t x his grip strength T, so the joint's force stays under
@@ -10151,6 +10175,9 @@ namespace
         double seen = -100.0;
         double twist[k_joint_part_count] = {};
         double state[k_joint_part_count] = {};
+        // His twist (from rest) when a hand took hold of that part: only what changes after it is yours.
+        double grab_twist[k_joint_part_count] = {};
+        bool held[k_joint_part_count] = {};
     };
     std::vector<JointVictim> g_joint_victims;
     constexpr double joint_state_decay = 0.05;
@@ -10317,6 +10344,12 @@ namespace
                 // than it turned. And your wrist turns him: past joint_break_wrench_from_deg, a torque on his head
                 // (or upper arm) toward your wrist's turn, as strong as your grip.
                 double limb_tw = normalize_axis(twist - rest.twist[i]);
+                bool held_now = limb >= 0 && on_limb[limb] && side < 2;
+                if (held_now && !rest.held[i]) rest.grab_twist[i] = limb_tw;
+                rest.held[i] = held_now;
+                // Your part of it: his twist since you took hold (test 2026-11-24 04e802e: the choke had already
+                // turned his neck 24-55 deg before any wrench, so a wrench the other way never counted).
+                double mine_tw = held_now ? normalize_axis(limb_tw - rest.grab_twist[i]) : limb_tw;
                 double counted = limb_tw, ctl_tw = 0.0;
                 bool gated = false;
                 Vec3 axis;
@@ -10338,12 +10371,12 @@ namespace
                         if (std::fabs(t) > std::fabs(best)) { best = t; grip_t = bg.grip_t; }
                     }
                     ctl_tw = best;
-                    counted = limb_tw * ctl_tw > 0.0 ? std::copysign((std::min)(std::fabs(limb_tw), std::fabs(ctl_tw)), limb_tw) : 0.0;
+                    counted = mine_tw * ctl_tw > 0.0 ? std::copysign((std::min)(std::fabs(mine_tw), std::fabs(ctl_tw)), mine_tw) : 0.0;
                     const char* drive_bone = p.kind == 0 ? "head" : p.kind == 1 ? p.bone : nullptr;
                     if (drive_bone && cfg.joint_break_wrench_nm_per_deg > 0.0 && std::fabs(ctl_tw) >= cfg.joint_break_wrench_from_deg)
                     {
                         double cap = cfg.joint_break_wrench_max_nm * (std::max)(0.2, grip_t / 121.0);
-                        double nm = (std::max)(-cap, (std::min)(cap, (ctl_tw - limb_tw) * cfg.joint_break_wrench_nm_per_deg));
+                        double nm = (std::max)(-cap, (std::min)(cap, (ctl_tw - mine_tw) * cfg.joint_break_wrench_nm_per_deg));
                         Vec3 tq = axis * (nm * 10000.0); // N m -> kg cm^2 / s^2
                         Call c(mesh, STR("AddTorqueInRadians"));
                         c.three(STR("Torque"), tq.x, tq.y, tq.z);
@@ -10354,8 +10387,8 @@ namespace
                         if (now - wlog[(std::min)(2, (int)p.kind)] > 0.5)
                         {
                             wlog[(std::min)(2, (int)p.kind)] = now;
-                            HSVR_LOG("Joints: your wrist turns %ls's %s: wrist %.0f deg, his %.0f deg, %.0f N m on %s (cap %.0f)", w->GetName().c_str(), p.bone, ctl_tw,
-                                     limb_tw, nm, drive_bone, cap);
+                            HSVR_LOG("Joints: your wrist turns %ls's %s: wrist %.0f deg, his %.0f deg since you took hold (%.0f from rest), %.0f N m on %s (cap %.0f)",
+                                     w->GetName().c_str(), p.bone, ctl_tw, mine_tw, limb_tw, nm, drive_bone, cap);
                         }
                     }
                 }
@@ -28951,6 +28984,7 @@ namespace
         {
             g_fake_roll_deg[i].store(0.0);
             g_fake_yaw_deg[i].store(0.0);
+            g_fake_yaw_neck[i].store(false);
             g_fake_trigger[i].store(-1.0f);
             g_fake_squeeze[i].store(-1.0f);
             g_fake_thumb[i].store(-1.0f);
@@ -30546,8 +30580,9 @@ namespace
                 // arm_move pose (0 = back). Steps a few degrees apart make a steady wrench.
                 int sd = 1;
                 double deg = 0.0;
-                sscanf(entry.command.c_str() + 14, "%d %lf", &sd, &deg);
-                if (sd == 0 || sd == 1) g_fake_yaw_deg[sd].store(deg);
+                char about[16] = {0};
+                sscanf(entry.command.c_str() + 14, "%d %lf %15s", &sd, &deg, about);
+                if (sd == 0 || sd == 1) g_fake_yaw_deg[sd].store(deg), g_fake_yaw_neck[sd].store(std::string(about) == "neck");
                 continue;
             }
             if (entry.command.rfind("hsvr.hand_roll ", 0) == 0)
