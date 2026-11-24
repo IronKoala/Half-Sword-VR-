@@ -2,3 +2,4 @@
 sm_grip_heavy_l|steps-sm_grip_heavy_l.txt
 sm_unmount_heavy_l|steps-sm_unmount_heavy_l.txt
 sm_two_hand_heavy_l|steps-sm_two_hand_heavy_l.txt
+sm_grip_heavy_l_nobs|steps-sm_grip_heavy_l.txt|pose_two_hand_bs=0
