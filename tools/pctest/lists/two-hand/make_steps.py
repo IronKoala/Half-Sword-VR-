@@ -216,14 +216,14 @@ SWITCH_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
 10.1:hsvr.arm_move 3
 12:hsvr.arm_move 7 {along}
 12.1:hsvr.squeeze 0 0
-12.15:hsvr.spin_reset 1
+12.4:hsvr.spin_reset 1
 15:hsvr.expect held_r = 1
-15:hsvr.expect held_spin_max_r < 600 after the left let go (2 to 1 hands), hands still: no spin-up (deg/s; his ran 1300-2700)
+15:hsvr.expect held_spin_max_r < 300 from 0.3 s after the left let go (2 to 1 hands), hands still: no spin-up (deg/s; his ran 1300-2700)
 15.1:hsvr.arm_move 7 {along}
 16.5:hsvr.squeeze 0 1
-16.55:hsvr.spin_reset 1
+16.85:hsvr.spin_reset 1
 19.5:hsvr.expect two_hand = 1 took it again
-19.5:hsvr.expect held_spin_max_r < 600 after the left took it again (1 to 2 hands), hands still: no spin-up (deg/s)
+19.5:hsvr.expect held_spin_max_r < 300 from 0.3 s after the left took it again (1 to 2 hands), hands still: no spin-up (deg/s)
 19.6:quit
 """
 
@@ -296,7 +296,7 @@ def main():
     lst += ["pull2_spin_%s|steps-spin_%s.txt|pose_hold_joint_pull_once=0" % (n, n) for n in spin]
     lst += ["reach_%s|steps-reach_%s.txt" % (n, n) for n in reach]
     lst += ["old_reach_%s|steps-reach_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in reach]
-    for pre, extra in (("switch", ""), ("switch2", ""), ("old_switch", "|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0"),
+    for pre, extra in (("switch", ""), ("switch2", ""), ("grip_switch", "|pose_hold_joint_turn_couple=0"), ("old_switch", "|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0"),
                        ("old_switch2", "|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0")):
         lst += ["%s_%s|steps-switch_%s.txt%s" % (pre, n, n, extra) for n in switch]
     # (a second launch of each: the one runaway seen so far came in only one of two launches)

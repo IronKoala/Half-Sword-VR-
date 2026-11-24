@@ -563,6 +563,9 @@ namespace hsvr
         // One hand (and B&S two hands) on the joint with the mod's turn: the joint(s) alone pull; the spin the mod sets is the turn only. 0 = the
         // spin set also carries the pull's lever (as before 2026-11-24), so the pull acted twice a tick (mace spin 2026-11-23 17:01).
         bool pose_hold_joint_pull_once = true;
+        // The turn the mod sets on a held weapon (joint hold) is a pure couple: its centre of mass keeps its speed. 0 = the grip keeps
+        // its speed (before 2026-11-24), which could turn braking a spin into a throw the joint then turned back into spin.
+        bool pose_hold_joint_turn_couple = true;
         double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)
         bool pose_hold_joint_draw_wound = true; // drawing/sheathing and a blade in a wound stay on the joint (sent where the old rules put it)
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
