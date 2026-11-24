@@ -4,6 +4,7 @@ neck_drag|steps-neck_drag.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 neck_wrench_right|steps-neck_wrench_right.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 neck_wrench_left|steps-neck_wrench_left.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 floor_reach|steps-floor_reach.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_reach_62|steps-floor_reach.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62
 floor_no_grab|steps-floor_no_grab.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
 lantern_hold|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 hold_baseline|steps-hold_baseline.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
