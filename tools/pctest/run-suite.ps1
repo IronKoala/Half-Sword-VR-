@@ -328,7 +328,11 @@ function Run-Launch($group, [string]$run) {
       $m = [regex]::Match($slice, "Case: end .*: (\d+) check\(s\) passed, (\d+) failed")
       $pass = [int]$m.Groups[1].Value; $fail = [int]$m.Groups[2].Value
       $res = $(if ($fail -gt 0) { "FAIL" } else { "pass" })
-      $fps = Min-Fps $slice
+      # Only the case's own steps count (from case_here on), not the launch or the room loading before it;
+      # the first Perf line after that can still hold the end of the load (it averages the 2 s before it).
+      $own = $all.Substring($mark, $(if ($end -gt 0) { $end } else { $all.Length }) - $mark)
+      $pm = [regex]::Matches($own, "Perf: [0-9.]+ fps")
+      $fps = $(if ($pm.Count -gt 1) { Min-Fps $own.Substring($pm[0].Index + $pm[0].Length) } else { Min-Fps $own })
       # A starved game (his game or another copy took the machine) proves nothing either way: run it again later.
       if ($Copy -and $fps -ne "" -and $fps -lt $MinFps) { $res = "SLOW" }
       Note-Result $c $run $L ($k + 1) $pass $fail $res $secs $spawn ($reps -join " ") $fps

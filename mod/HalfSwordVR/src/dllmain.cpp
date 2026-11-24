@@ -2366,6 +2366,7 @@ namespace
     std::atomic<double> g_two_turn_sum{0.0}, g_two_hlag_sum{0.0}; // the main hold's turn_deg and lag (the replay's columns), summed
     std::atomic<int> g_two_mean_n{0};
     std::atomic<int> g_two_ticks{0}, g_two_revs{0}, g_two_revs_own{0}; // two-hand ticks since hsvr.two_reset, those where the weapon's spin reversed (jitter), and those not matched by his hands' own reversal
+    std::atomic<double> g_two_spot_now{0.0}; // cm the second hand's spot on the weapon is from his second hand (test measure, B&S two hands)
     std::atomic<double> g_hand_spread[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
     double g_jump_until = -1.0;               // a jump released by left X: until then the capsule's rise is the game's jump, not a climb
@@ -15364,7 +15365,22 @@ namespace
                     double z = m.hi + step;
                     while (z <= limit)
                     {
-                        while (z <= limit && probe(z).state != 0) z += step;
+                        {
+                            // (logged: what is not haft there, wide or off the parts, and how far it reaches; shovel 2026-11-23:
+                            // its shaft past a 4.4 cm collar at 26 cm was never counted, nothing said why)
+                            double g0 = z, wmax = 0.0;
+                            int nw = 0, noff = 0;
+                            Probe r;
+                            while (z <= limit && (r = probe(z)).state != 0)
+                            {
+                                if (r.state == 1) ++nw, wmax = (std::max)(wmax, r.width);
+                                else ++noff;
+                                z += step;
+                            }
+                            if (z > g0)
+                                HSVR_LOG("Haft: %ls %.0f .. %.0f cm not haft: %d steps wide (up to %.1f cm from the axis), %d off the parts", weapon->GetName().c_str(), g0,
+                                         z - step, nw, wmax, noff);
+                        }
                         if (z > limit) break;
                         double s0 = z, last = z;
                         while (z <= limit && probe(z).state == 0)
@@ -15876,6 +15892,31 @@ namespace
         ControllerState st = controllers_state();
         float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : st.hand[side].trigger;
         bool on = h.sliding ? trig > 0.15f : trig > 0.3f;
+        // Two hands (B&S hold) on a haft: a hand left far from its spot along the shaft follows your hand without the trigger
+        // (pose_two_hand_auto_slide_cm). Playtest 2026-11-23 4:59 PM: a polearm "did not respond very well at all until I turned
+        // on sliding for the hand that was furthest from my body": his hands were 45 cm apart for 80 cm on the weapon, each grip
+        // pulled 17 cm from its hand along the shaft.
+        {
+            static bool auto_on[2] = {false, false};
+            double as = cfg.pose_two_hand_auto_slide_cm;
+            bool can = as > 0.0 && two_hands_bs(weapon, cfg) && h.zone_hi - h.zone_lo > 2.0 * cfg.pose_slide_hand_half_cm + 1.0;
+            if (can)
+            {
+                double want0 = component_rotation(base).inverse().rotate(hand_point - component_location(base)).z - h.pivot.z;
+                double off = std::fabs(want0 - h.slide);
+                bool was = auto_on[side];
+                auto_on[side] = was ? off > 1.5 : off > as;
+                if (auto_on[side] != was)
+                    HSVR_LOG("Slide: %s hand %s along the shaft by itself (%.1f cm from your hand along it)", side == 0 ? "left" : "right",
+                             auto_on[side] ? "follows your hand" : "holds again", off);
+            }
+            else auto_on[side] = false;
+            if (auto_on[side] && trig < 0.5f)
+            {
+                trig = 0.5f;
+                on = true;
+            }
+        }
         if (on != h.sliding)
         {
             h.sliding = on;
@@ -16882,6 +16923,7 @@ namespace
                         h2 = line_main + line_rot.rotate(g_two.bs_local - pivot);
                     }
                     Vec3 wl = g2 - g1, hl = h2 - h1;
+                    if (!line) g_two_spot_now.store(length(g2 - h2));
                     if (length(wl) > 5.0 && length(hl) > 5.0)
                     {
                         double ang = std::acos((std::min)(1.0, (std::max)(-1.0, dot(normalized(wl), normalized(hl))))) * 57.2958;
@@ -17196,6 +17238,33 @@ namespace
             ControllerState st = controllers_state();
             float trig = g_fake_trigger[side].load() >= 0.0f ? g_fake_trigger[side].load() : st.hand[side].trigger;
             bool on = h.handle_sliding_logged ? trig > 0.15f : trig > 0.3f;
+            // Two hands (B&S hold): left far from its spot along the handle, the hand follows yours without the trigger
+            // (pose_two_hand_auto_slide_cm; playtest 2026-11-23 4:59 PM polearm, see slide_grip).
+            {
+                static bool auto_on[2] = {false, false};
+                bool was = auto_on[side];
+                auto_on[side] = false;
+                if (cfg.pose_two_hand_auto_slide_cm > 0.0 && two_hands_bs(weapon, cfg))
+                {
+                    Vec3 ab = h.free.hb - h.free.ha;
+                    double len = length(ab);
+                    if (len > 2.0 * cfg.pose_slide_hand_half_cm + 1.0)
+                    {
+                        Vec3 local = component_rotation(base).inverse().rotate(hand_pos + hand_rot.rotate(h.free.in_anchor) - component_location(base));
+                        double u = (std::min)(1.0, (std::max)(0.0, dot(local - h.free.ha, ab) / (len * len)));
+                        double off = std::fabs(u - h.free.t) * len;
+                        auto_on[side] = was ? off > 1.5 : off > cfg.pose_two_hand_auto_slide_cm;
+                        if (auto_on[side] != was)
+                            HSVR_LOG("Slide: %s hand %s along the %s by itself (%.1f cm from your hand along it)", side == 0 ? "left" : "right",
+                                     auto_on[side] ? "follows your hand" : "holds again", h.free.handle.c_str(), off);
+                    }
+                }
+                if (auto_on[side] && trig < 0.5f)
+                {
+                    trig = 0.5f;
+                    on = true;
+                }
+            }
             if (on != h.handle_sliding_logged)
             {
                 h.handle_sliding_logged = on;
@@ -17297,6 +17366,30 @@ namespace
                 ControllerState st2 = controllers_state();
                 float trig = g_fake_trigger[s2].load() >= 0.0f ? g_fake_trigger[s2].load() : st2.hand[s2].trigger;
                 bool on = g_two.sliding ? trig > 0.15f : trig > 0.3f;
+                // (as the first hand: left far from its spot along a haft, it follows your hand, pose_two_hand_auto_slide_cm)
+                if ((!g_two.use_rel || g_two.has_handle) && cfg.pose_two_hand_auto_slide_cm > 0.0 && two_hands_bs(weapon, cfg))
+                {
+                    static bool auto2 = false;
+                    Vec3 l2 = component_rotation(base).inverse().rotate(p2 - component_location(base));
+                    double off2 = std::fabs(l2.z - game_z - g_two.z);
+                    if (g_two.use_rel)
+                    {
+                        Vec3 ab = g_two.hb - g_two.ha;
+                        double len = length(ab);
+                        double u = len > 1e-3 ? (std::min)(1.0, (std::max)(0.0, dot(l2 - g_two.ha, ab) / (len * len))) : g_two.t;
+                        off2 = std::fabs(u - g_two.t) * len;
+                    }
+                    bool was = auto2;
+                    auto2 = was ? off2 > 1.5 : off2 > cfg.pose_two_hand_auto_slide_cm;
+                    if (auto2 != was)
+                        HSVR_LOG("Two hands: %s hand %s along the shaft by itself (%.1f cm from your hand along it)", s2 == 0 ? "left" : "right",
+                                 auto2 ? "follows your hand" : "holds again", off2);
+                    if (auto2 && trig < 0.5f)
+                    {
+                        trig = 0.5f;
+                        on = true;
+                    }
+                }
                 if (g_two.use_rel && !g_two.has_handle) on = false; // a fixed grip (or no handle) never slides
                 if (on != g_two.sliding)
                 {
@@ -28865,6 +28958,7 @@ namespace
         else if (w == "two_wrist") value = g_two_wrist_now.load();
         else if (w == "two_jitter") value = g_two_ticks.load() > 0 ? 100.0 * g_two_revs.load() / g_two_ticks.load() : 0.0; // % of two-hand ticks
         else if (w == "two_ticks") value = g_two_ticks.load();
+        else if (w == "two_spot_off") value = g_two_spot_now.load(); // cm, now
         else if (w == "two_jitter_own") value = g_two_ticks.load() > 0 ? 100.0 * g_two_revs_own.load() / g_two_ticks.load() : 0.0; // % of two-hand ticks: reversals not his hands' own
         else if (w == "two_wrist_mean") value = g_two_mean_n.load() > 0 ? g_two_wrist_sum.load() / g_two_mean_n.load() : 0.0;
         else if (w == "two_lag_mean") value = g_two_mean_n.load() > 0 ? g_two_lag_sum.load() / g_two_mean_n.load() : 0.0;
