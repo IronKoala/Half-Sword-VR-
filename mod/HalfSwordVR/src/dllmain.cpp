@@ -5986,6 +5986,7 @@ namespace
     // not paired off with them while held, so on the let-go any it overlapped shoved it (PC run 0815006: a
     // ~3 m/s kick as the no-collide pairs went with the item 8 cm clear of his bones).
     void attached_meshes(UObject* root, UObject* skip, std::vector<UObject*>& out, int depth);
+    std::vector<UObject*> static_parts_of(UObject* owner);
     UObject* no_collision_pair(UObject* pawn, UClass* cls, UObject* a, UObject* b, FName bone_b = FName());
     void drop_cm_pairs(int side, UObject* pawn, UObject* item)
     {
@@ -7074,6 +7075,24 @@ namespace
         if (!hsvr::config().pose_drop_keep_velocity || !item) return;
         r.base = object_property(item, STR("BaseMesh"));
         if (!r.base) return;
+        // Not for an item of several bodies (a chain lantern: lamp and links hang on constraints, outside BaseMesh's tree). Its
+        // holder's speed jumps from its own chain's pull, and holding the holder to its old speed tick after tick fought the chain:
+        // run 23 floor_pickup_62_b, 8 put-backs of 215-688 cm/s with no touch of his logged, then BaseMesh hit Link 1 at 1149 and
+        // the lantern went 5.2 m/s and 3 m away.
+        {
+            std::vector<UObject*> tree, scab;
+            attached_meshes(r.base, nullptr, tree, 0);
+            attached_meshes(object_property(item, STR("Scabbard")), nullptr, scab, 0);
+            for (UObject* c : static_parts_of(item))
+                if (std::find(tree.begin(), tree.end(), c) == tree.end() && std::find(scab.begin(), scab.end(), c) == scab.end())
+                {
+                    static UObject* said = nullptr;
+                    if (said != item) HSVR_LOG("Drop: %ls has bodies of its own (%ls): its speed is not put back", item->GetName().c_str(), c->GetName().c_str());
+                    said = item;
+                    r = ResumeGuard{};
+                    return;
+                }
+        }
         r.item = item;
         r.t0 = hsvr::now_seconds();
         Call lv(r.base, STR("GetPhysicsLinearVelocity"));
