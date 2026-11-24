@@ -17975,6 +17975,24 @@ namespace
                         HSVR_LOG_EVERY(0.5, "Hold: %s wrist bent %.0f deg from the hand: turning limit %.0f N m (wrist stop)", side == 0 ? "left" : "right", bend,
                                        tcap / 1e4);
                     }
+                    // The spin brake (pose_hold_spin_brake_*): a weapon spinning much faster than the hand turns it gets the wrist's
+                    // full stopping strength, whichever way it is bent, until it spins with the hand again. Playtest 2026-11-23
+                    // 17:01: a one-handed mace (head 57 cm out) got away from the 34.5 N m turn, the hand's pull flung it end over
+                    // end, and it spun at 1300-1700 deg/s for 10 s with his hand still: the wrist stop only pushed while it turned
+                    // away from the hand, so each half turn back went through at 34.5 N m. Held still, it still droops as before
+                    // (Matthew 2026-11-24: keep the 30 N m wrist, fix only the spin).
+                    if (cfg.pose_hold_spin_brake_from > 0.0 && cfg.pose_hold_wrist_stop_torque > 0.0 && hard > tcap)
+                    {
+                        double rs = length(w_now - target_ang);
+                        double span = (std::max)(0.1, cfg.pose_hold_spin_brake_span);
+                        double b = (std::min)(1.0, (std::max)(0.0, (rs - cfg.pose_hold_spin_brake_from) / span));
+                        if (b > 0.0)
+                        {
+                            tcap = tcap + (hard - tcap) * b;
+                            HSVR_LOG_EVERY(0.25, "Hold: %s weapon spins %.0f deg/s against the hand: turning limit %.0f N m (spin brake)", side == 0 ? "left" : "right",
+                                           rs * 57.2958, tcap / 1e4);
+                        }
+                    }
                 }
                 h.wrist_tcap_nm = tcap / 1e4; // (the joint hold uses it too: its own limit had no wrist stop)
                 // Two hands (playtest 2026-11-21 13:47, war staff): the right wrist's full turn (up to 680 N m)

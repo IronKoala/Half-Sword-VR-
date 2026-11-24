@@ -380,6 +380,8 @@ LAYOUT = [
         ('pose_hold_wrist_free_deg', 'Wrist bends freely up to this angle...'),
         ('pose_hold_wrist_stop_deg', '...and reaches the full end stop here.'),
         ('pose_hold_wrist_stop_spin', "Wrist stop pushes back fully from this spin (rad/s), so a weapon's weight still sags it slowly."),
+        ('pose_hold_spin_brake_from', 'Spin brake: a held weapon spinning this much faster than your hand (radians per second, 6 = about 340 degrees per second) gets the full wrist stop strength to stop it, whichever way it is bent. Stops a weapon that got away from spinning on in a still hand. 0 = off.'),
+        ('pose_hold_spin_brake_span', 'Spin brake: how much faster again (radians per second) before the brake is at full strength.'),
         ('pose_hold_torque_strength_power', 'His strength on wrist turning is raised to this power (a wrist is weaker in proportion).'),
         ('pose_hold_arm_reach_cm', 'Grip distance from the shoulder for a default body (cm, scaled with his size).'),
         ('pose_hold_shoulder_fade_from_cm', 'Shoulder limit starts fading once the grip trails your hand this far (cm)...'),

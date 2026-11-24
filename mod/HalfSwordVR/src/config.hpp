@@ -460,6 +460,10 @@ namespace hsvr
         // down to where the wrist's turning limit carries it (Matthew 2026-11-20: a pole hammer held out by
         // its end barely sagged for a weak Willie). 0 = it also holds still weight, as before.
         double pose_hold_wrist_stop_spin = 2.0;
+        // The spin brake: a held weapon spinning this much faster than the hand (rad/s) gets the wrist stop's turning limit
+        // (fully by from + span), whichever way it is bent, so it cannot keep spinning in a still hand (mace 2026-11-23 17:01). 0 = off.
+        double pose_hold_spin_brake_from = 6.0;
+        double pose_hold_spin_brake_span = 6.0;
         // His strength on the turning limits (wrist and stop) is raised to this power: a wrist is weaker in
         // proportion than the whole arm (min/min Willie x0.58 -> x0.34, biggest x1.27 -> x1.6). 1 = as the force.
         double pose_hold_torque_strength_power = 2.0; // below a default body only: above it, x strength as the force
