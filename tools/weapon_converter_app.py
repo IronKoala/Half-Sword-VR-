@@ -1319,10 +1319,18 @@ class App:
         return {"pommel": zn["handle_bottom"] - zn["pommel_end"], "grip": zn["guard_bottom"] - zn["handle_bottom"],
                 "guard": zn["guard_top"] - zn["guard_bottom"], "blade": zn["tip"] - zn["guard_top"]}
 
+    def shown_part_lengths(self, it):
+        """Part lengths of the picture as shown: the last Preview's, or the lines moved since (pending_b)."""
+        zn = it["result"][1]["zones_cm"]
+        if it.get("pending_b"):
+            z = [zn["pommel_end"], *it["pending_b"], zn["tip"]]
+            return {p: z[j + 1] - z[j] for j, p in enumerate(PARTS)}
+        return self.result_part_lengths(it["result"][1])
+
     def show_part_lengths(self):
         it = self.cur
         k = self.units()[1]
-        have = self.result_part_lengths(it["result"][1]) if it is not None and it["result"] is not None else {}
+        have = self.shown_part_lengths(it) if it is not None and it["result"] is not None else {}
         self.quiet = True
         for p in PARTS:
             v = it["part_len"].get(p) if it is not None else None
@@ -1339,7 +1347,7 @@ class App:
             cm = float(self.len_vars[part].get().replace(",", ".")) * self.units()[1]
         except ValueError:
             return
-        now = self.result_part_lengths(it["result"][1])[part]
+        now = self.shown_part_lengths(it)[part]
         if part not in it["part_len"] and abs(cm - now) < 0.06 * self.units()[1]:
             return  # just the length shown (unit rounding)
         if now < 0.05:
@@ -1415,7 +1423,10 @@ class App:
                         return raw[j] + (v - lo) * k
             b = [unstretch(v) for v in b]
         span = sum(raw_lens) if raw_lens else zn["tip"] - p0
-        it["part_len"] = {}  # lengths typed earlier went with the old boundaries
+        # A length typed earlier stays unless the moved line is one of its own ends (Matthew 2026-11-24: moving a
+        # line cleared every typed length).
+        for p in (PARTS[i], PARTS[i + 1]):
+            it["part_len"].pop(p, None)
         # Kept as shares of the whole length, so a new real length moves the lines with it.
         it["splits"] = tuple(round((v - p0) / span, 5) for v in b)
         self.show_part_lengths()
@@ -1496,6 +1507,10 @@ class App:
         name, info = self.result
         flat, edge, zones, zmin, s, width = self.result_views
         L = self.fmt_len
+        if self.cur is not None and self.cur.get("pending_b"):  # the bar follows lines moved since the Preview
+            zc = self.cur["result"][1]["zones_cm"]
+            z = [zc["pommel_end"], *self.cur["pending_b"], zc["tip"]]
+            zones = [(slot, z[j], z[j + 1]) for j, (slot, _, _) in enumerate(zones)]
         bar = zone_bar(zones, zmin, s, width, info["type"] in ("hafted", "flail"), L, bool(info["zones_cm"].get("double")),
                        info["type"] == "flail")
         pic = Image.new("RGB", (width, flat.height + edge.height + bar.height), (34, 36, 40))
