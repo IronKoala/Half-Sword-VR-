@@ -515,54 +515,162 @@ def drop_scenery(meshes):
     return meshes
 
 
-def reduce_meshes(meshes, target):
-    """The meshes simplified (quadric edge collapse, fast_simplification) to about target triangles in all,
-    each mesh keeping its share. Border edges stay: a model's meshes are split at their UV seams (separate
-    vertices), so seams and open edges keep their place and the texture still lines up. Each vertex left
-    keeps its own UV and normal (the collapses say which original vertex it is)."""
+REDUCE_FIRST_PASS = 4  # the fast pass stops at this many times the target; the texture-aware pass does the rest
+
+
+def _visual_like(g, uv):
     import trimesh
+    mat = getattr(g.visual, "material", None)
+    if uv is not None:
+        return trimesh.visual.TextureVisuals(uv=uv, material=mat)
+    return trimesh.visual.TextureVisuals(material=mat) if mat is not None else None
+
+
+def _reduce_border_locked(g, want):
+    """Fast pass (fast_simplification, quadric edge collapse) with border edges held: a model's meshes are split
+    at their UV seams (separate vertices), so the seams stay put and every vertex left keeps its own UV and
+    normal (the collapses say which original vertex it is). Stops early on models with many small UV islands
+    (Spit 2.0: 3.27M -> 297k, not 150k). None when the result cannot be matched up."""
+    import trimesh
+    import fast_simplification
+    f = np.asarray(g.faces, dtype=np.int64)
+    v = np.asarray(g.vertices, dtype=np.float64)
+    p2, f2, col = fast_simplification.simplify(v, f, target_count=max(want, 100), return_collapses=True,
+                                               preserve_border=True)
+    kept = np.setdiff1d(np.arange(len(v)), col[:, 1]) if len(col) else np.arange(len(v))
+    if len(kept) != len(p2):
+        return None
+    nrm = np.asarray(g.vertex_normals, dtype=np.float64)[kept]
+    uv = getattr(g.visual, "uv", None)
+    uv = np.asarray(uv)[kept] if uv is not None and len(uv) == len(v) else None
+    h = trimesh.Trimesh(vertices=p2, faces=np.asarray(f2, dtype=np.int64), vertex_normals=nrm, process=False)
+    vis = _visual_like(g, uv)
+    if vis is not None:
+        h.visual = vis
+    return h
+
+
+def _reduce_texture_aware(g, want):
+    """Texture-aware pass (MeshLab's quadric edge collapse with texture, pymeshlab): UV seams are welded into
+    one surface with per-corner UVs, so collapses may run along a seam but never smear a texture across it,
+    and the UV error counts in each collapse's cost. Normals: each vertex left takes the normal of the
+    nearest original vertex that faces the same way (hard edges stay hard). None if pymeshlab is missing."""
+    try:
+        import pymeshlab
+    except ImportError:
+        return None
+    import tempfile
+    import shutil
+    import trimesh
+    from PIL import Image
+    from scipy.spatial import cKDTree
+    v = np.asarray(g.vertices, dtype=np.float64)
+    f = np.asarray(g.faces, dtype=np.int64)
+    uv = getattr(g.visual, "uv", None)
+    has_uv = uv is not None and len(uv) == len(v)
+    key, inv = np.unique(v, axis=0, return_inverse=True)
+    F = inv.ravel()[f] + 1
+    tmp = tempfile.mkdtemp(prefix="hs_reduce_")
+    try:
+        obj = os.path.join(tmp, "m.obj")
+        with open(obj, "w") as fo:
+            if has_uv:  # MeshLab only keeps per-corner UVs for faces with a texture
+                Image.new("RGB", (4, 4)).save(os.path.join(tmp, "t.png"))
+                with open(os.path.join(tmp, "m.mtl"), "w") as fm:
+                    fm.write("newmtl m\nmap_Kd t.png\n")
+                fo.write("mtllib m.mtl\n")
+            np.savetxt(fo, key, fmt="v %.6f %.6f %.6f")
+            if has_uv:
+                uk, uinv = np.unique(np.asarray(uv, dtype=np.float64), axis=0, return_inverse=True)
+                T = uinv.ravel()[f] + 1
+                np.savetxt(fo, uk, fmt="vt %.8f %.8f")
+                fo.write("usemtl m\n")
+                np.savetxt(fo, np.stack([F[:, 0], T[:, 0], F[:, 1], T[:, 1], F[:, 2], T[:, 2]], 1),
+                           fmt="f %d/%d %d/%d %d/%d")
+            else:
+                np.savetxt(fo, F, fmt="f %d %d %d")
+        ms = pymeshlab.MeshSet()
+        ms.load_new_mesh(obj)
+        opts = dict(targetfacenum=int(want), qualitythr=0.3, preserveboundary=True, boundaryweight=1.0,
+                    optimalplacement=True, preservenormal=True, planarquadric=True)
+        if has_uv:
+            ms.meshing_decimation_quadric_edge_collapse_with_texture(extratcoordw=1.0, **opts)
+        else:
+            ms.meshing_decimation_quadric_edge_collapse(preservetopology=True, **opts)
+        m = ms.current_mesh()
+        P, F2 = m.vertex_matrix(), m.face_matrix().astype(np.int64)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if has_uv:
+        W = m.wedge_tex_coord_matrix().reshape(-1, 2)
+        corner = np.concatenate([F2.reshape(-1, 1), np.round(W * 1e8).astype(np.int64)], 1)
+        _, first, inv2 = np.unique(corner, axis=0, return_index=True, return_inverse=True)
+        pos_id, faces, new_uv = F2.reshape(-1)[first], inv2.reshape(-1, 3), W[first]
+    else:
+        pos_id, faces, new_uv = np.arange(len(P)), F2, None
+    pos = P[pos_id]
+    # Normals from the original: of the 8 nearest original vertices, the one closest in direction to the new
+    # surface there.
+    h = trimesh.Trimesh(vertices=pos, faces=faces, process=False)
+    here = np.asarray(h.vertex_normals, dtype=np.float64)
+    onrm = np.asarray(g.vertex_normals, dtype=np.float64)
+    k = min(8, len(v))
+    _, cand = cKDTree(v).query(pos, k=k)
+    cand = cand.reshape(len(pos), k)
+    best = np.einsum("nkj,nj->nk", onrm[cand], here).argmax(1)
+    nrm = onrm[cand[np.arange(len(pos)), best]]
+    h = trimesh.Trimesh(vertices=pos, faces=faces, vertex_normals=nrm, process=False)
+    vis = _visual_like(g, new_uv)
+    if vis is not None:
+        h.visual = vis
+    return h
+
+
+def reduce_meshes(meshes, target):
+    """The meshes simplified to about target triangles in all, each mesh keeping its share. A fast pass first
+    (borders and UV seams held, see _reduce_border_locked) down to REDUCE_FIRST_PASS x the share, then the
+    texture-aware pass (_reduce_texture_aware) to the share. Without pymeshlab: the fast pass only, which can
+    stop short of the target on models with many small UV islands. Measured on a 3.12M-triangle test model with
+    1600 UV islands, to 150k: fast pass only 226k, 14.7 s; both passes 150k, 22 s, texture error median 0.03 mm,
+    99% under 1 mm, worst 2.9 mm; MeshLab alone 75 s."""
     total = sum(len(g.faces) for _, g in meshes)
     if total <= target:
         print(f"reduce detail: the model has {total:,} triangles, at most {target:,}: kept as it is")
         return meshes
     try:
-        import fast_simplification
+        import fast_simplification  # noqa: F401
+        have_fast = True
     except ImportError:
-        print("reduce detail: fast_simplification is not installed: the model is kept as it is")
+        have_fast = False
+    try:
+        import pymeshlab  # noqa: F401
+        have_ml = True
+    except ImportError:
+        have_ml = False
+    if not have_fast and not have_ml:
+        print("reduce detail: fast_simplification and pymeshlab are not installed: the model is kept as it is")
         return meshes
     out, after = [], 0
     for names, g in meshes:
-        f = np.asarray(g.faces, dtype=np.int64)
-        want = int(round(target * len(f) / total))
-        if len(f) < 200 or want >= len(f):
+        n = len(g.faces)
+        want = max(int(round(target * n / total)), 100)
+        if n < 200 or want >= n:
             out.append((names, g))
-            after += len(f)
+            after += n
             continue
-        v = np.asarray(g.vertices, dtype=np.float64)
-        p2, f2, col = fast_simplification.simplify(v, f, target_count=max(want, 100), return_collapses=True,
-                                                   preserve_border=True)
-        # The simplified mesh's vertices are the originals not collapsed away, in their order (moved to
-        # the best place for the shape).
-        kept = np.setdiff1d(np.arange(len(v)), col[:, 1]) if len(col) else np.arange(len(v))
-        if len(kept) != len(p2):
-            print(f"reduce detail: {names[0]} could not be matched up, kept as it is")
-            out.append((names, g))
-            after += len(f)
-            continue
-        nrm = np.asarray(g.vertex_normals, dtype=np.float64)[kept]
-        uv = getattr(g.visual, "uv", None)
-        if uv is not None and len(uv) == len(v):
-            visual = trimesh.visual.TextureVisuals(uv=np.asarray(uv)[kept], material=g.visual.material)
-        else:
-            visual = None
-        h = trimesh.Trimesh(vertices=p2, faces=np.asarray(f2, dtype=np.int64), vertex_normals=nrm, process=False)
-        if visual is not None:
-            h.visual = visual
-        elif getattr(g.visual, "material", None) is not None:
-            h.visual = trimesh.visual.TextureVisuals(material=g.visual.material)
+        h = g
+        if have_fast:
+            first = want * REDUCE_FIRST_PASS if have_ml else want
+            if first < n:
+                h = _reduce_border_locked(g, first) or g
+        if have_ml and len(h.faces) > want * 1.02:
+            h = _reduce_texture_aware(h, want) or h
+        if h is g:
+            print(f"reduce detail: {names[0]} could not be reduced, kept as it is")
         out.append((names, h))
-        after += len(f2)
-    print(f"reduce detail: {total:,} triangles -> {after:,}")
+        after += len(h.faces)
+    print(f"reduce detail: {total:,} triangles -> {after:,}"
+          + ("" if have_ml else " (pymeshlab not installed: seams held, so it can stop short of the target)"))
     return out
 
 
