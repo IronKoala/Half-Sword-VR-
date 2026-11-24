@@ -1,0 +1,1 @@
+rp_polearm|steps-rp_polearm.txt|pose_hold_self_collision=0;hold_blocker_log=1

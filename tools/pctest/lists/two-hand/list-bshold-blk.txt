@@ -1,0 +1,3 @@
+two_polehammer|steps-polehammer.txt|hold_blocker_log=1
+rp_polearm|steps-rp_polearm.txt|hold_blocker_log=1
+rp_mace2h|steps-rp_mace2h.txt|hold_blocker_log=1
