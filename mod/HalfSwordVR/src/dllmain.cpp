@@ -2311,6 +2311,9 @@ namespace
 
     std::atomic<int> g_fake_arm_mode{0};
     std::atomic<bool> g_fake_look{true}; // test: hsvr.fake_look 0 = the made-up head stops looking about
+    // hsvr.still_trace 0/1/2: what moves a held weapon (Matthew 2026-11-24 "why is there small hand jitter
+    // at all?"). 1 = a "Still:" line every 0.5 s per held weapon, 2 = also one line every tick.
+    std::atomic<int> g_still_trace{0};
     std::atomic<int> g_fake_arm_epoch{0}; // bumped by every hsvr.arm_move: timed test paths restart
     std::atomic<double> g_fake_two_up{20.0};
     // hsvr.arm_move 10 <speed cm/s> <pitch deg> <height cm>: the right hand thrusts (stab tests).
@@ -19956,6 +19959,75 @@ namespace
         return side;
     }
 
+    // Still trace: each tick, just before the weapon's own tick, the speeds of everything between your
+    // controller and the weapon, so a weapon moving under a still hand can be pinned on one of them:
+    // target = the hand target from the controller (g_pose.target: tracking or fake arm), bone = his hand
+    // bone, shoulder = his upper arm, body = his actor, set = the velocity the hold gave the weapon last
+    // tick, weapon = the weapon's centre of mass now (what the game's whoosh reads). Each with its
+    // tick-to-tick change (d...): a part whose velocity flips every tick shows d ~ 2 x its speed.
+    struct StillTrace
+    {
+        bool have = false;
+        double t = 0.0;
+        hsvr::Vec3 target, bone, shoulder, v, set, v_target, v_bone, v_shoulder;
+        double win = -1.0;
+        int n = 0;
+        double mx[6] = {0, 0, 0, 0, 0, 0}, sq[6] = {0, 0, 0, 0, 0, 0}, dmx[6] = {0, 0, 0, 0, 0, 0};
+    };
+    StillTrace g_still[2];
+    void still_trace_tick(int side, UObject* weapon, const hsvr::Vec3& v)
+    {
+        using namespace hsvr;
+        int mode = g_still_trace.load();
+        StillTrace& st = g_still[side];
+        if (mode <= 0 || !g_pose.driver) { st = StillTrace{}; return; }
+        int hs = g_hold[side].weapon == weapon ? side : g_hold[1 - side].weapon == weapon ? 1 - side : side;
+        std::string sx = hs == 0 ? "_l" : "_r";
+        double now = now_seconds();
+        Vec3 target = g_pose.target[hs];
+        Vec3 bone = socket_location(g_pose.driver, bone_fname("hand" + sx));
+        Vec3 shoulder = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
+        Vec3 set = g_hold[hs].weapon == weapon ? g_hold[hs].last_set_v : Vec3{};
+        if (st.have && now - st.t > 1e-4 && now - st.t < 0.1)
+        {
+            double d = now - st.t;
+            Vec3 vt = (target - st.target) * (1.0 / d), vb = (bone - st.bone) * (1.0 / d), vs = (shoulder - st.shoulder) * (1.0 / d);
+            Vec3 vals[6] = {vt, vb, vs, g_whoosh_body_v, set, v};
+            Vec3 prev[6] = {st.v_target, st.v_bone, st.v_shoulder, g_whoosh_body_v, st.set, st.v};
+            if (st.win < 0.0) st.win = now;
+            ++st.n;
+            for (int i = 0; i < 6; ++i)
+            {
+                double sp = length(vals[i]);
+                st.mx[i] = (std::max)(st.mx[i], sp);
+                st.sq[i] += sp * sp;
+                if (st.n > 1) st.dmx[i] = (std::max)(st.dmx[i], length(vals[i] - prev[i]));
+            }
+            if (mode >= 2)
+                HSVR_LOG("Still tick: %s target %.0f bone %.0f shoulder %.0f body %.0f set %.0f weapon %.0f cm/s | weapon vs bone %.0f, weapon vs set %.0f cm/s",
+                         hs == 0 ? "left" : "right", length(vt), length(vb), length(vs), length(g_whoosh_body_v), length(set), length(v), length(v - vb), length(v - set));
+            st.v_target = vt, st.v_bone = vb, st.v_shoulder = vs;
+            if (now - st.win >= 0.5 && st.n > 0)
+            {
+                const char* nm[6] = {"target", "bone", "shoulder", "body", "set", "weapon"};
+                std::string line;
+                char buf[96];
+                for (int i = 0; i < 6; ++i)
+                {
+                    snprintf(buf, sizeof(buf), "%s%s max %.0f rms %.0f d %.0f", i ? ", " : "", nm[i], st.mx[i], std::sqrt(st.sq[i] / st.n), st.dmx[i]);
+                    line += buf;
+                }
+                HSVR_LOG("Still: %s %ls (%d ticks), cm/s: %s", hs == 0 ? "left" : "right", weapon->GetName().c_str(), st.n, line.c_str());
+                st.win = now;
+                st.n = 0;
+                for (int i = 0; i < 6; ++i) st.mx[i] = st.sq[i] = st.dmx[i] = 0.0;
+            }
+        }
+        st.have = true;
+        st.t = now;
+        st.target = target, st.bone = bone, st.shoulder = shoulder, st.set = set, st.v = v;
+    }
+
     void whoosh_before_weapon_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         int side = whoosh_side(context, function);
@@ -19969,7 +20041,7 @@ namespace
         if (!tv) return;
         double T = *tv, used = T;
         if (s.tracked && (g_whoosh_scale != 1.0 || g_whoosh_walk > 0.0)) used = T * g_whoosh_scale + g_whoosh_walk;
-        bool need_v = g_whoosh_log || (s.tracked && g_whoosh_gate);
+        bool need_v = g_whoosh_log || (s.tracked && g_whoosh_gate) || g_still_trace.load() > 0;
         UObject* base = need_v ? object_property(context, STR("BaseMesh")) : nullptr;
         FProperty* oldp = prop_chain(context, STR("Weapon Velocity_Old"));
         Vec3 v{};
@@ -19979,6 +20051,7 @@ namespace
             Call gv(base, STR("GetPhysicsLinearVelocity"));
             if (gv.run()) v = gv.vec(), have_v = true;
         }
+        if (have_v && s.tracked) still_trace_tick(side, context, v);
         // Strike gate (Matthew 2026-11-24: "the whoosh is constantly going off, I only want to hear it when
         // I'm actually striking"). Play log 2026-11-23: the game's one-shot fires at a third of the loop's
         // speed (|v| and dv > 0.5 T: 1.5 m/s at the VR threshold), and a held weapon's tick-to-tick dv
@@ -31443,6 +31516,12 @@ namespace
             if (entry.command.rfind("hsvr.contact_log ", 0) == 0)
             {
                 g_contact_log.store(atoi(entry.command.c_str() + 17) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.still_trace ", 0) == 0)
+            {
+                g_still_trace.store(atoi(entry.command.c_str() + 17));
+                HSVR_LOG("Script: still trace %d", g_still_trace.load());
                 continue;
             }
             if (entry.command.rfind("hsvr.arm_move ", 0) == 0)
