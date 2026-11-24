@@ -7473,6 +7473,7 @@ namespace
     std::wstring g_watch_name;
     std::atomic<double> g_watch_moved{0.0}, g_watch_speed{0.0};
     std::atomic<bool> g_watch_reset{false};
+    UObject* g_watch_item = nullptr; // the item hsvr.watch_item found (for its Collision Hit log)
     bool is_mounted(UObject* w);
     void own_gear(UObject* pawn, std::vector<UObject*>& out);
     struct LegGuard
@@ -7495,7 +7496,7 @@ namespace
         static Vec3 at_mark{};
         static bool have_mark = false;
         static double found_t = -10.0;
-        if (g_watch_name.empty() || !pawn) { item = nullptr; return; }
+        if (g_watch_name.empty() || !pawn) { item = nullptr; g_watch_item = nullptr; return; }
         double now = now_seconds();
         if (!item && now - found_t > 0.5)
         {
@@ -7505,6 +7506,7 @@ namespace
             for (UObject* w : ws)
                 if (w && w->GetName().rfind(STR("Default__"), 0) != 0 && w->GetName().find(g_watch_name) != std::wstring::npos) { item = w; break; }
             if (item) HSVR_LOG("Watch: %ls", item->GetName().c_str());
+            g_watch_item = item;
             have_mark = false;
         }
         if (!item) return;
@@ -20343,10 +20345,40 @@ namespace
                  hit.bone.ToString().c_str(), weapon->GetName().c_str(), length(hsvr::Vec3{ni[0], ni[1], ni[2]}));
     }
 
+    // Test (hsvr.watch_item): every hit of the watched item reported by its Collision Hit, with what it hit and how hard
+    // (run 17 c0fd30f: it went off at 4-9 m/s touching only paired bodies of his; which body did the physics say it hit?).
+    void watch_hit_log(Unreal::UnrealScriptFunctionCallableContext& context, UFunction* fn)
+    {
+        if (!g_watch_item || context.Context != g_watch_item || !fn) return;
+        uint8_t* locals = context.TheStack.Locals();
+        if (!locals) return;
+        UObject *other = nullptr, *other_comp = nullptr, *my_comp = nullptr;
+        double ni[3] = {0, 0, 0};
+        for (FProperty* p : fn->ForEachProperty())
+        {
+            std::wstring n = p->GetName();
+            uint8_t* at = locals + p->GetOffset_Internal();
+            if (n == STR("OtherActor") || n == STR("Other Actor")) other = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("OtherComp") || n == STR("Other Comp")) other_comp = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("HitComponent") || n == STR("Hit Component") || n == STR("MyComp")) my_comp = *reinterpret_cast<UObject**>(at);
+            else if (n == STR("NormalImpulse") || n == STR("Normal Impulse")) read_three(at, p, ni);
+        }
+        double imp = hsvr::length(hsvr::Vec3{ni[0], ni[1], ni[2]});
+        bool his = other && other == g_hitf.pawn;
+        if (!his && imp < 50.0) return; // resting on the floor
+        static std::map<std::wstring, double> said;
+        std::wstring key = (other_comp ? other_comp->GetName() : STR("?"));
+        double now = hsvr::now_seconds();
+        if (now - said[key] < 0.1) return;
+        said[key] = now;
+        HSVR_LOG("Watch hit: %ls.%ls hit %ls.%ls%ls, impulse %.0f", g_watch_item->GetName().c_str(), my_comp ? my_comp->GetName().c_str() : STR("?"),
+                 other ? other->GetName().c_str() : STR("?"), key.c_str(), his ? STR(" (HIS)") : STR(""), imp);
+    }
     void stab_hit_hook(Unreal::UnrealScriptFunctionCallableContext& context, void* custom_data)
     {
         gc_sync();
         HSVR_PROF(PerfStabHit);
+        watch_hit_log(context, static_cast<UFunction*>(custom_data));
         // Only a weapon he holds, or something hitting one he holds (every weapon's hits come here).
         if (!g_hitf.pawn || (!hit_is_his_item(context.Context) && !hit_is_his_item(hit_other_actor(context, static_cast<UFunction*>(custom_data))))) return;
         if (hsvr::config().hold_blocker_log) hold_blocker_hit(context, static_cast<UFunction*>(custom_data));
