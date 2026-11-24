@@ -209,6 +209,23 @@ REACH_STEPS = """6:hsvr.arm_move 6
 16:quit
 """
 
+# Switch (2026-11-24, his markers 2026-11-23: three runaway spins 0.82-1.06 s after a switch between one and two hands, controllers
+# still, right hand main throughout; one same switch with no spin). A fast two-hand cut, the left lets go out there, then takes again.
+SWITCH = [("axe2h", -25), ("polehammer", 30), ("warstaff", 30), ("longsword", -12)]
+SWITCH_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
+10.1:hsvr.arm_move 3
+12:hsvr.arm_move 7 {along}
+12.1:hsvr.squeeze 0 0
+12.15:hsvr.spin_reset 1
+15:hsvr.expect held_r = 1
+15:hsvr.expect held_spin_max_r < 600 after the left let go (2 to 1 hands), hands still: no spin-up (deg/s; his ran 1300-2700)
+15.1:hsvr.squeeze 0 1
+15.15:hsvr.spin_reset 1
+18:hsvr.expect two_hand = 1 took it again
+18:hsvr.expect held_spin_max_r < 600 after the left took it again (1 to 2 hands), hands still: no spin-up (deg/s)
+18.1:quit
+"""
+
 
 def main():
     rows = []
@@ -257,6 +274,11 @@ def main():
     for weapon in REACH:
         (HERE / ("steps-reach_%s.txt" % weapon)).write_text(HEAD.format(path=paths[weapon]) + REACH_STEPS, newline="\n")
         reach.append(weapon)
+    switch = []
+    for weapon, along in SWITCH:
+        steps = HEAD.format(path=paths[weapon]) + TAKE_ALONG.format(along=along) + SWITCH_STEPS.format(along=along)
+        (HERE / ("steps-switch_%s.txt" % weapon)).write_text(steps, newline="\n")
+        switch.append(weapon)
     lst = ["# Two hands with real-hand conditions (playtest 2026-11-23); two hands are held as B&S holds them (pose_two_hand_bs=1).",
            "# rp_: his own recorded controller motion. ctl_: the same cases in the previous line mode (pose_two_hand_bs=0), for comparison."]
     lst += ["two_%s|steps-%s.txt" % (n, n) for n in rows]
@@ -273,6 +295,9 @@ def main():
     lst += ["pull2_spin_%s|steps-spin_%s.txt|pose_hold_joint_pull_once=0" % (n, n) for n in spin]
     lst += ["reach_%s|steps-reach_%s.txt" % (n, n) for n in reach]
     lst += ["old_reach_%s|steps-reach_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in reach]
+    for pre, extra in (("switch", ""), ("switch2", ""), ("old_switch", "|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0"),
+                       ("old_switch2", "|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0")):
+        lst += ["%s_%s|steps-switch_%s.txt%s" % (pre, n, n, extra) for n in switch]
     # (a second launch of each: the one runaway seen so far came in only one of two launches)
     lst += ["reach2_%s|steps-reach_%s.txt" % (n, n) for n in reach]
     lst += ["old_reach2_%s|steps-reach_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in reach]
