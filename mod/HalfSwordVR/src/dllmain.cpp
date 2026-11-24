@@ -20698,8 +20698,9 @@ namespace
         UObject* weapon = nullptr;
         UFunction* tick = nullptr; // that weapon's ReceiveTick
         double win_start = -1.0, max_v = 0.0, max_dv = 0.0, max_vol = 0.0, threshold = 0.0, used = 0.0;
-        int ticks = 0, sliding = 0, shots = 0;
+        int ticks = 0, sliding = 0, shots = 0, striking_ticks = 0;
         bool tracked = false;
+        bool striking = false; // the strike gate is open (whoosh_strike_gate)
         bool restore = false; // its threshold is lowered for this tick: put saved back after it
         double saved = 0.0;
         double gate_until = -1.0;
@@ -20709,6 +20710,9 @@ namespace
     double g_whoosh_scale = 1.0;
     double g_whoosh_log_min_speed = 300.0;
     double g_whoosh_walk = 0.0; // cm/s added to a tracked weapon's whoosh threshold: his walking speed x whoosh_walk_speed_scale
+    bool g_whoosh_gate = true;
+    double g_whoosh_gate_ratio = 1.0;
+    hsvr::Vec3 g_whoosh_body_v; // his velocity (cm/s): the strike gate judges the weapon against his body
 
     // From the engine tick: which weapons are in his hands now, and the settings (config() is a copy,
     // too dear for every weapon tick).
@@ -20718,9 +20722,12 @@ namespace
         g_whoosh_scale = cfg.whoosh_vr_threshold_scale > 0.0 ? cfg.whoosh_vr_threshold_scale : 1.0;
         g_whoosh_log_min_speed = cfg.whoosh_log_min_speed;
         UObject* pawn = nullptr;
-        if (g_whoosh_log || g_whoosh_scale != 1.0 || cfg.whoosh_walk_speed_scale > 0.0) pawn = object_property(find_player_controller(), STR("Pawn"));
+        g_whoosh_gate = cfg.whoosh_strike_gate;
+        g_whoosh_gate_ratio = cfg.whoosh_strike_speed_ratio;
+        if (g_whoosh_log || g_whoosh_scale != 1.0 || cfg.whoosh_walk_speed_scale > 0.0 || g_whoosh_gate) pawn = object_property(find_player_controller(), STR("Pawn"));
         g_whoosh_walk = 0.0;
-        if (pawn && cfg.whoosh_walk_speed_scale > 0.0)
+        g_whoosh_body_v = hsvr::Vec3{};
+        if (pawn && (cfg.whoosh_walk_speed_scale > 0.0 || g_whoosh_gate))
         {
             // The game whooshes on the weapon's speed through the world (> its threshold); walking at 3-4 m/s
             // with a weapon nearly did that alone (playtest 2026-11-21 13:47). Raised by the walk, so a
@@ -20729,7 +20736,8 @@ namespace
             if (gv.run())
             {
                 hsvr::Vec3 v = gv.vec();
-                g_whoosh_walk = std::sqrt(v.x * v.x + v.y * v.y) * cfg.whoosh_walk_speed_scale;
+                g_whoosh_body_v = v;
+                if (cfg.whoosh_walk_speed_scale > 0.0) g_whoosh_walk = std::sqrt(v.x * v.x + v.y * v.y) * cfg.whoosh_walk_speed_scale;
             }
         }
         UObject* held[2] = {nullptr, nullptr};
@@ -20776,20 +20784,41 @@ namespace
         double* tv = tp->GetClass().GetName() == STR("DoubleProperty") ? reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(context) + tp->GetOffset_Internal()) : nullptr;
         if (!tv) return;
         double T = *tv, used = T;
-        if (s.tracked && (g_whoosh_scale != 1.0 || g_whoosh_walk > 0.0))
+        if (s.tracked && (g_whoosh_scale != 1.0 || g_whoosh_walk > 0.0)) used = T * g_whoosh_scale + g_whoosh_walk;
+        bool need_v = g_whoosh_log || (s.tracked && g_whoosh_gate);
+        UObject* base = need_v ? object_property(context, STR("BaseMesh")) : nullptr;
+        FProperty* oldp = prop_chain(context, STR("Weapon Velocity_Old"));
+        Vec3 v{};
+        bool have_v = false;
+        if (base)
+        {
+            Call gv(base, STR("GetPhysicsLinearVelocity"));
+            if (gv.run()) v = gv.vec(), have_v = true;
+        }
+        // Strike gate (Matthew 2026-11-24: "the whoosh is constantly going off, I only want to hear it when
+        // I'm actually striking"). Play log 2026-11-23: the game's one-shot fires at a third of the loop's
+        // speed (|v| and dv > 0.5 T: 1.5 m/s at the VR threshold), and a held weapon's tick-to-tick dv
+        // jitter reaches that while you only carry it. Like B&S (WhooshPoint: silent under minVelocity),
+        // a weapon in a tracked hand whooshes only while it moves against his body as fast as the game's
+        // own air loop needs (1.5 x the threshold used, x whoosh_strike_speed_ratio); the gate closes again
+        // under 70% of that. While closed its threshold is out of reach for this tick, so neither the loop
+        // nor a one-shot plays (contact scrapes, which don't use it, still do).
+        if (s.tracked && g_whoosh_gate && have_v)
+        {
+            double rel = length(v - g_whoosh_body_v);
+            double open = 1.5 * used * (g_whoosh_gate_ratio > 0.0 ? g_whoosh_gate_ratio : 1.0);
+            if (rel >= open) s.striking = true;
+            else if (rel < 0.7 * open) s.striking = false;
+            if (!s.striking) used = 1.0e7;
+        }
+        else s.striking = !s.tracked || !g_whoosh_gate;
+        if (used != T)
         {
             s.saved = T;
             s.restore = true;
-            used = T * g_whoosh_scale + g_whoosh_walk;
             *tv = used;
         }
-        if (!g_whoosh_log) return;
-        UObject* base = object_property(context, STR("BaseMesh"));
-        FProperty* oldp = prop_chain(context, STR("Weapon Velocity_Old"));
-        if (!base || !oldp) return;
-        Call gv(base, STR("GetPhysicsLinearVelocity"));
-        if (!gv.run()) return;
-        Vec3 v = gv.vec();
+        if (!g_whoosh_log || !have_v || !oldp) return;
         double o[3];
         read_three(reinterpret_cast<uint8_t*>(context) + oldp->GetOffset_Internal(), oldp, o);
         double speed = length(v);
@@ -20798,9 +20827,9 @@ namespace
         if (s.win_start < 0.0) s.win_start = now;
         ++s.ticks;
         s.threshold = T;
-        s.used = used;
         s.max_v = (std::max)(s.max_v, speed);
         s.max_dv = (std::max)(s.max_dv, dv);
+        if (s.striking) ++s.striking_ticks, s.used = used;
         if (bool_property(context, STR("Sliding"))) ++s.sliding;
         if (UObject* slide = object_property(context, STR("Sound Slide")))
             if (float* vol = value_ptr<float>(slide, STR("VolumeMultiplier"))) s.max_vol = (std::max)(s.max_vol, (double)*vol);
@@ -20808,13 +20837,13 @@ namespace
         if (dv > 0.5 * used && speed > 0.5 * used && now >= s.gate_until) ++s.shots, s.gate_until = now + 0.2;
         if (now - s.win_start >= 0.5)
         {
-            if (s.max_v >= g_whoosh_log_min_speed)
-                HSVR_LOG("Whoosh: %s %ls (%s, threshold %.0f, used %.0f): speed max %.0f cm/s, game's dv max %.0f cm/s, sliding %d/%d ticks, air loop volume max %.2f, "
-                         "one-shots %d",
+            if (s.max_v >= g_whoosh_log_min_speed || s.shots > 0)
+                HSVR_LOG("Whoosh: %s %ls (%s, threshold %.0f, used %.0f): speed max %.0f cm/s, game's dv max %.0f cm/s, striking %d/%d ticks, sliding %d/%d ticks, "
+                         "air loop volume max %.2f, one-shots %d",
                          side == 0 ? "left" : "right", context->GetName().c_str(), s.tracked ? "VR hand" : "game's arm", s.threshold, s.used, s.max_v, s.max_dv,
-                         s.sliding, s.ticks, s.max_vol, s.shots);
+                         s.striking_ticks, s.ticks, s.sliding, s.ticks, s.max_vol, s.shots);
             s.win_start = now;
-            s.ticks = s.sliding = s.shots = 0;
+            s.ticks = s.sliding = s.shots = s.striking_ticks = 0;
             s.max_v = s.max_dv = s.max_vol = 0.0;
         }
     }

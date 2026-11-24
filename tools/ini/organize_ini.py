@@ -524,6 +524,8 @@ LAYOUT = [
         ('pose_throw_speed', 'Let go faster than this (m/s) = a throw.'),
         ('whoosh_vr_threshold_scale', "Swing whoosh in VR: the game's whoosh speed threshold x this (1 = game's own, needs 7.5 m/s swings; lower = slower swings whoosh)."),
         ('whoosh_walk_speed_scale', 'Whoosh threshold raised by your walking speed x this, so walking with a weapon does not whoosh (0 = off).'),
+        ('whoosh_strike_gate', "1 = whoosh only while you actually strike (weapon as fast against your body as the game's air whoosh needs); 0 = also on slow moves."),
+        ('whoosh_strike_speed_ratio', "How fast a strike must be to whoosh, x the game's air-whoosh speed (1 = 4.5 m/s for most weapons; higher = only harder strikes)."),
         ('pose_feed_swing_speed', "1 = the game's swing speed is fed from your controllers."),
         ('pose_swing_speed_lo', 'Hand speed that counts as no swing (m/s).'),
         ('pose_swing_speed_hi', 'Hand speed that counts as a full swing (m/s).'),
