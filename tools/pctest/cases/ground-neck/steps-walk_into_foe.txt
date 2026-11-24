@@ -1,0 +1,12 @@
+# pose_capsule_no_push check: walking with the stick into a passive foe stood 80 cm in front. He must still be stopped by
+# him (not walk through) and not hurt him (body-contact-damage: kinematic push-outs once hurt Willies). Record + foe alive.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.6:hsvr.expect room_foes = 1 the one passive foe
+0.8:hsvr.player_immortal
+1.0:hsvr.foe_front 80
+1.5:hsvr.stick 0 1
+2.5:hsvr.expect walk_speed >= 0 record: walking toward him
+4.5:hsvr.expect walk_speed >= 0 record: against him
+4.6:hsvr.stick -9 0
+5.5:hsvr.expect room_foes = 1 the foe is still up
+5.5:hsvr.expect actor_z > 80 he is still standing

@@ -1,0 +1,16 @@
+# pose_capsule_no_push check: two crossbows dropped at his feet, then he walks forward with the stick over them. He must
+# not get stuck on them (the capsule treats loose things differently with the engine's physics interaction off).
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.8:hsvr.player_immortal
+1.0:hsvr.squeeze 1 1
+1.5:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C
+2.5:hsvr.squeeze 1 0
+3.0:hsvr.squeeze 1 1
+3.5:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C
+4.5:hsvr.squeeze 1 0
+6.0:hsvr.expect held_r = 0 items dropped at his feet
+6.1:hsvr.stick 0 1
+7.5:hsvr.expect walk_speed > 30 walking over them
+8.5:hsvr.expect walk_speed > 30 still walking
+8.6:hsvr.stick -9 0
+9.5:hsvr.expect actor_z > 80 standing

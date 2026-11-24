@@ -13,3 +13,5 @@ floor_kick|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 floor_kick_62|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62
 floor_kick_fast|steps-floor_kick_fast.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
 floor_kick_fast_62|steps-floor_kick_fast.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62
+walk_into_foe|steps-walk_into_foe.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+walk_over_items|steps-walk_over_items.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
