@@ -18043,6 +18043,48 @@ namespace
                     double stb = (std::max)(0.0, cfg.pose_hold_strength);
                     double tmax = cfg.pose_two_hand_bs_rot_max * (std::max)(0.0, cfg.pose_hold_joint_max) * 0.5 * ((std::max)(0.0, body.total) + (std::max)(0.0, s2.total)) * 1e4;
                     Vec3 err_rot = scaled_axis((rot * target_rot.inverse()).normalized());
+                    Vec3 tang = target_ang;
+                    {
+                        // Which hand turns it (B&S Handle.cs AutoFront, :1720-1775): the FRONT hand, the one further up the weapon
+                        // (toward its head), chosen again whenever the hands change order; the other only pulls. His B&S logs
+                        // 2026-11-19/23 (spears, staff, Military Fork): the turning hand followed his front hand. Before, the hand
+                        // that grabbed first always turned it, so a back hand that grabbed first steered from behind
+                        // (pose_two_hand_bs_front_turns).
+                        static bool second_front = false;
+                        static Quat rel2;
+                        static Quat prev_h2;
+                        static bool have_h2 = false;
+                        static UObject* sf_for = nullptr;
+                        static double sf_t = -1.0;
+                        double sf_now = now_seconds();
+                        if (sf_for != weapon || sf_now - sf_t > 0.2) second_front = false, have_h2 = false; // a new two-hand hold
+                        sf_for = weapon;
+                        sf_t = sf_now;
+                        int s2 = g_two.second;
+                        bool want = false;
+                        if (cfg.pose_two_hand_bs_front_turns && g_two.have_local && g_pose.hand_valid[s2])
+                        {
+                            double d = g_two.local.z - pivot.z; // + = the second hand is further up (BaseMesh +Z runs to the head)
+                            want = second_front ? d > -2.0 : d > 2.0;
+                        }
+                        Quat h2 = g_pose.hand_rot[s2];
+                        if (want && !second_front)
+                        {
+                            rel2 = (h2.inverse() * rot).normalized(); // the weapon in that hand's frame as it is now (no jump)
+                            HSVR_LOG("Two hands: %s hand is in front on %ls: it turns the weapon now", s2 == 0 ? "left" : "right", weapon->GetName().c_str());
+                        }
+                        else if (!want && second_front)
+                            HSVR_LOG("Two hands: %s hand is in front on %ls: it turns the weapon again", side == 0 ? "left" : "right", weapon->GetName().c_str());
+                        second_front = want;
+                        if (want)
+                        {
+                            Quat t2 = (h2 * rel2).normalized();
+                            err_rot = scaled_axis((rot * t2.inverse()).normalized());
+                            tang = have_h2 && DTb > 1e-4 ? scaled_axis((h2 * prev_h2.inverse()).normalized()) * (1.0 / DTb) : Vec3{};
+                        }
+                        prev_h2 = h2;
+                        have_h2 = true;
+                    }
                     // Solved WITH both hands' pulls as B&S's solver (PhysX) solves its three drives together: the turn alone,
                     // set as a spin outside the physics, swung the far grip against the second joint every tick (run 57719a0,
                     // his polearm motion: the main grip 28.8 cm from his hand on average, 6.8 in the playtest). Only the spin is
@@ -18072,7 +18114,7 @@ namespace
                     bool own = cfg.pose_two_hand_bs_solve_pulls;
                     Vec3 gravity{0.0, 0.0, g_weapon_gravity.load() == 0 ? 0.0 : -980.0};
                     Vec3 vb = own ? ev + gravity * DTb : ev, wb = ew, ang;
-                    bs_solve(mass, about_com.inverse(), vb, wb, pts, 2, err_rot, target_ang, cfg.pose_two_hand_bs_rot_k * stb * 1e4, cfg.pose_two_hand_bs_rot_c * stb * 1e4, tmax,
+                    bs_solve(mass, about_com.inverse(), vb, wb, pts, 2, err_rot, tang, cfg.pose_two_hand_bs_rot_k * stb * 1e4, cfg.pose_two_hand_bs_rot_c * stb * 1e4, tmax,
                              DTb, (std::max)(1, cfg.pose_bs_iterations), ang);
                     w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
                     if (own) bs_v = clamp_length(vb - gravity * DTb, 2000.0), have_bs_v = true;
