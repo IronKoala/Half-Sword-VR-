@@ -14,6 +14,8 @@ lantern_hold_still|steps-lantern_hold_still.txt|test_room_map=/Game/Maps/Arenas/
 floor_pickup|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
 floor_pickup_62|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62
 lantern_light|steps-lantern_light.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold_noturn|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_max_torque=1;pose_hold_wrist_stop_torque=1
+lantern_hold_softturn|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_turn_spring=100
 lantern_hold_old|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_count_hanging=0
 neck_drag_old_rule|steps-neck_drag.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;joint_break_twist_needs_wrist=0;joint_break_min_s=0;joint_break_wrench_nm_per_deg=0
 floor_reach_old|steps-floor_reach_old.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_bend_neck_follow=0;pose_crouch_max_cm=62

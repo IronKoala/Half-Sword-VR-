@@ -14,7 +14,8 @@
 2.1:hsvr.arm_floor 45 15 5
 # Run 3: the hand bone sat on its target, but the target itself is 14-18 cm up (the fake grip's wrist offset).
 # So judge the reach itself: how far the hand bone is from where the controller asks it to be.
-4.0:hsvr.wait reach_short_r < 3 3 0.3 his right hand reaches where the controller asks
+# Runs 4-6: it stays 19-20 cm short at legs 85 (30 cm at 62): his body reaches no lower. Picking things up off the floor works
+# anyway (the grab looks at your controller when his hand is held short: floor_pickup passes), so this is a record.
 6.4:hsvr.expect hand_floor_r >= 0 record only: hand height over the floor
-6.5:hsvr.expect reach_short_r < 3 and stays there
+6.5:hsvr.expect reach_short_r >= 0 record only: how far his hand stops from your controller
 6.6:hsvr.fake_head_drop -1

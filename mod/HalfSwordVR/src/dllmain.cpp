@@ -18622,8 +18622,12 @@ namespace
                     hang += b;
                 }
             }
-            HSVR_LOG_EVERY(0.5, "Hold: %s %ls trails %.1f cm: %.1f out from him, %.1f to the side, %.1f up; hand pull %.0f N%s; hanging: %s", side == 0 ? "left" : "right",
-                           weapon->GetName().c_str(), h.lag, dot(lag_v, out_h), dot(lag_v, side_h), lag_v.z, h.force_n, h.force_capped ? " (capped)" : "", hang.c_str());
+            double tilt = std::acos((std::max)(-1.0, (std::min)(1.0, rot.rotate(Vec3{0.0, 0.0, 1.0}).z))) * 57.2958;
+            double tilt_want = std::acos((std::max)(-1.0, (std::min)(1.0, target_rot.rotate(Vec3{0.0, 0.0, 1.0}).z))) * 57.2958;
+            HSVR_LOG_EVERY(0.5, "Hold: %s %ls trails %.1f cm: %.1f out from him, %.1f to the side, %.1f up; hand pull %.0f N%s, turn %.1f N m%s; tilted %.0f deg (hand wants %.0f, %.0f apart); hanging: %s",
+                           side == 0 ? "left" : "right", weapon->GetName().c_str(), h.lag, dot(lag_v, out_h), dot(lag_v, side_h), lag_v.z, h.force_n,
+                           h.force_capped ? " (capped)" : "", h.torque_nm, h.torque_capped ? " (capped)" : "", tilt, tilt_want,
+                           length(scaled_axis((target_rot * rot.inverse()).normalized())) * 57.2958, hang.c_str());
         }
         // Far behind for a while: why it isn't coming (asleep, not simulating, what it does with the
         // velocity it was given, its damping, and how it answers the world's channels).
