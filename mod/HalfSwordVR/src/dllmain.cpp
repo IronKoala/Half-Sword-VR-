@@ -5509,6 +5509,21 @@ namespace
         return false;
     }
 
+    // That side's whole arm (upper arm down to the fingers): B&S's RagdollPart Arm + Hand.
+    bool in_arm(UObject* mesh, FName bone, int side)
+    {
+        std::wstring stop = side == 0 ? STR("upperarm_l") : STR("upperarm_r");
+        FName at = bone;
+        for (int i = 0; i < 14; ++i)
+        {
+            std::wstring n = at.ToString();
+            if (n == stop) return true;
+            if (n == STR("None") || n.empty()) return false;
+            at = parent_bone(mesh, at);
+        }
+        return false;
+    }
+
     struct ArmIgnore
     {
         UObject* weapon = nullptr;
@@ -5740,8 +5755,24 @@ namespace
             // lets a held item touch the hand that holds it.
             // B&S: a held item ignores the whole player body (item.ignoredRagdoll, bs_hold_measured.md §1);
             // the other hand's call (a second hand on it) adds only its own forearm.
-            bool whole = hsvr::config().pose_hold_ignore_body && g_arm_ignore[1 - side].weapon != weapon;
-            if ((!hsvr::config().pose_hold_ignore_hand && bone.ToString() == hand.ToString()) || (!whole && !in_forearm(mesh, bone, side))) continue;
+            const hsvr::Config& ac = hsvr::config();
+            bool whole = ac.pose_hold_ignore_body && g_arm_ignore[1 - side].weapon != weapon;
+            if (!ac.pose_hold_ignore_hand && bone.ToString() == hand.ToString()) continue;
+            // B&S's Player Self Collision (Item.RefreshCollision, Item.cs:3359-3520; bs_body_physics.md). On
+            // (pose_hold_self_collision=1): the weapon ignores only the arm(s) and hand(s) holding it (upper arm to fingers);
+            // his torso, head, legs, feet and free arm push it away (playtest 2026-11-23 5:01 PM: a two-handed mace sat inside
+            // his torso). Off (0, B&S's default): his whole body but the feet, and the free hand while held in one hand.
+            if (ac.pose_hold_ignore_body && ac.pose_hold_self_collision)
+            {
+                if (!in_arm(mesh, bone, side)) continue;
+            }
+            else if (whole)
+            {
+                std::wstring bn = bone.ToString();
+                if (bn == STR("foot_l") || bn == STR("foot_r") || bn == (side == 0 ? STR("hand_r") : STR("hand_l"))) continue;
+            }
+            else if (!in_forearm(mesh, bone, side))
+                continue;
             UObject* j = new_constraint(pawn, cls);
             if (!j) continue;
             // Free in every direction and no drives: it holds nothing, it only switches off the pair's collision.

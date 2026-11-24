@@ -428,6 +428,7 @@ LAYOUT = [
         ('pose_hold_contact_cm', 'A held weapon this far short of where the hold sent it counts as blocked (cm).'),
         ('pose_hold_ignore_hand', '1 = the held weapon never collides with the hand holding it.'),
         ('pose_hold_ignore_body', '1 = the held weapon never collides with his own body (B&S).'),
+        ('pose_hold_self_collision', 'Blade and Sorcery Player Self Collision. 1 = a held weapon passes through only the arm and hand holding it (both, when two-handed); your torso, head, legs, feet and free arm push it away. 0 = as Blade and Sorcery default: it passes through your whole body except your feet, and your free hand while you hold it in one hand. Needs pose_hold_ignore_body=1.'),
         ('pose_hold_ignore_own_helmet', "1 = your held weapon also passes through your own worn helmet's collision. Others' helmets are still hit."),
         ('pose_hold_block_offhand_search', "1 = the game's off-hand search grip stays off while the mod holds a weapon (it shoved longswords)."),
     ]),
