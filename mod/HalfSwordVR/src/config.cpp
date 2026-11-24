@@ -498,6 +498,7 @@ namespace hsvr
         integer("pose_bs_iterations", c.pose_bs_iterations);
         num("pose_bs_two_let_go_cm", c.pose_bs_two_let_go_cm);
         flag("pose_hold_ignore_body", c.pose_hold_ignore_body);
+        flag("pose_hold_self_collision", c.pose_hold_self_collision);
         flag("pose_hold_ignore_own_helmet", c.pose_hold_ignore_own_helmet);
         flag("hold_blocker_log", c.hold_blocker_log);
         num("pose_hold_weight_spin_extra", c.pose_hold_weight_spin_extra);
@@ -527,6 +528,7 @@ namespace hsvr
         num("pose_hold_joint_fade_after_s", c.pose_hold_joint_fade_after_s);
         flag("pose_hold_joint_slerp", c.pose_hold_joint_slerp);
         flag("pose_hold_joint_mod_turn", c.pose_hold_joint_mod_turn);
+        flag("pose_hold_joint_pull_once", c.pose_hold_joint_pull_once);
         num("pose_hold_joint_target_max_speed", c.pose_hold_joint_target_max_speed);
         flag("pose_hold_joint_draw_wound", c.pose_hold_joint_draw_wound);
         flag("pose_hold_joint_turn_by_grip", c.pose_hold_joint_turn_by_grip);
@@ -557,6 +559,8 @@ namespace hsvr
         num("pose_hold_shoulder_fade_to_cm", c.pose_hold_shoulder_fade_to_cm);
         num("pose_hold_let_go_reach_slack_cm", c.pose_hold_let_go_reach_slack_cm);
         num("pose_hold_wrist_stop_spin", c.pose_hold_wrist_stop_spin);
+        num("pose_hold_spin_brake_from", c.pose_hold_spin_brake_from);
+        num("pose_hold_spin_brake_span", c.pose_hold_spin_brake_span);
         num("pose_hold_torque_strength_power", c.pose_hold_torque_strength_power);
         num("pose_slide_ring_max_len_cm", c.pose_slide_ring_max_len_cm);
         num("pose_slide_ring_max_width_cm", c.pose_slide_ring_max_width_cm);
@@ -706,6 +710,7 @@ namespace hsvr
         num("pose_two_hand_bs_rot_c", c.pose_two_hand_bs_rot_c);
         num("pose_two_hand_bs_rot_max", c.pose_two_hand_bs_rot_max);
         flag("pose_two_hand_bs_solve_pulls", c.pose_two_hand_bs_solve_pulls);
+        flag("pose_two_hand_bs_front_turns", c.pose_two_hand_bs_front_turns);
         num("pose_two_hand_auto_slide_cm", c.pose_two_hand_auto_slide_cm);
         flag("pose_two_hand_fixed_rebase", c.pose_two_hand_fixed_rebase);
         num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
