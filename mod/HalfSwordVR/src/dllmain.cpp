@@ -3126,6 +3126,20 @@ namespace
                 if (item && in_hand) grip = last_grip;
                 else if (item)
                     if (UObject* b = object_property(item, STR("BaseMesh"))) grip = last_grip = component_location(b) + Vec3{0, 0, g_arm_floor[2]};
+                // Moved there at a reach's pace, 120 cm/s: jumping from the made-up circle to the floor in one frame swung
+                // his hand at slap speed, and the slap fist knocked the lantern 5 m (run 13 gate floor_pickup 66.51-66.86).
+                static Vec3 eased_grip{};
+                static double eased_at = -10.0;
+                double step = (std::min)(0.1, now - eased_at) * 120.0;
+                if (now - eased_at > 0.5) eased_grip = grip; // first frame of this mode (or after a pause)
+                else
+                {
+                    Vec3 to = grip - eased_grip;
+                    double dl = length(to);
+                    eased_grip = dl <= step ? grip : eased_grip + to * (step / dl);
+                }
+                eased_at = now;
+                grip = eased_grip;
             }
             if (mode == 18 && side == 1)
             {
@@ -7458,6 +7472,9 @@ namespace
         std::vector<UObject*> joints;
         double clear_since = -1.0;
         std::vector<UObject*> gear; // his worn gear when the pairs were made: made again when it changes
+        // Each part's response to his capsule's object channel before it was set to ignore (restored with the pairs).
+        std::vector<std::pair<UObject*, int>> responses;
+        int channel = -1;
     };
     std::map<UObject*, LegGuard> g_leg_guard;
     void item_watch_tick(UObject* pawn)
@@ -7585,6 +7602,15 @@ namespace
                 d.object(STR("Object"), j);
                 d.run();
             }
+        for (auto& [part, was] : g.responses)
+            if (part && !gone(part) && object_alive(part) && g.channel >= 0 && was >= 0)
+            {
+                Call r(part, STR("SetCollisionResponseToChannel"));
+                r.byte(STR("Channel"), (uint8_t)g.channel);
+                r.byte(STR("NewResponse"), (uint8_t)was);
+                r.run();
+            }
+        g.responses.clear();
         if (item && !gone(item)) HSVR_LOG("Legs: %ls collides with his legs again (%s)", item->GetName().c_str(), why);
         g.joints.clear();
     }
@@ -7716,6 +7742,33 @@ namespace
                         if (UObject* j = no_collision_pair(pawn, cls, part, gp)) g.joints.push_back(j);
                 }
                 g.gear = gear;
+                // And his capsule's own movement: the character movement's sweeps and its repulsion of what overlaps the
+                // capsule are queries, which no-collide joints do not reach (run 13 4b7c188: a lantern lying inside his
+                // capsule went off at 9.4 m/s as he crouched to 82 cm, his capsule 0-1.7 cm from it, every pair in place).
+                // So each part ignores the capsule's object channel while guarded (only the filter changes, no rebuild).
+                std::wstring was_list;
+                if (UObject* cap = cfg.pose_legs_pass_capsule_channel ? object_property(pawn, STR("CapsuleComponent")) : nullptr)
+                {
+                    Call t(cap, STR("GetCollisionObjectType"));
+                    t.run();
+                    g.channel = byte_result(t);
+                    if (g.channel >= 0)
+                        for (UObject* part : parts)
+                        {
+                            Call rd(part, STR("GetCollisionResponseToChannel"));
+                            rd.byte(STR("Channel"), (uint8_t)g.channel);
+                            rd.run();
+                            int was = byte_result(rd);
+                            g.responses.push_back({part, was});
+                            was_list += std::to_wstring(was);
+                            if (was <= 0) continue;
+                            Call r(part, STR("SetCollisionResponseToChannel"));
+                            r.byte(STR("Channel"), (uint8_t)g.channel);
+                            r.byte(STR("NewResponse"), (uint8_t)0);
+                            r.run();
+                        }
+                }
+                HSVR_LOG("Legs: capsule channel %d: the parts' responses were [%ls], now ignore", g.channel, was_list.c_str());
                 HSVR_LOG("Legs: %ls %.0f cm from his legs: passes through them and his worn gear (%zu no-collide pair(s), %zu part(s) x %zu gear part(s); "
                          "crouch %.0f; %s)",
                          w->GetName().c_str(), nearest, g.joints.size(), parts.size(), gear_parts.size(), g_crouch_drop, why);

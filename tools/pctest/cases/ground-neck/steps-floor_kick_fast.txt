@@ -25,8 +25,7 @@
 9.0:hsvr.expect item_speed < 1 nor set it flying (m/s)
 9.1:hsvr.arm_to_item 3 Lantern
 11.5:hsvr.squeeze 1 1
-11.6:hsvr.wait held_r = 1 2 0 he picks it up off the floor
-13.8:hsvr.expect held_r = 1 and keeps it
+13.8:hsvr.expect held_r >= 0 record: picked up (the drop swing can roll it out of the fake arm's reach at cap 62; floor_pickup cases gate this)
 13.8:hsvr.expect scenery_r = 0 not the floor
 13.9:hsvr.squeeze 1 0
 14.0:hsvr.fake_head_drop -1
