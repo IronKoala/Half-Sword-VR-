@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory = $true)][string]$Name,   # A, B, C ...: one copy per test instance
   [string]$Root = "C:\HSTest",
-  [switch]$Refresh                               # copy his mod folder, save and settings again (after an install or a game update)
+  [switch]$Refresh,                              # copy his mod folder, save and settings again (after an install or a game update)
+  [switch]$Away                                  # he said he is away: SteamVR left open does not stop it (his Half Sword still does)
 )
 # A test copy of Half Sword that never shares a file the game or the mod WRITES with his own game (docs/pctest.md).
 #   <Root>\<Name>\game  the game: files of 50 MB and more are hard links to his install (paks, exe: read only,
@@ -23,7 +24,8 @@ if (Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.Exe
 if ((Split-Path $src -Qualifier) -ne (Split-Path $Root -Qualifier)) { throw "hard links need $Root on the same drive as $src" }
 # Making a copy writes GBs to C:. On 2026-11-23 it starved C: so badly that SteamVR's watchdog killed it three
 # times while he was starting VR. So: never while VR or his game runs, and at the lowest processor and disk priority.
-$busy = @(Get-Process -Name "vrserver", "vrcompositor", "vrmonitor", "HalfswordUE5*" -ErrorAction SilentlyContinue | Where-Object { -not ($_.Path -and $_.Path -like "$Root\*") })
+$watch = $(if ($Away) { @("HalfswordUE5*") } else { @("vrserver", "vrcompositor", "vrmonitor", "HalfswordUE5*") })
+$busy = @(Get-Process -Name $watch -ErrorAction SilentlyContinue | Where-Object { -not ($_.Path -and $_.Path -like "$Root\*") })
 if ($busy) { throw "SteamVR or his Half Sword is running ($(@($busy | ForEach-Object ProcessName | Select-Object -Unique) -join ', ')): make test copies only while he is away" }
 try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = "Idle" } catch {}
 
@@ -84,6 +86,11 @@ foreach ($l in $gus) {
 $missing = @($set.Keys | Where-Object { -not $seen[$_] -and $null -ne $set[$_] })
 if ($missing) { throw "his GameUserSettings.ini has no " + ($missing -join ", ") + ": check it before making a copy" }
 Set-Content "$user\Saved\Config\Windows\GameUserSettings.ini" $out -Encoding ascii
-Copy-Item "$here\testcopy-Engine.ini" "$user\Saved\Config\Windows\Engine.ini" -Force
+# The game deletes Saved\Config\Windows\Engine.ini at start (seen 2026-11-23 on copies A and B; the potato
+# guide says the same): read-only keeps it.
+$eng = "$user\Saved\Config\Windows\Engine.ini"
+if (Test-Path $eng) { Set-ItemProperty $eng -Name IsReadOnly -Value $false }
+Copy-Item "$here\testcopy-Engine.ini" $eng -Force
+Set-ItemProperty $eng -Name IsReadOnly -Value $true
 "$(Get-Date -Format o) from $src" | Set-Content "$copy\made.txt"
 Write-Host "test copy $copy ready (user dir $user)"

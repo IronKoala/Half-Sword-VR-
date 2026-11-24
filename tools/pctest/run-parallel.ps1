@@ -8,7 +8,8 @@ param(
   [double]$MinFps = 65,
   [int]$MaxFps = 72,
   [int]$SlowTries = 3,                           # a case that keeps running on a starved game is reported, not retried forever
-  [string]$Out = ""
+  [string]$Out = "",
+  [switch]$Away                                  # he said he is away (e.g. at work): SteamVR left open and no idle wait; only his own Half Sword limits to one
 )
 # Runs a case list on test copies (docs/pctest.md, "Test copies"). Matthew 2026-11-23:
 #   at the PC (keyboard or mouse used in the last -IdleMinutes, or his own Half Sword running): ONE test game,
@@ -32,6 +33,10 @@ public static double Seconds() { var i = new LASTINPUTINFO(); i.cbSize = (uint)M
 # He is using the PC for games: his own Half Sword (not from a test copy) or SteamVR is running.
 function His-GameRuns { [bool](Get-CimInstance Win32_Process | Where-Object { $_.Name -like "vrserver*" -or $_.Name -like "vrcompositor*" -or ($_.Name -like "HalfswordUE5*" -and -not ($_.ExecutablePath -and $_.ExecutablePath -like "$Root\*")) }) }
 function Allowed {
+  if ($Away) {
+    if (Get-CimInstance Win32_Process | Where-Object { $_.Name -like "HalfswordUE5*" -and -not ($_.ExecutablePath -and $_.ExecutablePath -like "$Root\*") }) { return 1 }
+    return $Slots
+  }
   if (His-GameRuns) { return 1 }
   if ([HsvrPc.Idle]::Seconds() -lt $IdleMinutes * 60) { return 1 }
   return $Slots
@@ -54,7 +59,7 @@ for ($i = 0; $i -lt $lines.Count; $i += $Chunk) { [void]$queue.Add(@($lines[$i..
 
 # ---- copies -------------------------------------------------------------------------------------------
 $names = @(65..(64 + $Slots) | ForEach-Object { [string][char]$_ })
-foreach ($n in $names) { if (-not (Test-Path "$Root\$n\game\HalfSwordUE5.exe")) { & "$here\new-testcopy.ps1" -Name $n -Root $Root } }
+foreach ($n in $names) { if (-not (Test-Path "$Root\$n\game\HalfSwordUE5.exe")) { & "$here\new-testcopy.ps1" -Name $n -Root $Root -Away:$Away } }
 
 $results = "$Out\results.csv"
 "copy,chunk,case,run,launch,case_in_launch,passed,failed,result,seconds,spawn,replays,min_fps" | Set-Content $results -Encoding ascii
