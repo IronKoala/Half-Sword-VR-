@@ -9988,7 +9988,7 @@ namespace
             if (std::find(blocked.begin(), blocked.end(), (uint8_t)slot) != blocked.end()) continue;
             double d = armour_slot_distance(mesh, slot, hand, side);
             if (d > radius) continue;
-            if (slot == keep) d -= 4.0; // the piece already counting stays chosen unless another is clearly nearer
+            if (slot == keep) d = -1000.0; // the piece already counting stays chosen while it is in reach (run bdf917a: head and neck took turns)
             int layer = armour_layer(slot);
             // Same bones (a tie to the cm): the outer layer. Otherwise the nearer.
             if (best < 0 || d < best_d - 1.0 || (std::abs(d - best_d) <= 1.0 && layer > best_layer)) best = slot, best_d = d, best_layer = layer, best_c = c;
