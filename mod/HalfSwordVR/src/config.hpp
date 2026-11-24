@@ -1210,6 +1210,8 @@ namespace hsvr
         double armor_trigger_off = 0.35;
         double armor_equip_cm = 30.0;
         double armor_take_cm = 18.0;
+        // A held foe: his worn piece whose bones are this close to your hand comes off (cm).
+        double armor_strip_cm = 25.0;
         // Taking your own piece off: the count restarts whenever the hand moves faster than this (cm/s).
         double armor_take_still_cms = 25.0;
         // The ghost hand: while his hand stays on a stopped weapon more than pose_ghost_from_cm from

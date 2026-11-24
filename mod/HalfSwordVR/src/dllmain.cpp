@@ -9999,10 +9999,15 @@ namespace
     }
     // Takes your own worn piece off into that hand: Remove Armor (spawned where the game spawns it), then
     // the hand's grab given the piece, as Strip Armor From Bone does for another's (@19066, @20519).
-    bool armour_take_own(UObject* pawn, UObject* mesh, int side, int slot, const hsvr::Vec3& hand)
+    // `owner` another Willie (a held foe): his piece, Remove Armor called on him (as Strip does, @19044).
+    bool armour_take_own(UObject* pawn, UObject* mesh, int side, int slot, const hsvr::Vec3& hand, UObject* owner = nullptr)
     {
         bool L = side == 0;
-        Call ra(pawn, STR("Remove Armor"));
+        if (!owner) owner = pawn;
+        UObject* owner_mesh = owner == pawn ? mesh : object_property(owner, STR("Mesh"));
+        if (!owner_mesh) return false;
+        const wchar_t* whose = owner == pawn ? L"your" : L"his";
+        Call ra(owner, STR("Remove Armor"));
         if (!ra.fn)
         {
             HSVR_LOG("Armour: no Remove Armor function on %ls", pawn->GetName().c_str());
@@ -10030,7 +10035,7 @@ namespace
             HSVR_LOG("Armour: Remove Armor's parameters not found (transform %d, slot %d, out %d)", tp != nullptr, sp != nullptr, outp != nullptr);
             return false;
         }
-        Call st(mesh, STR("GetSocketTransform"));
+        Call st(owner_mesh, STR("GetSocketTransform"));
         st.name(STR("InSocketName"), bone_fname(armour_slot_socket(slot)));
         FProperty* rp = st.param(STR("ReturnValue"));
         if (!st.run() || !rp || rp->GetSize() != tp->GetSize())
@@ -10045,7 +10050,7 @@ namespace
         UObject* spawned = *reinterpret_cast<UObject**>(ra.buffer.data() + outp->GetOffset_Internal());
         if (!object_alive(spawned))
         {
-            HSVR_LOG("Armour: Remove Armor on your %ls gave nothing", armour_slot_name(slot));
+            HSVR_LOG("Armour: Remove Armor on %ls %ls gave nothing", whose, armour_slot_name(slot));
             return false;
         }
         if (bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R"))) Call(pawn, L ? STR("Release Grab L") : STR("Release Grab R")).run();
@@ -10074,7 +10079,7 @@ namespace
         og.component = comp;
         og.point = hand;
         og.since = hsvr::now_seconds();
-        HSVR_LOG("Armour: %s hand took off your %ls: %ls (%ls), Grabbed %d", L ? "left" : "right", armour_slot_name(slot), spawned->GetName().c_str(),
+        HSVR_LOG("Armour: %s hand took off %ls %ls (%ls): %ls (%ls), Grabbed %d", L ? "left" : "right", whose, armour_slot_name(slot), owner->GetName().c_str(), spawned->GetName().c_str(),
                  comp ? comp->GetName().c_str() : STR("no mesh"), (int)bool_property(pawn, L ? STR("Grabbed L") : STR("Grabbed R")));
         return true;
     }
@@ -10227,11 +10232,25 @@ namespace
             }
             else if (mode == 2)
             {
-                bool ok = Call(pawn, L ? STR("Event Rob With L Hand") : STR("Event Rob With R Hand")).run();
-                FName* gb = value_ptr<FName>(pawn, L ? STR("Grab Bone L") : STR("Grab Bone R"));
-                HSVR_LOG("Armour: %s hand strips %ls at %ls (Fallen %d): Event Rob With %s Hand %s", hand_name, target->GetName().c_str(), gb ? gb->ToString().c_str() : STR("?"),
-                         (int)bool_property(target, STR("Fallen")), L ? "L" : "R", ok ? "called" : "MISSING");
-                a.check = 2, a.check_at = now + 0.9, a.check_obj = target;
+                // The game's Strip rule (Strip Armor From Bone @3801): Fallen, and the slot not in his Block
+                // Undress Slots; his AI turns hostile (@1651). The piece is the worn one nearest your hand (the
+                // game's bone-to-slot map took the neck under a held helmet: test 9dc5dc2), not the weapon rob.
+                UObject* fmesh = object_property(target, STR("Mesh"));
+                bool fallen = bool_property(target, STR("Fallen"));
+                UObject* c = nullptr;
+                double d = 0.0;
+                int fs = fmesh ? armour_own_near(target, fmesh, -1, hb, cfg.armor_strip_cm, &c, &d) : -1;
+                Call gc(target, STR("GetController"));
+                gc.run();
+                UObject* ctl = gc.object_result();
+                if (ctl && is_a(ctl, STR("AI_BP_C"))) set_variable(ctl, STR("Aggression"), 1.0);
+                if (!fallen)
+                    HSVR_LOG("Armour: %s hand: %ls is standing: the game only strips someone who is down (Fallen)", hand_name, target->GetName().c_str());
+                else if (fs < 0)
+                    HSVR_LOG("Armour: %s hand: no worn piece of %ls within %.0f cm of your hand", hand_name, target->GetName().c_str(), cfg.armor_strip_cm);
+                else if (!armour_take_own(pawn, mesh, side, fs, hb, target))
+                    HSVR_LOG("Armour: %s hand: %ls's %ls did not come off", hand_name, target->GetName().c_str(), armour_slot_name(fs));
+                if (!fallen || fs < 0) controllers_buzz(side, 0.15f);
             }
             else
                 armour_take_own(pawn, mesh, side, a.slot, hb);

@@ -860,6 +860,7 @@ namespace hsvr
         num("armor_trigger_off", c.armor_trigger_off);
         num("armor_equip_cm", c.armor_equip_cm);
         num("armor_take_cm", c.armor_take_cm);
+        num("armor_strip_cm", c.armor_strip_cm);
         num("armor_take_still_cms", c.armor_take_still_cms);
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
         flag("pose_grab_objects", c.pose_grab_objects);

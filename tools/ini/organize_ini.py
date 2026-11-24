@@ -652,6 +652,7 @@ LAYOUT = [
         ('armor_trigger_off', 'Trigger let back under this counts as released (0-1).'),
         ('armor_equip_cm', 'A carried piece goes on when your hand is this close to its spot on your body (cm).'),
         ('armor_take_cm', 'An empty hand this close to one of your worn pieces takes it off (cm).'),
+        ('armor_strip_cm', 'Holding a downed foe: his worn piece this close to your hand comes off (cm).'),
         ('armor_take_still_cms', 'Taking your own piece off: the 2 s count restarts if the hand moves faster than this (cm/s), so a fist held up in a guard does not undress you.'),
     ]),
     ('Old grip spring', 'Only used when pose_grip_hold=0.', [
