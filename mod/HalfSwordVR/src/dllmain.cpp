@@ -7606,7 +7606,7 @@ namespace
     // bodies moved to the pose every frame, so they hit what lies at his feet with his legs' speed. PC run 10 d82b641
     // floor_kick: a crouch to 85 cm (eased 150 cm/s) pushed the lantern at his feet 50 cm at 2.5 m/s, his calf_r 12 cm
     // from it. So a loose weapon near his legs gets no-collide pairs with his leg and hip bodies (thigh, calf, foot, ball,
-    // pelvis, spine_01), his capsule, his leg and cuirass armour proxies and his worn gear, and loses them once it is pose_legs_pass_loose_cm + 15 cm clear for 0.3 s or
+    // pelvis, spine_01, spine_02), his capsule, his leg and cuirass armour proxies and his worn gear, and loses them once it is pose_legs_pass_loose_cm + 15 cm clear for 0.3 s or
     // a hand takes it. A deliberate kick (the game's Kick, right A) makes no new pairs.
     void leg_guard_drop(UObject* item, LegGuard& g, const char* why)
     {
@@ -7677,7 +7677,7 @@ namespace
                 std::wstring n = b.ToString();
                 for (wchar_t& ch : n) ch = (wchar_t)towlower(ch);
                 if (n.find(L"thigh") != std::wstring::npos || n.find(L"calf") != std::wstring::npos || n.find(L"foot") != std::wstring::npos ||
-                    n.find(L"ball") != std::wstring::npos || n == L"pelvis" || n == L"spine_01")
+                    n.find(L"ball") != std::wstring::npos || n == L"pelvis" || n == L"spine_01" || n == L"spine_02")
                     leg_bones.push_back(b);
             }
             bones_of = mesh;
@@ -7709,7 +7709,7 @@ namespace
                     std::wstring n = b.ToString();
                     for (wchar_t& ch : n) ch = (wchar_t)towlower(ch);
                     if (n.find(L"thigh") != std::wstring::npos || n.find(L"calf") != std::wstring::npos || n.find(L"foot") != std::wstring::npos ||
-                        n.find(L"ball") != std::wstring::npos || n == L"pelvis" || n == L"spine_01")
+                        n.find(L"ball") != std::wstring::npos || n == L"pelvis" || n == L"spine_01" || n == L"spine_02")
                         driver_bones.push_back(b);
                 }
                 driver_collides = (enabled == 2 || enabled == 3) && !driver_bones.empty(); // PhysicsOnly / QueryAndPhysics
