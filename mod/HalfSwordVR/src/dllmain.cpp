@@ -5160,6 +5160,7 @@ namespace
         bool pulling_back = false;   // and being pulled back out of it
         double length = 80.0;        // the blade's length (cm)
         bool block_cleared = false;
+        bool past_mouth = false;     // in past the mouth (the game's seat is held off until it is nearly home)
     };
     DrawState g_draw[2];
     const char* sheathing_socket(int side)
@@ -22259,8 +22260,13 @@ namespace
                 st = SlotTake{};
                 continue;
             }
-            if (now_seconds() - st.t0 < 0.4) continue;
-            free_slot(pawn, st.slot, st.weapon, "the game had not after 0.4 s");
+            // The back slot (pavise) is freed after one tick, not 0.4 s: the game never frees it on its own, and for those 0.4 s
+            // his hand pulled against the slot joint on his own back (playtest 11-24 marker 14: stamina 100 -> 0 in 0.1 s,
+            // then the pavise snapped free at 15 m/s, 63 rad/s and spun 3800 deg/s).
+            const double wait = std::wstring(sd.var) == STR("Weapon Slot Back") ? 0.03 : 0.4;
+            if (now_seconds() - st.t0 < wait) continue;
+            HSVR_LOG("Draw: stamina %.1f at the slot break (%.2f s after the take)", read_number_variable(pawn, STR("Stamina")), now_seconds() - st.t0);
+            free_slot(pawn, st.slot, st.weapon, wait < 0.1 ? "back slot: freed after one tick" : "the game had not after 0.4 s");
             make_loose_simulating(st.weapon, "after the mod's slot break");
             // The rebuilt body is a new physics body: the hold's no-collide joints against his own bodies
             // (made at the take) no longer apply, and it was pinned on his own upper arm and pelvis (23:35Z
@@ -22397,7 +22403,10 @@ namespace
             Quat q0 = component_rotation(base0);
             if (best == 4 && cfg.pose_pavise_strap && pavise_spec(w)) remember_hung(mesh, w, p0, q0);
             bool freed = false;
-            if (!body_live(base0))
+            // The back slot (pavise) is freed before the hand takes it too: taken while still on its slot joint, his hand
+            // pulled against his own back until the mod broke the slot 0.4 s later (playtest 11-24 marker 14: stamina
+            // 100 -> 0 in 0.1 s, then the pavise snapped free at 15 m/s, 63 rad/s and spun 3800 deg/s).
+            if (!body_live(base0) || best == 4)
             {
                 freed = true;
                 // Off the back (or any slot that left it without a live body): freed and rebuilt first,
@@ -23331,8 +23340,11 @@ namespace
         if (cfg.pose_sheathe_two_hand)
         {
             UObject* held = held_scabbard(1 - side);
-            if (!held) return;
-            if (held != scab)
+            // A knife or dagger goes in one-handed (playtest 11-24: the kitchen knife could not be put away at all with the
+            // other hand busy; the holster refuses it for having a scabbard of its own). Into its own pinned scabbard only.
+            bool small_blade = blade_length(w) <= 28.0;
+            if (!held && !small_blade) return;
+            if (held && held != scab)
             {
                 HSVR_LOG_EVERY(2.0, "Sheathe: %s hand's sword: the other hand holds a scabbard that is not this sword's; not sheathed", hand);
                 return;
@@ -23477,6 +23489,9 @@ namespace
             {
                 if (d.sheathing)
                 {
+                    // Let go in past the mouth but before home: the game seats it now (as before), so it is never dropped.
+                    if (d.past_mouth && !d.block_cleared)
+                        set_bool_property(pawn, d.slot_side == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
                     HSVR_LOG("Sheathe: %s hand let go of its weapon after %.2f s; checking its seat", side == 0 ? "left" : "right", now - d.t0);
                     if (base) g_seat[side] = SeatWatch{d.weapon, slot_index(d.slot_side, d.slot), now};
                 }
@@ -23503,12 +23518,18 @@ namespace
             Vec3 bp = component_location(base);
             Quat bq = component_rotation(base);
             double z = d.scabbard ? bq.inverse().rotate(component_location(d.scabbard) - bp).z : 0.0;
-            if (d.sheathing && !d.block_cleared && z < 0.9 * d.length)
+            if (d.sheathing && !d.past_mouth && z < 0.9 * d.length)
             {
-                // In past the mouth: the game may now seat it (and let the hand go) at 20 cm.
+                d.past_mouth = true;
+                HSVR_LOG("Sheathe: in past the mouth (%.1f cm out); the hand slides it home", z);
+            }
+            // The game's seat (which locks it at once) waits until the hand has slid it nearly home, as a real sword is pushed
+            // in (playtest 11-24: in past the mouth at 51.2 cm out, let go, "seated and locked" 15 ms later: "it just snapped").
+            if (d.sheathing && d.past_mouth && !d.block_cleared && z < (std::min)(0.9 * d.length, 25.0))
+            {
                 set_bool_property(pawn, d.slot_side == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
                 d.block_cleared = true;
-                HSVR_LOG("Sheathe: in past the mouth (%.1f cm out)", z);
+                HSVR_LOG("Sheathe: nearly home (%.1f cm out): the game may seat it", z);
             }
             if (d.sheathing && !d.block_cleared)
             {

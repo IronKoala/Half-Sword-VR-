@@ -1,0 +1,5 @@
+# Quit-to-menu repro
+menu_a|steps-menu_travel.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+menu_b|steps-menu_travel.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+menu_c|steps-menu_travel.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+menu_d|steps-menu_travel.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
