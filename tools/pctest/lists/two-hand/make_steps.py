@@ -243,6 +243,10 @@ def main():
     lst += ["ctl_spread_%s|steps-spread_%s.txt|pose_two_hand_bs=0" % (n, n) for n in spread]
     lst += ["spin_%s|steps-spin_%s.txt" % (n, n) for n in spin]
     lst += ["ctl_spin_%s|steps-spin_%s.txt|pose_hold_spin_brake_from=0" % (n, n) for n in spin]
+    # (pull once, 2026-11-24: the one-hand spin the mod sets no longer carries the joint's pull a second time. old_: as installed
+    # a3bde48, both off, expected to keep spinning (the mace bug); pull2_: the pull twice with the brake on)
+    lst += ["old_spin_%s|steps-spin_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in spin]
+    lst += ["pull2_spin_%s|steps-spin_%s.txt|pose_hold_joint_pull_once=0" % (n, n) for n in spin]
     # (auto slide is off by default since Matthew 2026-11-24 00:08Z chose B&S's trigger-only slide; these turn it on)
     lst += ["auto_%s|steps-auto_%s.txt|pose_two_hand_auto_slide_cm=10" % (n, n) for n in auto]
     (HERE / "list.txt").write_text("\n".join(lst) + "\n", newline="\n")

@@ -16954,6 +16954,15 @@ namespace
         return true;
     }
 
+    // pose_hold_joint_pull_once: the one-hand solve's whole answer (pulls in) for a tick the joint can't hold it.
+    struct PullFull
+    {
+        hsvr::Vec3 v, w;
+        bool valid = false;
+        double force_n = 0.0;
+    };
+    PullFull g_pull_full[2];
+
     void hold_weapon(int side, UObject* pawn, UObject* joint, UObject* base, UObject* weapon, double mass, const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -18032,11 +18041,59 @@ namespace
                     if (length(twist_ax) > 5.0) twist_ax = twist_ax * (1.0 / length(twist_ax));
                     else twist_only = false;
                 }
-                bs_solve(mass, invI, vb, wb, pts, n, err_rot, target_ang, rk * st * 1e4, rc * dst * 1e4, tcap, DT,
+                // One hand on the joint hold with the mod's turn: the joint pulls the grip in the physics step, and that pull's
+                // lever about the centre of mass turns the weapon there. The spin set from this solve carried the same pull's
+                // lever a second time, with no push to go with it (the push is dropped: the grip's own speed is kept), so every
+                // tick the grip was put right twice, mostly by spinning the weapon round its centre (a mace's is out at the head).
+                // Playtest 2026-11-23 17:01 (one-handed mace, controller still, no contacts): spin 376 -> 1633 deg/s in 5 ticks
+                // while the turn pushed back at its 172.6 N m limit. pose_hold_joint_pull_once: the solve here is the turn only.
+                Vec3 w_before = wb;
+                bool pull_once = cfg.pose_hold_joint_pull_once && !two && cfg.pose_hold_joint && cfg.pose_hold_joint_mod_turn && g_pose.hand_valid[side] &&
+                                 !is_fist(weapon) && !(g_draw[side].active && g_draw[side].weapon == weapon) &&
+                                 !(cfg.stab_wound_hold && bool_property(weapon, STR("Stuck In Body")) && stuck_is_thrust(weapon));
+                g_pull_full[side].valid = false;
+                if (pull_once)
+                {
+                    // The whole answer too (pulls in), in case the joint can't hold it this tick and the velocity set does.
+                    SoftPoint pf2[2] = {pts[0], pts[1]};
+                    Vec3 vf = vb, wf = wb, af;
+                    bs_solve(mass, invI, vf, wf, pf2, n, err_rot, target_ang, rk * st * 1e4, rc * dst * 1e4, tcap, DT, (std::max)(1, cfg.pose_bs_iterations), af);
+                    g_pull_full[side] = {clamp_length(vf - g * DT, 2000.0), clamp_length(wf, (std::max)(1.0, cfg.pose_bs_max_spin)), true,
+                                         length(pf2[0].acc) / DT / 100.0};
+                }
+                bs_solve(mass, invI, vb, wb, pts, pull_once ? 0 : n, err_rot, target_ang, rk * st * 1e4, rc * dst * 1e4, tcap, DT,
                          (std::max)(1, cfg.pose_bs_iterations), ang, twist_only ? &twist_ax : nullptr,
                          (std::min)(1.0, (std::max)(0.0, cfg.pose_two_hand_swing_share)));
                 exact_v = clamp_length(vb - g * DT, 2000.0);
                 w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
+                // (Where the weapon is expected next tick, and the velocity set if no joint: the whole answer, pulls in.)
+                if (pull_once) exact_v = g_pull_full[side].v;
+                {
+                    // Every tick while it spins away from the hand (> 5 rad/s against the hand's turn), at most 400 lines a spin:
+                    // the spin read, the spin set, and what turned it (the turn's torque and whether it pushes back toward the hand,
+                    // the pull's lever) so a spin-up can be split between the mod's set and the physics step.
+                    static int spin_lines[2] = {0, 0};
+                    double rs = length(w_now - target_ang);
+                    if (rs > 5.0)
+                    {
+                        if (spin_lines[side] < 400)
+                        {
+                            ++spin_lines[side];
+                            Vec3 lever{};
+                            if (!pull_once)
+                                for (int i = 0; i < n; ++i) lever = lever + cross(pts[i].r, pts[i].acc);
+                            double el = length(err_rot);
+                            double back = el > 1e-6 ? -dot(ang, err_rot) / (el * (std::max)(1e-9, length(ang))) : 0.0; // +1 = straight back toward the hand
+                            HSVR_LOG("Spin: %s %ls read %.0f deg/s (hand %.0f), set %.0f (before the solve %.0f); turn %.1f N m, toward the hand %.2f; "
+                                     "pull lever %.1f N m (%s); grip %.1f cm / %.0f deg off; pull %.0f N",
+                                     side == 0 ? "left" : "right", weapon->GetName().c_str(), length(w_now) * 57.2958, length(target_ang) * 57.2958,
+                                     length(w_next) * 57.2958, length(w_before) * 57.2958, length(ang) / DT / 1e4, back, length(lever) / DT / 1e4,
+                                     pull_once ? "joint only" : "set and joint", length(pts[0].err), el * 57.2958, length(pts[0].acc) / DT / 100.0);
+                        }
+                    }
+                    else
+                        spin_lines[side] = 0;
+                }
                 if (pts[0].slide && pts[0].slide_c > 0.0)
                 {
                     // How it slides: the handle's tilt from level, and the grip's speed along it against the hand's.
@@ -18047,8 +18104,8 @@ namespace
                                    side == 0 ? "left" : "right", weapon->GetName().c_str(), tilt, slip, pts[0].slide_c,
                                    std::fabs(pts[0].acc_ax) / DT / 100.0, two ? ", other hand holds" : "");
                 }
-                h.force_n = length(pts[0].acc) / DT / 100.0;
-                h.force_capped = length(pts[0].acc) >= pts[0].fmax * DT * 0.999;
+                h.force_n = pull_once ? g_pull_full[side].force_n : length(pts[0].acc) / DT / 100.0;
+                h.force_capped = pull_once ? h.force_n >= pts[0].fmax / 100.0 * 0.999 : length(pts[0].acc) >= pts[0].fmax * DT * 0.999;
                 h.torque_nm = length(ang) / DT / 1e4;
                 h.torque_capped = length(ang) >= tcap * DT * 0.999;
                 HSVR_LOG_EVERY(0.5, "Hold: %s B&S hold%s: grip %.1f cm / %.0f deg off, %.0f N%s, turn %.1f N m%s%s", side == 0 ? "left" : "right",
@@ -18252,6 +18309,12 @@ namespace
                 }
             }
         }
+        if (!by_joint && g_pull_full[side].valid)
+        {
+            // (pose_hold_joint_pull_once: no joint this tick, so the velocity set does the pulling: its whole answer)
+            w_next = g_pull_full[side].w;
+        }
+        g_pull_full[side].valid = false;
         if (!by_joint)
         {
             for (JointHand& j : g_jh[side])
