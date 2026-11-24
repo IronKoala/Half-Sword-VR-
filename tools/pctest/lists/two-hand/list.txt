@@ -74,10 +74,10 @@ park_axe2h|steps-park_axe2h.txt
 park_polehammer|steps-park_polehammer.txt
 park_warstaff|steps-park_warstaff.txt
 park_longsword|steps-park_longsword.txt
-park_nofree_axe2h|steps-park_axe2h.txt|pose_hold_free_hand_collides=0
-park_nofree_polehammer|steps-park_polehammer.txt|pose_hold_free_hand_collides=0
-park_nofree_warstaff|steps-park_warstaff.txt|pose_hold_free_hand_collides=0
-park_nofree_longsword|steps-park_longsword.txt|pose_hold_free_hand_collides=0
+park_solid_axe2h|steps-park_axe2h.txt|pose_hold_free_hand_collides=1
+park_solid_polehammer|steps-park_polehammer.txt|pose_hold_free_hand_collides=1
+park_solid_warstaff|steps-park_warstaff.txt|pose_hold_free_hand_collides=1
+park_solid_longsword|steps-park_longsword.txt|pose_hold_free_hand_collides=1
 park_whole_axe2h|steps-park_axe2h.txt|pose_hold_self_collision=0
 park_whole_polehammer|steps-park_polehammer.txt|pose_hold_self_collision=0
 park_whole_warstaff|steps-park_warstaff.txt|pose_hold_self_collision=0

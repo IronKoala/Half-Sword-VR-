@@ -570,7 +570,7 @@ namespace hsvr
         // its speed (before 2026-11-24), which could turn braking a spin into a throw the joint then turned back into spin.
         bool pose_hold_joint_turn_couple = true;
         // A weapon held in one hand collides with the free hand (B&S: the free hand stays solid). 0 = the free arm is ignored too.
-        bool pose_hold_free_hand_collides = true;
+        bool pose_hold_free_hand_collides = false; // (0 since 2026-11-24: a free hand parked beside a held axe set it wobbling at ~500 deg/s; 0 = 0.4)
         double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)
         bool pose_hold_joint_draw_wound = true; // drawing/sheathing and a blade in a wound stay on the joint (sent where the old rules put it)
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
