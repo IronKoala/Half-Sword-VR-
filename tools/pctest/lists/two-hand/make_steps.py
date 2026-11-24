@@ -31,6 +31,7 @@ HEAD = """0.5:hsvr.fake_head_drop 0
 1.5:hsvr.squeeze 1 0
 2.4:hsvr.expect held_r = 0 right hand empty
 2.5:hsvr.arm_move 1
+2.6:hsvr.pawn_call Event Clear Sheathed Weapon Slots
 3:hsvr.squeeze 1 1
 3.5:hsvr.give_weapon {path}
 5:hsvr.weapon_dump 1

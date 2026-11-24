@@ -25609,6 +25609,34 @@ namespace
         HSVR_LOG("Script: called %ls on the game instance", function->GetFullName().c_str());
     }
 
+    // dev_script step "hsvr.pawn_call <Function>": the same for a function of the player's character that takes no parameters,
+    // e.g. Willie_BP "Event Clear Sheathed Weapon Slots" (ubergraph @302414-@303242: destroys what hangs in slots R1, L1, L2 and
+    // Back; the passport and the save are untouched). The test copies' Willie carries his own loadout's light pavise on his back,
+    // which hit held weapons 534 times in one two-hand run (2026-11-24).
+    void script_call_pawn(const std::string& step)
+    {
+        std::string name_text = step;
+        while (!name_text.empty() && name_text.back() == ' ') name_text.pop_back();
+        std::wstring wanted(name_text.begin(), name_text.end());
+        UObject* pawn = nullptr;
+        find_pawn_mesh(&pawn);
+        if (!pawn)
+        {
+            HSVR_LOG("Script: hsvr.pawn_call: no character yet");
+            return;
+        }
+        UFunction* function = func_chain(pawn, wanted.c_str());
+        if (!function)
+        {
+            HSVR_LOG("Script: hsvr.pawn_call: %ls has no function \"%s\"", pawn->GetFullName().c_str(), name_text.c_str());
+            return;
+        }
+        std::vector<uint8_t> block = param_block(function);
+        pawn->ProcessEvent(function, block.data());
+        HSVR_LOG("Script: called %ls on %ls; back slot now %ls", function->GetFullName().c_str(), pawn->GetName().c_str(),
+                 object_property(pawn, STR("Weapon Slot Back")) ? object_property(pawn, STR("Weapon Slot Back"))->GetName().c_str() : STR("empty"));
+    }
+
     // dev_script step "hsvr.give_weapon <class path>": puts a weapon in the player's right hand the
     // way the game equips one, through Willie's "Set Up Right Hand Weapon" with the weapon class
     // (Willie_BP: called with a class for the start loadout, UG @24976). For unattended tests: the
@@ -31381,6 +31409,11 @@ namespace
             if (entry.command.rfind("hsvr.give_weapon ", 0) == 0)
             {
                 script_give_weapon(entry.command.substr(17));
+                continue;
+            }
+            if (entry.command.rfind("hsvr.pawn_call ", 0) == 0)
+            {
+                script_call_pawn(entry.command.substr(15));
                 continue;
             }
             if (entry.command.rfind("hsvr.call ", 0) == 0)
