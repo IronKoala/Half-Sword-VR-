@@ -26955,6 +26955,45 @@ namespace
         HSVR_LOG("Graphics: end of list");
     }
 
+    // mouse_clip_window: while playing (game in front, no menu, the game not asking for a pointer)
+    // the mouse pointer is held inside the game window's picture with ClipCursor. With
+    // mirror_window_res the window no longer covers the monitor, and the engine leaves the pointer
+    // free (playtest 2026-11-24: aiming far left or right ran the mouse out of the window). Windows
+    // drops a clip on focus changes, so it is checked every tick and set again when it differs.
+    void keep_mouse_in_window(const hsvr::Config& cfg, HWND front)
+    {
+        static bool clipped = false;
+        bool want = false;
+        RECT r{};
+        wchar_t cls[32]{};
+        if (front && (!GetClassNameW(front, cls, 32) || wcscmp(cls, L"UnrealWindow") != 0)) front = nullptr; // e.g. the UE4SS console
+        if (cfg.mouse_clip_window && front && !hsvr::shared().menu_up.load() && !hsvr::shared().game_wants_pointer.load() &&
+            !IsIconic(front) && GetClientRect(front, &r) && r.right > 0 && r.bottom > 0)
+        {
+            POINT tl{r.left, r.top}, br{r.right, r.bottom};
+            if (ClientToScreen(front, &tl) && ClientToScreen(front, &br))
+            {
+                r = {tl.x, tl.y, br.x, br.y};
+                want = true;
+            }
+        }
+        if (want)
+        {
+            RECT now{};
+            if (!clipped || !GetClipCursor(&now) || now.left != r.left || now.top != r.top || now.right != r.right || now.bottom != r.bottom)
+            {
+                if (ClipCursor(&r) && !clipped) HSVR_LOG("Mouse: held inside the game window (%ld,%ld)-(%ld,%ld)", r.left, r.top, r.right, r.bottom);
+                clipped = true;
+            }
+        }
+        else if (clipped)
+        {
+            ClipCursor(nullptr);
+            clipped = false;
+            HSVR_LOG("Mouse: free (menu, another program in front, or mouse_clip_window=0)");
+        }
+    }
+
     // mirror_window_res: puts the game window at that size (windowed) with the engine's own r.SetRes,
     // so a recording of the window is 16:9 on an ultrawide monitor. Done again if the window size
     // later changes away from what the engine settled on (the game's own settings applied again);
@@ -34787,6 +34826,7 @@ namespace
         if (HWND front = GetForegroundWindow()) GetWindowThreadProcessId(front, &front_process);
         bool game_front = front_process == GetCurrentProcessId();
         input_mode_tick(cfg, game_front, shared.menu_up.load());
+        keep_mouse_in_window(cfg, game_front ? GetForegroundWindow() : nullptr);
         if (!game_front)
         {
             menu_buttons(cfg, nullptr); // lets a held Escape go
