@@ -295,7 +295,8 @@ class App:
         root.after(500, self.start_spare_child)  # the first conversion's process loads while the user picks
 
         root.title("Half Sword Weapon Converter")
-        root.minsize(760, 560)
+        # A short screen (768 px laptop) gets a shorter smallest window, or its bottom is off the screen.
+        root.minsize(760, max(300, min(560, root.winfo_screenheight() - 120)))
         root.protocol("WM_DELETE_WINDOW", self.close)
         pad = {"padx": 8, "pady": 4}
         self.batch = ttk.Frame(root, padding=(10, 10, 10, 0))
@@ -335,9 +336,17 @@ class App:
             """The panel's height: what its contents ask for (read again often: a frame inside a canvas gets
             no event when its contents grow, Matthew's PC test of eaa5801), at least the window's."""
             canvas.update_idletasks() if _ == "now" else None
-            rw, rh = main.winfo_reqwidth(), max(main.winfo_reqheight(), min_h)
+            sh = root.winfo_screenheight()
+            listed = self.batch.winfo_reqheight() if self.batch.winfo_ismapped() else 0
+            # The window may have been dragged down before a model was loaded (it then grew past the screen's
+            # bottom): the room left below its top counts, when it is on this screen.
+            top = root.winfo_rooty()
+            lower = top - 51 if 51 < top < sh else 0
+            room = sh - 160 - listed - lower
+            least = max(240, min(min_h, room))  # short screens: the panel scrolls sooner
+            rw, rh = main.winfo_reqwidth(), max(main.winfo_reqheight(), least)
             cw, ch = canvas.winfo_width(), canvas.winfo_height()
-            key = (rw, rh, cw, ch)
+            key = (rw, rh, cw, ch, room)
             if key == self.fit_size:
                 return
             self.fit_size = key
@@ -346,9 +355,7 @@ class App:
             # the top of the screen (set once in __init__: Windows otherwise cascades new windows down to y 338,
             # under the taskbar on Matthew's 1440 screen). It is never moved afterwards: that broke snapping
             # (PC test of 7e2d5cd).
-            sh = root.winfo_screenheight()
-            listed = self.batch.winfo_reqheight() if self.batch.winfo_ismapped() else 0
-            cap = max(min_h, sh - 160 - listed)
+            cap = max(least, room)
             canvas.configure(width=rw, height=min(rh, cap))
             h = max(ch, rh)
             canvas.itemconfigure(win, width=max(cw, 1), height=h)
