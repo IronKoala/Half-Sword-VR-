@@ -178,6 +178,20 @@ SPREAD_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
 """
 
 
+# Spin brake (one hand; playtest 2026-11-23 17:01: a one-handed mace spun end over end at 1300-1700 deg/s for 10 s in a still
+# hand): the held weapon is set spinning 1500 deg/s end over end, the hand still; it must come to rest with the hand.
+SPIN = ["warhammer_long", "polehammer", "longsword"]
+SPIN_STEPS = """6:hsvr.spin_kick 1 1500
+6.5:hsvr.expect held_spin_max_r > 300 (check) the kick took: it spun
+8.5:hsvr.expect held_r = 1 still in the hand
+8.5:hsvr.expect held_spin_r < 120 2.5 s after: back at rest in the still hand (deg/s)
+9:hsvr.spin_kick 1 -1500
+11.5:hsvr.expect held_r = 1 the other way: still in the hand
+11.5:hsvr.expect held_spin_r < 120 the other way: back at rest (deg/s)
+12:quit
+"""
+
+
 def main():
     rows = []
     for line in Path(sys.argv[1]).read_text().splitlines():
@@ -214,6 +228,11 @@ def main():
         steps = HEAD.format(path=paths[weapon]) + TAKE_ALONG.format(along=along) + SPREAD_STEPS
         (HERE / ("steps-spread_%s.txt" % weapon)).write_text(steps, newline="\n")
         spread.append(weapon)
+    spin = []
+    for weapon in SPIN:
+        steps = HEAD.format(path=paths[weapon]) + SPIN_STEPS
+        (HERE / ("steps-spin_%s.txt" % weapon)).write_text(steps, newline="\n")
+        spin.append(weapon)
     lst = ["# Two hands with real-hand conditions (playtest 2026-11-23); two hands are held as B&S holds them (pose_two_hand_bs=1).",
            "# rp_: his own recorded controller motion. ctl_: the same cases in the previous line mode (pose_two_hand_bs=0), for comparison."]
     lst += ["two_%s|steps-%s.txt" % (n, n) for n in rows]
@@ -222,6 +241,8 @@ def main():
     lst += ["ctl_rp_%s|steps-rp_%s.txt|pose_two_hand_bs=0" % (n, n) for n in rp]
     lst += ["spread_%s|steps-spread_%s.txt" % (n, n) for n in spread]
     lst += ["ctl_spread_%s|steps-spread_%s.txt|pose_two_hand_bs=0" % (n, n) for n in spread]
+    lst += ["spin_%s|steps-spin_%s.txt" % (n, n) for n in spin]
+    lst += ["ctl_spin_%s|steps-spin_%s.txt|pose_hold_spin_brake_from=0" % (n, n) for n in spin]
     # (auto slide is off by default since Matthew 2026-11-24 00:08Z chose B&S's trigger-only slide; these turn it on)
     lst += ["auto_%s|steps-auto_%s.txt|pose_two_hand_auto_slide_cm=10" % (n, n) for n in auto]
     (HERE / "list.txt").write_text("\n".join(lst) + "\n", newline="\n")

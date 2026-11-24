@@ -2350,6 +2350,9 @@ namespace
     std::atomic<int> g_two_mean_n{0};
     std::atomic<int> g_two_ticks{0}, g_two_revs{0}, g_two_revs_own{0}; // two-hand ticks since hsvr.two_reset, those where the weapon's spin reversed (jitter), and those not matched by his hands' own reversal
     std::atomic<double> g_two_spin_max{0.0}; // deg/s, the weapon's worst sustained spin (least of 3 ticks) since hsvr.two_reset (test measure)
+    std::atomic<double> g_held_spin[2] = {0.0, 0.0};     // deg/s, each hand's held weapon's spin this tick (test measure)
+    std::atomic<double> g_held_spin_max[2] = {0.0, 0.0}; // its worst sustained (least of 3 ticks) since hsvr.spin_kick (test measure)
+    std::atomic<double> g_spin_kick[2] = {0.0, 0.0};     // test: hsvr.spin_kick <side> <deg/s> sets the held weapon spinning end over end once
     std::atomic<double> g_two_spot_now{0.0}; // cm the second hand's spot on the weapon is from his second hand (test measure, B&S two hands)
     std::atomic<double> g_hand_spread[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
@@ -17505,6 +17508,27 @@ namespace
         Call av(base, STR("GetPhysicsAngularVelocityInRadians"));
         av.run();
         Vec3 w_now = av.vec();
+        Vec3 w_kick; // test: hsvr.spin_kick this tick
+        {
+            double ds = length(w_now) * 57.2958;
+            g_held_spin[side].store(ds);
+            static double s3[2][3] = {{0, 0, 0}, {0, 0, 0}};
+            static int k3s[2] = {0, 0};
+            s3[side][k3s[side]++ % 3] = ds;
+            double sm = (std::min)((std::min)(s3[side][0], s3[side][1]), s3[side][2]);
+            if (sm > g_held_spin_max[side].load()) g_held_spin_max[side].store(sm);
+            double kick = g_spin_kick[side].exchange(0.0);
+            if (kick != 0.0)
+            {
+                // End over end: about the weapon's own X axis (across its length), on top of what it has.
+                Vec3 ax = component_rotation(base).rotate(Vec3{1, 0, 0});
+                // As if the physics had left it spinning so: the hold's answer for this tick starts from it (and sets it).
+                w_kick = ax * (kick / 57.2958);
+                w_now = w_now + w_kick;
+                g_held_spin_max[side].store(0.0);
+                HSVR_LOG("Script: hsvr.spin_kick: %s hand's %ls set spinning %.0f deg/s end over end", side == 0 ? "left" : "right", weapon->GetName().c_str(), kick);
+            }
+        }
         if (h.have_expected)
         {
             h.miss_cm = length(com - h.expected_com);
@@ -18085,7 +18109,7 @@ namespace
             if (by_joint && !fresh && jm.mod_turn)
             {
                 // The turn about the GRIP: the grip's own velocity is kept (the joint pulls it), only the spin changes.
-                Vec3 ev = lv.vec(), ew = av.vec();
+                Vec3 ev = lv.vec(), ew = av.vec() + w_kick; // (+ a test's hsvr.spin_kick)
                 Vec3 bs_v;
                 bool have_bs_v = false;
                 if (jm.bs2)
@@ -28896,6 +28920,8 @@ namespace
         else if (w == "two_wrist") value = g_two_wrist_now.load();
         else if (w == "two_jitter") value = g_two_ticks.load() > 0 ? 100.0 * g_two_revs.load() / g_two_ticks.load() : 0.0; // % of two-hand ticks
         else if (w == "two_ticks") value = g_two_ticks.load();
+        else if (w == "held_spin_r") value = g_held_spin[1].load(); // deg/s now
+        else if (w == "held_spin_max_r") value = g_held_spin_max[1].load(); // deg/s, worst sustained since hsvr.spin_kick / spin_reset
         else if (w == "two_spin_max") value = g_two_spin_max.load(); // deg/s since hsvr.two_reset
         else if (w == "two_spot_off") value = g_two_spot_now.load(); // cm, now
         else if (w == "two_jitter_own") value = g_two_ticks.load() > 0 ? 100.0 * g_two_revs_own.load() / g_two_ticks.load() : 0.0; // % of two-hand ticks: reversals not his hands' own
@@ -31187,6 +31213,19 @@ namespace
                              g_ctl_track.rows.back()[0] - g_ctl_track.rows.front()[0], g_ctl_track.blend);
                 else
                     HSVR_LOG("Script: hsvr.ctl_replay: could not read %s", file);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.spin_kick ", 0) == 0)
+            {
+                int side = -1;
+                double dps = 0.0;
+                if (sscanf(entry.command.c_str() + 15, "%d %lf", &side, &dps) == 2 && (side == 0 || side == 1)) g_spin_kick[side] = dps;
+                continue;
+            }
+            if (entry.command.rfind("hsvr.spin_reset ", 0) == 0)
+            {
+                int side = atoi(entry.command.c_str() + 16);
+                if (side == 0 || side == 1) g_held_spin_max[side] = 0.0;
                 continue;
             }
             if (entry.command.rfind("hsvr.hold_rebase ", 0) == 0)
