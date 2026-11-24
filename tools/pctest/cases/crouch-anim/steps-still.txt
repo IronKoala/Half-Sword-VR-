@@ -1,0 +1,10 @@
+# Crouched 45 cm, no stick: the standing-still tree (CrouchLoop, crouch turns as the made-up head turns his body).
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.fake_head_drop 45
+3.0:hsvr.mark
+7.0:hsvr.expect canim_frames >= 150 frames shown at full weight
+7.0:hsvr.expect canim_moving <= 0.15 walking tree share
+7.0:hsvr.expect canim_foot_err <= 2 drawn foot vs sent, cm mean
+7.0:hsvr.expect canim_chest <= 15 chest off his heading, deg mean
+7.0:hsvr.expect canim_slip_worst >= 0 planted foot slide worst (record)
+7.1:hsvr.fake_head_drop -1

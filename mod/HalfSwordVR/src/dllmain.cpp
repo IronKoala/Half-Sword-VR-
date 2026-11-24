@@ -831,6 +831,7 @@ namespace
         FProperty* rotation_space = nullptr;
         FProperty* translation_mode = nullptr;
         FProperty* translation_space = nullptr;
+        FProperty* alpha = nullptr; // FAnimNode_SkeletalControlBase::Alpha (1 = the node's own pose, 0 = its input)
     };
 
     // The player's DriverSkeleton anim instance (ABP_Willie). Enemies run the same ABP; this is
@@ -869,6 +870,7 @@ namespace
                 n.rotation_space = struct_member(type, STR("RotationSpace"));
                 n.translation_mode = struct_member(type, STR("TranslationMode"));
                 n.translation_space = struct_member(type, STR("TranslationSpace"));
+                n.alpha = struct_member(type, STR("Alpha"));
                 nodes.push_back(n);
             }
         }
@@ -1365,6 +1367,7 @@ namespace
     // Crouch: how far your headset is below where you stood at recentering (cm, 0 standing).
     std::atomic<int> g_count_steps{0}; // foot steps since hsvr.mark (hsvr.expect steps)
     double g_crouch_drop = 0.0;
+    double g_crouch_want_cm = 0.0; // your view's drop below standing (real crouch plus the button), before the leg cap (pose_crouch_anim's head height)
     // Button crouch (B&S: the stick crouches as well as bending down): left stick click toggles it; the
     // view and his body go down together by this much (cm, eased), on top of your own crouch.
     // (g_button_crouch is defined near the top: provide_anchor uses it)
@@ -2193,6 +2196,547 @@ namespace
         }
     }
 
+    // ---- Blade & Sorcery's crouch animation (pose_crouch_anim) -----------------------------------
+    // Matthew 2026-11-24: "I just want to copy Blade and Sorcery's animation." B&S's crouch clips are
+    // humanoid (muscle) clips; tools/bs-crouch bakes them onto Willie's DriverSkeleton (Willie_Lopoly,
+    // a T-pose with every body bone's rotation identity) with Unity 2021.3.38f1's own humanoid
+    // retargeting, B&S's engine version, foot IK on as B&S's states have it. Each baked file is one
+    // clip at 60 samples a second: every listed bone's position and rotation in his component space
+    // (UE axes: x his left, y forward, z up; cm), relative to the clip's moving root on the ground.
+    //
+    // Played as B&S plays them (B&S ThunderRoad Creature.UpdateLocomotionAnimation + the 'Human'
+    // AnimatorController's Dual Wield / Unarmed states):
+    // - moving: a freeform-directional 2D blend over the 8 Crouch_Walk clips by your local velocity
+    //   (B&S's Strafe/Speed, damped 0.1 s); standing still: a 1D blend Crouch_Turn90L / CrouchLoop /
+    //   Crouch_Turn90R by the turn rate (B&S's Turn = deg/s x 0.007, thresholds -1.58 / 0 / 1.58).
+    //   A blend tree's clips share one normalized time, as Unity's do.
+    // - B&S plays the clips at their own speed; here the time runs at your speed over the blended
+    //   clips' speed, so the planted foot stays where it was put down.
+    // The pose: the hips turn as the clip's do (pose_crouch_anim_hips); his chest is turned back by as
+    // much on spine_02, so it faces as before. Each foot goes where the clip has it from the hips,
+    // at the clip's height above the floor found under it; the knee bends toward the clip's knee
+    // (two-bone solve with his own leg lengths). Thigh, calf and foot keep the clip's own roll.
+    // Written as Replace in component space on the end-of-graph Modify Bone nodes (pelvis, then
+    // thigh/calf/foot: parent first), faded in and out by their Alpha.
+    struct CrouchClip
+    {
+        std::string name;
+        double length = 0.0;
+        hsvr::Vec3 velocity;   // the root's, cm/s, his component frame
+        double yaw_rate = 0.0; // the root's turn, deg/s (right +)
+        // per sample: pelvis rotation; per leg [0 left, 1 right]: thigh, calf, foot positions relative
+        // to the pelvis on the ground plane (z: height above the clip's ground), and their rotations
+        std::vector<hsvr::Quat> pelvis;
+        std::vector<hsvr::Vec3> pos[2][3];
+        std::vector<hsvr::Quat> rot[2][3];
+    };
+    struct CrouchPose
+    {
+        hsvr::Quat pelvis;
+        hsvr::Vec3 pos[2][3];
+        hsvr::Quat rot[2][3];
+    };
+    struct CrouchAnim
+    {
+        bool loaded = false, tried = false;
+        std::vector<CrouchClip> clips;
+        int walk[8] = {-1, -1, -1, -1, -1, -1, -1, -1}; // Fwd Lt45 Lt Lt135 Bwd Rt135 Rt Rt45
+        int loop = -1, turn_l = -1, turn_r = -1;
+        bool on = false;          // wanted
+        double fade = 0.0;        // 0..1 shown
+        double moving = 0.0;      // 0 standing tree .. 1 walking tree
+        double walk_phase = 0.0, idle_phase = 0.0;
+        hsvr::Vec3 last_loc;
+        double last_yaw = 0.0, last_t = -1.0;
+        hsvr::Vec3 vel;           // damped (B&S animationDampTime 0.1 s), component frame
+        double yaw_rate = 0.0;    // damped, deg/s
+        hsvr::Quat pelvis_anim;   // the animation's own pelvis rotation (component), measured while off
+        double floor_z[2] = {0.0, 0.0};
+        bool have_floor[2] = {false, false};
+        hsvr::Vec3 target_prev_world[2];
+        bool target_prev_ok[2] = {false, false};
+        // log stats since the last line
+        double slip_sum = 0.0, slip_worst = 0.0;
+        int slip_n = 0;
+        double reach_short_worst = 0.0;
+    };
+    CrouchAnim g_canim;
+    std::atomic<int> g_canim_frames{0}; // frames shown at full weight since hsvr.mark (tests)
+    // Since hsvr.mark (test readers canim_*): planted-foot slide, drawn foot vs where it was sent, chest turn.
+    struct CrouchAnimStats
+    {
+        double slip_sum = 0, slip_worst = 0; int slip_n = 0;
+        double foot_err_sum = 0, foot_err_worst = 0; int foot_err_n = 0;
+        double chest_sum = 0, chest_worst = 0; int chest_n = 0;
+        double hips_sum = 0; int hips_n = 0;
+        double moving_sum = 0; int moving_n = 0;
+        double floor_gap_worst = 0; // planted foot's drawn ankle above (or below: negative kept as abs) the floor plus its clip height
+    };
+    CrouchAnimStats g_canim_stats;
+    void crouch_anim_stats_reset() { g_canim_stats = CrouchAnimStats{}; g_canim_frames.store(0); }
+
+    hsvr::Quat qnlerp(const hsvr::Quat& a, hsvr::Quat b, double t)
+    {
+        if (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0.0) b = {-b.x, -b.y, -b.z, -b.w};
+        return hsvr::Quat{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t}.normalized();
+    }
+    // The shortest turn taking direction a onto direction b.
+    hsvr::Quat swing_between(const hsvr::Vec3& a_raw, const hsvr::Vec3& b_raw)
+    {
+        using namespace hsvr;
+        Vec3 a = normalized(a_raw), b = normalized(b_raw);
+        double d = dot(a, b);
+        if (d > 0.999999) return {};
+        if (d < -0.999999)
+        {
+            Vec3 axis = normalized(cross(a, std::fabs(a.x) < 0.9 ? Vec3{1, 0, 0} : Vec3{0, 1, 0}));
+            return quat_axis_angle(axis, kPi);
+        }
+        Vec3 c = cross(a, b);
+        return Quat{c.x, c.y, c.z, 1.0 + d}.normalized();
+    }
+
+    bool crouch_anim_load()
+    {
+        using namespace hsvr;
+        CrouchAnim& A = g_canim;
+        A.tried = true;
+        static const char* names[] = {"Crouch_WalkFwd_new", "Crouch_WalkLt45_new", "Crouch_WalkLt_new", "Crouch_WalkLt135_new", "Crouch_WalkBwd_new",
+                                      "Crouch_WalkRt135_new", "Crouch_WalkRt_new", "Crouch_WalkRt45_new", "CrouchLoop_new", "Crouch_Turn90L_new", "Crouch_Turn90R_new"};
+        std::wstring dir = mod_dir() + L"bs-crouch\\";
+        std::string missing;
+        for (int ci = 0; ci < 11; ++ci)
+        {
+            std::string nm = names[ci];
+            std::wstring path = dir + std::wstring(nm.begin(), nm.end()) + L".csv";
+            FILE* f = _wfopen(path.c_str(), L"rb");
+            if (!f) { missing += " " + nm; continue; }
+            std::string text;
+            char buf[65536];
+            size_t got;
+            while ((got = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, got);
+            std::fclose(f);
+            std::vector<std::string> lines;
+            {
+                size_t at = 0;
+                while (at < text.size())
+                {
+                    size_t e = text.find('\n', at);
+                    if (e == std::string::npos) e = text.size();
+                    std::string l = text.substr(at, e - at);
+                    if (!l.empty() && l.back() == '\r') l.pop_back();
+                    if (!l.empty()) lines.push_back(l);
+                    at = e + 1;
+                }
+            }
+            if (lines.size() < 3) { missing += " " + nm + "(empty)"; continue; }
+            auto split = [](const std::string& l) {
+                std::vector<std::string> out;
+                size_t at = 0;
+                while (true)
+                {
+                    size_t c = l.find(',', at);
+                    out.push_back(l.substr(at, c == std::string::npos ? std::string::npos : c - at));
+                    if (c == std::string::npos) break;
+                    at = c + 1;
+                }
+                return out;
+            };
+            std::vector<std::string> head = split(lines[0]);
+            auto col = [&](const std::string& n) {
+                for (size_t i = 0; i < head.size(); ++i) if (head[i] == n) return (int)i;
+                return -1;
+            };
+            static const char* bones[2][3] = {{"thigh_l", "calf_l", "foot_l"}, {"thigh_r", "calf_r", "foot_r"}};
+            int c_t = col("t"), c_rx = col("root_x"), c_ry = col("root_y"), c_yaw = col("root_yaw");
+            int c_p = col("pelvis_x");
+            int c_b[2][3];
+            bool ok = c_t >= 0 && c_rx >= 0 && c_ry >= 0 && c_yaw >= 0 && c_p >= 0;
+            for (int s = 0; s < 2; ++s)
+                for (int k = 0; k < 3; ++k) { c_b[s][k] = col(std::string(bones[s][k]) + "_x"); ok = ok && c_b[s][k] >= 0; }
+            if (!ok) { missing += " " + nm + "(columns)"; continue; }
+            CrouchClip clip;
+            clip.name = nm;
+            double t_last = 0.0, rx0 = 0, ry0 = 0, rx1 = 0, ry1 = 0, yaw0 = 0, yaw_total = 0, yaw_prev = 0;
+            for (size_t li = 1; li < lines.size(); ++li)
+            {
+                std::vector<std::string> v = split(lines[li]);
+                if (v.size() < head.size()) continue;
+                auto D = [&](int i) { return std::strtod(v[i].c_str(), nullptr); };
+                auto V = [&](int i) { return Vec3{D(i), D(i + 1), D(i + 2)}; };
+                auto Q = [&](int i) { return Quat{D(i + 3), D(i + 4), D(i + 5), D(i + 6)}.normalized(); };
+                double yaw = D(c_yaw);
+                if (li == 1) { rx0 = D(c_rx), ry0 = D(c_ry), yaw0 = yaw_prev = yaw; }
+                yaw_total += wrap_deg(yaw - yaw_prev);
+                yaw_prev = yaw;
+                rx1 = D(c_rx), ry1 = D(c_ry), t_last = D(c_t);
+                Vec3 p = V(c_p);
+                clip.pelvis.push_back(Q(c_p));
+                for (int s = 0; s < 2; ++s)
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        Vec3 b = V(c_b[s][k]);
+                        clip.pos[s][k].push_back(Vec3{b.x - p.x, b.y - p.y, b.z});
+                        clip.rot[s][k].push_back(Q(c_b[s][k]));
+                    }
+            }
+            (void)yaw0;
+            if (clip.pelvis.size() < 3 || t_last <= 0.0) { missing += " " + nm + "(short)"; continue; }
+            clip.length = t_last;
+            // Root motion is in the starting root's frame; walking clips don't turn, so this is the velocity.
+            clip.velocity = Vec3{(rx1 - rx0) / t_last, (ry1 - ry0) / t_last, 0.0};
+            clip.yaw_rate = yaw_total / t_last;
+            int index = (int)A.clips.size();
+            if (ci < 8) A.walk[ci] = index;
+            else if (ci == 8) A.loop = index;
+            else if (ci == 9) A.turn_l = index;
+            else A.turn_r = index;
+            HSVR_LOG("CrouchAnim: %s %.2f s, %zu samples, root %.0f cm/s (%.0f, %.0f), turn %.0f deg/s", nm.c_str(), clip.length, clip.pelvis.size(),
+                     length(clip.velocity), clip.velocity.x, clip.velocity.y, clip.yaw_rate);
+            A.clips.push_back(std::move(clip));
+        }
+        bool all_walk = true;
+        for (int i : A.walk) all_walk = all_walk && i >= 0;
+        A.loaded = all_walk && A.loop >= 0 && A.turn_l >= 0 && A.turn_r >= 0;
+        std::string dn(dir.begin(), dir.end());
+        HSVR_LOG("CrouchAnim: %s: %zu of 11 B&S crouch clips read from %s%s%s", A.loaded ? "ready" : "NOT USED", A.clips.size(), dn.c_str(),
+                 missing.empty() ? "" : "; missing:", missing.c_str());
+        return A.loaded;
+    }
+
+    // A clip's pose at normalized time u (0..1, looping), samples blended linearly.
+    void crouch_sample(const CrouchClip& c, double u, CrouchPose& out)
+    {
+        size_t n = c.pelvis.size();
+        u -= std::floor(u);
+        double x = u * (double)(n - 1);
+        size_t i = (std::min)(n - 2, (size_t)x);
+        double f = x - (double)i;
+        out.pelvis = qnlerp(c.pelvis[i], c.pelvis[i + 1], f);
+        for (int s = 0; s < 2; ++s)
+            for (int k = 0; k < 3; ++k)
+            {
+                out.pos[s][k] = c.pos[s][k][i] + (c.pos[s][k][i + 1] - c.pos[s][k][i]) * f;
+                out.rot[s][k] = qnlerp(c.rot[s][k][i], c.rot[s][k][i + 1], f);
+            }
+    }
+
+    // Weighted mix of poses (weights sum to 1); quaternions summed on one hemisphere and normalized.
+    void crouch_mix(const std::vector<std::pair<const CrouchPose*, double>>& in, CrouchPose& out)
+    {
+        using namespace hsvr;
+        auto add = [](Quat& acc, const Quat& ref, const Quat& q, double w) {
+            Quat b = q;
+            if (ref.x * b.x + ref.y * b.y + ref.z * b.z + ref.w * b.w < 0.0) b = {-b.x, -b.y, -b.z, -b.w};
+            acc = {acc.x + b.x * w, acc.y + b.y * w, acc.z + b.z * w, acc.w + b.w * w};
+        };
+        const CrouchPose& r = *in[0].first;
+        Quat pel{0, 0, 0, 0};
+        Quat rot[2][3];
+        for (int s = 0; s < 2; ++s)
+            for (int k = 0; k < 3; ++k) { rot[s][k] = {0, 0, 0, 0}; out.pos[s][k] = {}; }
+        for (const auto& [p, w] : in)
+        {
+            add(pel, r.pelvis, p->pelvis, w);
+            for (int s = 0; s < 2; ++s)
+                for (int k = 0; k < 3; ++k)
+                {
+                    out.pos[s][k] = out.pos[s][k] + p->pos[s][k] * w;
+                    add(rot[s][k], r.rot[s][k], p->rot[s][k], w);
+                }
+        }
+        out.pelvis = pel.normalized();
+        for (int s = 0; s < 2; ++s)
+            for (int k = 0; k < 3; ++k) out.rot[s][k] = rot[s][k].normalized();
+    }
+
+    // Unity's freeform directional 2D blend (gradient band interpolation in polar space,
+    // directional influence 2), for children with no centre motion.
+    void freeform_directional(const hsvr::Vec3* pts, int n, const hsvr::Vec3& p, double* w)
+    {
+        double sum = 0.0;
+        double mp = std::sqrt(p.x * p.x + p.y * p.y);
+        for (int i = 0; i < n; ++i)
+        {
+            double mi = std::sqrt(pts[i].x * pts[i].x + pts[i].y * pts[i].y);
+            double best = 1e9;
+            for (int j = 0; j < n; ++j)
+            {
+                if (j == i) continue;
+                double mj = std::sqrt(pts[j].x * pts[j].x + pts[j].y * pts[j].y);
+                double avg = 0.5 * (mi + mj);
+                double a_ij = std::atan2(pts[i].x * pts[j].y - pts[i].y * pts[j].x, pts[i].x * pts[j].x + pts[i].y * pts[j].y);
+                double a_ip = mp > 1e-6 ? std::atan2(pts[i].x * p.y - pts[i].y * p.x, pts[i].x * p.x + pts[i].y * p.y) : 0.0;
+                double vij0 = (mj - mi) / avg, vij1 = a_ij * 2.0;
+                double vip0 = (mp - mi) / avg, vip1 = a_ip * 2.0;
+                double h = 1.0 - (vip0 * vij0 + vip1 * vij1) / (vij0 * vij0 + vij1 * vij1);
+                best = (std::min)(best, h);
+            }
+            w[i] = (std::max)(0.0, best);
+            sum += w[i];
+        }
+        for (int i = 0; i < n; ++i) w[i] = sum > 1e-9 ? w[i] / sum : (i == 0 ? 1.0 : 0.0);
+    }
+
+    void crouch_anim_release()
+    {
+        CrouchAnim& A = g_canim;
+        for (const char* b : {"pelvis", "thigh_l", "calf_l", "foot_l", "thigh_r", "calf_r", "foot_r"})
+            if (ModifyBoneNode* n = chain_node(b))
+            {
+                if (n->alpha) *reinterpret_cast<float*>(n->node + n->alpha->GetOffset_Internal()) = 1.0f;
+                if (std::string(b) == "pelvis" || std::string(b).rfind("foot", 0) != 0) node_release(*n);
+            }
+        A.target_prev_ok[0] = A.target_prev_ok[1] = false;
+    }
+
+    // Called at the end of feet_after_anim_update (his animation update, after the body pose).
+    void crouch_anim_apply(const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        CrouchAnim& A = g_canim;
+        UObject* driver = g_pose.driver ? g_pose.driver : g_pose.mesh;
+        UObject* pawn = g_pose.pawn;
+        if (!driver || !pawn) return;
+        if (!A.tried && cfg.pose_crouch_anim) crouch_anim_load();
+        double now = now_seconds();
+        double dt = A.last_t < 0.0 ? 0.0 : (std::min)(0.1, (std::max)(0.0, now - A.last_t));
+        A.last_t = now;
+        Vec3 loc = component_location(driver);
+        Quat crot = component_rotation(driver);
+        Quat cinv = crot.inverse();
+        double scale = (std::max)(1e-3, component_scale_z(driver));
+        double yaw = quat_yaw_deg(crot);
+        // Test measures of last frame's drawn pose against what was sent (A.fade full both frames).
+        if (A.fade >= 1.0)
+        {
+            CrouchAnimStats& S = g_canim_stats;
+            for (int s2 = 0; s2 < 2; ++s2)
+                if (A.target_prev_ok[s2])
+                {
+                    double e = length(socket_location(driver, bone_fname(s2 == 0 ? "foot_l" : "foot_r")) - A.target_prev_world[s2]);
+                    S.foot_err_sum += e, ++S.foot_err_n;
+                    S.foot_err_worst = (std::max)(S.foot_err_worst, e);
+                }
+            // His chest (spine_05) heading against his body's: the hips' turn must not carry it.
+            Vec3 cf = cinv.rotate(socket_rotation(driver, bone_fname("spine_05")).rotate(Vec3{0, 1, 0}));
+            double chest = std::fabs(std::atan2(-cf.x, cf.y) * kRadToDeg);
+            S.chest_sum += chest, ++S.chest_n;
+            S.chest_worst = (std::max)(S.chest_worst, chest);
+        }
+        // Damped local velocity and turn rate (B&S: animationDampTime 0.1 s), from how his body moved.
+        if (dt > 0.0)
+        {
+            Vec3 d = loc - A.last_loc;
+            d.z = 0.0;
+            if (length(d) < 100.0)
+            {
+                Vec3 v = cinv.rotate(d * (1.0 / dt));
+                v.z = 0.0;
+                double k = 1.0 - std::exp(-dt / 0.1);
+                A.vel = A.vel + (v - A.vel) * k;
+                A.yaw_rate += (wrap_deg(yaw - A.last_yaw) / dt - A.yaw_rate) * k;
+            }
+        }
+        A.last_loc = loc;
+        A.last_yaw = yaw;
+        // Head height as B&S measures it: your head over his standing head height.
+        double stand = 163.0 * scale;
+        double h = 1.0 - g_crouch_want_cm / stand;
+        bool kicking = g_feet[0].kicking || g_feet[1].kicking;
+        bool want = cfg.pose_crouch_anim && A.loaded && cfg.pose_crouch && g_feet_active.load() && !kicking && g_pose.feet_calibrated;
+        bool was = A.on;
+        if (!want) A.on = false;
+        else if (A.on) A.on = h <= cfg.pose_crouch_anim_off_ratio;
+        else A.on = h <= cfg.pose_crouch_anim_on_ratio;
+        if (A.on != was)
+            HSVR_LOG("CrouchAnim: %s (head at %.2f of standing, %.0f cm down%s)", A.on ? "B&S crouch animation on" : "off: back to stepping",
+                     h, g_crouch_want_cm, kicking ? ", a kick has a leg" : "");
+        double fade_rate = cfg.pose_crouch_anim_fade_s > 0.0 ? dt / cfg.pose_crouch_anim_fade_s : 1.0;
+        if (kicking) fade_rate = 1.0;
+        A.fade = (std::max)(0.0, (std::min)(1.0, A.fade + (A.on ? fade_rate : -fade_rate)));
+        if (A.fade <= 0.0)
+        {
+            if (was || A.target_prev_ok[0] || A.target_prev_ok[1])
+            {
+                crouch_anim_release();
+                // The stepping feet start where his feet are now.
+                for (int side = 0; side < 2; ++side)
+                {
+                    FootState& f = g_feet[side];
+                    if (!f.valid || f.kicking) continue;
+                    Vec3 at = socket_location(driver, bone_fname(side == 0 ? "foot_l" : "foot_r"));
+                    f.at = {at.x, at.y, 0.0};
+                    f.yaw = yaw + 90.0;
+                    f.stepping = false;
+                }
+            }
+            // While off, the animation's own pelvis turn (component), for the chest's counter-turn.
+            A.pelvis_anim = (cinv * socket_rotation(driver, bone_fname("pelvis"))).normalized();
+            A.moving = 0.0;
+            return;
+        }
+        // ---- the blend trees ----
+        double speed = length(A.vel);
+        double want_moving = speed > cfg.pose_crouch_anim_still_cms ? 1.0 : 0.0;
+        A.moving += (std::max)(-fade_rate, (std::min)(fade_rate, want_moving - A.moving));
+        CrouchPose walk_pose, idle_pose, pose;
+        double walk_w[8] = {0};
+        double walk_rate = 0.0;
+        if (A.moving > 0.0)
+        {
+            Vec3 pts[8];
+            for (int i = 0; i < 8; ++i) pts[i] = A.clips[A.walk[i]].velocity;
+            Vec3 p = speed > 1.0 ? A.vel : pts[0] * 0.01;
+            freeform_directional(pts, 8, p, walk_w);
+            double dur = 0.0;
+            Vec3 cv;
+            for (int i = 0; i < 8; ++i) { dur += walk_w[i] * A.clips[A.walk[i]].length; cv = cv + A.clips[A.walk[i]].velocity * walk_w[i]; }
+            double cs = length(cv);
+            walk_rate = cs > 1.0 ? (std::min)(2.0, (std::max)(0.25, speed / cs)) : 1.0;
+            A.walk_phase += dur > 1e-3 ? walk_rate * dt / dur : 0.0;
+            A.walk_phase -= std::floor(A.walk_phase);
+            static CrouchPose parts[8];
+            std::vector<std::pair<const CrouchPose*, double>> mix;
+            for (int i = 0; i < 8; ++i)
+                if (walk_w[i] > 1e-4) { crouch_sample(A.clips[A.walk[i]], A.walk_phase, parts[i]); mix.push_back({&parts[i], walk_w[i]}); }
+            crouch_mix(mix, walk_pose);
+        }
+        double turn_in = A.yaw_rate * 0.007, idle_w[3] = {0, 1, 0};
+        if (A.moving < 1.0)
+        {
+            const double lo = -1.5757067, hi = 1.5813490;
+            if (turn_in <= 0.0) { double t = (std::min)(1.0, turn_in / lo); idle_w[0] = t, idle_w[1] = 1.0 - t; }
+            else { double t = (std::min)(1.0, turn_in / hi); idle_w[2] = t, idle_w[1] = 1.0 - t; }
+            int ids[3] = {A.turn_l, A.loop, A.turn_r};
+            double dur = 0.0;
+            for (int i = 0; i < 3; ++i) dur += idle_w[i] * A.clips[ids[i]].length;
+            A.idle_phase += dur > 1e-3 ? dt / dur : 0.0;
+            A.idle_phase -= std::floor(A.idle_phase);
+            static CrouchPose parts[3];
+            std::vector<std::pair<const CrouchPose*, double>> mix;
+            for (int i = 0; i < 3; ++i)
+                if (idle_w[i] > 1e-4) { crouch_sample(A.clips[ids[i]], A.idle_phase, parts[i]); mix.push_back({&parts[i], idle_w[i]}); }
+            crouch_mix(mix, idle_pose);
+        }
+        if (A.moving >= 1.0) pose = walk_pose;
+        else if (A.moving <= 0.0) pose = idle_pose;
+        else crouch_mix({{&idle_pose, 1.0 - A.moving}, {&walk_pose, A.moving}}, pose);
+
+        // ---- onto his body (component space, cm of his unscaled skeleton) ----
+        Vec3 pelvis_cs = cinv.rotate(socket_location(driver, bone_fname("pelvis")) - loc) * (1.0 / scale);
+        Quat hips = qnlerp(Quat{}, pose.pelvis, (std::max)(0.0, (std::min)(1.0, cfg.pose_crouch_anim_hips)));
+        static const Vec3 hip_off[2] = {{9.969193, 0.25973, -2.35398}, {-9.969189, 0.25973, -2.353971}};
+        static const char* bn[2][3] = {{"thigh_l", "calf_l", "foot_l"}, {"thigh_r", "calf_r", "foot_r"}};
+        Quat wrote[2][3];
+        for (int s = 0; s < 2; ++s)
+        {
+            // His leg lengths (unscaled), from his current bones.
+            Vec3 tw = socket_location(driver, bone_fname(bn[s][0])), cw = socket_location(driver, bone_fname(bn[s][1])), fw = socket_location(driver, bone_fname(bn[s][2]));
+            double a = length(cw - tw) / scale, b = length(fw - cw) / scale;
+            if (a < 10.0 || b < 10.0) { a = 43.33, b = 42.20; }
+            Vec3 H = pelvis_cs + hips.rotate(hip_off[s]);
+            Vec3 foot_rel = pose.pos[s][2];
+            Vec3 F{pelvis_cs.x + foot_rel.x, pelvis_cs.y + foot_rel.y, 0.0};
+            // The floor under that spot (looking through him, weapons and people), from a step above his last floor.
+            Vec3 Fw = loc + crot.rotate(F * scale);
+            double from_z = A.have_floor[s] ? A.floor_z[s] + 40.0 * scale : socket_location(driver, bone_fname("pelvis")).z;
+            if (g_feet[s].have_ground) from_z = (std::min)(from_z, g_feet[s].ground_z - g_pose.ankle_height[s] + 40.0 * scale);
+            double fz = 0.0;
+            if (ground_below(pawn, Fw.x, Fw.y, from_z, fz)) { A.floor_z[s] = fz; A.have_floor[s] = true; }
+            else if (!A.have_floor[s] && g_feet[s].have_ground) { A.floor_z[s] = g_feet[s].ground_z - g_pose.ankle_height[s]; A.have_floor[s] = true; }
+            double floor_cs = A.have_floor[s] ? (A.floor_z[s] - loc.z) / scale : 0.0;
+            F.z = floor_cs + foot_rel.z;
+            // Two-bone solve, bending toward the clip's knee.
+            Vec3 d = F - H;
+            double L = length(d), Lw = L;
+            L = (std::max)(std::fabs(a - b) + 0.5, (std::min)((a + b) * 0.999, L));
+            A.reach_short_worst = (std::max)(A.reach_short_worst, Lw - L);
+            Vec3 dn = L > 1e-6 ? normalized(d) : Vec3{0, 0, -1};
+            Vec3 kdir = pose.pos[s][1] - pose.pos[s][0];
+            Vec3 perp = kdir - dn * dot(kdir, dn);
+            if (length(perp) < 1e-3) perp = Vec3{0, 1, 0} - dn * dn.y;
+            Vec3 e = normalized(perp);
+            double cosA = (std::max)(-1.0, (std::min)(1.0, (a * a + L * L - b * b) / (2.0 * a * L)));
+            double sinA = std::sqrt((std::max)(0.0, 1.0 - cosA * cosA));
+            Vec3 K = H + dn * (a * cosA) + e * (a * sinA);
+            Vec3 Fe = H + dn * L;
+            Quat thigh = (swing_between(pose.pos[s][1] - pose.pos[s][0], K - H) * pose.rot[s][0]).normalized();
+            Quat calf = (swing_between(pose.pos[s][2] - pose.pos[s][1], Fe - K) * pose.rot[s][1]).normalized();
+            wrote[s][0] = thigh, wrote[s][1] = calf, wrote[s][2] = pose.rot[s][2];
+            // How far the planted foot's spot moves over the floor (a clip foot under 12 cm is down).
+            Vec3 Few = loc + crot.rotate(Fe * scale);
+            if (foot_rel.z < 12.0 && A.target_prev_ok[s] && dt > 0.0 && A.fade >= 1.0)
+            {
+                Vec3 m = Few - A.target_prev_world[s];
+                m.z = 0.0;
+                double v = length(m) / dt;
+                A.slip_sum += v, ++A.slip_n;
+                A.slip_worst = (std::max)(A.slip_worst, v);
+                g_canim_stats.slip_sum += v, ++g_canim_stats.slip_n;
+                g_canim_stats.slip_worst = (std::max)(g_canim_stats.slip_worst, v);
+            }
+            A.target_prev_world[s] = Few;
+            A.target_prev_ok[s] = true;
+        }
+        float alpha = (float)A.fade;
+        auto put = [&](const char* bone, const Quat& q) {
+            if (ModifyBoneNode* n = chain_node(bone))
+            {
+                node_set_rotation(*n, q);
+                if (n->alpha) *reinterpret_cast<float*>(n->node + n->alpha->GetOffset_Internal()) = alpha;
+            }
+        };
+        put("pelvis", hips);
+        for (int s = 0; s < 2; ++s)
+            for (int k = 0; k < 3; ++k) put(bn[s][k], wrote[s][k]);
+        // The chest turned back by the hips' extra turn (spine_02 is additive in component space:
+        // its turn is put before the hips' change, so the bones above keep facing as they were).
+        Quat delta = (qnlerp(A.pelvis_anim, hips, A.fade) * A.pelvis_anim.inverse()).normalized();
+        if (ModifyBoneNode* n = chain_node("spine_02"))
+        {
+            // What the torso lean put there this frame (or, if nothing wrote it since, what it put before ours).
+            static Quat last_written, last_base;
+            static bool have_last = false;
+            Quat add{};
+            uint8_t mode = *(n->node + n->rotation_mode->GetOffset_Internal());
+            if (mode == 2)
+            {
+                double r[3];
+                read_three(n->node + n->rotation->GetOffset_Internal(), n->rotation, r);
+                add = rot_to_quat(r[0], r[1], r[2]);
+                Quat lw = last_written;
+                if (have_last && std::fabs(add.x * lw.x + add.y * lw.y + add.z * lw.z + add.w * lw.w) > 0.999999) add = last_base;
+            }
+            last_base = add;
+            last_written = (add * delta.inverse()).normalized();
+            have_last = true;
+            node_add_rotation(*n, last_written);
+        }
+        if (A.fade >= 1.0)
+        {
+            g_canim_frames.fetch_add(1);
+            g_canim_stats.hips_sum += 2.0 * std::acos((std::min)(1.0, std::fabs(hips.w))) * kRadToDeg, ++g_canim_stats.hips_n;
+            g_canim_stats.moving_sum += A.moving, ++g_canim_stats.moving_n;
+        }
+        static double last_log = 0.0;
+        if (now - last_log >= 0.5)
+        {
+            last_log = now;
+            static const char* wn[8] = {"Fwd", "Lt45", "Lt", "Lt135", "Bwd", "Rt135", "Rt", "Rt45"};
+            std::string top;
+            for (int i = 0; i < 8; ++i)
+                if (walk_w[i] > 0.05) { char part[32]; std::snprintf(part, sizeof(part), " %s %.2f", wn[i], walk_w[i]); top += part; }
+            double hips_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(hips.w))) * kRadToDeg;
+            HSVR_LOG("CrouchAnim: shown %.2f, head %.2f of standing (%.0f cm down, legs %.0f), moving %.2f at %.0f cm/s (%.0f, %.0f) walk[%s ] phase %.2f x%.2f; "
+                     "still: L %.2f loop %.2f R %.2f (turn %.0f deg/s); hips turned %.0f deg; planted foot slides %.1f cm/s mean, %.1f worst; leg short of the floor %.1f cm",
+                     A.fade, h, g_crouch_want_cm, g_crouch_drop, A.moving, speed, A.vel.x, A.vel.y, top.c_str(), A.walk_phase, walk_rate, idle_w[0], idle_w[1], idle_w[2],
+                     A.yaw_rate, hips_deg, A.slip_n ? A.slip_sum / A.slip_n : 0.0, A.slip_worst, A.reach_short_worst);
+            A.slip_sum = A.slip_worst = A.reach_short_worst = 0.0;
+            A.slip_n = 0;
+        }
+    }
+
     void feet_after_anim_update(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         gc_sync();
@@ -2295,6 +2839,7 @@ namespace
             Vec3 out = to.vec(STR("OutPosition"));
             write_three(field, p, out.x, out.y, out.z);
         }
+        crouch_anim_apply(hsvr::config());
     }
 
     // ---- Torso twist ----------------------------------------------------------------------------
@@ -4615,6 +5160,7 @@ namespace
         // How far your view went down (real crouch plus the button), and how far his legs can take him:
         // the rest he bends forward for (lean_update's deficit).
         double crouch_want = g_crouch_drop + g_button_crouch;
+        g_crouch_want_cm = crouch_want;
         double crouch_cap = (std::max)(10.0, cfg.pose_crouch_max_cm) * component_scale_z(mesh);
         g_crouch_drop = (std::min)(crouch_cap, crouch_want);
         // Torso lean: the bend carries his head forward and down; his hips go back by the forward part
@@ -29965,6 +30511,7 @@ namespace
         g_count_neck_snaps.store(0);
         g_count_joint_breaks.store(0);
         g_count_steps.store(0);
+        crouch_anim_stats_reset();
         g_count_kicks.store(0);
         g_count_sheathe_back.store(0);
         g_count_sheathe_seated.store(0);
@@ -30230,6 +30777,23 @@ namespace
         else if (w == "crouch_drop") value = g_crouch_drop; // cm his body is down this frame (your crouch + button, past the lean)
         else if (w == "joint_breaks") value = g_count_joint_breaks.load();
         else if (w == "steps") value = g_count_steps.load();
+        else if (w.rfind("canim_", 0) == 0)
+        {
+            // B&S crouch animation (pose_crouch_anim), since hsvr.mark
+            const CrouchAnimStats& S = g_canim_stats;
+            auto mean = [](double sum, int n) { return n ? sum / n : 0.0; };
+            if (w == "canim_frames") value = g_canim_frames.load();         // frames shown at full weight
+            else if (w == "canim_shown") value = g_canim.fade;              // now, 0..1
+            else if (w == "canim_slip") value = mean(S.slip_sum, S.slip_n); // planted foot's spot sliding over the floor, cm/s mean
+            else if (w == "canim_slip_worst") value = S.slip_worst;
+            else if (w == "canim_foot_err") value = mean(S.foot_err_sum, S.foot_err_n); // drawn foot vs where it was sent, cm mean
+            else if (w == "canim_foot_err_worst") value = S.foot_err_worst;
+            else if (w == "canim_chest") value = mean(S.chest_sum, S.chest_n); // chest turned off his body's heading, deg mean
+            else if (w == "canim_chest_worst") value = S.chest_worst;
+            else if (w == "canim_hips") value = mean(S.hips_sum, S.hips_n);    // the clips' hip turn shown, deg mean
+            else if (w == "canim_moving") value = mean(S.moving_sum, S.moving_n); // walking tree share, mean
+            else known = false;
+        }
         else if (w == "kicks") value = g_count_kicks.load();
         else if (w == "sheathe_backs") value = g_count_sheathe_back.load();     // sheathes pulled back out
         else if (w == "sheathes_seated") value = g_count_sheathe_seated.load(); // sheathes seated and locked
@@ -30789,6 +31353,7 @@ namespace
                 g_count_neck_snaps.store(0);
                 g_count_joint_breaks.store(0);
                 g_count_steps.store(0);
+                crouch_anim_stats_reset();
                 g_count_kicks.store(0);
                 g_count_sheathe_back.store(0);
                 g_count_sheathe_seated.store(0);

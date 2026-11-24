@@ -1,0 +1,12 @@
+# Down into the crouch, walk, back up: the animation fades in and out, and stepping takes over after.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.6:hsvr.fake_head_drop 0
+1.0:hsvr.stick 0 1
+1.5:hsvr.fake_head_drop 45
+4.0:hsvr.expect canim_shown >= 0.99 shown crouched
+4.1:hsvr.fake_head_drop 0
+6.5:hsvr.expect canim_shown <= 0.01 gone when standing again
+6.6:hsvr.mark
+8.6:hsvr.expect steps >= 2 stepping again after
+8.6:hsvr.expect canim_frames <= 0 none after
+8.7:hsvr.stick -9 0
