@@ -548,6 +548,7 @@ namespace
     void item_watch_tick(UObject* pawn);
     void leg_guard_tick(UObject* pawn, UObject* mesh, const hsvr::Config& cfg);
     void shoulder_slot_tick(UObject* pawn, UObject* mesh, const hsvr::Config& cfg);
+    void lamp_probe_tick(UObject* pawn);
     double g_slot_moved = 0.0, g_slot_speed = 0.0; // test: the back-slot item's move (cm) and speed (m/s) against his chest since hsvr.mark
     std::atomic<bool> g_slot_reset{false};
     void chain_calm_tick(UObject* pawn, const hsvr::Config& cfg);
@@ -4632,6 +4633,7 @@ namespace
         item_watch_tick(pawn);
         leg_guard_tick(pawn, object_property(pawn, STR("Mesh")), cfg);
         shoulder_slot_tick(pawn, object_property(pawn, STR("Mesh")), cfg);
+        lamp_probe_tick(pawn);
         chain_calm_tick(pawn, cfg);
         arm_hanging_tick(pawn);
         {
@@ -8309,6 +8311,135 @@ namespace
         done.insert(joint);
         HSVR_LOG("Slot: %ls on his shoulder slot hung from %ls: now from spine_05 (his chest), frame kept in place (%d%d%d; pos (%.1f, %.1f, %.1f))",
                  item->GetName().c_str(), bone.c_str(), (int)ok, (int)ok2, (int)ok3, at_c.x, at_c.y, at_c.z);
+    }
+
+    // Lamp probe (Matthew 11-24: the held hanging lantern "feels like it's in zero gravity"): what a held item's hanging body
+    // does (the chain lantern's lamp, "Weapon", on PhysicsConstraint1-6 below the handle): where it hangs from the handle,
+    // its speed, and what the engine has on it (gravity, damping, mass), every 0.2 s while held. Test readers lamp_*.
+    double g_lamp_drop = 0.0, g_lamp_speed_max = 0.0, g_lamp_swing_max = 0.0;
+    std::atomic<bool> g_lamp_reset{false};
+    void lamp_probe_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        if (!pawn) return;
+        static double last = -1.0, t_prev = -1.0;
+        static Vec3 rel_prev{}, rel_mark{};
+        static UObject* lamp_prev = nullptr;
+        static bool tr = track_freed(&lamp_prev);
+        (void)tr;
+        UObject* lamp = nullptr;
+        UObject* base = nullptr;
+        for (int side = 0; side < 2 && !lamp; ++side)
+        {
+            UObject* w = held_weapon_of(side);
+            if (!w || gone(w) || is_fist(w)) continue;
+            UObject* b = object_property(w, STR("BaseMesh"));
+            if (!b) continue;
+            for (UObject* c : static_parts_of(w))
+                if (c && c->GetName() == STR("Weapon") && c != b)
+                {
+                    Call sim(c, STR("IsSimulatingPhysics"));
+                    sim.name(STR("BoneName"), FName(STR("None"), FNAME_Add));
+                    FProperty* sp = sim.run() ? sim.param(STR("ReturnValue")) : nullptr;
+                    if (sp && *(sim.buffer.data() + sp->GetOffset_Internal())) lamp = c, base = b;
+                }
+        }
+        // A held item's hanging bodies (lamp, chain links) swing as hung things do, not in syrup: the chain lantern's lamp
+        // carries the asset's own linear damping 1.0 and angular damping 5.0 (Lamp: lines, test cases\lamp), so after a shake
+        // it went from 1.7 to 0.1 m/s in 0.6 s with no swing at all: "it feels like it's in zero gravity". B&S items keep
+        // Unity's rigidbody defaults (drag 0, angular drag 0.05). While held they get pose_hanging_damping_held; the asset's
+        // own values come back when it leaves the hand.
+        {
+            const hsvr::Config& cfg = hsvr::config();
+            static std::map<UObject*, std::pair<double, double>> saved; // hanging body -> its own (linear, angular) damping
+            static UObject* saved_for = nullptr;
+            static bool t2 = on_freed([] {
+                for (auto it = saved.begin(); it != saved.end();) it = gone(it->first) ? saved.erase(it) : std::next(it);
+                if (gone(saved_for)) saved_for = nullptr;
+            });
+            (void)t2;
+            UObject* held_item = nullptr;
+            if (lamp)
+                for (int side = 0; side < 2 && !held_item; ++side)
+                    if (UObject* w = held_weapon_of(side))
+                        if (object_property(w, STR("BaseMesh")) == base) held_item = w;
+            if (saved_for && saved_for != held_item)
+            {
+                for (auto& [c, d] : saved)
+                    if (!gone(c) && object_alive(c))
+                    {
+                        Call l(c, STR("SetLinearDamping"));
+                        first_number(l, d.first);
+                        l.run();
+                        Call a(c, STR("SetAngularDamping"));
+                        first_number(a, d.second);
+                        a.run();
+                    }
+                HSVR_LOG("Lamp: %zu hanging bodies back to their own damping (out of the hand)", saved.size());
+                saved.clear();
+                saved_for = nullptr;
+            }
+            if (held_item && !saved_for && cfg.pose_hanging_damping_held >= 0.0)
+            {
+                std::vector<UObject*> tree;
+                attached_meshes(base, nullptr, tree, 0);
+                for (UObject* c : static_parts_of(held_item))
+                {
+                    if (!c || c == base || std::find(tree.begin(), tree.end(), c) != tree.end() || !physics_collides(c)) continue;
+                    Call ld(c, STR("GetLinearDamping"));
+                    Call ad(c, STR("GetAngularDamping"));
+                    double l0 = ld.run() ? ld.number() : 0.0, a0 = ad.run() ? ad.number() : 0.0;
+                    saved[c] = {l0, a0};
+                    Call l(c, STR("SetLinearDamping"));
+                    first_number(l, cfg.pose_hanging_damping_held);
+                    l.run();
+                    Call a(c, STR("SetAngularDamping"));
+                    first_number(a, cfg.pose_hanging_damping_held);
+                    a.run();
+                }
+                saved_for = held_item;
+                HSVR_LOG("Lamp: %ls in the hand: %zu hanging bodies' damping %.2f (their own: lamp etc. kept to put back)", held_item->GetName().c_str(), saved.size(),
+                         cfg.pose_hanging_damping_held);
+            }
+        }
+        if (!lamp) { lamp_prev = nullptr; return; }
+        Vec3 bp = component_location(base);
+        Quat bq = component_rotation(base);
+        Vec3 lp = component_location(lamp);
+        Vec3 rel = lp - bp; // world-axis offset of the lamp from the handle
+        double now = now_seconds();
+        if (lamp != lamp_prev || g_lamp_reset.exchange(false))
+        {
+            lamp_prev = lamp;
+            rel_mark = rel;
+            g_lamp_speed_max = g_lamp_swing_max = 0.0;
+            t_prev = -1.0;
+        }
+        g_lamp_drop = -rel.z;
+        if (t_prev > 0.0 && now - t_prev > 1e-4)
+            g_lamp_speed_max = (std::max)(g_lamp_speed_max, length(rel - rel_prev) / (now - t_prev) / 100.0); // m/s against the handle
+        g_lamp_swing_max = (std::max)(g_lamp_swing_max, length(Vec3{rel.x - rel_mark.x, rel.y - rel_mark.y, 0.0}));
+        rel_prev = rel;
+        t_prev = now;
+        if (now - last < 0.2) return;
+        last = now;
+        Call g(lamp, STR("IsGravityEnabled"));
+        FProperty* gp = g.run() ? g.param(STR("ReturnValue")) : nullptr;
+        bool grav = gp && *(g.buffer.data() + gp->GetOffset_Internal());
+        Call ld(lamp, STR("GetLinearDamping"));
+        double lin = ld.run() ? ld.number() : -1.0;
+        Call ad(lamp, STR("GetAngularDamping"));
+        double ang = ad.run() ? ad.number() : -1.0;
+        Call m(lamp, STR("GetMass"));
+        double mass = m.run() ? m.number() : -1.0;
+        Call lv(lamp, STR("GetPhysicsLinearVelocity"));
+        double v = lv.run() ? length(lv.vec()) / 100.0 : -1.0;
+        Call hv(base, STR("GetPhysicsLinearVelocity"));
+        double vh = hv.run() ? length(hv.vec()) / 100.0 : -1.0;
+        Vec3 local = bq.inverse().rotate(rel);
+        HSVR_LOG("Lamp: %.1f cm below the handle, %.1f cm out (world); in the handle's frame (%.1f, %.1f, %.1f); lamp %.2f m/s, handle %.2f m/s; gravity %d, "
+                 "damping lin %.2f ang %.2f, mass %.2f kg; swing so far %.1f cm, speed vs handle max %.2f m/s",
+                 -rel.z, length(Vec3{rel.x, rel.y, 0.0}), local.x, local.y, local.z, v, vh, (int)grav, lin, ang, mass, g_lamp_swing_max, g_lamp_speed_max);
     }
 
     void crouch_push_log(UObject* pawn, UObject* mesh)
@@ -30108,6 +30239,9 @@ namespace
         else if (w == "lag_l") value = g_worst_lag[0].load();
         else if (w == "kick_speed") value = g_kick_speed.load(); // m/s, fastest loose weapon near his legs while crouched since hsvr.mark
         else if (w == "item_moved") value = g_watch_moved.load(); // cm the watched item moved since hsvr.mark (hsvr.watch_item)
+        else if (w == "lamp_drop") value = g_lamp_drop;           // cm the held item's hanging lamp is below its handle
+        else if (w == "lamp_swing") value = g_lamp_swing_max;    // cm the lamp swung sideways from where it hung at hsvr.mark
+        else if (w == "lamp_speed") value = g_lamp_speed_max;    // m/s, the lamp's worst speed against the handle since hsvr.mark
         else if (w == "slot_back_moved") value = g_slot_moved; // cm the back/shoulder-slot item moved against his chest since hsvr.mark
         else if (w == "slot_back_speed") value = g_slot_speed; // m/s, the same item's worst speed against his chest since hsvr.mark
         else if (w == "item_speed") value = g_watch_speed.load(); // m/s, its fastest since hsvr.mark
@@ -30662,6 +30796,7 @@ namespace
                 g_kick_speed.store(0.0);
                 g_watch_reset.store(true);
                 g_slot_reset.store(true);
+                g_lamp_reset.store(true);
                 g_watch_moved.store(0.0);
                 g_watch_speed.store(0.0);
                 g_worst_lag[1].store(0.0);

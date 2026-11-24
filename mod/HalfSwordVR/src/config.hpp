@@ -332,6 +332,7 @@ namespace hsvr
         // around"; PC run 10 d82b641: a crouch to 85 cm pushed a lantern 50 cm at 2.5 m/s). The game's own kick still hits.
         bool pose_legs_pass_loose = true;
         bool pose_shoulder_slot_on_chest = true; // a shield slung on his shoulder slot hangs from his chest (spine_05), not his tracked left upper arm (Matthew 11-24: pavise jitters on his back standing still)
+        double pose_hanging_damping_held = 0.05; // a held item's hanging bodies (chain lantern lamp, links): linear and angular damping while held, B&S-like (Unity drag 0 / angular 0.05); the asset has 1.0 / 5.0 (Matthew 11-24: "zero gravity"); < 0 = leave as is
         // How near his legs (hip, knee, ankle or toe point) a loose weapon must come to pass through them (cm). It
         // collides with them again once 15 cm farther than this for 0.3 s, or when a hand takes it.
         double pose_legs_pass_loose_cm = 40.0;
