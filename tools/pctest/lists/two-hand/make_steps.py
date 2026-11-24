@@ -201,8 +201,8 @@ def main():
     lst += ["rp_%s|steps-rp_%s.txt" % (n, n) for n in rp]
     lst += ["ctl_%s|steps-line-%s.txt|pose_two_hand_bs=0" % (n, n) for n in rows]
     lst += ["ctl_rp_%s|steps-rp_%s.txt|pose_two_hand_bs=0" % (n, n) for n in rp]
-    lst += ["auto_%s|steps-auto_%s.txt" % (n, n) for n in auto]
-    lst += ["ctl_auto_%s|steps-auto_%s.txt|pose_two_hand_auto_slide_cm=0" % (n, n) for n in auto]
+    # (auto slide is off by default since Matthew 2026-11-24 00:08Z chose B&S's trigger-only slide; these turn it on)
+    lst += ["auto_%s|steps-auto_%s.txt|pose_two_hand_auto_slide_cm=10" % (n, n) for n in auto]
     (HERE / "list.txt").write_text("\n".join(lst) + "\n", newline="\n")
     print("wrote %d cases (+%d control)" % (len(rows), len(rows)))
 
