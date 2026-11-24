@@ -219,11 +219,12 @@ SWITCH_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
 12.15:hsvr.spin_reset 1
 15:hsvr.expect held_r = 1
 15:hsvr.expect held_spin_max_r < 600 after the left let go (2 to 1 hands), hands still: no spin-up (deg/s; his ran 1300-2700)
-15.1:hsvr.squeeze 0 1
-15.15:hsvr.spin_reset 1
-18:hsvr.expect two_hand = 1 took it again
-18:hsvr.expect held_spin_max_r < 600 after the left took it again (1 to 2 hands), hands still: no spin-up (deg/s)
-18.1:quit
+15.1:hsvr.arm_move 7 {along}
+16.5:hsvr.squeeze 0 1
+16.55:hsvr.spin_reset 1
+19.5:hsvr.expect two_hand = 1 took it again
+19.5:hsvr.expect held_spin_max_r < 600 after the left took it again (1 to 2 hands), hands still: no spin-up (deg/s)
+19.6:quit
 """
 
 
