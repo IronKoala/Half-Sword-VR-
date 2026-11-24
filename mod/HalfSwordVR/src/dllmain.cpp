@@ -7752,6 +7752,18 @@ namespace
                     Call t(cap, STR("GetCollisionObjectType"));
                     t.run();
                     g.channel = byte_result(t);
+                    // Only while the capsule's channel is its own: never one his body or the item itself is on (ignoring it
+                    // would let the item through every body or weapon of that kind, not just his capsule).
+                    Call mt(mesh, STR("GetCollisionObjectType"));
+                    mt.run();
+                    Call it_t(base, STR("GetCollisionObjectType"));
+                    it_t.run();
+                    int mesh_ch = byte_result(mt), item_ch = byte_result(it_t);
+                    if (g.channel == mesh_ch || g.channel == item_ch)
+                    {
+                        HSVR_LOG("Legs: capsule channel %d is also his body's (%d) or the item's (%d): left as it is", g.channel, mesh_ch, item_ch);
+                        g.channel = -1;
+                    }
                     if (g.channel >= 0)
                         for (UObject* part : parts)
                         {
