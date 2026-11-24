@@ -1,0 +1,4 @@
+park_axe2h|steps-park_axe2h.txt
+park_polehammer|steps-park_polehammer.txt
+park_warstaff|steps-park_warstaff.txt
+park_longsword|steps-park_longsword.txt

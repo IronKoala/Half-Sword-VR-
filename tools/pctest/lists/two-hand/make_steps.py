@@ -230,6 +230,16 @@ SWITCH_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
 19.6:quit
 """
 
+# Park (2026-11-24, 885d369 run): the free left hand parked beside a weapon the right holds pushed it (and the right hand 15 cm off
+# its still target) into a 300-670 deg/s wobble for 1.3 s. Coordinator: a bug, not a watch item.
+PARK = [("axe2h", -25), ("polehammer", 30), ("warstaff", 30), ("longsword", -12)]
+PARK_STEPS = """6:hsvr.arm_move 7 {along}
+6.1:hsvr.spin_reset 1
+10:hsvr.expect held_spin_max_r < 150 the free hand parked beside it: no wobble (deg/s)
+10:hsvr.expect held_r = 1
+10.1:quit
+"""
+
 
 def main():
     rows = []
@@ -283,6 +293,10 @@ def main():
         steps = HEAD.format(path=paths[weapon]) + TAKE_ALONG.format(along=along) + SWITCH_STEPS.format(along=along)
         (HERE / ("steps-switch_%s.txt" % weapon)).write_text(steps, newline="\n")
         switch.append(weapon)
+    park = []
+    for weapon, along in PARK:
+        (HERE / ("steps-park_%s.txt" % weapon)).write_text(HEAD.format(path=paths[weapon]) + PARK_STEPS.format(along=along), newline="\n")
+        park.append(weapon)
     lst = ["# Two hands with real-hand conditions (playtest 2026-11-23); two hands are held as B&S holds them (pose_two_hand_bs=1).",
            "# rp_: his own recorded controller motion. ctl_: the same cases in the previous line mode (pose_two_hand_bs=0), for comparison."]
     lst += ["two_%s|steps-%s.txt" % (n, n) for n in rows]
@@ -302,6 +316,7 @@ def main():
     for pre, extra in (("switch", ""), ("switch2", ""), ("grip_switch", "|pose_hold_joint_turn_couple=0"), ("old_switch", "|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0"),
                        ("old_switch2", "|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0")):
         lst += ["%s_%s|steps-switch_%s.txt%s" % (pre, n, n, extra) for n in switch]
+    lst += ["park_%s|steps-park_%s.txt" % (n, n) for n in park]
     # (a second launch of each: the one runaway seen so far came in only one of two launches)
     lst += ["reach2_%s|steps-reach_%s.txt" % (n, n) for n in reach]
     lst += ["old_reach2_%s|steps-reach_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in reach]
