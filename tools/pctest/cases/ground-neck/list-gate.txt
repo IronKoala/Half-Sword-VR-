@@ -8,3 +8,4 @@ floor_no_grab|steps-floor_no_grab.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_
 floor_pickup|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
 look_down_stance|steps-look_down_stance.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;dev_pose_fake_tracking=0
 crouch_walk|steps-crouch_walk.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+floor_pickup_62|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62

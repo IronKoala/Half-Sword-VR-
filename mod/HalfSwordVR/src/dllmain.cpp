@@ -1362,6 +1362,9 @@ namespace
     // (g_button_crouch is defined near the top: provide_anchor uses it)
     bool g_button_crouch_on = false;
     std::atomic<double> g_fake_head_drop{-1.0}; // test: hsvr.fake_head_drop <cm> (fake tracking only)
+    // test: hsvr.fake_head_speed <cm/s>: how fast the fake head goes to that depth, as a person crouches (0 = at once). Run 8
+    // bd711d2: dropped 95 cm in one frame, his legs swept a lantern lying at his feet 1-3 m away.
+    std::atomic<double> g_fake_head_speed{150.0};
     bool g_pose_cfg_turn = true, g_pose_cfg_crouch = true, g_pose_fake = false;
     double g_turn_dead_deg = 60.0, g_turn_speed_dps = 150.0, g_turn_max_deg = 85.0;
 
@@ -4353,7 +4356,14 @@ namespace
         {
             // Made-up path: slowly down to 40 cm and back up; hsvr.fake_head_drop <cm> holds a depth.
             double held = g_fake_head_drop.load();
-            g_crouch_drop = held >= 0.0 ? held : 20.0 - 20.0 * std::cos(now_seconds() * 0.4);
+            static double eased = 0.0, eased_t = -1.0;
+            double tn = now_seconds(), gap = eased_t < 0.0 ? 0.0 : (std::min)(0.1, tn - eased_t);
+            eased_t = tn;
+            double want = held >= 0.0 ? held : 20.0 - 20.0 * std::cos(tn * 0.4);
+            double v = g_fake_head_speed.load();
+            if (v <= 0.0 || held < 0.0) eased = want;
+            else eased += (std::max)(-v * gap, (std::min)(v * gap, want - eased));
+            g_crouch_drop = eased;
         }
         else if (cfg.pose_crouch && (state.head_valid || g_fake_head_pose.load()))
         {
@@ -29281,6 +29291,7 @@ namespace
         g_fake_shift_fwd.store(0.0);
         g_fake_shift_right.store(0.0);
         g_fake_head_drop.store(-1.0);
+        g_fake_head_speed.store(150.0);
         g_fake_arm_mode.store(0);
         g_fake_arm_epoch.fetch_add(1);
         g_fake_two_up.store(20.0);
@@ -31780,6 +31791,12 @@ namespace
                 g_fake_tilt_roll.store(r);
                 g_fake_tilt_drop.store(d);
                 HSVR_LOG("Script: hsvr.fake_head_tilt pitch %.0f roll %.0f drop %.0f cm", p, r, d);
+            }
+            if (entry.command.rfind("hsvr.fake_head_speed ", 0) == 0)
+            {
+                g_fake_head_speed.store(atof(entry.command.c_str() + 21));
+                HSVR_LOG("Script: hsvr.fake_head_speed %.0f cm/s", g_fake_head_speed.load());
+                continue;
             }
             if (entry.command.rfind("hsvr.fake_head_drop ", 0) == 0)
             {

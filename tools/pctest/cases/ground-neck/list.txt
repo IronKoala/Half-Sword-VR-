@@ -12,6 +12,7 @@ lantern_hold_damp1|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Ar
 lantern_hold_damp5|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_hanging_damping=5;pose_hold_count_hanging=1
 lantern_hold_still|steps-lantern_hold_still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_count_hanging=1
 floor_pickup|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_pickup_instant|steps-floor_pickup_instant.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
 floor_pickup_62|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62
 lantern_light|steps-lantern_light.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_count_hanging=1
 lantern_hold_noturn|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_max_torque=1;pose_hold_wrist_stop_torque=1;pose_hold_count_hanging=1
