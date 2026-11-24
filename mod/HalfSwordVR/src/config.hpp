@@ -643,7 +643,7 @@ namespace hsvr
         // 1 = the hand's hold counts what hangs from the weapon on its own joints (a lantern's chain and lamp, a
         // flail's links and head) as carried weight; 0 = the handle's mass alone (the chain lantern hung 9-20 cm
         // off your hand).
-        bool pose_hold_count_hanging = true;
+        bool pose_hold_count_hanging = false; // off until it helps: run 4 9ed2430 it spun the chain lantern 2-3x faster and did not shorten its 15-19 cm trail
         // Test switch: linear and angular damping set on those hanging parts once held (0 = the game's own).
         double pose_hold_hanging_damping = 0.0;
         double pose_hold_arm_reach_cm = 55.0;

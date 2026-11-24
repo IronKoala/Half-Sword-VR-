@@ -1,0 +1,10 @@
+# Install gate for the neck / stance / crouch walk / floor pickup fixes (the lantern hold is unchanged from the installed build: its cases are diagnostics in list.txt).
+neck_hold_still|steps-neck_hold_still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+neck_drag|steps-neck_drag.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+neck_wrench_right|steps-neck_wrench_right.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+neck_wrench_left|steps-neck_wrench_left.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+floor_reach|steps-floor_reach.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_no_grab|steps-floor_no_grab.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_pickup|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+look_down_stance|steps-look_down_stance.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;dev_pose_fake_tracking=0
+crouch_walk|steps-crouch_walk.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
