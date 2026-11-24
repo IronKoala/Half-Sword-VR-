@@ -2047,6 +2047,7 @@ namespace
     // which shook the hand on a steady sword. The engine tick still runs it when this has not fired.
     void pose_body(const hsvr::Config& cfg);
     void enter_plain_game(UObject* pawn);
+    UObject* g_no_push_for = nullptr; // pose_capsule_no_push was set for this pawn
     std::atomic<double> g_pose_in_anim_at{-1.0};
     double number_property(UObject* owner, FProperty* p);
     bool write_three(uint8_t* field, FProperty* property, double a, double b, double c);
@@ -4632,7 +4633,7 @@ namespace
         {
             // pose_capsule_no_push: the engine's character physics interaction off (touch impulses and repulsion on loose
             // things by the capsule); the game's own push factors are already 0. Set once per pawn, and back when switched off.
-            static UObject* set_for = nullptr;
+            UObject*& set_for = g_no_push_for; // reset by enter_plain_game, which puts the engine's own back
             static bool set_to = true;
             bool want = !cfg.pose_capsule_no_push;
             if (set_for != pawn || set_to != want)
@@ -25625,6 +25626,13 @@ namespace
             disarm_end(side);
             g_world[side] = WorldGrab{};
         }
+        // The leg guard's no-collide pairs and channel changes between his legs and loose items: the game's own again.
+        for (auto& [item, g] : g_leg_guard) leg_guard_drop(item, g, "mouse and keyboard");
+        g_leg_guard.clear();
+        // The engine's capsule push on loose things back on (its default; pose_capsule_no_push took it off).
+        if (UObject* movement = object_property(pawn, STR("CharacterMovement")))
+            if (set_bool_property(movement, STR("bEnablePhysicsInteraction"), true)) HSVR_LOG("Capsule: physics interaction with loose things on (the game's own)");
+        g_no_push_for = nullptr;
         forget_level_objects();
         HSVR_LOG("Input: mouse and keyboard: the plain game (VR holds, joints, arm no-collide pairs and posing taken off; nothing dropped)");
     }
