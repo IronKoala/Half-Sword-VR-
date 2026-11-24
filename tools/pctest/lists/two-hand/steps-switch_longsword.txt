@@ -24,15 +24,15 @@
 12.4:hsvr.spin_reset 1
 15:hsvr.expect held_r = 1
 15:hsvr.expect held_spin_max_r < 300 from 0.3 s after the left let go (2 to 1 hands), hands still: no spin-up (deg/s; his ran 1300-2700)
-15.1:hsvr.arm_move 7 -12
-16.2:hsvr.arm_move 7 -12
+15.1:hsvr.arm_move 7 -12 1
+16.2:hsvr.arm_move 7 -12 1
 16.5:hsvr.squeeze 0 1
 17.3:hsvr.if_free 0 hsvr.squeeze 0 0
-17.5:hsvr.if_free 0 hsvr.arm_move 7 -12
+17.5:hsvr.if_free 0 hsvr.arm_move 7 -12 1
 17.8:hsvr.if_free 0 hsvr.squeeze 0 1
 18.4:hsvr.if_free 0 hsvr.squeeze 0 0
-18.6:hsvr.if_free 0 hsvr.arm_move 7 -12
-19.2:hsvr.if_free 0 hsvr.arm_move 7 -12
+18.6:hsvr.if_free 0 hsvr.arm_move 7 -12 1
+19.2:hsvr.if_free 0 hsvr.arm_move 7 -12 1
 19.5:hsvr.if_free 0 hsvr.squeeze 0 1
 19.8:hsvr.spin_reset 1
 22.5:hsvr.expect two_hand = 1 took it again

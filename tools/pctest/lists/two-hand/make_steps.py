@@ -218,7 +218,8 @@ REACH_STEPS = """6:hsvr.arm_move 6
 # still, right hand main throughout; one same switch with no spin). A fast two-hand cut, the left lets go out there, then takes again.
 SWITCH = [("axe2h", -25), ("polehammer", 30), ("warstaff", 30), ("longsword", -12)]
 # (a third retake try, re-placed twice and settled 0.9 s: the rig's polehammer retake missed with its hand 12-20 cm off the grip in two
-# launches of a69b19e and once on 3181941; the rig's miss, not the hold's)
+# launches of a69b19e and once on 3181941; the rig's miss, not the hold's. Retakes use arm_move 7's onto-the-line flag: the left hand
+# goes to the weapon's own line, which hung 11-29 cm off the line through the right controller after the cut)
 SWITCH_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
 10.1:hsvr.arm_move 3
 12:hsvr.arm_move 7 {along}
@@ -226,15 +227,15 @@ SWITCH_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
 12.4:hsvr.spin_reset 1
 15:hsvr.expect held_r = 1
 15:hsvr.expect held_spin_max_r < 300 from 0.3 s after the left let go (2 to 1 hands), hands still: no spin-up (deg/s; his ran 1300-2700)
-15.1:hsvr.arm_move 7 {along}
-16.2:hsvr.arm_move 7 {along}
+15.1:hsvr.arm_move 7 {along} 1
+16.2:hsvr.arm_move 7 {along} 1
 16.5:hsvr.squeeze 0 1
 17.3:hsvr.if_free 0 hsvr.squeeze 0 0
-17.5:hsvr.if_free 0 hsvr.arm_move 7 {along}
+17.5:hsvr.if_free 0 hsvr.arm_move 7 {along} 1
 17.8:hsvr.if_free 0 hsvr.squeeze 0 1
 18.4:hsvr.if_free 0 hsvr.squeeze 0 0
-18.6:hsvr.if_free 0 hsvr.arm_move 7 {along}
-19.2:hsvr.if_free 0 hsvr.arm_move 7 {along}
+18.6:hsvr.if_free 0 hsvr.arm_move 7 {along} 1
+19.2:hsvr.if_free 0 hsvr.arm_move 7 {along} 1
 19.5:hsvr.if_free 0 hsvr.squeeze 0 1
 19.8:hsvr.spin_reset 1
 22.5:hsvr.expect two_hand = 1 took it again

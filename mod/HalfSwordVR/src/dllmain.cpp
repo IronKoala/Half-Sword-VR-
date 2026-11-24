@@ -2313,6 +2313,7 @@ namespace
     std::atomic<bool> g_fake_look{true}; // test: hsvr.fake_look 0 = the made-up head stops looking about
     std::atomic<int> g_fake_arm_epoch{0}; // bumped by every hsvr.arm_move: timed test paths restart
     std::atomic<double> g_fake_two_up{20.0};
+    std::atomic<bool> g_fake_two_online{false}; // hsvr.arm_move 7 <cm> 1: the left hand onto the held weapon's own line (not the right controller's)
     // hsvr.arm_move 10 <speed cm/s> <pitch deg> <height cm>: the right hand thrusts (stab tests).
     std::atomic<double> g_fake_thrust_pitch{60.0};
     std::atomic<double> g_fake_thrust_up{-5.0};
@@ -3044,7 +3045,8 @@ namespace
                 {
                     Vec3 along{0, 0, 1};
                     UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
-                    if (UObject* wb = held ? object_property(held, STR("BaseMesh")) : nullptr) along = body.inverse().rotate(component_rotation(wb).rotate(Vec3{0, 0, 1}));
+                    UObject* wb = held ? object_property(held, STR("BaseMesh")) : nullptr;
+                    if (wb) along = body.inverse().rotate(component_rotation(wb).rotate(Vec3{0, 0, 1}));
                     // Along where the weapon actually hangs, as a real hand reaches for the handle where it is. (456cfc5 used the right
                     // hold's target axis instead: the left hand then missed drooping long weapons by 12-29 cm and never took them,
                     // run 2 2026-11-23: polehammer, war staff, mace, crossbow.)
@@ -3054,6 +3056,7 @@ namespace
                     // (Kept from when the command came: kept from when two hands took hold, it was the axis
                     // of a staff already drooping in one hand, 2026-11-22 r2.)
                     static Vec3 kept_along{0, 0, 1};
+                    static Vec3 kept_line{0, 0, 0};
                     static int kept_epoch = -1;
                     static UObject* kept_for = nullptr;
                     if (kept_epoch != g_fake_arm_epoch.load() || kept_for != held)
@@ -3061,10 +3064,22 @@ namespace
                         kept_epoch = g_fake_arm_epoch.load();
                         kept_for = held;
                         kept_along = along;
+                        kept_line = Vec3{};
+                        // With the "onto the line" flag: from the weapon's own grip point and axis, not from the right controller
+                        // (a69b19e+3d47c22 switch_polehammer: after the cut the polehammer hung 11-29 cm off the line through the
+                        // right controller, and every retake missed). Taken once per command, kept in his body's frame as above.
+                        if (wb && g_fake_two_online.load())
+                        {
+                            Vec3 r = shoulder + body.rotate(local);
+                            Vec3 p0 = component_location(wb);
+                            Vec3 a = component_rotation(wb).rotate(Vec3{0, 0, 1});
+                            Vec3 on = p0 + a * dot(r - p0, a);
+                            kept_line = body.inverse().rotate(on - r);
+                        }
                     }
                     along = kept_along;
                     (void)&two_hands_hold;
-                    local = local + along * g_fake_two_up.load();
+                    local = local + kept_line + along * g_fake_two_up.load();
                     if (mode == 24) local = local + Vec3{0.0, 15.0 * std::sin(now * 3.14159265358979), 0.0};
                 }
             }
@@ -13896,6 +13911,10 @@ namespace
                     double d = closest_on_weapon(held_weapon_of(1 - side), socket_location(fm, bone_fname(side == 0 ? "hand_l" : "hand_r")), nullptr, nullptr);
                     by_own = d >= 0.0 && d < cfg.pose_fist_slap_own_weapon_cm;
                 }
+            // Nor a hand that is on the weapon as second hand or just let go of it (a69b19e+3d47c22 switch_polehammer: the left hand let
+            // go at 70.002 and slapped at 70.030, speed 31, inside the haft it still passes through).
+            if (cfg.pose_fist_slap_own_weapon_cm > 0.0 && !is_fist(mine) && (is_second_hand(side) || g_release_linger[side].weapon))
+                by_own = true;
             if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass && by_own)
                 HSVR_LOG_EVERY(1.0, "Fist: %s hand no slap (hand swing speed %.0f): within %.0f cm of the weapon the other hand holds", hand, hand_ass, cfg.pose_fist_slap_own_weapon_cm);
             if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass && !by_own) g_slap_until[side] = t + cfg.pose_fist_slap_keep_s;
@@ -31701,6 +31720,7 @@ namespace
                 double a1 = 0, a2 = 0, a3 = 0;
                 int got = sscanf(entry.command.c_str() + 14, "%d %lf %lf %lf", &mode_arg, &a1, &a2, &a3);
                 if (got >= 2) g_fake_two_up.store(a1);
+                g_fake_two_online.store(mode_arg == 7 && got >= 3 && a2 != 0.0);
                 if (got >= 3) g_fake_thrust_pitch.store(a2);
                 if (got >= 4) g_fake_thrust_up.store(a3);
                 else if (mode_arg == 22) g_fake_thrust_up.store(0.0);
