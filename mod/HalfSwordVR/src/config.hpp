@@ -451,7 +451,11 @@ namespace hsvr
         bool pose_hold_ignore_own_helmet = true;
         bool hold_blocker_log = false; // test: name what a held weapon hits, and what is along it while it is held off
         bool pose_hold_ignore_body = true;   // the held weapon never collides with his own body (B&S)
-        bool pose_hold_self_collision = true; // B&S Player Self Collision: the held weapon ignores only the holding arm(s); off = whole body but feet and free hand
+        // B&S Player Self Collision (off by default in B&S: a held item ignores the player's whole ragdoll, item.ignoredRagdoll).
+        // 1 = the held weapon ignores only the holding arm(s), so his torso and legs block it; 0 (B&S) = his whole body but the feet and
+        // the free hand. With the B&S joint hold (6000 N pulls) 1 jammed two-handed polearms 40-58 cm off both hands against his own
+        // calf and spine (PC run 2026-11-24 bshold-t2blk: "Blocker: hit OWN ... bone calf_l / spine_05").
+        bool pose_hold_self_collision = false;
         // While held, his visible hand sits on the weapon (1): when the weapon is stopped by something,
         // the hand stays on it instead of going on with your controller. It eases from following the
         // controller to sitting on the weapon as the weapon falls 1 to pose_hold_blocked_from_cm behind.
