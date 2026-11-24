@@ -2337,6 +2337,7 @@ namespace
     // Test counters since the last hsvr.mark (for hsvr.expect): stuck let-goes, kicks (a held weapon
     // ending a tick more than 8 cm from where it was sent) and the worst hold lag (cm) per hand.
     std::atomic<int> g_count_letgo{0}, g_count_kicks{0};
+    std::atomic<int> g_count_sheathe_back{0}, g_count_sheathe_seated{0}; // test: hsvr.expect sheathe_backs / sheathes_seated
     std::atomic<int> g_count_punches{0}, g_count_punches_counted{0}; // tests: fist blows that started a new punch / of them, ones that took consciousness or health
     std::atomic<double> g_worst_lag[2] = {0.0, 0.0};
     // Two-hand test measures (joint hold, two hands): worst since hsvr.two_reset of the angle between the weapon's
@@ -21656,6 +21657,7 @@ namespace
             }
             bool seated = locked && out <= 20.0 && off <= 5.0;
             if (!seated && !late) continue;
+            if (seated) g_count_sheathe_seated.fetch_add(1);
             HSVR_LOG("Sheathe: %ls %s (%ls %s it, joint %s, blade %.1f cm out, scabbard %.1f cm from %s)", sw.weapon->GetName().c_str(),
                      seated ? "is seated and locked" : "is NOT seated", sd.var, in_slot ? "holds" : "does not hold", locked ? "locked" : "not locked", out, off, sd.socket);
             sw = SeatWatch{};
@@ -21741,6 +21743,7 @@ namespace
                 if (back != d.pulling_back)
                 {
                     d.pulling_back = back;
+                    if (back) g_count_sheathe_back.fetch_add(1);
                     set_bool_property(pawn, d.slot_side == 0 ? STR("L Weapon Sheathing") : STR("R Weapon Sheathing"), !back);
                     HSVR_LOG("Sheathe: %s hand %s (%.1f cm out)", side == 0 ? "left" : "right",
                              back ? "pulls it back out: the game frees it as in a draw" : "pushes it in again", z);
@@ -28620,6 +28623,8 @@ namespace
         g_carry_log_until.store(0.0);
         g_count_letgo.store(0);
         g_count_kicks.store(0);
+        g_count_sheathe_back.store(0);
+        g_count_sheathe_seated.store(0);
         g_count_punches.store(0);
         g_count_punches_counted.store(0);
         g_fake_continue.store(false);
@@ -28848,6 +28853,8 @@ namespace
         else if (w == "grabbed_l") value = bool_property(pawn, STR("Grabbed L")) ? 1.0 : 0.0;
         else if (w == "letgo") value = g_count_letgo.load();
         else if (w == "kicks") value = g_count_kicks.load();
+        else if (w == "sheathe_backs") value = g_count_sheathe_back.load();     // sheathes pulled back out
+        else if (w == "sheathes_seated") value = g_count_sheathe_seated.load(); // sheathes seated and locked
         else if (w == "punches") value = g_count_punches.load();               // punches with a blow in them
         else if (w == "punches_counted") value = g_count_punches_counted.load(); // of them, ones that took consciousness or health
         else if (w == "lag_r") value = g_worst_lag[1].load();
@@ -29365,6 +29372,8 @@ namespace
             {
                 g_count_letgo.store(0);
                 g_count_kicks.store(0);
+                g_count_sheathe_back.store(0);
+                g_count_sheathe_seated.store(0);
                 g_worst_lag[0].store(0.0);
                 g_worst_lag[1].store(0.0);
                 HSVR_LOG("Script: hsvr.mark: test counters cleared");

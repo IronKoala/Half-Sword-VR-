@@ -1,0 +1,28 @@
+# Tilted variant (the blade leans within reach). Matthew's mark 6/12 sheathe (playtest 2026-11-23 17:04): sword drawn from the right hip, the left hand holds its
+# scabbard, the right hand pushes the blade in and keeps gripping. Before 37f4488 the scabbard's kick as the
+# blade went in read as "pulls it back out" 0.04-0.07 s later and the game freed it.
+0.5:hsvr.fake_head_drop 0
+0.6:hsvr.fake_look 0
+1:hsvr.squeeze 1 1
+1.5:hsvr.squeeze 1 0
+2.5:hsvr.clear_belt
+3:hsvr.give_weapon passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight 3
+4.5:hsvr.sheathe_spawn 0
+5.5:hsvr.slot_state
+6:hsvr.arm_move 11
+7.2:hsvr.squeeze 1 1
+10.8:hsvr.expect held_r = 1 drawn from the right hip
+10.9:hsvr.arm_move 1
+11:hsvr.hand_at 0 scabbard 0
+14:hsvr.squeeze 0 1
+14.6:hsvr.expect scab_l = 1 left hand holds the scabbard
+14.7:hsvr.mark
+15:hsvr.arm_blade 1 scabbard tilt
+21:hsvr.slot_state
+21.2:hsvr.expect sheathe_backs = 0 not pulled back out while the hand still grips
+21.2:hsvr.expect sheathes_seated >= 1 seated and locked
+21.2:hsvr.expect held_r = 0 the sword is in its scabbard, not in the hand
+21.3:hsvr.squeeze 1 0
+21.3:hsvr.squeeze 0 0
+22.5:hsvr.expect sheathes_seated >= 1 still seated after both hands open
+23:quit
