@@ -550,6 +550,7 @@ namespace hsvr
         num("pose_hold_arm_lag_s", c.pose_hold_arm_lag_s);
         num("pose_hold_arm_lag_max_s", c.pose_hold_arm_lag_max_s);
         num("pose_hold_heft_lag_s", c.pose_hold_heft_lag_s);
+        flag("pose_hold_count_hanging", c.pose_hold_count_hanging);
         num("pose_hold_arm_reach_cm", c.pose_hold_arm_reach_cm);
         num("pose_hold_shoulder_torque", c.pose_hold_shoulder_torque);
         num("pose_hold_shoulder_fade_from_cm", c.pose_hold_shoulder_fade_from_cm);

@@ -445,6 +445,7 @@ namespace
     struct PoseState;
     UObject* live_posed_pawn();
     void forget_level_objects();
+    double hanging_mass(UObject* weapon, UObject* base);
 
     struct SocketLocationParams
     {
@@ -17934,6 +17935,8 @@ namespace
                 double dst = (std::max)(1.0, st * 0.5);
                 bool arm_lag = cfg.pose_hold_arm_lag && cfg.pose_hold_arm_lag_s > 0.0;
                 double arm_fcap = -1.0; // N per held point, from the shoulder's strength (-1 = none)
+                // What the hand carries: the weapon and what hangs from it on its own joints (pose_hold_count_hanging).
+                double carried = mass + (cfg.pose_hold_count_hanging ? hanging_mass(weapon, object_property(weapon, STR("BaseMesh"))) : 0.0);
                 if (arm_lag)
                 {
                     // Flat Half Sword's arm (flat_hs_weight_vs_hold.md, weak_willie_weight.md): the same pull for
@@ -17945,7 +17948,7 @@ namespace
                     double reach = cfg.pose_hold_arm_reach_cm * 0.01;
                     double A = arm_inertia_shoulder(g_body_dims, reach) * (two ? 2.0 : 1.0);
                     double L = reach * g_body_dims.scale / 0.9375;
-                    double W = ig / 1e4 + mass * L * L;
+                    double W = ig / 1e4 + carried * L * L;
                     double fit = (std::min)(body.injury, body.stamina);
                     if (two) fit = 0.5 * (fit + (std::min)(s2b.injury, s2b.stamina));
                     fit = (std::max)(0.05, fit);
@@ -17955,7 +17958,7 @@ namespace
                     lag = (std::min)((std::max)(cfg.pose_hold_arm_lag_s, cfg.pose_hold_arm_lag_max_s), lag);
                     double om = 2.0 / lag;
                     double z = cfg.pose_hold_damping_ratio > 0.0 ? cfg.pose_hold_damping_ratio : 1.0;
-                    double per_point = two ? mass * 0.5 : mass;
+                    double per_point = two ? carried * 0.5 : carried;
                     // Far behind the hand (a big jump, or pushed back by something) the hold stiffens back to the
                     // B&S springs over pose_hold_shoulder_fade_from..to_cm (or 30..60 deg turned away): the hand is
                     // on the weapon and can't be half a metre from it. The soft arm spring alone let weapons trail
@@ -18001,7 +18004,7 @@ namespace
                     Vec3 rp = pivot_now - com;
                     double ig = (std::max)((std::max)(I.x, I.y), I.z) + mass * dot(rp, rp); // kg cm^2
                     double z = cfg.pose_hold_damping_ratio;
-                    double per_point = two ? mass * 0.5 : mass;
+                    double per_point = two ? carried * 0.5 : carried;
                     pc = 2.0 * z * std::sqrt((std::max)(0.0, pk * st * per_point)) / dst;
                     rc = 2.0 * z * std::sqrt((std::max)(0.0, rk * st * 1e4 * ig)) / (dst * 1e4);
                     HSVR_LOG_EVERY(2.0, "Hold: %s dampers for %ls (%.2f kg, %.3f kg m^2 about the grip): position %.0f, turn %.1f", side == 0 ? "left" : "right",
@@ -23828,8 +23831,43 @@ namespace
 
     // Pointers kept to the old pawn's weapons, scabbards and thrown items are dropped when the pawn
     // changes (a map change frees them; the old pawn's holds end with it).
+    // Mass hanging from a weapon on its own joints: its simulating parts that are not welded to anything (a
+    // lantern's chain links and lamp, a flail's links and head). The hand carries their weight through the
+    // handle, though BaseMesh's GetMass is the handle alone (chain lantern 1.36 kg, with 2.95 kg swinging under
+    // it: test 2026-11-24 a462c97, held still it hung 9-20 cm off your controller). Cached per weapon.
+    std::map<UObject*, std::pair<UObject*, double>> g_hanging_mass;
+    double hanging_mass(UObject* weapon, UObject* base)
+    {
+        auto it = g_hanging_mass.find(weapon);
+        if (it != g_hanging_mass.end() && it->second.first == base) return it->second.second;
+        double sum = 0.0;
+        std::wstring parts;
+        std::vector<UObject*> comps;
+        UObjectGlobals::FindAllOf(STR("StaticMeshComponent"), comps);
+        static const FName none_b = FName(STR("None"), FNAME_Add);
+        for (UObject* c : comps)
+        {
+            if (!c || c == base || c->GetOuterPrivate() != weapon || object_property(c, STR("AttachParent"))) continue;
+            Call sim(c, STR("IsSimulatingPhysics"));
+            sim.name(STR("BoneName"), none_b);
+            sim.run();
+            FProperty* sp = sim.param(STR("ReturnValue"));
+            if (!(sp && *(sim.buffer.data() + sp->GetOffset_Internal()))) continue;
+            Call gm(c, STR("GetMass"));
+            gm.run();
+            double m = gm.number();
+            if (!(m > 0.0)) continue;
+            sum += m;
+            parts += c->GetName() + STR(" ");
+        }
+        g_hanging_mass[weapon] = {base, sum};
+        if (sum > 0.0) HSVR_LOG("Hold: %ls carries %.2f kg hanging on its own joints (%ls)", weapon->GetName().c_str(), sum, parts.c_str());
+        return sum;
+    }
+
     void forget_level_objects()
     {
+        g_hanging_mass.clear();
         static int times = 0;
         HSVR_LOG("Pose: the player's pawn changed: forgetting the old one's holds, draws, scabbards, stabs and throws (%d)", ++times);
         for (int side = 0; side < 2; ++side)

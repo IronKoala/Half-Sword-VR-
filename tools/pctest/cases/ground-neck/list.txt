@@ -5,6 +5,8 @@ neck_wrench_right|steps-neck_wrench_right.txt|test_room_map=/Game/Maps/Arenas/Ma
 neck_wrench_left|steps-neck_wrench_left.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 floor_reach|steps-floor_reach.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 floor_no_grab|steps-floor_no_grab.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold_old|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_count_hanging=0
 # Record only (test 2026-11-24: at full arm reach his hand stayed 22-25 cm off the floor): how much deeper legs or a deeper bend would bring it.
 floor_reach_legs75|steps-floor_reach_old.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=75
 floor_reach_legs85|steps-floor_reach_old.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85

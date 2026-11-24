@@ -623,6 +623,10 @@ namespace hsvr
         // greatsword like a dagger): the lag is never below this x sqrt(weapon inertia about the shoulder per arm,
         // in kg m^2). 0.11: greatsword ~0.10 s two-handed / 0.14 one-handed, arming sword ~0.08, dagger ~0.05. 0 = off.
         double pose_hold_heft_lag_s = 0.11;
+        // 1 = the hand's hold counts what hangs from the weapon on its own joints (a lantern's chain and lamp, a
+        // flail's links and head) as carried weight; 0 = the handle's mass alone (the chain lantern hung 9-20 cm
+        // off your hand).
+        bool pose_hold_count_hanging = true;
         double pose_hold_arm_reach_cm = 55.0;
         // His shoulder's strength (N m, for a default fresh body; x his strength, injury and stamina; both arms
         // add): the arm-lag hold can't speed arm + weapon about the shoulder faster than this allows, so the
