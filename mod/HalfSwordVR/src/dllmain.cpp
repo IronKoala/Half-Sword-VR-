@@ -545,6 +545,7 @@ namespace
     double g_actor_z_smooth = -1e9;
     bool g_actor_z_smooth_on = false;
     void crouch_push_log(UObject* pawn, UObject* mesh);
+    void item_watch_tick(UObject* pawn);
     bool provide_anchor(hsvr::PlayerAnchor& out)
     {
         if (!g_engine) return false;
@@ -4424,6 +4425,7 @@ namespace
             g_crouch_drop = (std::min)(crouch_cap, (std::max)(0.0, crouch_want + m.z));
         }
         if (g_crouch_drop > 10.0) crouch_push_log(pawn, mesh);
+        item_watch_tick(pawn);
         {
             // pose_capsule_no_push: the engine's character physics interaction off (touch impulses and repulsion on loose
             // things by the capsule); the game's own push factors are already 0. Set once per pawn, and back when switched off.
@@ -7426,6 +7428,73 @@ namespace
     // Crouched (Matthew 2026-11-19: "it kicks stuff around"): every 0.25 s, the loose things and bodies
     // near his legs that are moving, how fast, and how near his nearest leg bone is. Logging only.
     std::atomic<double> g_kick_speed{0.0}; // m/s: the fastest loose weapon seen moving near his legs while crouched since hsvr.mark
+    // Test: hsvr.watch_item <name part>: one loose weapon (not in his hands) watched every frame: how far it moved since
+    // hsvr.mark (item_moved, cm) and its fastest speed (item_speed, m/s). Run 9 86af79d: kick_speed counted his own worn
+    // gear (pavise on his back, hip sword, dagger swinging on their slots), and never the lantern at his feet.
+    std::wstring g_watch_name;
+    std::atomic<double> g_watch_moved{0.0}, g_watch_speed{0.0};
+    std::atomic<bool> g_watch_reset{false};
+    void item_watch_tick(UObject* pawn)
+    {
+        using namespace hsvr;
+        static UObject* item = nullptr;
+        static bool tracked = track_freed(&item);
+        (void)tracked;
+        static Vec3 at_mark{};
+        static bool have_mark = false;
+        static double found_t = -10.0;
+        if (g_watch_name.empty() || !pawn) { item = nullptr; return; }
+        double now = now_seconds();
+        if (!item && now - found_t > 0.5)
+        {
+            found_t = now;
+            std::vector<UObject*> ws;
+            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), ws);
+            for (UObject* w : ws)
+                if (w && w->GetName().rfind(STR("Default__"), 0) != 0 && w->GetName().find(g_watch_name) != std::wstring::npos) { item = w; break; }
+            if (item) HSVR_LOG("Watch: %ls", item->GetName().c_str());
+            have_mark = false;
+        }
+        if (!item) return;
+        UObject* b = object_property(item, STR("BaseMesh"));
+        if (!b) return;
+        // Only while loose: in a hand it moves with the hand.
+        if (object_property(pawn, STR("Weapon R")) == item || object_property(pawn, STR("Weapon L")) == item) { have_mark = false; return; }
+        Vec3 p = component_location(b);
+        if (g_watch_reset.exchange(false) || !have_mark)
+        {
+            at_mark = p;
+            have_mark = true;
+            g_watch_moved.store(0.0);
+            g_watch_speed.store(0.0);
+        }
+        Call lv(b, STR("GetPhysicsLinearVelocity"));
+        double v = lv.run() ? length(lv.vec()) / 100.0 : 0.0;
+        double d = length(p - at_mark);
+        if (d > g_watch_moved.load()) g_watch_moved.store(d);
+        if (v > g_watch_speed.load())
+        {
+            g_watch_speed.store(v);
+            if (v > 0.5)
+            {
+                // What of his is nearest it as it goes (bones of his posed mesh, and the capsule)
+                UObject* mesh = object_property(pawn, STR("Mesh"));
+                const char* names[] = {"foot_l", "foot_r", "calf_l", "calf_r", "thigh_l", "thigh_r", "pelvis", "hand_l", "hand_r"};
+                double best = 1e9;
+                const char* bn = "?";
+                for (const char* n : names)
+                {
+                    double dd = length(socket_location(mesh, bone_fname(n)) - p);
+                    if (dd < best) best = dd, bn = n;
+                }
+                UObject* cap = object_property(pawn, STR("CapsuleComponent"));
+                Vec3 cp = cap ? component_location(cap) : Vec3{};
+                double cap_d = length(Vec3{cp.x - p.x, cp.y - p.y, 0.0});
+                HSVR_LOG_EVERY(0.1, "Watch: %ls at %.1f m/s, %.0f cm from where it lay; nearest his %s %.0f cm, capsule axis %.0f cm away (crouch %.0f)",
+                               item->GetName().c_str(), v, d, bn, best, cap_d, g_crouch_drop);
+            }
+        }
+    }
     void crouch_push_log(UObject* pawn, UObject* mesh)
     {
         using namespace hsvr;
@@ -29332,6 +29401,9 @@ namespace
             g_worst_lag[i].store(0.0);
         }
         g_kick_speed.store(0.0);
+        g_watch_name.clear();
+        g_watch_moved.store(0.0);
+        g_watch_speed.store(0.0);
         g_carry_log_until.store(0.0);
         g_count_letgo.store(0);
         g_count_neck_snaps.store(0);
@@ -29593,6 +29665,8 @@ namespace
         else if (w == "lag_r") value = g_worst_lag[1].load();
         else if (w == "lag_l") value = g_worst_lag[0].load();
         else if (w == "kick_speed") value = g_kick_speed.load(); // m/s, fastest loose weapon near his legs while crouched since hsvr.mark
+        else if (w == "item_moved") value = g_watch_moved.load(); // cm the watched item moved since hsvr.mark (hsvr.watch_item)
+        else if (w == "item_speed") value = g_watch_speed.load(); // m/s, its fastest since hsvr.mark
         else if (w == "stamina") value = read_number_variable(pawn, STR("Stamina"));
         else if (w == "strength_r") value = g_hold[1].body_strength;
         else if (w == "strength_l") value = g_hold[0].body_strength;
@@ -30133,6 +30207,9 @@ namespace
                 g_count_sheathe_seated.store(0);
                 g_worst_lag[0].store(0.0);
                 g_kick_speed.store(0.0);
+                g_watch_reset.store(true);
+                g_watch_moved.store(0.0);
+                g_watch_speed.store(0.0);
                 g_worst_lag[1].store(0.0);
                 HSVR_LOG("Script: hsvr.mark: test counters cleared");
                 continue;
@@ -30810,6 +30887,13 @@ namespace
                              after.z, after.z < at.z - 40.0 ? " - he is down" : "");
                 }
                 if (!moved) HSVR_LOG("Script: hsvr.foe_front: no foe found");
+                continue;
+            }
+            if (entry.command.rfind("hsvr.watch_item ", 0) == 0)
+            {
+                std::string n = entry.command.substr(16);
+                g_watch_name.assign(n.begin(), n.end());
+                HSVR_LOG("Script: hsvr.watch_item %s", n.c_str());
                 continue;
             }
             if (entry.command.rfind("hsvr.hanging_light ", 0) == 0)

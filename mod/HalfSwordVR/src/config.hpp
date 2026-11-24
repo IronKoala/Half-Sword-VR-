@@ -321,7 +321,9 @@ namespace hsvr
         // speed x the item's mass, unclamped since the game's MaxTouchForce is 0, and the per-tick repulsion of what overlaps
         // the capsule) is off. Playtest 2026-11-23 17:23 local: crouched with his legs still, a lantern by his capsule
         // flew off at 6.7 m/s while the game dragged the capsule 48 cm a tick toward his hips.
-        bool pose_capsule_no_push = true;
+        // Off until proven: run 9 86af79d the floor_kick test reproduced no kick either way, and with it on walking into a
+        // passive foe slowed to 85 cm/s (319 off).
+        bool pose_capsule_no_push = false;
         // 1 = his body faces where you face: it follows your headset once you look more than
         // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
         // turns you as well.
