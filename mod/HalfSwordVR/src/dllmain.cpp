@@ -18248,6 +18248,31 @@ namespace
                     }
                     else
                         spin_lines[side] = 0;
+                    // Which of his free arm's bodies touch it, and how fast they move, while it spins with one hand on it (park cases
+                    // 2026-11-24: the free left hand parked beside a held axe set it wobbling at ~500 deg/s, nothing on the axis).
+                    static double free_log_t[2] = {-1.0, -1.0};
+                    double ft = now_seconds();
+                    if (rs > 5.0 && !two && ft - free_log_t[side] >= 0.1)
+                        if (UObject* fm = object_property(pawn, STR("Mesh")))
+                        {
+                            free_log_t[side] = ft;
+                            std::string parts;
+                            const char* other = side == 0 ? "_r" : "_l";
+                            for (const char* b0 : {"hand", "lowerarm", "upperarm"})
+                            {
+                                std::string bn = std::string(b0) + other;
+                                FName bf = bone_fname(bn.c_str());
+                                Vec3 bp = socket_location(fm, bf);
+                                double gp = item_gap(weapon, fm, bf, bp);
+                                Call bv(fm, STR("GetPhysicsLinearVelocity"));
+                                bv.name(STR("BoneName"), bf);
+                                bv.run();
+                                char buf[96];
+                                snprintf(buf, sizeof buf, "%s%s %.1f cm (%.0f cm/s)", parts.empty() ? "" : ", ", bn.c_str(), gp, length(bv.vec()));
+                                parts += buf;
+                            }
+                            HSVR_LOG("Spin: %s %ls free arm: %s", side == 0 ? "left" : "right", weapon->GetName().c_str(), parts.c_str());
+                        }
                 }
                 if (pts[0].slide && pts[0].slide_c > 0.0)
                 {
