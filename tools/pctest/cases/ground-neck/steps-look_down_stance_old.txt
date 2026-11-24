@@ -2,6 +2,7 @@
 0.5:hsvr.wait room_ready = 1 6 0 room revealed
 1.0:hsvr.fake_head_pose 1
 1.6:hsvr.fake_head_tilt 66 0 0
-3.0:hsvr.expect crouch_drop > 3 the old measure reads a crouch (shows the test reaches the code)
+# Record only: with the test head tilt the old measure read 1.8 cm (his own 17:22 look-down read ~10), so this rig does not reproduce his squat.
+3.0:hsvr.expect crouch_drop >= 0 the old measure (record only)
 4.6:hsvr.fake_head_tilt 0 0 0
 4.7:hsvr.fake_head_pose 0

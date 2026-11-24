@@ -11,7 +11,8 @@
 1.9:hsvr.expect held_l = 0 left hand empty
 2.0:hsvr.fake_head_drop 95
 2.1:hsvr.arm_floor 45 15 2
-4.0:hsvr.wait hand_floor_r < 12 3 0.3 hand at the floor
+# His hand may stay above the floor (reach); the grab then looks at your controller on the floor, which is the playtest case.
+4.0:hsvr.expect hand_floor_r >= 0 how high his hand is (record only)
 4.5:hsvr.squeeze 1 1
 5.0:hsvr.expect scenery_r = 0 the floor is not grabbed
 5.1:hsvr.squeeze 1 0

@@ -5,6 +5,10 @@ neck_wrench_right|steps-neck_wrench_right.txt|test_room_map=/Game/Maps/Arenas/Ma
 neck_wrench_left|steps-neck_wrench_left.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 floor_reach|steps-floor_reach.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 floor_no_grab|steps-floor_no_grab.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+# Record only (test 2026-11-24: at full arm reach his hand stayed 22-25 cm off the floor): how much deeper legs or a deeper bend would bring it.
+floor_reach_legs75|steps-floor_reach_old.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=75
+floor_reach_legs85|steps-floor_reach_old.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_reach_bend100|steps-floor_reach_old.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_bend_max_deg=100
 neck_drag_old_rule|steps-neck_drag.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;joint_break_twist_needs_wrist=0;joint_break_min_s=0;joint_break_wrench_nm_per_deg=0
 floor_reach_old|steps-floor_reach_old.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_bend_neck_follow=0
 look_down_stance|steps-look_down_stance.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;dev_pose_fake_tracking=0

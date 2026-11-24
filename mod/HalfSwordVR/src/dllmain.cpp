@@ -1244,6 +1244,7 @@ namespace
         double last_check = 0.0;
         hsvr::Vec3 target[2]; // last hand targets (where the hand bone goes, from the controller)
         hsvr::Quat hand_rot[2]; // and the hand bone's world rotation there
+        double ctl_frame_yaw[2] = {0.0, 0.0}; // yaw of the frame your controller is tracked in (play space; the actor's heading for test hands)
         hsvr::Vec3 raw_target[2]; // the same before scaling your reach to his (for measuring your arm)
         hsvr::Vec3 reach_target[2]; // scaled to his reach but not yet clamped to it (where you mean his hand to be)
         bool hand_valid[2] = {false, false};
@@ -3403,6 +3404,13 @@ namespace
         Quat Wh = (quat_from_two(fingers_world, thumb_world) * quat_from_two(a.fingers_local, a.thumb_local).inverse()).normalized();
         g_pose.hand_rot[side] = Wh;
         g_pose.hand_valid[side] = true;
+        {
+            // The play space's turn (stick turns), so a hand that does not turn in your room reads as still
+            // even when the world turns around you; test hands are made in the actor's heading frame.
+            Vec3 an;
+            double by = 0.0;
+            g_pose.ctl_frame_yaw[side] = (tracked && stereo_view_anchor(an, by)) ? by : quat_yaw_deg(body);
+        }
         // Holding a weapon that something has stopped: his hand stays on the weapon (Matthew's framework).
         Vec3 controller_wrist = target;
         Quat controller_rot = Wh;
@@ -4556,6 +4564,11 @@ namespace
                              g_lean.head_moved.y, g_lean.head_moved.z, g_crouch_drop, c.x, -c.z, cl.x, cr.x, g_lean.offset.x, g_lean.offset.y, g_lean.off_fwd,
                              g_lean.off_side, actor.x, actor.y, g_lean.reach_fwd, g_lean.look_back);
                 }
+                else if (cfg.dev_pose_fake_tracking)
+                    HSVR_LOG_EVERY(1.0, "Lean (test hands): wanted forward %.0f side %.0f, bent forward %.0f side %.0f (%.0f%% allowed by head height); head carried (%.1f, %.1f, %.1f) cm, "
+                             "legs crouch %.0f cm (cap %.0f); bend for a crouch past his legs %.0f (max %.0f), neck follows %.0f deg",
+                             g_lean.want_fwd, g_lean.want_side, g_lean.fwd, g_lean.side, g_lean.held * 100.0, g_lean.head_moved.x, g_lean.head_moved.y, g_lean.head_moved.z,
+                             g_crouch_drop, cfg.pose_crouch_max_cm * component_scale_z(mesh), g_lean.reach_fwd, cfg.pose_crouch_bend_max_deg, g_lean.depth_free);
             }
             HSVR_LOG("Pose: capsule velocity (%.0f, %.0f, %.0f) mode %d, torso twist %.0f deg asked; on screen: head %.0f, chest %.0f, hips %.0f (chest %+.0f from hips)",
                      v[0], v[1], v[2], mode, g_pose.twist_deg, look_yaw, chest_yaw, hips_yaw, wrap_deg(chest_yaw - hips_yaw));
@@ -7553,11 +7566,23 @@ namespace
                 {
                     double feet_z = (std::min)(socket_location(mesh, bone_fname("foot_l")).z, socket_location(mesh, bone_fname("foot_r")).z);
                     Vec3 up = d > 0.5 ? normalized(at - sp) : Vec3{0.0, 0.0, 0.0};
-                    if (sp.z < feet_z + cfg.pose_grab_world_floor_cm && (d <= 0.5 || up.z > 0.6))
+                    double top = feet_z + cfg.pose_grab_world_floor_cm;
+                    // Or the spot is the top of a floor-like face: straight down onto it there finds an upward
+                    // face that low (test 2026-11-24 a462c97: your controller was in the floor, 30 cm under his
+                    // hand, and the floor was taken 8.6 cm from it).
+                    bool floor_face = false;
+                    if (sp.z < top)
+                    {
+                        Vec3 h, n;
+                        floor_face = trace_component(c, Vec3{sp.x, sp.y, top + 20.0}, Vec3{sp.x, sp.y, sp.z - 5.0}, h, n) && n.z > 0.7 && h.z < top;
+                    }
+                    if (sp.z < top && (d <= 0.5 || up.z > 0.6 || floor_face))
                     {
                         seen += STR("(the floor) ");
                         continue;
                     }
+                    seen += STR("(spot z ") + std::to_wstring((int)std::lround(sp.z - feet_z)) + STR(" over his feet, up ") +
+                            std::to_wstring((int)std::lround(up.z * 100.0)) + STR("%) ");
                 }
                 still_d = d;
                 still = c;
@@ -7586,8 +7611,9 @@ namespace
             w.point = still_point;
             w.since = now_seconds();
             controllers_buzz(side, 0.4f);
-            HSVR_LOG("Grab: %s grip holds %ls.%ls (fixed scenery, %.1f cm from the hand): the hand stays on it", hand, so ? so->GetName().c_str() : STR("?"),
-                     still->GetName().c_str(), still_d);
+            HSVR_LOG("Grab: %s grip holds %ls.%ls (fixed scenery, %.1f cm from the hand, spot (%.0f %.0f %.0f), looked from (%.0f %.0f %.0f)): the hand stays on it; overlapping: %ls",
+                     hand, so ? so->GetName().c_str() : STR("?"), still->GetName().c_str(), still_d, still_point.x, still_point.y, still_point.z, at.x, at.y, at.z,
+                     seen.c_str());
             return true;
         }
         if (!best)
@@ -9884,6 +9910,7 @@ namespace
         // Your controller's hand turn when you took hold (g_pose.hand_rot, before the hand rides the
         // body): joint_break_tick counts a twist of his neck/arm only as far as your own wrist turned it.
         hsvr::Quat ctl0;
+        double ctl0_yaw = 0.0; // g_pose.ctl_frame_yaw then
         bool ctl0_ok = false;
     };
     BodyGrab g_body_grab[2];
@@ -10266,7 +10293,12 @@ namespace
                     {
                         const BodyGrab& bg = g_body_grab[h];
                         if (hand_limb[h] != limb || !bg.on || bg.victim != w || !bg.ctl0_ok || !g_pose.hand_valid[h]) continue;
-                        double t = quat_twist_deg((g_pose.hand_rot[h] * bg.ctl0.inverse()).normalized(), axis);
+                        // In the frame your controller is tracked in (test 2026-11-24 a462c97: measured in the world,
+                        // a still test hand read as a 21-49 deg wrist turn while the choke turned the player, since
+                        // test hands turn with the actor; a stick turn does the same to a real one).
+                        hsvr::Quat fi = hsvr::quat_from_yaw_deg(g_pose.ctl_frame_yaw[h]).inverse(), f0i = hsvr::quat_from_yaw_deg(bg.ctl0_yaw).inverse();
+                        hsvr::Quat now_room = (fi * g_pose.hand_rot[h]).normalized(), then_room = (f0i * bg.ctl0).normalized();
+                        double t = quat_twist_deg((now_room * then_room.inverse()).normalized(), hsvr::normalized(fi.rotate(axis)));
                         if (std::fabs(t) > std::fabs(best)) { best = t; grip_t = bg.grip_t; }
                     }
                     ctl_tw = best;
@@ -11391,7 +11423,7 @@ namespace
                 b.victim = oc.object_result();
                 b.rest = length(hb - socket_location(b.comp, b.bone));
                 b.ctl0_ok = g_pose.hand_valid[side];
-                if (b.ctl0_ok) b.ctl0 = g_pose.hand_rot[side];
+                if (b.ctl0_ok) b.ctl0 = g_pose.hand_rot[side], b.ctl0_yaw = g_pose.ctl_frame_yaw[side];
                 HSVR_LOG("Body grab: %s hand holds %ls bone %ls (%.1f cm from the hand bone)", hand, b.victim ? b.victim->GetName().c_str() : STR("?"),
                          b.bone.ToString().c_str(), b.rest);
             }

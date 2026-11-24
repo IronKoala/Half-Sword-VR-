@@ -1,4 +1,4 @@
-# Control: the old bend (pose_crouch_bend_neck_follow=0): record how far his hand stays off the floor.
+# Record how far his hand stays off the floor (control: old bend pose_crouch_bend_neck_follow=0; also deeper legs/bend variants).
 0.5:hsvr.wait room_ready = 1 6 0 room revealed
 0.6:hsvr.expect room_foes = 1 the one passive foe
 0.8:hsvr.player_immortal
