@@ -185,6 +185,8 @@ LAYOUT = [
         ('pose_legs_pass_loose', "1 = loose weapons at his feet pass through his legs: walking and crouching never kick them away (the game's own kick still does)."),
         ('pose_legs_pass_loose_cm', 'How near his legs a loose weapon must come to pass through them (cm).'),
         ('pose_legs_pass_capsule_channel', "Test switch: 1 = such a weapon also ignores the capsule's whole collision channel (0 = per item only)."),
+        ('pose_chain_no_self_collision', "1 = a chain item's own parts (chain lantern, flail: handle, links, lamp) don't bump each other."),
+        ('pose_chain_damping', "Damping on a chain item's hanging parts so a loose one settles (0 = the game's own)."),
         ('pose_feet', '1 = feet stay planted and step.'),
         ('pose_feet_free_on_kick', "1 = the game's kick moves the leg freely; the foot is planted again where it lands."),
         ('pose_feet_kick_free_s', 'Feet stay free this long after a kick fires (s).'),

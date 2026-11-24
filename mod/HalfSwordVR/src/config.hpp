@@ -334,6 +334,10 @@ namespace hsvr
         // Test switch: 1 = while a loose weapon passes through his legs it also ignores his capsule's whole object channel
         // (channel-wide, so off: the project keeps to per-pair ignores; his capsule's moves ignore the item instead).
         bool pose_legs_pass_capsule_channel = false;
+        // A chain item (chain lantern, flail): its own bodies (handle, links, lamp) no longer bump each other, and the
+        // hanging ones get this much linear/angular damping (0 = the game's own). Loose, it rolled 0.5-2.6 m on its own.
+        bool pose_chain_no_self_collision = false;
+        double pose_chain_damping = 0.0;
         // 1 = his body faces where you face: it follows your headset once you look more than
         // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
         // turns you as well.

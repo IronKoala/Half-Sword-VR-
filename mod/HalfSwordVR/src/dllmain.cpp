@@ -4620,6 +4620,7 @@ namespace
         if (g_crouch_drop > 10.0) crouch_push_log(pawn, mesh);
         item_watch_tick(pawn);
         leg_guard_tick(pawn, object_property(pawn, STR("Mesh")), cfg);
+        chain_calm_tick(pawn, cfg);
         {
             // pose_capsule_no_push: the engine's character physics interaction off (touch impulses and repulsion on loose
             // things by the capsule); the game's own push factors are already 0. Set once per pawn, and back when switched off.
@@ -5987,6 +5988,7 @@ namespace
     // ~3 m/s kick as the no-collide pairs went with the item 8 cm clear of his bones).
     void attached_meshes(UObject* root, UObject* skip, std::vector<UObject*>& out, int depth);
     std::vector<UObject*> static_parts_of(UObject* owner);
+    void first_number(Call& c, double v);
     UObject* no_collision_pair(UObject* pawn, UClass* cls, UObject* a, UObject* b, FName bone_b = FName());
     void drop_cm_pairs(int side, UObject* pawn, UObject* item)
     {
@@ -7880,6 +7882,70 @@ namespace
         if (item && !gone(item)) HSVR_LOG("Legs: %ls collides with his legs again (%s)", item->GetName().c_str(), why);
         g.joints.clear();
     }
+    // ---- Chain items (pose_chain_no_self_collision, pose_chain_damping) ---------------------------------
+    // A chain lantern's lamp and Link 1-4 hang on PhysicsConstraint1-6, bodies of their own outside BaseMesh's weld tree. Run 26
+    // (2741646): spawned on the floor 45 cm from him, nothing of his touching it in 10 of 12 runs, it rolled 0.5-2.6 m and sped up
+    // to 5.9 m/s, its only contacts the floor and its own lamp, links and holder (impulses 50-317 between its own parts).
+    // Once per item: a no-collide pair between each of its own bodies (per pair, the item's own parts only), and damping on the
+    // hanging ones. Kept for the item's life (the joints are components of the item, destroyed with it).
+    std::unordered_set<UObject*> g_chain_calmed;
+    void chain_calm_tick(UObject* pawn, const hsvr::Config& cfg)
+    {
+        static bool tracked = on_freed([] {
+            for (auto it = g_chain_calmed.begin(); it != g_chain_calmed.end();) it = gone(*it) ? g_chain_calmed.erase(it) : std::next(it);
+        });
+        (void)tracked;
+        if (!cfg.pose_chain_no_self_collision && cfg.pose_chain_damping <= 0.0) return;
+        // The pairs are components of his (as the leg guard's: a free joint owned by the weapon would count as one of its chain
+        // joints, hanging_mass): a new body of his takes them with the old one, so every item is done again.
+        static UObject* calmed_for = nullptr;
+        if (pawn != calmed_for) g_chain_calmed.clear(), calmed_for = pawn;
+        static double listed = -10.0;
+        double now = hsvr::now_seconds();
+        if (now - listed < 1.0 || !pawn) return;
+        listed = now;
+        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+        if (!cls) return;
+        std::vector<UObject*> weapons;
+        UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+        for (UObject* w : weapons)
+        {
+            if (!w || gone(w) || w->GetName().rfind(STR("Default__"), 0) == 0 || g_chain_calmed.count(w)) continue;
+            UObject* base = object_property(w, STR("BaseMesh"));
+            if (!base) continue;
+            std::vector<UObject*> tree, scab, hanging;
+            attached_meshes(base, nullptr, tree, 0);
+            attached_meshes(object_property(w, STR("Scabbard")), nullptr, scab, 0);
+            for (UObject* c : static_parts_of(w))
+                if (std::find(tree.begin(), tree.end(), c) == tree.end() && std::find(scab.begin(), scab.end(), c) == scab.end() && physics_collides(c))
+                    hanging.push_back(c);
+            g_chain_calmed.insert(w);
+            if (hanging.empty()) continue;
+            int pairs = 0;
+            if (cfg.pose_chain_no_self_collision)
+            {
+                // The weld tree is one body (its root): one pair per hanging body with it, and one between each two hanging bodies.
+                std::vector<UObject*> bodies{base};
+                bodies.insert(bodies.end(), hanging.begin(), hanging.end());
+                for (size_t i = 0; i < bodies.size(); ++i)
+                    for (size_t k = i + 1; k < bodies.size(); ++k)
+                        if (no_collision_pair(pawn, cls, bodies[i], bodies[k])) ++pairs;
+            }
+            if (cfg.pose_chain_damping > 0.0)
+                for (UObject* c : hanging)
+                {
+                    Call ld(c, STR("SetLinearDamping"));
+                    first_number(ld, cfg.pose_chain_damping);
+                    ld.run();
+                    Call ad(c, STR("SetAngularDamping"));
+                    first_number(ad, cfg.pose_chain_damping);
+                    ad.run();
+                }
+            HSVR_LOG("Chain: %ls: %zu hanging bodies; %d no-collide pair(s) among its own parts, damping %.2f", w->GetName().c_str(), hanging.size(), pairs,
+                     cfg.pose_chain_damping);
+        }
+    }
+
     void leg_guard_tick(UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
     {
         using namespace hsvr;

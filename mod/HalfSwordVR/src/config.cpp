@@ -449,6 +449,8 @@ namespace hsvr
         flag("pose_legs_pass_loose", c.pose_legs_pass_loose);
         num("pose_legs_pass_loose_cm", c.pose_legs_pass_loose_cm);
         flag("pose_legs_pass_capsule_channel", c.pose_legs_pass_capsule_channel);
+        flag("pose_chain_no_self_collision", c.pose_chain_no_self_collision);
+        num("pose_chain_damping", c.pose_chain_damping);
         flag("pose_body_turn", c.pose_body_turn);
         flag("pose_mouse_off_with_controllers", c.pose_mouse_off_with_controllers);
         text("input_mode", c.input_mode);
