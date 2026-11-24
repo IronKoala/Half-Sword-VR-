@@ -770,6 +770,8 @@ namespace hsvr
         num("pose_hand_world_radius_cm", c.pose_hand_world_radius_cm);
         num("pose_hand_world_reach_cm", c.pose_hand_world_reach_cm);
         num("pose_hand_held_weapon_stop_cm", c.pose_hand_held_weapon_stop_cm);
+        num("pose_hand_held_weapon_body_gap_cm", c.pose_hand_held_weapon_body_gap_cm);
+        num("pose_hand_held_weapon_body_max_cm", c.pose_hand_held_weapon_body_max_cm);
         flag("pose_arm_fresh_shoulder", c.pose_arm_fresh_shoulder);
         flag("pose_arm_fresh_shoulder_held", c.pose_arm_fresh_shoulder_held);
         flag("pose_no_fall_arms", c.pose_no_fall_arms);

@@ -1007,6 +1007,9 @@ namespace hsvr
         double pose_hand_world_reach_cm = 6.0;
         // A free hand's drawn place stays this far (cm, from the palm's middle) outside a weapon the other hand holds. 0 = off.
         double pose_hand_held_weapon_stop_cm = 4.0;
+        // ...and his real hand body kept at least this far (cm) off it, by moving its drawn place away, at most _body_max_cm (0 = off).
+        double pose_hand_held_weapon_body_gap_cm = 1.5;
+        double pose_hand_held_weapon_body_max_cm = 6.0;
         // 1 = an empty hand's arm is corrected after his body is evaluated, from this frame's shoulder
         // (the solve only has last frame's, so the hand bobbed with each step while walking).
         bool pose_arm_fresh_shoulder = true;

@@ -2328,6 +2328,8 @@ namespace
     bool hand_on_scenery(int side); // the hand is pinned on fixed scenery (a world grab)
     bool hand_has_weapon(int side); // the game's hold has a weapon in this hand (his fist doesn't count)
     UObject* held_weapon_of(int side);
+    double item_gap(UObject* item, UObject* comp, FName bone, hsvr::Vec3 p);
+    hsvr::Vec3 g_free_rest_off[2]; // the free hand's drawn place moved off a weapon the other hand holds, from his real hand body (pose_hand_held_weapon_body_gap_cm)
     hsvr::Vec3 g_thumb_world[2]; // each hand's thumb-ward line through the fist this frame (the grip's direction on a handle) // the weapon the mod's hold has in this hand (or null)
     double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part);
     bool hand_is_fist(int side);    // the game's hold has his fist in this hand
@@ -3458,6 +3460,47 @@ namespace
                                    hw->GetName().c_str(), length(push));
                 }
             }
+        }
+        // ...and from his REAL hand body (796b650 / e616b9b park runs: the hand's physics body, driven by stiff arm motors, overshot its
+        // drawn place and bounced off the held axe every ~0.2 s (blocker log: hand_l only, impulse up to 298) while the drawn place
+        // was already 4 cm clear; the axe wobbled 186-504 deg/s in about half the launches). Each frame the hand body is closer than
+        // pose_hand_held_weapon_body_gap_cm, its drawn place is moved further off the weapon (at most _body_max_cm); clear, it eases back.
+        {
+            Vec3& off = g_free_rest_off[side];
+            bool active = false;
+            if (cfg.pose_hand_held_weapon_body_gap_cm > 0.0 && !on_weapon && (g_solved_on[side] & ~1) == 0 && !hand_has_weapon(side) && hand_has_weapon(1 - side) && g_pose.pawn)
+            {
+                UObject* hw = held_weapon_of(1 - side);
+                UObject* fm = object_property(g_pose.pawn, STR("Mesh"));
+                FName hb = bone_fname(side == 0 ? "hand_l" : "hand_r");
+                Vec3 hp = fm ? socket_location(fm, hb) : Vec3{};
+                Vec3 q;
+                double near_cm = hw && fm ? closest_on_weapon(hw, hp, &q, nullptr) : -1.0;
+                if (near_cm >= 0.0 && near_cm < 20.0)
+                {
+                    active = true;
+                    double g = item_gap(hw, fm, hb, hp);
+                    double g0 = cfg.pose_hand_held_weapon_body_gap_cm;
+                    if (g >= 0.0 && g < g0 && hs.squeeze <= 0.3f)
+                    {
+                        Vec3 away = hp - q;
+                        if (length(away) > 1e-3)
+                        {
+                            off = off + normalized(away) * ((g0 - g) * 0.5);
+                            double most = (std::max)(0.0, cfg.pose_hand_held_weapon_body_max_cm);
+                            if (length(off) > most) off = normalized(off) * most;
+                            HSVR_LOG_EVERY(1.0, "Hand: %s free hand body %.1f cm from %ls (held by the other hand): drawn place moved %.1f cm off it", side == 0 ? "left" : "right", g,
+                                           hw->GetName().c_str(), length(off));
+                        }
+                    }
+                }
+            }
+            // Squeezing to take it (a second hand on the weapon): the hand goes where you put it, at once.
+            if (hs.squeeze > 0.3f) active = false, off = Vec3{};
+            if (!active) off = off * 0.9;
+            else if (length(off) > 0.0) off = off * 0.995;
+            if (length(off) < 0.05) off = Vec3{};
+            if (length(off) > 0.0) target = target + off, stopped = true;
         }
         if (!on_weapon && hand_on_grab(side, cfg, target, Wh))
         {
