@@ -455,6 +455,7 @@ LAYOUT = [
         ('pose_pavise_mount_cm', 'How near the back of the other forearm you let go of the strap to mount a pavise (cm).'),
         ('pose_mount_fist_grip', 'Closing the hand of the arm a shield is mounted on: 1 = the fist closes on the handle by your palm and the shield stays strapped on; 3 = the handle is taken into that hand (the strap comes off until the hand opens); 2 = the game\'s own forearm grip; 0 = only closes on the strap. Opening the hand leaves it mounted.'),
         ('pose_mount_handle_cm', 'How near your palm a mounted shield\'s handle must be for that hand to take it (cm).'),
+        ('pose_mount_head_ignore', '1 = a shield strapped on your forearm is ignored by the game\'s head-room check, as held and sheathed weapons are (else it can make Willie crouch when it goes on). 0 = off.'),
     ]),
     ('Drawing, sheathing, belt', '', [
         ('pose_draw', "1 = squeeze near a sheathed weapon's grip to draw it."),

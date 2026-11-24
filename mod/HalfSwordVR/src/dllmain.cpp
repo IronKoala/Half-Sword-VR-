@@ -9177,6 +9177,112 @@ namespace
     }
     bool is_mounted(UObject* w) { return w && (w == g_mount[0].weapon || w == g_mount[1].weapon); }
 
+    // His "Ignore Pick Up Array" (TArray<AActor*>): the actors his own traces look through. The game puts
+    // each weapon in a hand there (Set Up Right Hand Weapon @3568, Left @3672) and each sheathed one (Create
+    // Sheath Constraint L @3627, Sheathe on Spawn @5541), and takes it out when the hand lets go (Set Up
+    // <S> Hand Weapon @9504/@11175, Right @10094/@11268). A pavise on a forearm is in neither, so it was out:
+    // his head-room trace (UG @49612: a line from 100 to 180 cm over the middle of his feet, ignoring this
+    // list) then hit his own shield and set Head Hitting Ceiling (@51331: blocking hit and distance > 1),
+    // which crouches him (ABP Is Crouched?? @229009) for the 1 s until it is traced again: 5 of 8 light pavise
+    // mounts in test 00daa6e (Matthew 2026-11-23: "a vomit-like animation" each time it goes on or off).
+    // In place only: an entry is added only into the room already there (no allocation of ours in the
+    // game's array); none is logged.
+    bool own_ignore(UObject* pawn, UObject* actor, bool want)
+    {
+        if (!pawn || !actor) return false;
+        FProperty* p = prop_chain(pawn, STR("Ignore Pick Up Array"));
+        if (!p) return false;
+        struct Arr { UObject** data; int32_t num, max; };
+        auto* a = reinterpret_cast<Arr*>(reinterpret_cast<uint8_t*>(pawn) + p->GetOffset_Internal());
+        if (a->num < 0 || a->num > a->max || (a->num > 0 && !a->data)) return false;
+        int at = -1;
+        for (int32_t i = 0; i < a->num; ++i)
+            if (a->data[i] == actor)
+            {
+                at = i;
+                break;
+            }
+        if (want)
+        {
+            if (at >= 0) return true;
+            if (!a->data || a->num >= a->max)
+            {
+                HSVR_LOG_EVERY(5.0, "Pavise: no room in his Ignore Pick Up Array (%d of %d) for %ls: not added", a->num, a->max, actor->GetName().c_str());
+                return false;
+            }
+            a->data[a->num++] = actor;
+            HSVR_LOG("Pavise: %ls added to his Ignore Pick Up Array (%d of %d): his own traces look through it", actor->GetName().c_str(), a->num, a->max);
+            return true;
+        }
+        if (at < 0) return false;
+        for (int32_t i = at; i + 1 < a->num; ++i) a->data[i] = a->data[i + 1];
+        a->data[--a->num] = nullptr;
+        HSVR_LOG("Pavise: %ls out of his Ignore Pick Up Array (%d left)", actor->GetName().c_str(), a->num);
+        return true;
+    }
+
+    // Each change of his Head Hitting Ceiling, logged with what the game's own trace for it hits now (the same
+    // line, channel and ignore list, UG @48880-49743), so a test shows what crouched him.
+    void ceiling_watch(UObject* pawn)
+    {
+        using namespace hsvr;
+        static UObject* last_pawn = nullptr;
+        static bool was = false;
+        if (!pawn) return;
+        const bool now_on = bool_property(pawn, STR("Head Hitting Ceiling"));
+        if (pawn != last_pawn) last_pawn = pawn, was = now_on;
+        if (now_on == was) return;
+        was = now_on;
+        if (!now_on)
+        {
+            HSVR_LOG("Ceiling: Head Hitting Ceiling off");
+            return;
+        }
+        static UObject* cdo = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+        static UObject* gs = UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        const double* r = value_ptr<double>(pawn, STR("R Foot On Ground Loc"));
+        const double* l = value_ptr<double>(pawn, STR("L Foot On Ground Loc"));
+        const double* scale = value_ptr<double>(pawn, STR("Character Scale (Set in BP)"));
+        FProperty* ip = prop_chain(pawn, STR("Ignore Pick Up Array"));
+        if (!cdo || !gs || !r || !l || !ip)
+        {
+            HSVR_LOG("Ceiling: Head Hitting Ceiling on (its trace could not be repeated)");
+            return;
+        }
+        const double s = scale ? scale[0] : 1.0;
+        Vec3 from{(r[0] + l[0]) * 0.5, (r[1] + l[1]) * 0.5, (r[2] + l[2]) * 0.5 + 100.0 * s};
+        Vec3 to{from.x, from.y, from.z + 80.0 * s};
+        Call trace(cdo, STR("LineTraceSingle"));
+        if (!trace.fn) return;
+        trace.object(STR("WorldContextObject"), pawn);
+        trace.three(STR("Start"), from.x, from.y, from.z);
+        trace.three(STR("End"), to.x, to.y, to.z);
+        trace.byte(STR("TraceChannel"), 5);
+        trace.flag(STR("bTraceComplex"), false);
+        trace.flag(STR("bIgnoreSelf"), true);
+        FProperty* tp = trace.param(STR("ActorsToIgnore"));
+        if (tp) std::memcpy(trace.buffer.data() + tp->GetOffset_Internal(), reinterpret_cast<uint8_t*>(pawn) + ip->GetOffset_Internal(), 16); // his list, read only
+        bool ran = trace.run();
+        if (tp) std::memset(trace.buffer.data() + tp->GetOffset_Internal(), 0, tp->GetSize()); // never ours to free
+        FProperty* ret = trace.param(STR("ReturnValue"));
+        FProperty* hit = trace.param(STR("OutHit"));
+        if (!ran || !ret || !hit || !(*(trace.buffer.data() + ret->GetOffset_Internal()) & 1))
+        {
+            HSVR_LOG("Ceiling: Head Hitting Ceiling on; its trace repeated now (%.0f %.0f %.0f up %.0f cm) hits nothing", from.x, from.y, from.z, 80.0 * s);
+            return;
+        }
+        Call b(gs, STR("BreakHitResult"));
+        FProperty* hp = b.param(STR("Hit"));
+        if (!hp) return;
+        std::memcpy(b.buffer.data() + hp->GetOffset_Internal(), trace.buffer.data() + hit->GetOffset_Internal(), (std::min)(hp->GetSize(), hit->GetSize()));
+        b.run();
+        UObject* actor = b.object_result(STR("HitActor"));
+        UObject* comp = b.object_result(STR("HitComponent"));
+        HSVR_LOG("Ceiling: Head Hitting Ceiling on; its trace repeated now hits %ls / %ls %.1f cm up from %.0f cm over his feet%s", actor ? actor->GetName().c_str() : STR("?"),
+                 comp ? comp->GetName().c_str() : STR("?"), b.number(STR("Distance")), 100.0 * s,
+                 is_mounted(actor) ? " (his own mounted pavise)" : actor && (actor == object_property(pawn, STR("Weapon L")) || actor == object_property(pawn, STR("Weapon R"))) ? " (in his hand)" : "");
+    }
+
     void destroy_joint(UObject*& j)
     {
         if (!j) return;
@@ -9322,6 +9428,7 @@ namespace
         Mount m = g_mount[arm];
         g_mount[arm] = Mount{};
         unjoin_mount(m);
+        own_ignore(m.pawn, m.weapon, false); // loose: his pickups find it again
         Call(m.weapon, STR("Set Weapon Damping Drop")).run();
         HSVR_LOG("Pavise: %ls comes off the %s forearm (%s)", m.weapon->GetName().c_str(), arm == 0 ? "left" : "right", why);
     }
@@ -9437,8 +9544,8 @@ namespace
         unjoin_mount(m);
         m = Mount{};
         bool ok = take_by_strap(side, pawn, mesh, w, base, *strap, palm);
-        if (ok) controllers_buzz(side, 0.4f);
-        else Call(w, STR("Set Weapon Damping Drop")).run();
+        if (ok) controllers_buzz(side, 0.4f); // in that hand: the game's set-up keeps it in his ignore list
+        else own_ignore(pawn, w, false), Call(w, STR("Set Weapon Damping Drop")).run();
         HSVR_LOG("Pavise: %s hand %s %ls off the %s forearm by its %s (%.1f cm from it)", side == 0 ? "left" : "right", ok ? "takes" : "could NOT take",
                  w->GetName().c_str(), arm == 0 ? "left" : "right", strap->name.c_str(), d);
         return true;
@@ -9669,6 +9776,7 @@ namespace
             if (m.weapon == in_hand[0] || m.weapon == in_hand[1] || user != pawn)
             {
                 unjoin_mount(m);
+                if (user != pawn) own_ignore(pawn, m.weapon, false);
                 HSVR_LOG("Pavise: the pavise on the %s forearm was taken; its joints removed", arm == 0 ? "left" : "right");
                 m = Mount{};
                 continue;
@@ -9698,6 +9806,8 @@ namespace
                 if (m.anchor) set_component_transform(m.anchor, socket_location(m.mesh, sockets[arm]), socket_rotation(m.mesh, sockets[arm]), false);
             }
             mount_beside(arm, pawn, in_hand[arm]);
+            // Each tick: the game's own grab search takes what it hit out of the list again (UG @216701).
+            if (hsvr::config().pose_mount_head_ignore) own_ignore(pawn, m.weapon, true);
             if (m.gripped) set_anim_grip(arm, (int)(std::max)(0.0, hsvr::config().pose_shield_hand_grip_type));
             const double now = hsvr::now_seconds();
             if (now - m.last_log >= 1.0)
@@ -22298,6 +22408,7 @@ namespace
         draw_tick(pawn);
         scabbard_tick(pawn, cfg);
         mount_tick(pawn);
+        ceiling_watch(pawn);
         for (int side = 0; side < 2; ++side)
         {
             GripLog& log = g_grip_log[side];

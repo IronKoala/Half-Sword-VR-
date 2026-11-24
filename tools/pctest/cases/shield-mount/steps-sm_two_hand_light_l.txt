@@ -26,7 +26,7 @@
 24.8:hsvr.slot_state
 25:hsvr.arm_move 1
 25.5:hsvr.squeeze 1 1
-26:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Tiers/ModularWeaponBP_Hafted_Mid_Tier_Long.ModularWeaponBP_Hafted_Mid_Tier_Long_C
+26:hsvr.give_weapon passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight 0
 27.5:hsvr.expect held_r = 1 weapon in the right hand
 27.6:hsvr.expect mount_l = 1 still strapped on the left forearm
 28:hsvr.arm_move 7 30

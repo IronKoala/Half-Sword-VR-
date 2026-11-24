@@ -1,0 +1,4 @@
+# Heavy pavise: carried in the right hand to the left forearm. Stalled short in 388c68f (see list.txt); run for the hold's log.
+sm_grip_heavy_l|steps-sm_grip_heavy_l.txt
+sm_unmount_heavy_l|steps-sm_unmount_heavy_l.txt
+sm_two_hand_heavy_l|steps-sm_two_hand_heavy_l.txt

@@ -1,10 +1,10 @@
-# 388c68f (37f4488 + 9qa6xg merge): strapped shield stays strapped when its hand takes the handle; two-hand + mounted pavise; sheathe.
-# Needs the usual test hook patch (hand_at / slot_state / strap_ / mount_ / item_ expects). watch_vars all logs ABP_Willie flag changes (the "vomit" hunt).
+# Strapped shield stays strapped when its hand takes the handle; two-hand + mounted pavise; sheathe; strapped pavise in his
+# Ignore Pick Up Array (no "Head Hitting Ceiling" crouch: look for "Ceiling:" and "Ignore Pick Up Array" lines).
+# Needs the usual test hook patch (hand_at / slot_state / strap_ / mount_ / item_ expects). watch_vars all logs ABP_Willie flag changes.
+# The heavy pavise cases are in list-heavy.txt: in 388c68f the right hand carrying it stalled 33-39 cm short of the left forearm
+# (B&S hold at its 393 N / 33.8 N m caps, "weapon stopped"), before any code of this list runs.
 sm_grip_light_l|steps-sm_grip_light_l.txt
 sm_grip_targe_l|steps-sm_grip_targe_l.txt
-sm_grip_heavy_l|steps-sm_grip_heavy_l.txt
 sm_unmount_light_l|steps-sm_unmount_light_l.txt
-sm_unmount_heavy_l|steps-sm_unmount_heavy_l.txt
 sm_two_hand_light_l|steps-sm_two_hand_light_l.txt
-sm_two_hand_heavy_l|steps-sm_two_hand_heavy_l.txt
 reopen_after_gripping|steps-scabbard_pickup_full_hip.txt
