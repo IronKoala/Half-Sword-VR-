@@ -6458,107 +6458,13 @@ namespace
         }
     };
 
-    // ---- B&S's hold (Matthew 2026-11-19, measured from his own B&S session: bs_hold_measured.md) ----
-    // Each hand holds the item by soft drives (a spring and damper with a force cap), not by putting it
-    // exactly on the hand: PhysX's D6 drives, solved here the same way, as soft constraints with
-    // sequential impulses over the frame (Box2D-style soft step: gamma = 1/(dt(c + dt k)), bias =
-    // k/(c + dt k) * error), all hands together. Positions cm, mass kg, so forces are N x 100 and
-    // torques N m x 1e4; springs in N/m are the same number in kg/s^2.
+    // (The old soft-constraint hold that lived here is gone: the hold is bs_hold_joint, the engine joint with B&S drives.)
     hsvr::Vec3 clamp_length(const hsvr::Vec3& v, double most);
-    struct SoftPoint
-    {
-        hsvr::Vec3 r;      // from the centre of mass to the held point (world)
-        hsvr::Vec3 err;    // held point minus its target
-        hsvr::Vec3 vt;     // the target's velocity
-        double k = 0.0, c = 0.0, fmax = 0.0;
-        bool slide = false; // no spring along `axis` (the hand sliding on the handle)
-        hsvr::Vec3 axis;
-        double slide_c = 0.0; // B&S's slide damper along `axis` (N s/m, against the hand's motion along it); 0 = free
-        hsvr::Vec3 acc;    // accumulated impulse
-        double acc_ax = 0.0; // accumulated impulse along `axis` while sliding
-    };
     inline Mat3 skew(const hsvr::Vec3& r)
     {
         Mat3 m;
         m.m[0][1] = -r.z, m.m[0][2] = r.y, m.m[1][0] = r.z, m.m[1][2] = -r.x, m.m[2][0] = -r.y, m.m[2][1] = r.x;
         return m;
-    }
-    // v, w: the item's centre-of-mass velocity and spin, changed in place. Angular drive (the main
-    // hand's turn) when ka > 0: err_rot = the turn from target to current (scaled axis), wt its target spin.
-    void bs_solve(double mass, const Mat3& invI, hsvr::Vec3& v, hsvr::Vec3& w, SoftPoint* pts, int n, const hsvr::Vec3& err_rot, const hsvr::Vec3& wt, double ka,
-                  double ca, double tmax, double dt, int iters, hsvr::Vec3& ang_acc, const hsvr::Vec3* twist_axis = nullptr, double swing_share = 1.0)
-    {
-        using namespace hsvr;
-        Mat3 I3 = Mat3::diag(1, 1, 1);
-        Mat3 Ksoft[4];
-        for (int i = 0; i < n; ++i)
-        {
-            SoftPoint& p = pts[i];
-            Mat3 S = skew(p.r);
-            Mat3 K = I3 * (1.0 / mass) + (S * invI * S) * -1.0;
-            double gamma = 1.0 / (dt * (p.c + dt * p.k) + 1e-12);
-            Ksoft[i] = (K + I3 * gamma).inverse();
-            p.acc = Vec3{};
-            p.acc_ax = 0.0;
-            if (p.slide) p.axis = normalized(p.axis);
-        }
-        // The slide's damper (B&S Handle.UpdateSliding: the Y drive gets spring 0 and damper 300 -> 20): a
-        // soft constraint along the handle with no bias, so only gravity, the swing and contacts move the
-        // weapon through the hand, slowed by the damper against the hand's own motion along it.
-        double kax[4] = {0, 0, 0, 0};
-        for (int i = 0; i < n; ++i)
-            if (pts[i].slide && pts[i].slide_c > 0.0)
-            {
-                Mat3 S = skew(pts[i].r);
-                Mat3 K = I3 * (1.0 / mass) + (S * invI * S) * -1.0;
-                kax[i] = dot(pts[i].axis, K * pts[i].axis);
-            }
-        double ga = ka > 0.0 ? 1.0 / (dt * (ca + dt * ka) + 1e-12) : 0.0;
-        Mat3 Kang = ka > 0.0 ? (invI + I3 * ga).inverse() : Mat3{};
-        ang_acc = Vec3{};
-        for (int it = 0; it < iters; ++it)
-        {
-            for (int i = 0; i < n; ++i)
-            {
-                SoftPoint& p = pts[i];
-                double gamma = 1.0 / (dt * (p.c + dt * p.k) + 1e-12);
-                Vec3 bias = p.err * (p.k / (p.c + dt * p.k + 1e-12));
-                Vec3 cdot = v + cross(w, p.r) - p.vt;
-                Vec3 lam = (Ksoft[i] * (cdot + bias + p.acc * gamma)) * -1.0;
-                if (p.slide) lam = lam - p.axis * dot(lam, p.axis);
-                Vec3 old = p.acc;
-                p.acc = clamp_length(p.acc + lam, p.fmax * dt);
-                lam = p.acc - old;
-                v = v + lam * (1.0 / mass);
-                w = w + invI * cross(p.r, lam);
-                if (p.slide && p.slide_c > 0.0)
-                {
-                    double gax = 1.0 / (dt * p.slide_c);
-                    double cax = dot(v + cross(w, p.r) - p.vt, p.axis);
-                    double l = -(cax + p.acc_ax * gax) / (kax[i] + gax);
-                    double o = p.acc_ax;
-                    p.acc_ax = (std::min)(p.fmax * dt, (std::max)(-p.fmax * dt, p.acc_ax + l));
-                    Vec3 J = p.axis * (p.acc_ax - o);
-                    v = v + J * (1.0 / mass);
-                    w = w + invI * cross(p.r, J);
-                }
-            }
-            if (ka > 0.0)
-            {
-                Vec3 bias = err_rot * (ka / (ca + dt * ka + 1e-12));
-                Vec3 lam = (Kang * ((w - wt) + bias + ang_acc * ga)) * -1.0;
-                if (twist_axis)
-                {
-                    // Two hands: the turning hand only twists it about the line between the hands (and a
-                    // swing_share of the rest); where it points is the two hands' positions.
-                    Vec3 tw = *twist_axis * dot(lam, *twist_axis);
-                    lam = tw + (lam - tw) * swing_share;
-                }
-                Vec3 old = ang_acc;
-                ang_acc = clamp_length(ang_acc + lam, tmax * dt);
-                w = w + invI * (ang_acc - old);
-            }
-        }
     }
 
     hsvr::Vec3 clamp_length(const hsvr::Vec3& v, double most)
@@ -17204,8 +17110,7 @@ namespace
                 bool hand_and_half = sword && grip_cls.rfind(STR("Weapon_Sword_Grip_15"), 0) == 0;
                 // Matthew 2026-11-23: every longsword, greatsword and hand-and-a-half sword slides; only daggers and
                 // one-handed swords have fixed grips (pose_grip_two_hand_swords_slide; 0 = the two zones below as before).
-                bool two_zones = sword && two_hand_type && !cfg.pose_grip_two_hand_swords_slide && (hand_and_half || cfg.pose_grip_two_zones_2h_sword >= 2) &&
-                                 cfg.pose_grip_two_zones_2h_sword >= 1;
+                bool two_zones = false; // (B&S: a two-handed sword's grip is one handle; each hand takes it where it touches and may slide)
                 if (sword && two_hand_type && cfg.pose_grip_two_hand_swords_slide)
                     if (UObject* pom = object_property(item, STR("PommelSk")))
                     {
@@ -17268,37 +17173,6 @@ namespace
                 {
                     hs.back().fixed = true;
                     hs.back().fixed_t = (std::min)(1.0, (std::max)(0.0, (0.0 - g0) / (g1 - g0))); // the game's grip point
-                }
-                else if (two_zones && g1 - g0 >= 2.0 * half)
-                {
-                    // Hand-and-a-half and two-handed swords (Matthew 2026-11-21): two fixed zones, no slide:
-                    // one under the guard (the grip's top, where the game's grip point is) and one above the
-                    // pommel (the grip's bottom). A touch on the upper half of the grip takes the upper zone,
-                    // on the lower half the lower one.
-                    // The lower zone is just above the pommel, not on it (playtest 2026-11-22: the grip's bottom
-                    // was walked through the pommel, so all 7 second-hand grabs sat on the pommel at -29.5 cm).
-                    double low = g0;
-                    if (UObject* pom = object_property(item, STR("PommelSk")))
-                    {
-                        double pz = component_rotation(base).inverse().rotate(component_location(pom) - component_location(base)).z;
-                        low = (std::max)(g0, pz + cfg.pose_grip_pommel_top_cm + half);
-                        double want = low;
-                        // Hands side by side at least; on a grip too short for that above the pommel (short
-                        // hand-and-a-half swords: one hand's room), the hands squeeze together over each other by up to
-                        // pose_grip_hands_overlap_cm rather than the lower one wrapping the pommel (Matthew 2026-11-22).
-                        low = (std::min)(low, g1 - 2.0 * half + (std::max)(0.0, cfg.pose_grip_hands_overlap_cm));
-                        HSVR_LOG("Handles: %ls: pommel at %.1f cm, lower hand zone at %.1f (clear of the pommel at %.1f; grip %.1f..%.1f)%s", item->GetName().c_str(), pz,
-                                 low, want, g0, g1, low > g1 - 2.0 * half ? ": short grip, hands squeezed together" : low < want ? ": no room for two hands above the pommel" : "");
-                    }
-                    else
-                        low = (std::min)(low, g1 - 2.0 * half); // hands side by side at least
-                    double mid = (std::max)(0.5 * (g0 + g1), low);
-                    hs.back() = Handle{Vec3{0, 0, mid}, Vec3{0, 0, g1}, "grip", -1, 2};
-                    hs.back().fixed = true;
-                    hs.back().fixed_t = 1.0;
-                    hs.push_back(Handle{Vec3{0, 0, g0}, Vec3{0, 0, mid}, "grip", -1, 2});
-                    hs.back().fixed = true;
-                    hs.back().fixed_t = mid - g0 > 1e-3 ? (low - g0) / (mid - g0) : 1.0;
                 }
                 if (dagger)
                 {
@@ -17606,8 +17480,6 @@ namespace
                      blade ? "on the blade" : "on the grip", h.zone_lo, h.zone_hi, h.zone_stop + cfg.pose_slide_hand_half_cm + cfg.pose_two_hand_blade_gap_cm);
         }
         if (!on) return;
-        // Not while a weapon that just came into the hand swings into place.
-        if (h.started >= 0.0 && now_seconds() - h.started < cfg.pose_hold_let_go_grace_s) return;
         Vec3 bp = component_location(base);
         Quat binv = component_rotation(base).inverse();
         double want = binv.rotate(hand_point - bp).z - h.pivot.z; // along the axis, from the game's grip point
@@ -17939,11 +17811,6 @@ namespace
         int missed = 0;  // ticks in a row the hold skipped it while its weapon stayed in the hand
     };
     JointHand g_jh[2][2]; // [side][0 = the hand's own joint, 1 = its joint as the second hand on the other's weapon]
-    // A hand's own joint removed while its weapon stays in hand (a tick the hold skipped: a fist, a stab's
-    // release) is remade the next tick; it keeps its age and its open fade gate, or it couldn't brake for 0.3 s
-    // (sanity 8503226: both let-gos were a remake).
-    struct JointGone { UObject* weapon = nullptr; double at = -1.0, made_t = -1.0, fade_until = -1.0; };
-    JointGone g_jh_gone[2];
     // A level change (the test room reopened between cases, leaving an arena) frees the held weapon and the
     // joint's parts; jh_sweep's own gone() checks only see a batch while it is being pruned, so without this
     // the next sweep read the old weapon's name (crash 2026-11-22 21:22Z, pctest b-shared-57142d1).
@@ -17957,11 +17824,8 @@ namespace
                 if (!j.sphere && !j.con) j = JointHand{};
                 else if (!j.weapon) j.touched = false; // its weapon is gone: the next sweep removes what is left
             }
-        for (JointGone& g : g_jh_gone)
-            if (gone(g.weapon)) g = JointGone{};
     });
 
-    bool cfg_slerp() { return hsvr::config().pose_hold_joint_slerp; }
 
     void jh_destroy(JointHand& j)
     {
@@ -18097,7 +17961,7 @@ namespace
             // and a polehammer grabbed end-for-end turned away from the hand (sanity 8503226). Two hands need no
             // swing-free drive: the sphere is turned only by the twist about the hands' line (joint_hold).
             Call mode(c, STR("SetAngularDriveMode"));
-            mode.byte(STR("DriveMode"), cfg_slerp() ? 0 : 1);
+            mode.byte(STR("DriveMode"), 0); // SLERP
             mode.run();
         }
         j.sphere = s;
@@ -18109,15 +17973,6 @@ namespace
         j.fresh = true;
         j.prev_t = -1.0;
         j.fade_until = -1.0;
-        if (turns && g_jh_gone[side].weapon == weapon && j.made_t - g_jh_gone[side].at < 0.5)
-        {
-            j.made_t = g_jh_gone[side].made_t;
-            j.fade_until = g_jh_gone[side].fade_until;
-            j.fresh = false; // keeps the speed it has: the old hold's restart speed mid-swing threw it (two_polehammer)
-            HSVR_LOG("Joint hold: %s hand's joint on %ls remade %.0f ms after it went: keeps its age", side == 0 ? "left" : "right", weapon->GetName().c_str(),
-                     (hsvr::now_seconds() - g_jh_gone[side].at) * 1000.0);
-        }
-        g_jh_gone[side] = JointGone{};
         HSVR_LOG("Joint hold: %s hand %s joint made on %ls at (%.1f, %.1f, %.1f) on it", side == 0 ? "left" : "right", turns ? "turning" : "pull-only",
                  weapon->GetName().c_str(), at_local.x, at_local.y, at_local.z);
         return true;
@@ -18129,7 +17984,7 @@ namespace
         if (want != j.drives)
         {
             j.drives = want;
-            if (cfg_slerp())
+            if (true)
             {
                 Call d1(j.con, STR("SetOrientationDriveSLERP"));
                 d1.first_flag(want != 0);
@@ -18177,7 +18032,6 @@ namespace
             JointHand& j = g_jh[side][i];
             if (j.weapon != w || !(j.sphere || j.con)) continue;
             HSVR_LOG("Joint hold: %s hand's joint on %ls removed before the let-go", side == 0 ? "left" : "right", w->GetName().c_str());
-            if (i == 0) g_jh_gone[side] = JointGone{j.weapon, hsvr::now_seconds(), j.made_t, j.fade_until};
             jh_destroy(j);
         }
         JointHand& o = g_jo[side];
@@ -18222,38 +18076,32 @@ namespace
 
     void jh_sweep(UObject* pawn)
     {
-        // Speed net for whatever each hand holds, every tick, hold or not (sanity 5dd9267: on ticks with no hold
-        // a polehammer jammed in scenery got 88-158 k impulses and reached 816 m/s).
-        {
-            hsvr::Config cfg = hsvr::config();
-            if (pawn && cfg.pose_hold_joint && cfg.pose_hold_joint_speed_limit)
-                for (int s = 0; s < 2; ++s)
-                {
-                    UObject* w = object_property(pawn, s == 0 ? STR("Weapon L") : STR("Weapon R"));
-                    if (!w || is_fist(w)) continue;
-                    UObject* b = object_property(w, STR("BaseMesh"));
-                    if (!b) continue;
-                    Call lv(b, STR("GetPhysicsLinearVelocity"));
-                    lv.run();
-                    Call av(b, STR("GetPhysicsAngularVelocityInRadians"));
-                    av.run();
-                    hsvr::Vec3 v = lv.vec(), wv = av.vec();
-                    double spin = (std::max)(1.0, cfg.pose_bs_max_spin);
-                    if (length(v) <= 2000.0 && length(wv) <= spin) continue;
-                    HSVR_LOG_EVERY(0.25, "Joint hold: %s hand's %ls at %.0f cm/s, %.0f rad/s after the tick: held to the limit", s == 0 ? "left" : "right",
-                                   w->GetName().c_str(), length(v), length(wv));
-                    v = clamp_length(v, 2000.0);
-                    wv = clamp_length(wv, spin);
-                    Call slv(b, STR("SetPhysicsLinearVelocity"));
-                    slv.three(STR("NewVel"), v.x, v.y, v.z);
-                    slv.flag(STR("bAddToCurrent"), false);
-                    slv.run();
-                    Call sav(b, STR("SetPhysicsAngularVelocityInRadians"));
-                    sav.three(STR("NewAngVel"), wv.x, wv.y, wv.z);
-                    sav.flag(STR("bAddToCurrent"), false);
-                    sav.run();
-                }
-        }
+        using hsvr::length;
+        // Crash guard only (not part of the hold): a held item past 100 m/s or 200 rad/s means the physics blew up; it is
+        // logged and stopped. B&S has no speed limit on a held item, and nothing below these acts.
+        if (pawn)
+            for (int s = 0; s < 2; ++s)
+            {
+                UObject* w = object_property(pawn, s == 0 ? STR("Weapon L") : STR("Weapon R"));
+                if (!w) continue;
+                UObject* b = object_property(w, STR("BaseMesh"));
+                if (!b) continue;
+                Call lv(b, STR("GetPhysicsLinearVelocity"));
+                lv.run();
+                Call av(b, STR("GetPhysicsAngularVelocityInRadians"));
+                av.run();
+                if (length(lv.vec()) <= 10000.0 && length(av.vec()) <= 200.0) continue;
+                HSVR_LOG_EVERY(0.25, "Hold: CRASH GUARD: %s hand's %ls at %.0f cm/s, %.0f rad/s: stopped", s == 0 ? "left" : "right", w->GetName().c_str(), length(lv.vec()),
+                               length(av.vec()));
+                Call slv(b, STR("SetPhysicsLinearVelocity"));
+                slv.three(STR("NewVel"), 0.0, 0.0, 0.0);
+                slv.flag(STR("bAddToCurrent"), false);
+                slv.run();
+                Call sav(b, STR("SetPhysicsAngularVelocityInRadians"));
+                sav.three(STR("NewAngVel"), 0.0, 0.0, 0.0);
+                sav.flag(STR("bAddToCurrent"), false);
+                sav.run();
+            }
         for (int s = 0; s < 2; ++s)
         {
             JointHand& j = g_jo[s];
@@ -18288,7 +18136,6 @@ namespace
                     if (j.weapon && !gone(j.weapon))
                         HSVR_LOG("Joint hold: %s hand's joint on %ls removed%s", s == 0 ? "left" : "right", j.weapon->GetName().c_str(),
                                  pawn && object_property(pawn, s == 0 ? STR("Weapon L") : STR("Weapon R")) == j.weapon ? " (still in that hand: the hold skipped this tick)" : "");
-                    if (i == 0 && j.weapon && !gone(j.weapon)) g_jh_gone[s] = JointGone{j.weapon, hsvr::now_seconds(), j.made_t, j.fade_until};
                     if (gone(j.sphere)) j.sphere = nullptr;
                     if (gone(j.con)) j.con = nullptr;
                     jh_destroy(j);
@@ -18455,6 +18302,12 @@ namespace
         Vec3 pivot_world = pos + rot.rotate(pivot);
         // The joint's X along the handle (the slide's axis) when there is one, else along the item's length.
         Vec3 along_l = (h.free.set && h.free.has_handle && length(h.free.hb - h.free.ha) > 1e-3) ? normalized(h.free.hb - h.free.ha) : Vec3{0, 0, 1};
+        // B&S: ending a slide re-anchors the joint where the hand now is (Handle.SetSliding(false)).
+        if (m.con && m.weapon == weapon && slide_c < 0.0 && length(m.made_at - pivot) > 2.0)
+        {
+            HSVR_LOG("Hold: %s hand's joint on %ls re-anchored %.1f cm along it (slide ended)", side == 0 ? "left" : "right", weapon->GetName().c_str(), length(m.made_at - pivot));
+            m.has_frame = false;
+        }
         if (!m.con || m.weapon != weapon || !m.has_frame)
         {
             Vec3 xw = rot.rotate(along_l);
@@ -18476,7 +18329,7 @@ namespace
         Vec3 stretch = target_pivot - pivot_world;
         if (!two)
         {
-            bs_drive_joint(m, mass, I, com_l, pivot, m.joint_in_item, 5000.0 * mk, 100.0 * mc, 3000.0 * mk, 1000.0 * hk * mk, 50.0 * hc * mc, 250.0 * mk, slide_c, err_l);
+            bs_drive_joint(m, mass, I, com_l, m.made_at, m.joint_in_item, 5000.0 * mk, 100.0 * mc, 3000.0 * mk, 1000.0 * hk * mk, 50.0 * hc * mc, 250.0 * mk, slide_c, err_l);
             out.turns = true;
             out.force_n = (std::min)(5000.0 * mk * length(stretch) * 0.01, 3000.0 * mk);
             out.force_capped = out.force_n >= 3000.0 * mk * 0.999;
@@ -18506,7 +18359,7 @@ namespace
             double up1 = dot(bs_grip_up(side, g_pose.hand_rot[side], hand_to_item), ax);
             double up2 = dot(bs_grip_up(s2, g_pose.hand_rot[s2], g_two.rel), ax);
             double a1 = dot(pivot - h.free.ha, ax), a2 = dot(g_two.bs_local - h.free.ha, ax);
-            if (up1 * up2 > 0.0)
+            if (up1 * up2 >= 0.0)
             {
                 // Both grips face the same way: facing up the handle, the hand further up turns it; facing down, the one further down.
                 bool first_front = up1 > 0.0 ? a1 > a2 : a1 < a2;
@@ -18530,12 +18383,13 @@ namespace
         // The main hand's joint.
         bool main_turns = turner == side;
         Vec3 err2_l = rot.inverse().rotate(scaled_axis((rot2 * rot.inverse()).normalized()));
-        bs_drive_joint(m, mass, I, com_l, pivot, m.joint_in_item, 10000.0 * mk, pc * mc, 6000.0 * mk, main_turns ? 2200.0 * rot_scale * mk : 0.0,
+        bs_drive_joint(m, mass, I, com_l, m.made_at, m.joint_in_item, 10000.0 * mk, pc * mc, 6000.0 * mk, main_turns ? 2200.0 * rot_scale * mk : 0.0,
                        main_turns ? 90.0 * rot_scale * mc : 0.0, main_turns ? 500.0 * rot_scale * mk : 0.0, slide_c, err_l);
         // The second hand's joint (its own, on its spot).
         JointHand& o = g_jh[s2][1];
         Vec3 at_world = pos + rot.rotate(g_two.bs_local);
         Vec3 along2_l = (g_two.has_handle && length(g_two.hb - g_two.ha) > 1e-3) ? normalized(g_two.hb - g_two.ha) : Vec3{0, 0, 1};
+        if (o.con && o.weapon == weapon && !g_two.sliding && length(o.made_at - g_two.bs_local) > 2.0) o.has_frame = false; // re-anchor after its slide
         if (!o.con || o.weapon != weapon || !o.has_frame)
         {
             Vec3 xw2 = rot.rotate(along2_l);
@@ -18550,7 +18404,7 @@ namespace
             o.touched = true;
             set_component_transform(o.sphere, pos2, rot2, false);
             double slide2 = g_two.sliding && g_two.has_handle ? g_two.slide_c : -1.0;
-            bs_drive_joint(o, mass, I, com_l, g_two.bs_local, o.joint_in_item, 10000.0 * mk2, pc * mc2, 6000.0 * mk2, !main_turns ? 2200.0 * rot_scale * mk2 : 0.0,
+            bs_drive_joint(o, mass, I, com_l, o.made_at, o.joint_in_item, 10000.0 * mk2, pc * mc2, 6000.0 * mk2, !main_turns ? 2200.0 * rot_scale * mk2 : 0.0,
                            !main_turns ? 90.0 * rot_scale * mc2 : 0.0, !main_turns ? 500.0 * rot_scale * mk2 : 0.0, slide2, err2_l);
         }
         Vec3 stretch2 = g_two.bs_p2 - at_world;
@@ -18579,7 +18433,7 @@ namespace
             if (g_pending_slide[side] < 1e8)
             {
                 h.slide = g_pending_slide[side];
-                h.started = now - cfg.pose_hold_let_go_grace_s; // handed over, already in place: no settling grace
+                h.started = now - 1.0; // handed over, already in place
                 g_pending_slide[side] = 1e9;
             }
             if (g_pending_free[side].set)
@@ -18753,7 +18607,7 @@ namespace
                 HSVR_LOG("Slide: %s hand %s on the %s of %ls at %.0f%%", side == 0 ? "left" : "right", on ? "starts sliding" : "holds", h.free.handle.c_str(),
                          weapon->GetName().c_str(), h.free.t * 100.0);
             }
-            if (on && !(h.started >= 0.0 && now - h.started < cfg.pose_hold_let_go_grace_s))
+            if (on)
             {
                 Vec3 bp = component_location(base);
                 Quat bq = component_rotation(base);
