@@ -4363,7 +4363,9 @@ namespace
             eased_t = tn;
             double want = held >= 0.0 ? held : 20.0 - 20.0 * std::cos(tn * 0.4);
             double v = g_fake_head_speed.load();
-            if (v <= 0.0 || held < 0.0) eased = want;
+            // Back to the made-up path (-1) eased too: snapping up from 82 cm in one frame flung a lantern let go at his feet
+            // 18 m/s (run 11 floor_pickup_62 32.488), a stand no player can do. The made-up path itself moves under 10 cm/s.
+            if (v <= 0.0) eased = want;
             else eased += (std::max)(-v * gap, (std::min)(v * gap, want - eased));
             g_crouch_drop = eased;
         }
@@ -7436,6 +7438,15 @@ namespace
     std::wstring g_watch_name;
     std::atomic<double> g_watch_moved{0.0}, g_watch_speed{0.0};
     std::atomic<bool> g_watch_reset{false};
+    bool is_mounted(UObject* w);
+    void own_gear(UObject* pawn, std::vector<UObject*>& out);
+    struct LegGuard
+    {
+        std::vector<UObject*> joints;
+        double clear_since = -1.0;
+        std::vector<UObject*> gear; // his worn gear when the pairs were made: made again when it changes
+    };
+    std::map<UObject*, LegGuard> g_leg_guard;
     void item_watch_tick(UObject* pawn)
     {
         using namespace hsvr;
@@ -7494,22 +7505,64 @@ namespace
                 double cap_d = length(Vec3{cp.x - p.x, cp.y - p.y, 0.0});
                 HSVR_LOG_EVERY(0.1, "Watch: %ls at %.1f m/s, %.0f cm from where it lay; nearest his %s %.0f cm, capsule axis %.0f cm away (crouch %.0f)",
                                item->GetName().c_str(), v, d, bn, best, cap_d, g_crouch_drop);
+                // Surface gaps (run 11 8653332: with its legs paired it still went off; which of his bodies touched it?):
+                // every physics body of his, his capsule, armour proxies and worn gear, nearest three.
+                static double surf_t = -1.0;
+                if (mesh && now - surf_t > 0.1)
+                {
+                    surf_t = now;
+                    std::vector<std::pair<double, std::wstring>> gaps;
+                    for (FName bone : physics_body_bones(mesh))
+                    {
+                        double g = item_gap(item, mesh, bone, socket_location(mesh, bone));
+                        if (g >= 0.0) gaps.push_back({g, bone.ToString()});
+                    }
+                    if (cap)
+                    {
+                        double g = item_gap(item, cap, FName(), component_location(cap));
+                        if (g >= 0.0) gaps.push_back({g, STR("capsule")});
+                    }
+                    for (const TCHAR* name : k_cm_proxies)
+                        if (UObject* cm = object_property(pawn, name))
+                        {
+                            Call r(cm, STR("GetScaledSphereRadius"));
+                            double radius = r.run() ? r.number() : 0.0;
+                            double g = closest_on_weapon(item, component_location(cm), nullptr, nullptr);
+                            if (g >= 0.0) gaps.push_back({(std::max)(0.0, g - radius), name});
+                        }
+                    std::vector<UObject*> gear;
+                    own_gear(pawn, gear);
+                    for (UObject* gw : gear)
+                        if (UObject* gb = object_property(gw, STR("BaseMesh")))
+                        {
+                            std::vector<UObject*> gp;
+                            attached_meshes(gb, nullptr, gp, 0);
+                            for (UObject* part : gp)
+                            {
+                                double g = item_gap(item, part, FName(), component_location(part));
+                                if (g >= 0.0) gaps.push_back({g, gw->GetName() + STR(".") + part->GetName()});
+                            }
+                        }
+                    std::sort(gaps.begin(), gaps.end());
+                    std::wstring list;
+                    for (size_t i = 0; i < gaps.size() && i < 4; ++i)
+                    {
+                        wchar_t b[200];
+                        std::swprintf(b, 200, L"%ls %.1f cm; ", gaps[i].second.c_str(), gaps[i].first);
+                        list += b;
+                    }
+                    HSVR_LOG("Watch: %ls nearest surfaces of his: %ls(leg guard %s)", item->GetName().c_str(), list.c_str(),
+                             g_leg_guard.count(item) ? "on" : "off");
+                }
             }
         }
     }
     // pose_legs_pass_loose (Matthew 2026-11-24: "I dont want willies feet kicking stuff around"): his legs are kinematic
     // bodies moved to the pose every frame, so they hit what lies at his feet with his legs' speed. PC run 10 d82b641
     // floor_kick: a crouch to 85 cm (eased 150 cm/s) pushed the lantern at his feet 50 cm at 2.5 m/s, his calf_r 12 cm
-    // from it. So a loose weapon near his legs gets no-collide pairs with his leg bodies (thigh, calf, foot, ball), his
-    // capsule and his leg armour proxies, and loses them once it is pose_legs_pass_loose_cm + 15 cm clear for 0.3 s or
+    // from it. So a loose weapon near his legs gets no-collide pairs with his leg and hip bodies (thigh, calf, foot, ball,
+    // pelvis, spine_01), his capsule, his leg and cuirass armour proxies and his worn gear, and loses them once it is pose_legs_pass_loose_cm + 15 cm clear for 0.3 s or
     // a hand takes it. A deliberate kick (the game's Kick, right A) makes no new pairs.
-    bool is_mounted(UObject* w);
-    struct LegGuard
-    {
-        std::vector<UObject*> joints;
-        double clear_since = -1.0;
-    };
-    std::map<UObject*, LegGuard> g_leg_guard;
     void leg_guard_drop(UObject* item, LegGuard& g, const char* why)
     {
         for (UObject* j : g.joints)
@@ -7562,7 +7615,7 @@ namespace
                 std::wstring n = b.ToString();
                 for (wchar_t& ch : n) ch = (wchar_t)towlower(ch);
                 if (n.find(L"thigh") != std::wstring::npos || n.find(L"calf") != std::wstring::npos || n.find(L"foot") != std::wstring::npos ||
-                    n.find(L"ball") != std::wstring::npos)
+                    n.find(L"ball") != std::wstring::npos || n == L"pelvis" || n == L"spine_01")
                     leg_bones.push_back(b);
             }
             bones_of = mesh;
@@ -7596,6 +7649,8 @@ namespace
         bool kicking = g_feet[0].kicking || g_feet[1].kicking;
         double within = cfg.pose_legs_pass_loose_cm;
         UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+        std::vector<UObject*> gear;
+        own_gear(pawn, gear);
         std::unordered_set<UObject*> seen;
         for (UObject* w : weapons)
         {
@@ -7626,28 +7681,48 @@ namespace
                 if (d >= 0.0 && d < nearest) nearest = d;
             }
             seen.insert(w);
-            if (it == g_leg_guard.end())
-            {
-                if (nearest > within || kicking || !cls) continue;
-                LegGuard g;
-                std::vector<UObject*> parts;
+            // Pairs with his leg and hip bodies, capsule, leg armour proxies and his worn gear (run 11 8653332: crouched
+            // to 82 cm over a lantern lying under him, his pelvis at z 13 and his slung pavise swinging 1-9 m/s 6-17 cm from
+            // his calf, it went off at 5-6 m/s with the legs alone paired).
+            auto make_pairs = [&](LegGuard& g, const char* why) {
+                std::vector<UObject*> parts, gear_parts;
                 attached_meshes(base, object_property(w, STR("Scabbard")), parts, 0);
+                for (UObject* gw : gear)
+                    if (gw != w)
+                        if (UObject* gb = object_property(gw, STR("BaseMesh"))) attached_meshes(gb, nullptr, gear_parts, 0);
                 for (UObject* part : parts)
                 {
                     for (FName b : leg_bones)
                         if (UObject* j = no_collision_pair(pawn, cls, part, mesh, b)) g.joints.push_back(j);
                     if (UObject* cap = object_property(pawn, STR("CapsuleComponent")))
                         if (UObject* j = no_collision_pair(pawn, cls, part, cap)) g.joints.push_back(j);
-                    for (const TCHAR* n : {STR("CM_Leg_L"), STR("CM_Leg_R")})
+                    for (const TCHAR* n : {STR("CM_Leg_L"), STR("CM_Leg_R"), STR("CM_Cuirass")})
                         if (UObject* cm = object_property(pawn, n))
                             if (UObject* j = no_collision_pair(pawn, cls, part, cm)) g.joints.push_back(j);
+                    for (UObject* gp : gear_parts)
+                        if (UObject* j = no_collision_pair(pawn, cls, part, gp)) g.joints.push_back(j);
                 }
-                HSVR_LOG("Legs: %ls %.0f cm from his legs: passes through them (%zu no-collide pair(s), %zu part(s); crouch %.0f)", w->GetName().c_str(),
-                         nearest, g.joints.size(), parts.size(), g_crouch_drop);
+                g.gear = gear;
+                HSVR_LOG("Legs: %ls %.0f cm from his legs: passes through them and his worn gear (%zu no-collide pair(s), %zu part(s) x %zu gear part(s); "
+                         "crouch %.0f; %s)",
+                         w->GetName().c_str(), nearest, g.joints.size(), parts.size(), gear_parts.size(), g_crouch_drop, why);
+            };
+            if (it == g_leg_guard.end())
+            {
+                if (nearest > within || kicking || !cls) continue;
+                LegGuard g;
+                make_pairs(g, "new");
                 g_leg_guard[w] = std::move(g);
                 continue;
             }
             LegGuard& g = it->second;
+            // Made again when his worn gear changed. (Two guards' joints on one pair do not undo each other: Chaos counts
+            // ignore requests per pair, FIgnoreCollisionManager, UE 5.4.4 CollisionConstraintFlags.cpp:42-92.)
+            if (cls && g.gear != gear)
+            {
+                leg_guard_drop(nullptr, g, "");
+                make_pairs(g, "his worn gear changed");
+            }
             if (nearest <= within + 15.0)
             {
                 g.clear_since = -1.0;
@@ -20975,6 +21050,18 @@ namespace
         for (const SlotDef& sd : k_slots)
             if (object_property(pawn, sd.var) == w) return true;
         return false;
+    }
+    // His own worn gear: what hangs on his belt and back slots, and a pavise strapped on a forearm.
+    void own_gear(UObject* pawn, std::vector<UObject*>& out)
+    {
+        out.clear();
+        if (!pawn) return;
+        for (const SlotDef& sd : k_slots)
+            if (UObject* w = object_property(pawn, sd.var))
+                if (std::find(out.begin(), out.end(), w) == out.end()) out.push_back(w);
+        for (int arm = 0; arm < 2; ++arm)
+            if (UObject* w = g_mount[arm].weapon)
+                if (!gone(w) && std::find(out.begin(), out.end(), w) == out.end()) out.push_back(w);
     }
 
     bool call_one_object(UObject* owner, const TCHAR* name, UObject* arg)
