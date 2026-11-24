@@ -2349,6 +2349,7 @@ namespace
     std::atomic<double> g_two_turn_sum{0.0}, g_two_hlag_sum{0.0}; // the main hold's turn_deg and lag (the replay's columns), summed
     std::atomic<int> g_two_mean_n{0};
     std::atomic<int> g_two_ticks{0}, g_two_revs{0}, g_two_revs_own{0}; // two-hand ticks since hsvr.two_reset, those where the weapon's spin reversed (jitter), and those not matched by his hands' own reversal
+    std::atomic<double> g_two_spin_max{0.0}; // deg/s, the weapon's worst sustained spin (least of 3 ticks) since hsvr.two_reset (test measure)
     std::atomic<double> g_two_spot_now{0.0}; // cm the second hand's spot on the weapon is from his second hand (test measure, B&S two hands)
     std::atomic<double> g_hand_spread[2] = {0.0, 0.0};
     std::atomic<bool> g_fake_continue{false}; // test: hsvr.press_a 1 holds right A for menu_buttons
@@ -16840,6 +16841,13 @@ namespace
                                 Vec3 lw = cross(prev_hu, hu) * (1.0 / gap);
                                 if (have_w)
                                 {
+                                    {
+                                        static double sp3[3] = {0, 0, 0};
+                                        static int ks = 0;
+                                        sp3[ks++ % 3] = length(wv) * 57.2958;
+                                        double sm = (std::min)((std::min)(sp3[0], sp3[1]), sp3[2]);
+                                        if (sm > g_two_spin_max.load()) g_two_spin_max.store(sm);
+                                    }
                                     int mw = rev_mask(wv, prev_w);
                                     int mc = rev_mask(tw, prev_tw) | rev_mask(lw, prev_lw);
                                     // the previous tick's weapon reversal, against his hands' reversals one tick before, then and after
@@ -28870,6 +28878,7 @@ namespace
         else if (w == "two_wrist") value = g_two_wrist_now.load();
         else if (w == "two_jitter") value = g_two_ticks.load() > 0 ? 100.0 * g_two_revs.load() / g_two_ticks.load() : 0.0; // % of two-hand ticks
         else if (w == "two_ticks") value = g_two_ticks.load();
+        else if (w == "two_spin_max") value = g_two_spin_max.load(); // deg/s since hsvr.two_reset
         else if (w == "two_spot_off") value = g_two_spot_now.load(); // cm, now
         else if (w == "two_jitter_own") value = g_two_ticks.load() > 0 ? 100.0 * g_two_revs_own.load() / g_two_ticks.load() : 0.0; // % of two-hand ticks: reversals not his hands' own
         else if (w == "two_wrist_mean") value = g_two_mean_n.load() > 0 ? g_two_wrist_sum.load() / g_two_mean_n.load() : 0.0;
@@ -31187,6 +31196,7 @@ namespace
                 g_two_ticks.store(0);
                 g_two_revs.store(0);
                 g_two_revs_own.store(0);
+                g_two_spin_max.store(0.0);
                 g_two_wrist_sum.store(0.0);
                 g_two_lag_sum.store(0.0);
                 g_two_mean_n.store(0);
