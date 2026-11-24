@@ -182,6 +182,8 @@ LAYOUT = [
         ('pose_follow_room', '1 = walking around your room moves him (and his capsule) with you.'),
         ('pose_hold_capsule', "1 = his capsule only moves when you walk (the game's own pulls, stumbles and dodges are undone)."),
         ('pose_capsule_no_push', '1 = his capsule never shoves loose things (the engine\'s character physics interaction is off); 0 = the game\'s.'),
+        ('pose_legs_pass_loose', "1 = loose weapons at his feet pass through his legs: walking and crouching never kick them away (the game's own kick still does)."),
+        ('pose_legs_pass_loose_cm', 'How near his legs a loose weapon must come to pass through them (cm).'),
         ('pose_feet', '1 = feet stay planted and step.'),
         ('pose_feet_free_on_kick', "1 = the game's kick moves the leg freely; the foot is planted again where it lands."),
         ('pose_feet_kick_free_s', 'Feet stay free this long after a kick fires (s).'),

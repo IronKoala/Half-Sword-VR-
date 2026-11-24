@@ -37,3 +37,4 @@ walk_into_foe|steps-walk_into_foe.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_
 walk_over_items|steps-walk_over_items.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 walk_into_foe_nopush|steps-walk_into_foe.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_capsule_no_push=1
 walk_over_items_nopush|steps-walk_over_items.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_capsule_no_push=1
+floor_kick_legsoff|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85;pose_legs_pass_loose=0

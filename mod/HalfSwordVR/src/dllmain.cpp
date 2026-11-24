@@ -546,6 +546,7 @@ namespace
     bool g_actor_z_smooth_on = false;
     void crouch_push_log(UObject* pawn, UObject* mesh);
     void item_watch_tick(UObject* pawn);
+    void leg_guard_tick(UObject* pawn, UObject* mesh, const hsvr::Config& cfg);
     bool provide_anchor(hsvr::PlayerAnchor& out)
     {
         if (!g_engine) return false;
@@ -4426,6 +4427,7 @@ namespace
         }
         if (g_crouch_drop > 10.0) crouch_push_log(pawn, mesh);
         item_watch_tick(pawn);
+        leg_guard_tick(pawn, object_property(pawn, STR("Mesh")), cfg);
         {
             // pose_capsule_no_push: the engine's character physics interaction off (touch impulses and repulsion on loose
             // things by the capsule); the game's own push factors are already 0. Set once per pawn, and back when switched off.
@@ -5785,7 +5787,7 @@ namespace
     // not paired off with them while held, so on the let-go any it overlapped shoved it (PC run 0815006: a
     // ~3 m/s kick as the no-collide pairs went with the item 8 cm clear of his bones).
     void attached_meshes(UObject* root, UObject* skip, std::vector<UObject*>& out, int depth);
-    UObject* no_collision_pair(UObject* pawn, UClass* cls, UObject* a, UObject* b);
+    UObject* no_collision_pair(UObject* pawn, UClass* cls, UObject* a, UObject* b, FName bone_b = FName());
     void drop_cm_pairs(int side, UObject* pawn, UObject* item)
     {
         UObject* base = object_property(item, STR("BaseMesh"));
@@ -7493,6 +7495,177 @@ namespace
                 HSVR_LOG_EVERY(0.1, "Watch: %ls at %.1f m/s, %.0f cm from where it lay; nearest his %s %.0f cm, capsule axis %.0f cm away (crouch %.0f)",
                                item->GetName().c_str(), v, d, bn, best, cap_d, g_crouch_drop);
             }
+        }
+    }
+    // pose_legs_pass_loose (Matthew 2026-11-24: "I dont want willies feet kicking stuff around"): his legs are kinematic
+    // bodies moved to the pose every frame, so they hit what lies at his feet with his legs' speed. PC run 10 d82b641
+    // floor_kick: a crouch to 85 cm (eased 150 cm/s) pushed the lantern at his feet 50 cm at 2.5 m/s, his calf_r 12 cm
+    // from it. So a loose weapon near his legs gets no-collide pairs with his leg bodies (thigh, calf, foot, ball), his
+    // capsule and his leg armour proxies, and loses them once it is pose_legs_pass_loose_cm + 15 cm clear for 0.3 s or
+    // a hand takes it. A deliberate kick (the game's Kick, right A) makes no new pairs.
+    bool is_mounted(UObject* w);
+    struct LegGuard
+    {
+        std::vector<UObject*> joints;
+        double clear_since = -1.0;
+    };
+    std::map<UObject*, LegGuard> g_leg_guard;
+    void leg_guard_drop(UObject* item, LegGuard& g, const char* why)
+    {
+        for (UObject* j : g.joints)
+            if (j && !gone(j) && object_alive(j))
+            {
+                Call d(j, STR("K2_DestroyComponent"));
+                d.object(STR("Object"), j);
+                d.run();
+            }
+        if (item && !gone(item)) HSVR_LOG("Legs: %ls collides with his legs again (%s)", item->GetName().c_str(), why);
+        g.joints.clear();
+    }
+    void leg_guard_tick(UObject* pawn, UObject* mesh, const hsvr::Config& cfg)
+    {
+        using namespace hsvr;
+        static bool tracked = on_freed([] {
+            for (auto it = g_leg_guard.begin(); it != g_leg_guard.end();)
+            {
+                if (gone(it->first)) it = g_leg_guard.erase(it);
+                else
+                {
+                    auto& js = it->second.joints;
+                    js.erase(std::remove_if(js.begin(), js.end(), [](UObject* o) { return gone(o); }), js.end());
+                    ++it;
+                }
+            }
+        });
+        (void)tracked;
+        static UObject* guard_pawn = nullptr;
+        bool on = cfg.pose_legs_pass_loose && pawn && mesh;
+        if (!on || pawn != guard_pawn)
+        {
+            for (auto& [item, g] : g_leg_guard) leg_guard_drop(item, g, on ? "a new body" : "switched off");
+            g_leg_guard.clear();
+            guard_pawn = on ? pawn : nullptr;
+            if (!on) return;
+        }
+        double now = now_seconds();
+        static double last = -1.0;
+        if (now - last < 0.1) return;
+        last = now;
+        // His leg bodies (as their physics asset names them), cached per mesh.
+        static UObject* bones_of = nullptr;
+        static std::vector<FName> leg_bones;
+        if (bones_of != mesh)
+        {
+            leg_bones.clear();
+            for (FName b : physics_body_bones(mesh))
+            {
+                std::wstring n = b.ToString();
+                for (wchar_t& ch : n) ch = (wchar_t)towlower(ch);
+                if (n.find(L"thigh") != std::wstring::npos || n.find(L"calf") != std::wstring::npos || n.find(L"foot") != std::wstring::npos ||
+                    n.find(L"ball") != std::wstring::npos)
+                    leg_bones.push_back(b);
+            }
+            bones_of = mesh;
+            std::wstring names;
+            for (FName b : leg_bones) names += b.ToString() + STR(" ");
+            HSVR_LOG("Legs: his leg bodies: %ls", names.empty() ? STR("(none found)") : names.c_str());
+        }
+        if (leg_bones.empty()) return;
+        // Where his legs are: hip, knee, ankle and toe points of both legs.
+        std::vector<Vec3> points;
+        for (const char* n : {"thigh_l", "calf_l", "foot_l", "ball_l", "thigh_r", "calf_r", "foot_r", "ball_r"})
+            points.push_back(socket_location(mesh, bone_fname(n)));
+        Vec3 mid{0, 0, 0};
+        for (const Vec3& p : points) mid = mid + p * (1.0 / points.size());
+        // Loose weapons (not in a hand, sheath, slot or forearm mount), listed again every second.
+        static std::vector<UObject*> weapons, willies;
+        static bool list_tracked = on_freed([] {
+            weapons.erase(std::remove_if(weapons.begin(), weapons.end(), [](UObject* o) { return gone(o); }), weapons.end());
+            willies.erase(std::remove_if(willies.begin(), willies.end(), [](UObject* o) { return gone(o); }), willies.end());
+        });
+        (void)list_tracked;
+        static double listed = -10.0;
+        if (now - listed > 1.0)
+        {
+            listed = now;
+            weapons.clear();
+            willies.clear();
+            UObjectGlobals::FindAllOf(STR("ModularWeaponBP_C"), weapons);
+            UObjectGlobals::FindAllOf(STR("Willie_BP_C"), willies);
+        }
+        bool kicking = g_feet[0].kicking || g_feet[1].kicking;
+        double within = cfg.pose_legs_pass_loose_cm;
+        UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
+        std::unordered_set<UObject*> seen;
+        for (UObject* w : weapons)
+        {
+            if (!w || gone(w) || w->GetName().rfind(STR("Default__"), 0) == 0) continue;
+            UObject* base = object_property(w, STR("BaseMesh"));
+            if (!base) continue;
+            Vec3 bp = component_location(base);
+            // Far off (a weapon is at most ~2 m long): not looked at closely.
+            if (std::fabs(bp.x - mid.x) > 250.0 || std::fabs(bp.y - mid.y) > 250.0 || std::fabs(bp.z - mid.z) > 250.0) continue;
+            bool held = false;
+            for (UObject* c : willies)
+                if (c && !gone(c) && (object_property(c, STR("Weapon R")) == w || object_property(c, STR("Weapon L")) == w)) held = true;
+            bool loose = !held && !bool_property(w, STR("Is Sheathed")) && !is_fist(w) && !in_own_slot(pawn, w) && !is_mounted(w);
+            auto it = g_leg_guard.find(w);
+            if (!loose)
+            {
+                if (it != g_leg_guard.end())
+                {
+                    leg_guard_drop(w, it->second, held ? "taken in a hand" : "sheathed, slotted or mounted");
+                    g_leg_guard.erase(it);
+                }
+                continue;
+            }
+            double nearest = 1e9;
+            for (const Vec3& p : points)
+            {
+                double d = closest_on_weapon(w, p, nullptr, nullptr);
+                if (d >= 0.0 && d < nearest) nearest = d;
+            }
+            seen.insert(w);
+            if (it == g_leg_guard.end())
+            {
+                if (nearest > within || kicking || !cls) continue;
+                LegGuard g;
+                std::vector<UObject*> parts;
+                attached_meshes(base, object_property(w, STR("Scabbard")), parts, 0);
+                for (UObject* part : parts)
+                {
+                    for (FName b : leg_bones)
+                        if (UObject* j = no_collision_pair(pawn, cls, part, mesh, b)) g.joints.push_back(j);
+                    if (UObject* cap = object_property(pawn, STR("CapsuleComponent")))
+                        if (UObject* j = no_collision_pair(pawn, cls, part, cap)) g.joints.push_back(j);
+                    for (const TCHAR* n : {STR("CM_Leg_L"), STR("CM_Leg_R")})
+                        if (UObject* cm = object_property(pawn, n))
+                            if (UObject* j = no_collision_pair(pawn, cls, part, cm)) g.joints.push_back(j);
+                }
+                HSVR_LOG("Legs: %ls %.0f cm from his legs: passes through them (%zu no-collide pair(s), %zu part(s); crouch %.0f)", w->GetName().c_str(),
+                         nearest, g.joints.size(), parts.size(), g_crouch_drop);
+                g_leg_guard[w] = std::move(g);
+                continue;
+            }
+            LegGuard& g = it->second;
+            if (nearest <= within + 15.0)
+            {
+                g.clear_since = -1.0;
+                continue;
+            }
+            if (g.clear_since < 0.0) g.clear_since = now;
+            if (now - g.clear_since < 0.3) continue;
+            char why[64];
+            std::snprintf(why, sizeof(why), "%.0f cm clear", nearest);
+            leg_guard_drop(w, g, why);
+            g_leg_guard.erase(it);
+        }
+        // Gone from the list (freed, or far off): pairs dropped.
+        for (auto it = g_leg_guard.begin(); it != g_leg_guard.end();)
+        {
+            if (seen.count(it->first)) { ++it; continue; }
+            leg_guard_drop(it->first, it->second, "far off");
+            it = g_leg_guard.erase(it);
         }
     }
     void crouch_push_log(UObject* pawn, UObject* mesh)
@@ -25454,7 +25627,7 @@ namespace
         g = HelmetIgnore{};
     }
 
-    UObject* no_collision_pair(UObject* pawn, UClass* cls, UObject* a, UObject* b)
+    UObject* no_collision_pair(UObject* pawn, UClass* cls, UObject* a, UObject* b, FName bone_b)
     {
         Call add(pawn, STR("AddComponentByClass"));
         add.object(STR("Class"), cls);
@@ -25497,7 +25670,7 @@ namespace
         join.object(STR("Component1"), a);
         join.name(STR("BoneName1"), FName());
         join.object(STR("Component2"), b);
-        join.name(STR("BoneName2"), FName());
+        join.name(STR("BoneName2"), bone_b);
         join.run();
         return j;
     }

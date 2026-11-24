@@ -324,6 +324,13 @@ namespace hsvr
         // Off until proven: run 9 86af79d the floor_kick test reproduced no kick either way, and with it on walking into a
         // passive foe slowed to 85 cm/s (319 off).
         bool pose_capsule_no_push = false;
+        // 1 = loose weapons near his legs pass through them (his thighs, calves, feet, capsule and leg armour proxies):
+        // his posed legs never kick what lies at his feet (Matthew 2026-11-24: "I dont want willies feet kicking stuff
+        // around"; PC run 10 d82b641: a crouch to 85 cm pushed a lantern 50 cm at 2.5 m/s). The game's own kick still hits.
+        bool pose_legs_pass_loose = true;
+        // How near his legs (hip, knee, ankle or toe point) a loose weapon must come to pass through them (cm). It
+        // collides with them again once 15 cm farther than this for 0.3 s, or when a hand takes it.
+        double pose_legs_pass_loose_cm = 40.0;
         // 1 = his body faces where you face: it follows your headset once you look more than
         // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
         // turns you as well.
