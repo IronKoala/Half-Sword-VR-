@@ -6,5 +6,7 @@
 sm_grip_light_l|steps-sm_grip_light_l.txt
 sm_grip_targe_l|steps-sm_grip_targe_l.txt
 sm_unmount_light_l|steps-sm_unmount_light_l.txt
-sm_two_hand_light_l|steps-sm_two_hand_light_l.txt
+# Two hands + strapped pavise with the B&S two-hand hold off: the shield part of it. With it on (installed since a3bde48)
+# the swings lag 57-65 deg with or without this build's changes: list-bs-two-hand.txt, not gating (suite-71d8d46-2h).
+sm_two_hand_light_l_nobs|steps-sm_two_hand_light_l.txt|pose_two_hand_bs=0
 reopen_after_gripping|steps-scabbard_pickup_full_hip.txt
