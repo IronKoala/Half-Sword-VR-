@@ -2114,6 +2114,17 @@ namespace
         }
         // BaseMesh (the grip dummy) has a mass of its own, which stays; the parts get the rest.
         double whole_before = mass_of(base_mesh);
+        // Rubber band (Matthew 2026-11-24): an ESTIMATED weight (the converter's volume guess) is pulled toward
+        // the carrier game weapon's own weight, a little when close and harder the further off, never past
+        // 1.4x either way: game * exp(B tanh(ln(r) / B)), B = ln 1.4. A weight typed in the converter or
+        // mass_kg in the ini is kept as it is.
+        if (g_settings.mass_kg <= 0 && numbers["mass_estimated"] > 0.5 && whole_before > 0.1 && mass_total > 0)
+        {
+            const double b = std::log(1.4);
+            double banded = whole_before * std::exp(b * std::tanh(std::log(mass_total / whole_before) / b));
+            log("  estimated %.3f kg banded toward the game weapon's %.3f kg: %.3f kg", mass_total, whole_before, banded);
+            mass_total = banded;
+        }
         double base_share = whole_before - parts_before;
         double parts_target = mass_total - base_share;
         if (base_share < 0 || parts_target < 0.25 * mass_total) parts_target = mass_total;

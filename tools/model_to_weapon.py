@@ -307,6 +307,17 @@ TYPICAL_SWORD = [(20, 0.2), (40, 0.4), (60, 0.7), (90, 1.1), (120, 1.5), (150, 2
 TYPICAL_HAFTED = [(40, 0.6), (70, 1.2), (90, 1.6), (120, 2.0), (200, 2.2), (250, 2.8), (300, 3.3)]
 
 
+MASS_BAND = 1.4  # an estimated weight ends at most this many times above (or below) the typical one
+
+
+def rubber_band(value, typical, band=MASS_BAND):
+    """value pulled toward typical: kept when close, pulled harder the further it is, at most band x off."""
+    if value <= 0 or typical <= 0:
+        return typical
+    b = math.log(band)
+    return typical * math.exp(b * math.tanh(math.log(value / typical) / b))
+
+
 def typical_mass_kg(length_cm, hafted):
     pts = TYPICAL_HAFTED if hafted else TYPICAL_SWORD
     return float(np.interp(length_cm, [p[0] for p in pts], [p[1] for p in pts]))
@@ -1236,12 +1247,14 @@ def main(argv=None):
             typical = 10.5 * (w_ * h_ * 0.85) / 1e4
         else:
             typical = typical_mass_kg(length_cm, hafted)
-        kept = min(max(from_volume, 0.6 * typical), 1.6 * typical)
-        mass = round(math.sqrt(kept * typical), 3)
+        # Rubber band (Matthew 2026-11-24): the volume guess is pulled toward the typical weight, a little
+        # when it is close and harder the further it strays, never past BAND either way (in ratio:
+        # typical * exp(B tanh(ln(r) / B)), B = ln BAND). 1.1x stays 1.10x, 1.3x -> 1.26x, 2x -> 1.33x.
+        mass = round(rubber_band(from_volume, typical), 3)
         mass_note += (f"; volume gives {from_volume:.2f} kg, real {'shields' if shield else 'hafted weapons' if hafted else 'swords'} of "
                       f"{length_cm:.0f} cm weigh about {typical:.2f} kg"
                       + (" (volume guess far off: the model is thicker or thinner than a real one)"
-                         if kept != from_volume else ""))
+                         if not 0.75 <= from_volume / max(typical, 1e-9) <= 1.33 else ""))
     print(f"mass {mass} kg ({mass_note}); volumes cm3: " + ", ".join(f"{s} {v:.0f}" for s, v in volume.items()))
 
     top = float(z.max())
@@ -1250,6 +1263,8 @@ def main(argv=None):
                "tip": round(top, 2), "hafted": 1 if hafted else 0, "double": 1 if args.type == "double" else 0,
                "hand_slide": 1 if args.hand_slide else 0, "shield": 1 if shield else 0,
                "flail": 1 if args.type == "flail" else 0, "crossbow": 1 if args.type == "crossbow" else 0}
+    if mass_note != "given":
+        numbers["mass_estimated"] = 1  # the mod pulls an estimated weight toward its carrier game weapon's
     if args.held:
         numbers["held"] = {"one": 1, "two": 2, "spear": 3}[args.held]
     if shield:
