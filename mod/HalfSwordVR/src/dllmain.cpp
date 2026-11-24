@@ -3091,7 +3091,11 @@ namespace
                 static UObject* item = nullptr;
                 static bool item_tracked = track_freed(&item);
                 static double found_at = -1.0;
-                if (!item || now - found_at > 1.0)
+                // Once in his hand it is kept, not looked for again: the controller stays put rather than jumping back
+                // to the made-up circle (run 11 floor_kick: "target jumped 81 cm in 14 ms" 0.6 s after the pickup, the
+                // crouched arm could not follow and the stretch let-go dropped it).
+                bool in_hand = item && (object_property(g_pose.pawn, STR("Weapon R")) == item || object_property(g_pose.pawn, STR("Weapon L")) == item);
+                if (!in_hand && (!item || now - found_at > 1.0))
                 {
                     found_at = now;
                     item = nullptr;
@@ -3111,8 +3115,11 @@ namespace
                         if (d < best) { best = d; item = w; }
                     }
                 }
-                if (item)
-                    if (UObject* b = object_property(item, STR("BaseMesh"))) grip = component_location(b) + Vec3{0, 0, g_arm_floor[2]};
+                // In his hand the controller holds where it was at the pickup (following the item would chase itself).
+                static Vec3 last_grip{};
+                if (item && in_hand) grip = last_grip;
+                else if (item)
+                    if (UObject* b = object_property(item, STR("BaseMesh"))) grip = last_grip = component_location(b) + Vec3{0, 0, g_arm_floor[2]};
             }
             if (mode == 18 && side == 1)
             {
