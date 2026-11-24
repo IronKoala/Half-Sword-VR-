@@ -10657,6 +10657,7 @@ namespace
         const PaviseSpec* spec = nullptr;
         bool gripped = false; // that arm's own hand is on its strap (or on its handle: handle not empty)
         std::string handle;   // the handle that hand closed on, the shield still strapped on (pose_mount_fist_grip 1)
+        hsvr::Vec3 shift{0.0, 0.0, 0.0}; // shield-frame move off the strap's place while that hand holds its forward grip (handle into the palm)
         bool unstuck = false; // its "Static Mesh Collision Disabled (Unstuck)" as last seen
         double last_log = -1e9;
     };
@@ -10897,7 +10898,7 @@ namespace
         static const FName sockets[2] = {bone_fname("shield_l_socket"), bone_fname("shield_r_socket")};
         const auto& at = m.spec->at[arm];
         q = (socket_rotation(m.mesh, sockets[arm]) * rot_to_quat(-at.pitch, -at.yaw, -at.roll)).normalized();
-        p = socket_location(m.mesh, sockets[arm]) - q.rotate(Vec3{at.x, at.y, at.z});
+        p = socket_location(m.mesh, sockets[arm]) - q.rotate(Vec3{at.x, at.y, at.z}) + q.rotate(m.shift);
     }
 
     // Placed on the forearm (one teleport) and jointed to it: at the mount, and again only when the
@@ -11091,7 +11092,47 @@ namespace
             Vec3 palm = hand_grab_point(m.mesh, side);
             const std::vector<Handle>& hs = item_handles(w, m.base);
             double t = 0.0, d = 1e9;
-            int hi = nearest_handle(hs, bq.inverse().rotate(palm - bp), t, d);
+            Vec3 local_palm = bq.inverse().rotate(palm - bp);
+            int hi = nearest_handle(hs, local_palm, t, d);
+            // The forward grip first (the light pavise's upright handle, the heavy's centre handle): Matthew 11-24, 5-6
+            // times: "I still can't grab the forward grip when it's strapped to my forearm". On the light pavise the
+            // strap's place puts the palm 9.7-9.9 cm from that handle and 1-3 cm from the top handle, so the nearest
+            // (the top) always won and the forward grip was past the 8 cm reach. Within pose_mount_forward_cm it is taken,
+            // and the shield slides along the forearm so that handle sits in the palm, still strapped on.
+            int fwd = -1;
+            double fwd_t = 0.0, fwd_d = 1e9;
+            for (int i = 0; i < (int)hs.size(); ++i)
+                if (hs[i].name == "upright handle" || hs[i].name == "centre handle")
+                {
+                    std::vector<Handle> one{hs[i]};
+                    double tt = 0.0, dd = 1e9;
+                    nearest_handle(one, local_palm, tt, dd);
+                    if (dd < fwd_d) fwd = i, fwd_t = tt, fwd_d = dd;
+                }
+            bool forward = fwd >= 0 && fwd_d <= cfg.pose_mount_forward_cm && cfg.pose_mount_fist_grip == 1;
+            if (forward) hi = fwd, t = fwd_t, d = fwd_d;
+            if (forward)
+            {
+                Vec3 ab = hs[hi].b - hs[hi].a;
+                Vec3 on_local = hs[hi].a + ab * t;
+                // Moved so that point lands on the palm (in the shield's frame, on top of any earlier move).
+                m.shift = m.shift + (local_palm - on_local);
+                unjoin_mount(m);
+                if (!join_mount(side, m))
+                {
+                    m.shift = Vec3{0.0, 0.0, 0.0};
+                    if (!join_mount(side, m)) unmount_loose(side, "no joint could be made after the forward grip");
+                    HSVR_LOG("Pavise: %s hand: the forward grip move could not be jointed; back on the strap", hand);
+                    return true;
+                }
+                m.gripped = true;
+                m.handle = hs[hi].name;
+                controllers_buzz(side, 0.3f);
+                HSVR_LOG("Pavise: %s hand closes on the forward grip (%s) of %ls on its own forearm: was %.1f cm from the palm, the shield moved %.1f cm "
+                         "along the arm to put it in the hand; it stays strapped on",
+                         hand, m.handle.c_str(), w->GetName().c_str(), d, length(local_palm - on_local));
+                return true;
+            }
             if (hi < 0 || d > cfg.pose_mount_handle_cm)
             {
                 HSVR_LOG("Pavise: %s hand closes by %ls on its forearm: no handle within %.0f cm of the palm (nearest %s %.1f cm): it closes on the strap", hand,
@@ -11205,6 +11246,14 @@ namespace
     {
         if (!g_mount[side].gripped) return false;
         g_mount[side].gripped = false;
+        // Off the forward grip: back to the strap's own place on the forearm.
+        if (hsvr::length(g_mount[side].shift) > 0.01)
+        {
+            Mount& m = g_mount[side];
+            m.shift = hsvr::Vec3{0.0, 0.0, 0.0};
+            unjoin_mount(m);
+            if (!join_mount(side, m)) unmount_loose(side, "no joint could be made back on the strap");
+        }
         std::string was = g_mount[side].handle.empty() ? std::string("strap") : g_mount[side].handle;
         g_mount[side].handle.clear();
         set_anim_grip(side, -1);
