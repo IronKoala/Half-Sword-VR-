@@ -16450,6 +16450,15 @@ namespace
             // A pull that the yank will answer is not a let-go (flip-test3: the past-reach let-go fired
             // after 0.15 s and dropped the weapon before the 0.25 s yank could pull it out).
             if (in_body && cfg.stab_yank_cm > 0.0 && out_along > cfg.stab_yank_cm) out = false;
+            // Nor while he is sheathing or holding a scabbard: the blade catching on its own scabbard or his hip is no reason to
+            // drop it while his grip is held (playtest 11-24 marker 4: stuck 0.4 s by the scabbard mouth, "lets go ... stopped
+            // 70 cm from where you hold it" with the grip still 1.00 for 0.8 s more).
+            if (sheathing_socket(side) || scabbard_held(0) || scabbard_held(1))
+            {
+                if (out) HSVR_LOG_EVERY(1.0, "Hold: %s hand keeps %ls: stopped %.0f cm off while sheathing (no let-go)", side == 0 ? "left" : "right",
+                                        h.weapon->GetName().c_str(), h.blocked_cm);
+                out = false;
+            }
             // Not right after it came into the hand (a new or long weapon swings into place first),
             // and not while it is still closing in on where the hold sends it.
             double t_now = now_seconds();
@@ -19706,6 +19715,11 @@ namespace
                         }
                     }
                     tmax *= opp;
+                    // The second hand's pull is a lever too: with the turn cut to x0.1 but that pull left whole, the two pulls 45 cm
+                    // apart flipped a greatsword 150-180 deg in 0.11 s at 1513 deg/s with the controllers still (playtest 11-24 marker
+                    // 9: "grips face opposite ways ... turn x0.10", weapon line 124 deg off the hands', pull 645 N, whoosh). So it is
+                    // cut the same: neither hand can lever it against the other, as the B&S rule says.
+                    if (opp < 1.0) pts[1].fmax *= opp;
                     bool own = cfg.pose_two_hand_bs_solve_pulls;
                     Vec3 gravity{0.0, 0.0, g_weapon_gravity.load() == 0 ? 0.0 : -980.0};
                     Vec3 vb = own ? ev + gravity * DTb : ev, wb = ew, ang;
@@ -20430,6 +20444,20 @@ namespace
         int theirs = other ? hit_holders(pawn, other) : 0;
         int mask = mine | theirs;
         if (!mask) return;
+        // His own slotted or strapped gear knocking the item in his hand is his own kit, not a hit (Matthew 11-24:
+        // "weapons touching holstered pavise must NOT buzz"; launch 1 had 51 buzzes of his back-slot pavise on his sword).
+        if (cfg.hit_buzz_ignore_self)
+        {
+            std::vector<UObject*> gear;
+            own_gear(pawn, gear);
+            auto worn = [&](UObject* o) { return o && std::find(gear.begin(), gear.end(), o) != gear.end(); };
+            if ((worn(weapon) && theirs) || (worn(other) && mine))
+            {
+                HSVR_LOG_EVERY(2.0, "Hit buzz: %ls on %ls: his own worn gear and his held item, no buzz", weapon->GetName().c_str(),
+                               other ? other->GetName().c_str() : STR("?"));
+                return;
+            }
+        }
         double now = now_seconds();
         if (!hit_rate_ok(now)) return;
         HitInfo hit = break_hit(context, hit_prop);
