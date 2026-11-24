@@ -8,10 +8,16 @@
 1.4:hsvr.squeeze 0 0
 1.4:hsvr.squeeze 1 0
 1.9:hsvr.expect held_r = 0 right hand empty
-2.0:hsvr.arm_floor 65 40 25
-2.1:hsvr.watch_item Lantern
-4.0:hsvr.spawn /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
-4.1:hsvr.mark
-10.0:hsvr.expect held_r = 0 not taken in the hand
-10.0:hsvr.expect item_moved < 30 a lantern let go 10-25 cm over the floor, nothing of his near it, comes to rest near where it landed (cm)
-10.0:hsvr.expect item_speed >= 0 record: its fastest, m/s
+# (Run 25: without arm_move 1 the fake arm stayed put and the lantern spawned against his thigh.) Crouched as floor_reach,
+# so the hand gets down there.
+2.0:hsvr.arm_move 1
+2.05:hsvr.fake_head_drop 95
+2.1:hsvr.arm_floor 65 40 15
+2.2:hsvr.watch_item Lantern
+5.0:hsvr.expect hand_floor_r >= 0 record: the hand's height over the floor at the spawn
+5.0:hsvr.spawn /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
+5.1:hsvr.mark
+11.0:hsvr.expect held_r = 0 not taken in the hand
+11.0:hsvr.expect item_moved < 30 a lantern let go 10-25 cm over the floor, nothing of his near it, comes to rest near where it landed (cm)
+11.0:hsvr.expect item_speed >= 0 record: its fastest, m/s
+11.1:hsvr.fake_head_drop -1
