@@ -1743,13 +1743,14 @@ class App:
             self.refresh_row(a)
             self.status.config(text=f"{a['name']}: {b}")
         elif kind == "item_failed":
-            a["status"] = f"failed: {b}"
+            a["status"] = f"failed: {str(b).strip().splitlines()[-1][:200] if str(b).strip() else b}"
             self.refresh_row(a)
         elif kind == "converted":
             self.converted(a, b)
         elif kind == "failed":
             self.log.insert("end", b, "error")
-            self.status.config(text=f"That did not work: {a}")
+            short = str(a).strip().splitlines()[-1][:300] if str(a).strip() else str(a)
+            self.status.config(text=f"That did not work: {short} (details below)")
             if not self.details_shown:
                 self.toggle_details()
         elif kind == "done":
@@ -1797,8 +1798,10 @@ def convert_in_child(jobs, q):
         q.put(("done", None))
     except SystemExit as e:
         q.put(("done", None) if e.code in (None, 0) else ("error", str(e.code)))
-    except Exception:
-        q.put(("error", traceback.format_exc()))
+    except Exception as e:
+        # The whole traceback goes to the details log; the status line gets one short line.
+        q.put(("log", traceback.format_exc()))
+        q.put(("error", f"{type(e).__name__}: {e}".strip()[:300]))
 
 
 def main():
