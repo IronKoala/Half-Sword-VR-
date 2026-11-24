@@ -1273,6 +1273,12 @@ namespace hsvr
         // swings were silent). A weapon in a tracked hand has its threshold x this during its tick
         // (1 = the game's own; lower = slower swings whoosh; the one-shot is also that much quieter).
         double whoosh_vr_threshold_scale = 0.6;
+        // Strike gate (Matthew 2026-11-24: whoosh only on real strikes): a weapon in a tracked hand whooshes
+        // only while it moves against his body at least as fast as the game's air loop needs (1.5 x the
+        // threshold used, x whoosh_strike_speed_ratio: 4.5 m/s for most weapons); slower carries, hand
+        // jitter and small moves stay silent. Off = the game's one-shots fire from 1.5 m/s.
+        bool whoosh_strike_gate = true;
+        double whoosh_strike_speed_ratio = 1.0;
         // "Whoosh:" lines every 0.5 s while a held weapon moves faster than whoosh_log_min_speed (cm/s).
         bool whoosh_log = true;
         double whoosh_log_min_speed = 300.0;
