@@ -2372,6 +2372,7 @@ namespace
     double g_slot_test[5] = {1.0, 4.0, 0.0, 0.0, 0.0}; // test: hsvr.arm_to_slot <hand> <slot 0-4> <along cm> <out cm> [cm/s] (arm mode 22)
     std::atomic<double> g_fake_jitter_cm{0.0};
     bool two_hands_hold(UObject* weapon); // both hands on this weapon (defined with g_two)
+    bool class_name_starts(UObject* object, const TCHAR* prefix);
     bool is_fist(UObject* weapon);  // test: hsvr.fake_jitter <cm>: tracking-like noise on the fake hands (rms per axis)  // test: hsvr.arm_floor <fwd> <side> <height> (arm mode 14): right hand near the floor
     std::atomic<float> g_fake_trigger[2] = {-1.0f, -1.0f}; // test: hsvr.trigger <0|1> <value>, -1 = the controller
     std::atomic<float> g_fake_squeeze[2] = {-1.0f, -1.0f}; // test: hsvr.squeeze <0|1> <value>, -1 = the controller
@@ -5769,7 +5770,11 @@ namespace
             // his torso). Off (0, B&S's default): his whole body but the feet, and the free hand while held in one hand.
             // pose_hold_free_hand_collides=0: the free arm (one hand holding) is ignored too (test switch: park cases 2026-11-24, the
             // free left hand parked beside a held axe set it wobbling at 450-650 deg/s with no contact logged on the axis).
-            bool free_ignored = !ac.pose_hold_free_hand_collides && g_arm_ignore[1 - side].weapon != weapon;
+            // A shield or pavise held in one hand also passes through the free arm: strapping it onto that forearm means
+            // carrying it into that arm (PC run 2ef27f9: with only the holding arm ignored, the light pavise in the right
+            // hand stopped 15-20 cm short of the left forearm, "Hold: right weapon stopped", and never mounted).
+            bool one_hand = g_arm_ignore[1 - side].weapon != weapon;
+            bool free_ignored = one_hand && (!ac.pose_hold_free_hand_collides || class_name_starts(weapon, STR("Shield")));
             if (ac.pose_hold_ignore_body && ac.pose_hold_self_collision)
             {
                 if (!in_arm(mesh, bone, side) && !(free_ignored && in_arm(mesh, bone, 1 - side))) continue;
