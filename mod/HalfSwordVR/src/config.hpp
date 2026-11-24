@@ -576,7 +576,7 @@ namespace hsvr
         // no shoulder cap, no weight carried outside the cap, no smoothing of the hand's speed, no wrist stop, spin brake or
         // turn-by-grip limit. On, it overrides those settings when the ini is read. 0 = our hold as tuned.
         bool pose_hold_bs_pure = false;
-        bool pose_hold_free_hand_collides = false; // (0 since 2026-11-24: a free hand parked beside a held axe set it wobbling at ~500 deg/s; 0 = 0.4)
+        bool pose_hold_free_hand_collides = true; // (Matthew 2026-11-24 04:12Z chose solid, like B&S, with the rest stop pose_hand_held_weapon_stop_cm: parked axe 34 deg/s, 244-481 without the stop)
         double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)
         bool pose_hold_joint_draw_wound = true; // drawing/sheathing and a blade in a wound stay on the joint (sent where the old rules put it)
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
