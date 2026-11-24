@@ -3086,6 +3086,7 @@ namespace
             grip = shoulder + body.rotate(local);
             if (mode == 15 && side == 1 && g_pose.pawn)
             {
+                Vec3 circle = grip; // where the made-up path has the hand this frame: the reach starts from it
                 // Pickup test: the right controller this high above the grip point of the nearest loose
                 // weapon (one no one holds, not sheathed), as a hand reaching for it on the floor.
                 static UObject* item = nullptr;
@@ -3131,7 +3132,9 @@ namespace
                 static Vec3 eased_grip{};
                 static double eased_at = -10.0;
                 double step = (std::min)(0.1, now - eased_at) * 120.0;
-                if (now - eased_at > 0.5) eased_grip = grip; // first frame of this mode (or after a pause)
+                // First frame of this mode (or after a pause): from the made-up path's spot, not the target (run 15
+                // 69408e5: starting at the target still swung the right hand at 8.7 m/s, slap speed 75 every case).
+                if (now - eased_at > 0.5) eased_grip = circle;
                 else
                 {
                     Vec3 to = grip - eased_grip;
@@ -7558,6 +7561,12 @@ namespace
                         double g = item_gap(item, cap, FName(), component_location(cap));
                         if (g >= 0.0) gaps.push_back({g, STR("capsule")});
                     }
+                    if (UObject* drv = object_property(pawn, STR("DriverSkeleton")))
+                        for (const char* n : {"foot_l", "foot_r", "calf_l", "calf_r", "thigh_l", "thigh_r", "pelvis"})
+                        {
+                            double g = item_gap(item, drv, bone_fname(n), socket_location(drv, bone_fname(n)));
+                            if (g >= 0.0) gaps.push_back({g, std::wstring(STR("driver.")) + std::wstring(n, n + std::strlen(n))});
+                        }
                     for (const TCHAR* name : k_cm_proxies)
                         if (UObject* cm = object_property(pawn, name))
                         {
@@ -7677,6 +7686,37 @@ namespace
             HSVR_LOG("Legs: his leg bodies: %ls", names.empty() ? STR("(none found)") : names.c_str());
         }
         if (leg_bones.empty()) return;
+        // His DriverSkeleton (the hidden animated copy the visible body copies): if it has physics collision of its own,
+        // its legs are paired too (run 15 69408e5: the lantern touching his foot_r 0.3 cm with every pair on Mesh still went
+        // off at 5 m/s, three times).
+        UObject* driver = object_property(pawn, STR("DriverSkeleton"));
+        static UObject* driver_of = nullptr;
+        static std::vector<FName> driver_bones;
+        static bool driver_collides = false;
+        if (driver != driver_of)
+        {
+            driver_of = driver;
+            driver_bones.clear();
+            driver_collides = false;
+            if (driver)
+            {
+                Call ce(driver, STR("GetCollisionEnabled"));
+                ce.run();
+                int enabled = byte_result(ce);
+                std::vector<FName> all = physics_body_bones(driver);
+                for (FName b : all)
+                {
+                    std::wstring n = b.ToString();
+                    for (wchar_t& ch : n) ch = (wchar_t)towlower(ch);
+                    if (n.find(L"thigh") != std::wstring::npos || n.find(L"calf") != std::wstring::npos || n.find(L"foot") != std::wstring::npos ||
+                        n.find(L"ball") != std::wstring::npos || n == L"pelvis" || n == L"spine_01")
+                        driver_bones.push_back(b);
+                }
+                driver_collides = (enabled == 2 || enabled == 3) && !driver_bones.empty(); // PhysicsOnly / QueryAndPhysics
+                HSVR_LOG("Legs: his DriverSkeleton: collision %d, %zu physics bodies (%zu leg/hip): %s", enabled, all.size(), driver_bones.size(),
+                         driver_collides ? "its legs are paired too" : "nothing to pair");
+            }
+        }
         // Where his legs are: hip, knee, ankle and toe points of both legs.
         std::vector<Vec3> points;
         for (const char* n : {"thigh_l", "calf_l", "foot_l", "ball_l", "thigh_r", "calf_r", "foot_r", "ball_r"})
@@ -7747,6 +7787,9 @@ namespace
                 {
                     for (FName b : leg_bones)
                         if (UObject* j = no_collision_pair(pawn, cls, part, mesh, b)) g.joints.push_back(j);
+                    if (driver_collides)
+                        for (FName b : driver_bones)
+                            if (UObject* j = no_collision_pair(pawn, cls, part, driver, b)) g.joints.push_back(j);
                     if (UObject* cap = object_property(pawn, STR("CapsuleComponent")))
                         if (UObject* j = no_collision_pair(pawn, cls, part, cap)) g.joints.push_back(j);
                     for (const TCHAR* n : {STR("CM_Leg_L"), STR("CM_Leg_R"), STR("CM_Cuirass")})
