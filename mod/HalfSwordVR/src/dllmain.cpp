@@ -3290,7 +3290,21 @@ namespace
                 Vec3 ap = actor_location(g_pose.pawn);
                 double floor_z = ap.z - 90.0 * component_scale_z(object_property(g_pose.pawn, STR("Mesh")));
                 Vec3 flat = body.rotate(Vec3{g_arm_floor[0], g_arm_floor[1], 0.0});
-                grip = Vec3{ap.x + flat.x, ap.y + flat.y, floor_z + g_arm_floor[2]};
+                Vec3 target{ap.x + flat.x, ap.y + flat.y, floor_z + g_arm_floor[2]};
+                // At a reach's pace (120 cm/s) from the made-up path's spot, as arm_to_item: floor_pickup puts the lantern
+                // down with this, and a one-frame jump to the floor would swing it at slap speed.
+                static Vec3 eased14{};
+                static double eased14_at = -10.0;
+                if (now - eased14_at > 0.5) eased14 = grip;
+                else
+                {
+                    double step = (std::min)(0.1, now - eased14_at) * 120.0;
+                    Vec3 to = target - eased14;
+                    double dl = length(to);
+                    eased14 = dl <= step ? target : eased14 + to * (step / dl);
+                }
+                eased14_at = now;
+                grip = eased14;
             }
             if (mode == 13 && side == 1 && g_pose.pawn && !g_park_socket.empty())
             {
