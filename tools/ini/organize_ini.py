@@ -430,7 +430,7 @@ LAYOUT = [
         ('pose_hold_joint_fade_after_s', "Engine-joint hold: no ease to B&S's cap this soon after a joint is made (s)."),
         ('pose_hold_joint_slerp', 'Engine-joint hold: 1 = turns the weapon with one SLERP drive (handles flips and end-for-end grabs); 0 = twist and swing drives.'),
         ('pose_hold_joint_mod_turn', "Engine-joint hold, one hand: 1 = the weapon turns as with the old hold (wrist strength and wrist stop), the joint only holds the grip in your hand; 0 = the joint turns it too (weak on weapons with lopsided inertia, e.g. polehammers)."),
-        ('pose_hold_joint_pull_once', 'Engine-joint hold, one hand: 1 = only the joint pulls the grip to your hand and the mod sets just the turn; 0 = the turn the mod sets also carries the pull, so it acts twice a tick (could spin a mace up in a still hand).'),
+        ('pose_hold_joint_pull_once', 'Engine-joint hold, one hand and B&S two hands: 1 = only the joint(s) pull the grip to your hand and the mod sets just the turn; 0 = the turn the mod sets also carries the pull, so it acts twice a tick (could spin a mace up in a still hand).'),
         ('pose_hold_joint_target_max_speed', 'Engine-joint hold: when your hand jumps (tracking, a snap turn), the weapon follows it no faster than this (cm/s) and catches up; 0 = off.'),
         ('pose_hold_joint_draw_wound', 'Engine-joint hold: 1 = drawing, sheathing and a blade stuck in a body stay on the joint (sent where the scabbard or wound rule puts it); 0 = the old hold for those.'),
         ('pose_hold_joint_turn_by_grip', "Engine-joint hold, one hand: the weapon's turn is no stronger than your hand's pull can keep the grip in place against (1 = long weapons aren't swung out of your hand on a grab)."),

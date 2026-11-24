@@ -560,7 +560,7 @@ namespace hsvr
         double pose_hold_joint_fade_after_s = 0.0;  // s: no ease to B&S's cap this soon after a joint is made (was 0.3 before the grab's speed was zeroed)
         bool pose_hold_joint_slerp = true; // 1 = the joint turns the weapon by one SLERP drive (0 = twist and swing drives)
         bool pose_hold_joint_mod_turn = true; // one hand: 1 = the old hold's turn (spin set each tick), the joint only pulls; 0 = the joint's turn drive
-        // One hand on the joint with the mod's turn: the joint alone pulls the grip; the spin the mod sets is the turn only. 0 = the
+        // One hand (and B&S two hands) on the joint with the mod's turn: the joint(s) alone pull; the spin the mod sets is the turn only. 0 = the
         // spin set also carries the pull's lever (as before 2026-11-24), so the pull acted twice a tick (mace spin 2026-11-23 17:01).
         bool pose_hold_joint_pull_once = true;
         double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)

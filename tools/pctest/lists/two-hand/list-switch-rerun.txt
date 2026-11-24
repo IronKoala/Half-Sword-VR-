@@ -1,0 +1,4 @@
+switch_axe2h|steps-switch_axe2h.txt
+switch2_axe2h|steps-switch_axe2h.txt
+switch2_polehammer|steps-switch_polehammer.txt
+switch_longsword|steps-switch_longsword.txt

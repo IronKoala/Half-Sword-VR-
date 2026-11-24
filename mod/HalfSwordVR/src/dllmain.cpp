@@ -18466,8 +18466,11 @@ namespace
                     bool own = cfg.pose_two_hand_bs_solve_pulls;
                     Vec3 gravity{0.0, 0.0, g_weapon_gravity.load() == 0 ? 0.0 : -980.0};
                     Vec3 vb = own ? ev + gravity * DTb : ev, wb = ew, ang;
-                    bs_solve(mass, about_com.inverse(), vb, wb, pts, 2, err_rot, tang, cfg.pose_two_hand_bs_rot_k * stb * 1e4, cfg.pose_two_hand_bs_rot_c * stb * 1e4, tmax,
-                             DTb, (std::max)(1, cfg.pose_bs_iterations), ang);
+                    // (pose_hold_joint_pull_once, as one hand: with the joints pulling, the spin set is the turn only; their pulls' leverage
+                    // comes from the physics step once, not also from this set. Three of his runaway spins (2026-11-23 markers 4/5, 9/10, 11)
+                    // came 0.8-1.1 s after a switch between one and two hands.)
+                    bs_solve(mass, about_com.inverse(), vb, wb, pts, (!own && cfg.pose_hold_joint_pull_once) ? 0 : 2, err_rot, tang,
+                             cfg.pose_two_hand_bs_rot_k * stb * 1e4, cfg.pose_two_hand_bs_rot_c * stb * 1e4, tmax, DTb, (std::max)(1, cfg.pose_bs_iterations), ang);
                     w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
                     if (own) bs_v = clamp_length(vb - gravity * DTb, 2000.0), have_bs_v = true;
                     h.torque_nm = length(ang) / DTb / 1e4;
