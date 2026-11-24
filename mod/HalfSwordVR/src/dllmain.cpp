@@ -4424,6 +4424,24 @@ namespace
             g_crouch_drop = (std::min)(crouch_cap, (std::max)(0.0, crouch_want + m.z));
         }
         if (g_crouch_drop > 10.0) crouch_push_log(pawn, mesh);
+        {
+            // pose_capsule_no_push: the engine's character physics interaction off (touch impulses and repulsion on loose
+            // things by the capsule); the game's own push factors are already 0. Set once per pawn, and back when switched off.
+            static UObject* set_for = nullptr;
+            static bool set_to = true;
+            bool want = !cfg.pose_capsule_no_push;
+            if (set_for != pawn || set_to != want)
+                if (UObject* movement = object_property(pawn, STR("CharacterMovement")))
+                {
+                    bool was = bool_property(movement, STR("bEnablePhysicsInteraction"));
+                    if (set_bool_property(movement, STR("bEnablePhysicsInteraction"), want))
+                        HSVR_LOG("Capsule: physics interaction with loose things %s (was %s)", want ? "on" : "off", was ? "on" : "off");
+                    else
+                        HSVR_LOG("Capsule: no bEnablePhysicsInteraction on %ls", movement->GetName().c_str());
+                    set_for = pawn;
+                    set_to = want;
+                }
+        }
         place.z -= g_crouch_drop;
         // Moved, not teleported: a teleport snaps his kinematic physics bodies (the hand holding a
         // weapon) to the new spot with no velocity in the first physics substep, and the held weapon
@@ -7407,6 +7425,7 @@ namespace
     // (the game's direct grab, which has no special handling); a body is left.
     // Crouched (Matthew 2026-11-19: "it kicks stuff around"): every 0.25 s, the loose things and bodies
     // near his legs that are moving, how fast, and how near his nearest leg bone is. Logging only.
+    std::atomic<double> g_kick_speed{0.0}; // m/s: the fastest loose weapon seen moving near his legs while crouched since hsvr.mark
     void crouch_push_log(UObject* pawn, UObject* mesh)
     {
         using namespace hsvr;
@@ -7473,6 +7492,8 @@ namespace
             lv.run();
             double speed = length(lv.vec()) / 100.0;
             if (speed < 0.5) continue;
+            // A loose weapon (not his, not in a sheath or slot) moving near his legs: the worst since hsvr.mark (expect kick_speed).
+            if (is_a(owner, STR("ModularWeaponBP_C")) && !bool_property(owner, STR("Is Sheathed")) && speed > g_kick_speed.load()) g_kick_speed.store(speed);
             int near_i = -1;
             double near_d = 1e9;
             for (int i = 0; i < 6; ++i)
@@ -29310,6 +29331,7 @@ namespace
             g_fake_thumb[i].store(-1.0f);
             g_worst_lag[i].store(0.0);
         }
+        g_kick_speed.store(0.0);
         g_carry_log_until.store(0.0);
         g_count_letgo.store(0);
         g_count_neck_snaps.store(0);
@@ -29570,6 +29592,7 @@ namespace
         else if (w == "punches_counted") value = g_count_punches_counted.load(); // of them, ones that took consciousness or health
         else if (w == "lag_r") value = g_worst_lag[1].load();
         else if (w == "lag_l") value = g_worst_lag[0].load();
+        else if (w == "kick_speed") value = g_kick_speed.load(); // m/s, fastest loose weapon near his legs while crouched since hsvr.mark
         else if (w == "stamina") value = read_number_variable(pawn, STR("Stamina"));
         else if (w == "strength_r") value = g_hold[1].body_strength;
         else if (w == "strength_l") value = g_hold[0].body_strength;
@@ -30109,6 +30132,7 @@ namespace
                 g_count_sheathe_back.store(0);
                 g_count_sheathe_seated.store(0);
                 g_worst_lag[0].store(0.0);
+                g_kick_speed.store(0.0);
                 g_worst_lag[1].store(0.0);
                 HSVR_LOG("Script: hsvr.mark: test counters cleared");
                 continue;

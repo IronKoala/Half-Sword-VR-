@@ -317,6 +317,11 @@ namespace hsvr
         // 1 = while posed, your character's capsule only moves when you walk: the game's own pull
         // toward the body (and hit stumbles, dodges and leans) is undone after each of his ticks.
         bool pose_hold_capsule = true;
+        // 1 = his capsule never shoves loose things: the engine's character physics interaction (a touch impulse of his
+        // speed x the item's mass, unclamped since the game's MaxTouchForce is 0, and the per-tick repulsion of what overlaps
+        // the capsule) is off. Playtest 2026-11-23 17:23 local: crouched with his legs still, a lantern by his capsule
+        // flew off at 6.7 m/s while the game dragged the capsule 48 cm a tick toward his hips.
+        bool pose_capsule_no_push = true;
         // 1 = his body faces where you face: it follows your headset once you look more than
         // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
         // turns you as well.

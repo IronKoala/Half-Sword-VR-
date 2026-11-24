@@ -12,7 +12,6 @@ lantern_hold_damp1|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Ar
 lantern_hold_damp5|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_hanging_damping=5;pose_hold_count_hanging=1
 lantern_hold_still|steps-lantern_hold_still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_count_hanging=1
 floor_pickup|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
-floor_pickup_instant|steps-floor_pickup_instant.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
 floor_pickup_62|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62
 lantern_light|steps-lantern_light.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_count_hanging=1
 lantern_hold_noturn|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hold_max_torque=1;pose_hold_wrist_stop_torque=1;pose_hold_count_hanging=1
@@ -28,3 +27,9 @@ look_down_stance|steps-look_down_stance.txt|test_room_map=/Game/Maps/Arenas/Map_
 look_down_stance_old|steps-look_down_stance_old.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;dev_pose_fake_tracking=0;pose_crouch_at_neck_base=0
 crouch_walk|steps-crouch_walk.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
 crouch_walk_old|steps-crouch_walk.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_step_crouch_scale=1
+floor_kick|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_kick_62|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62
+floor_kick_fast|steps-floor_kick_fast.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_kick_fast_62|steps-floor_kick_fast.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62
+floor_kick_instant|steps-floor_kick_instant.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_kick_62_old|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62;pose_capsule_no_push=0

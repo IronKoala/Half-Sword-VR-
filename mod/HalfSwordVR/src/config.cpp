@@ -445,6 +445,7 @@ namespace hsvr
         flag("pose_arms", c.pose_arms);
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);
+        flag("pose_capsule_no_push", c.pose_capsule_no_push);
         flag("pose_body_turn", c.pose_body_turn);
         flag("pose_mouse_off_with_controllers", c.pose_mouse_off_with_controllers);
         text("input_mode", c.input_mode);

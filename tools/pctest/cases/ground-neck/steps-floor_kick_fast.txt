@@ -1,0 +1,29 @@
+# As floor_kick, crouching at 250 cm/s (his fastest, 17:23: 213 cm/s for a frame, 153 over 0.1 s).
+# Playtest 2026-11-23 17:23 local: crouched, his legs still, a lantern by him flew off at 6.7 m/s while the game dragged his
+# capsule 48 cm a tick toward his hips. Matthew 2026-11-24: "I dont want willies feet kicking stuff around".
+# A lantern dropped at his feet, left to settle; he crouches (95 cm: legs to the cap, the rest a bend); nothing he does may
+# set it moving (kick_speed: the fastest loose weapon near his legs, m/s); then he picks it up.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.8:hsvr.player_immortal
+1.0:hsvr.squeeze 0 1
+1.0:hsvr.squeeze 1 1
+1.4:hsvr.squeeze 0 0
+1.4:hsvr.squeeze 1 0
+1.9:hsvr.expect held_r = 0 right hand empty (the test room starts him with a crossbow)
+2.0:hsvr.arm_move 1
+2.2:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
+2.4:hsvr.wait held_r = 1 3 0 the lantern is in the right hand
+3.0:hsvr.squeeze 1 1
+3.3:hsvr.squeeze 1 0
+3.6:hsvr.expect held_r = 0 dropped
+6.0:hsvr.mark
+6.05:hsvr.fake_head_speed 250
+6.1:hsvr.fake_head_drop 95
+9.0:hsvr.expect kick_speed < 0.5 crouching, he sets nothing on the floor moving
+9.1:hsvr.arm_to_item 3 Lantern
+11.5:hsvr.squeeze 1 1
+11.6:hsvr.wait held_r = 1 2 0 he picks it up off the floor
+13.8:hsvr.expect held_r = 1 and keeps it
+13.8:hsvr.expect scenery_r = 0 not the floor
+13.9:hsvr.squeeze 1 0
+14.0:hsvr.fake_head_drop -1
