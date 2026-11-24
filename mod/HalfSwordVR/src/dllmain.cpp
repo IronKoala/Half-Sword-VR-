@@ -31682,6 +31682,40 @@ namespace
         double now = now_seconds();
 
         bool x = (cfg.jump_on_x && live && state.hand[0].primary) || g_fake_x.load();
+        // The bug marker (Frame left D-pad Left, held replay_hold_s) also clicks D-pad Down under the same
+        // thumb: in his 2026-11-23 17:00 playtest every one of his 6 jumps started 0.02-0.10 s after a marker
+        // press began (6 of his 17 markers), the jump's wind-up crouching his body and lifting his feet while he
+        // spoke a note ("trying to vomit or something"). So the press waits jump_marker_guard_s; one that
+        // comes with the marker (or within that time of it) is no jump until the button is let go.
+        static double x_wait = -1.0, marker_at = -1e9;
+        static bool x_spent = false;
+        const bool marker = live && state.hand[0].marker;
+        if (marker) marker_at = now;
+        if (!x)
+        {
+            x_wait = -1.0;
+            x_spent = false;
+        }
+        else if (!x_down && !x_spent)
+        {
+            if (x_wait < 0.0) x_wait = now;
+            if (marker || now - marker_at < cfg.jump_marker_guard_s)
+            {
+                x_spent = true;
+                HSVR_LOG("Jump: left D-pad Down came with the bug marker (D-pad Left): no jump");
+            }
+            else if (now - x_wait < cfg.jump_marker_guard_s && !g_fake_x.load())
+                x = false; // not yet
+        }
+        if (x_spent) x = false;
+        if (x_down && marker)
+        {
+            // The marker after the jump began: the charge is dropped, no jump on the release.
+            set_variable(pawn, STR("Jump Rate"), 0.0);
+            x = false;
+            x_spent = true;
+            HSVR_LOG("Jump: the bug marker came during the jump's hold: the jump is dropped");
+        }
         if (x && !x_down)
         {
             x_down = true;

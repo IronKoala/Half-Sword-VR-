@@ -639,6 +639,7 @@ LAYOUT = [
         ('log_frames', '1 = record every tick to logs\\frames-<time>.csv (headset, controllers, hands, held items).'),
         ('replay_capture', '1 = bug marker: hold left D-pad Left (Steam Frame; left Y on Touch, left B on Index) to save the last seconds of play to replays\\replay-<time>.csv; three strong pulses on both controllers say it is recording.'),
         ('replay_hold_s', 'How long to hold the bug-marker button (seconds). On Touch/Index it is left Y/B, whose shorter tap flips the grip.'),
+        ('jump_marker_guard_s', 'Steam Frame: a jump press (left D-pad Down) waits this long (seconds) and is dropped when the bug marker (D-pad Left) comes with it, since one thumb clicks both. 0 = no wait (a press that comes with the marker is still dropped).'),
         ('replay_before_s', 'Seconds before the press that the bug marker saves.'),
         ('replay_after_s', 'Seconds after the press that the bug marker keeps recording.'),
         ('log_input', '1 = log input: keyboard focus, Esc and menu clicks, sticks, turn speed.'),

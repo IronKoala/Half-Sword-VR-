@@ -148,6 +148,9 @@ namespace hsvr
         // The press plays three strong pulses on both controllers (no other buzz in the mod repeats).
         bool replay_capture = true;
         double replay_hold_s = 0.8;
+        // A jump press (Frame left D-pad Down) waits this long and is dropped when the bug marker (D-pad Left)
+        // comes with it: the same thumb clicks both (playtest 2026-11-23: 6 of 17 markers jumped).
+        double jump_marker_guard_s = 0.15;
         double replay_before_s = 10.0;
         double replay_after_s = 5.0;
         // Write "Input:" lines to the log: which window has the keyboard, Esc and menu clicks,

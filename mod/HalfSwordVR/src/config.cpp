@@ -618,6 +618,7 @@ namespace hsvr
         flag("log_frames", c.log_frames);
         flag("replay_capture", c.replay_capture);
         num("replay_hold_s", c.replay_hold_s);
+        num("jump_marker_guard_s", c.jump_marker_guard_s);
         num("replay_before_s", c.replay_before_s);
         num("replay_after_s", c.replay_after_s);
         flag("pose_keep_scabbard_on_drop", c.pose_keep_scabbard_on_drop);
