@@ -2329,6 +2329,16 @@ namespace
     bool hand_has_weapon(int side); // the game's hold has a weapon in this hand (his fist doesn't count)
     UObject* held_weapon_of(int side);
     double item_gap(UObject* item, UObject* comp, FName bone, hsvr::Vec3 p);
+    struct ReleaseLinger
+    {
+        UObject* weapon = nullptr;
+        double t = -1.0;
+    };
+    ReleaseLinger g_release_linger[2];
+    void clear_arm_ignore(int side);
+    UObject* arm_ignore_weapon(int side);
+    bool is_second_hand(int side);
+    hsvr::Vec3 hand_grab_point(UObject* mesh, int side);
     hsvr::Vec3 g_free_palm_unstopped[2]; // the free hand's palm middle where you put it, before the stops on a held weapon (for taking it)
     bool g_free_palm_valid[2] = {false, false};
     hsvr::Vec3 g_free_rest_off[2]; // the free hand's drawn place moved off a weapon the other hand holds, from his real hand body (pose_hand_held_weapon_body_gap_cm)
@@ -3462,6 +3472,31 @@ namespace
                     stopped = true;
                     HSVR_LOG_EVERY(1.0, "Hand: %s free hand rests on %ls (held by the other hand): moved %.1f cm out of it", side == 0 ? "left" : "right",
                                    hw->GetName().c_str(), length(push));
+                }
+            }
+        }
+        // A hand that just let go of a weapon the other hand holds passes through it until clear (end_two_hand, B&S).
+        if (g_release_linger[side].weapon)
+        {
+            ReleaseLinger& L = g_release_linger[side];
+            UObject* fm = g_pose.pawn ? object_property(g_pose.pawn, STR("Mesh")) : nullptr;
+            bool gone = arm_ignore_weapon(side) != L.weapon || !object_alive(L.weapon) || !hand_has_weapon(1 - side) || held_weapon_of(1 - side) != L.weapon;
+            if (!gone && is_second_hand(side)) L = ReleaseLinger{}; // took it again: its hold's own ignore stays
+            else if (gone)
+            {
+                bool mine = arm_ignore_weapon(side) == L.weapon && !hand_has_weapon(side);
+                L = ReleaseLinger{};
+                if (mine) clear_arm_ignore(side);
+            }
+            else if (fm && now_seconds() - L.t >= cfg.pose_hold_release_ignore_s)
+            {
+                Vec3 gp = hand_grab_point(fm, side);
+                double d = closest_on_weapon(L.weapon, gp, nullptr, nullptr);
+                if (d < 0.0 || d >= cfg.pose_hold_release_clear_cm)
+                {
+                    HSVR_LOG("Two hands: %s hand is %.0f cm clear of %ls %.2f s after letting go: solid against it again", side == 0 ? "left" : "right", d,
+                             L.weapon->GetName().c_str(), now_seconds() - L.t);
+                    clear_arm_ignore(side);
                 }
             }
         }
@@ -5634,6 +5669,7 @@ namespace
         std::vector<UObject*> cm_joints; // that dropped item's no-collide pairs with his CM_* armour proxies
     };
     ArmIgnore g_arm_ignore[2];
+    UObject* arm_ignore_weapon(int side) { return g_arm_ignore[side].weapon; }
     std::atomic<int> g_grip_ignore_arm{1};
     // hsvr.weapon_channel <channel> <response>: sets the held weapon's response to one collision
     // channel (0 ignore, 1 overlap, 2 block). Changing responses only updates the physics filter,
@@ -5765,6 +5801,7 @@ namespace
 
     void clear_arm_ignore(int side)
     {
+        g_release_linger[side] = ReleaseLinger{};
         for (UObject* j : g_arm_ignore[side].joints)
         {
             Call d(j, STR("K2_DestroyComponent"));
@@ -7901,6 +7938,7 @@ namespace
     }
     double g_pending_slide[2] = {1e9, 1e9}; // a hand-over: where the new hand holds, applied when its hold starts
 
+    bool is_second_hand(int side) { return g_two.active && g_two.second == side; }
     void end_two_hand(const char* why)
     {
         if (!g_two.active) return;
@@ -7912,7 +7950,20 @@ namespace
                      ok ? "" : ": NOT SET", read_number_variable(g_pose.pawn, grip_type_name(g_two.main)));
         }
         HSVR_LOG("Two hands: %s hand lets go of %ls (%s)", g_two.second == 0 ? "left" : "right", g_two.weapon ? g_two.weapon->GetName().c_str() : STR("?"), why);
-        if (g_two.weapon && g_arm_ignore[g_two.second].weapon == g_two.weapon) clear_arm_ignore(g_two.second);
+        if (g_two.weapon && g_arm_ignore[g_two.second].weapon == g_two.weapon)
+        {
+            // B&S (RagdollHand.HandOverlapCoroutine, RagdollHand.cs:1502-1548): a hand that lets go keeps ignoring the item until
+            // collisionUngrabMinDelay 0.25 s has passed AND a collisionUngrabRadius 0.13 m sphere at its grip is clear. With the free
+            // hand solid, letting go inside the haft kicked it (5e085fa switch2_warstaff: 559 deg/s, then dropped).
+            if (hsvr::config().pose_hold_release_ignore_s > 0.0 && g_hold[g_two.main].weapon == g_two.weapon)
+            {
+                g_release_linger[g_two.second] = {g_two.weapon, hsvr::now_seconds()};
+                HSVR_LOG("Two hands: %s hand keeps passing through %ls until it is %.0f cm clear (at least %.2f s)", g_two.second == 0 ? "left" : "right",
+                         g_two.weapon->GetName().c_str(), hsvr::config().pose_hold_release_clear_cm, hsvr::config().pose_hold_release_ignore_s);
+            }
+            else
+                clear_arm_ignore(g_two.second);
+        }
         g_two = TwoHand{};
         g_anim_grip_two_side = -1;
     }

@@ -431,6 +431,8 @@ LAYOUT = [
         ('pose_hold_joint_turn_couple', 'Engine-joint hold: 1 = the turn the mod sets is a pure twist (the weapon keeps its centre speed) and the joint holds the grip; 0 = the grip keeps its speed instead (could throw a spinning weapon and spin it up again).'),
         ('pose_hold_free_hand_collides', 'A weapon held in one hand bumps against your free hand (as in Blade and Sorcery); 0 = it passes through your free arm.'),
         ('pose_hold_free_arm_collides', 'With your free hand solid against a weapon your other hand holds: 1 = that whole arm is solid (as Blade and Sorcery Player Self Collision), 0 = only the hand; the forearm and upper arm pass through.'),
+        ('pose_hold_release_ignore_s', 'A hand that lets go of a weapon your other hand still holds passes through it for at least this long (s), as in Blade and Sorcery. 0 = solid at once.'),
+        ('pose_hold_release_clear_cm', '...and until it is this far (cm) from the weapon (Blade and Sorcery 13).'),
         ('pose_hold_joint_target_max_speed', 'Engine-joint hold: when your hand jumps (tracking, a snap turn), the weapon follows it no faster than this (cm/s) and catches up; 0 = off.'),
         ('pose_hold_joint_draw_wound', 'Engine-joint hold: 1 = drawing, sheathing and a blade stuck in a body stay on the joint (sent where the scabbard or wound rule puts it); 0 = the old hold for those.'),
         ('pose_hold_joint_turn_by_grip', "Engine-joint hold, one hand: the weapon's turn is no stronger than your hand's pull can keep the grip in place against (1 = long weapons aren't swung out of your hand on a grab)."),
