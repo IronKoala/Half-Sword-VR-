@@ -8021,6 +8021,13 @@ namespace
                 {
                     auto& js = it->second.joints;
                     js.erase(std::remove_if(js.begin(), js.end(), [](UObject* o) { return gone(o); }), js.end());
+                    // Every other pointer the guard keeps (its parts, their saved responses, his capsule) is read again in
+                    // leg_guard_drop, where gone() no longer knows them.
+                    auto& rs = it->second.responses;
+                    rs.erase(std::remove_if(rs.begin(), rs.end(), [](const std::pair<UObject*, int>& p) { return gone(p.first); }), rs.end());
+                    erase_gone(it->second.parts);
+                    erase_gone(it->second.gear);
+                    if (gone(it->second.capsule)) it->second.capsule = nullptr;
                     ++it;
                 }
             }
@@ -9865,11 +9872,16 @@ namespace
     {
         out.clear();
         refresh_weapon_parts(pawn);
+        // Made again after every garbage collection too: gone() is only true inside gc_sync, so a weapon freed since the
+        // list was made stayed in it until the next 0.25 s rebuild, and the leg guard read the freed actor (6 crashes in
+        // Matthew's 11-24 playtest, all leg_guard_tick -> object_property / component_location right after a "GC:" line).
         static double built = -10.0;
+        static uint64_t built_epoch = 0;
         static std::vector<UObject*> cache;
-        if (built != g_weapon_parts_time)
+        if (built != g_weapon_parts_time || built_epoch != g_gc_epoch)
         {
             built = g_weapon_parts_time;
+            built_epoch = g_gc_epoch;
             cache.clear();
             for (auto& [owner, parts] : g_weapon_parts)
                 if (owner && !gone(owner) && is_a(owner, STR("ModularWeaponBP_C"))) cache.push_back(owner);
