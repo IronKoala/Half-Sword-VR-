@@ -918,6 +918,8 @@ namespace hsvr
         num("hit_buzz_min_intensity", c.hit_buzz_min_intensity);
         num("hit_buzz_limb_min_ms", c.hit_buzz_limb_min_ms);
         num("whoosh_vr_threshold_scale", c.whoosh_vr_threshold_scale);
+        flag("whoosh_strike_gate", c.whoosh_strike_gate);
+        num("whoosh_strike_speed_ratio", c.whoosh_strike_speed_ratio);
         num("whoosh_walk_speed_scale", c.whoosh_walk_speed_scale);
         flag("whoosh_log", c.whoosh_log);
         num("whoosh_log_min_speed", c.whoosh_log_min_speed);
