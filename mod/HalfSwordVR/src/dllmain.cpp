@@ -5826,7 +5826,11 @@ namespace
             bool free_ignored = one_hand && (!ac.pose_hold_free_hand_collides || class_name_starts(weapon, STR("Shield")));
             if (ac.pose_hold_ignore_body && ac.pose_hold_self_collision)
             {
-                if (!in_arm(mesh, bone, side) && !(free_ignored && in_arm(mesh, bone, 1 - side))) continue;
+                // pose_hold_free_arm_collides=0: of the free arm only the hand stays solid; its forearm and upper arm pass through
+                // (796b650 park_axe2h: the axe was pushed 15-20 cm off the hand and held there against his free arm at 446-504 deg/s).
+                bool free_hand_bone = bone.ToString() == (side == 0 ? STR("hand_r") : STR("hand_l"));
+                bool free_arm_ignored = one_hand && !ac.pose_hold_free_arm_collides && !free_hand_bone;
+                if (!in_arm(mesh, bone, side) && !((free_ignored || free_arm_ignored) && in_arm(mesh, bone, 1 - side))) continue;
             }
             else if (whole)
             {

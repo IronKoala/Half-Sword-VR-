@@ -577,6 +577,8 @@ namespace hsvr
         // turn-by-grip limit. On, it overrides those settings when the ini is read. 0 = our hold as tuned.
         bool pose_hold_bs_pure = false;
         bool pose_hold_free_hand_collides = true; // (Matthew 2026-11-24 04:12Z chose solid, like B&S, with the rest stop pose_hand_held_weapon_stop_cm: parked axe 34 deg/s, 244-481 without the stop)
+        // With the free hand solid (above): its forearm and upper arm too (1, B&S Player Self Collision), or only the hand (0).
+        bool pose_hold_free_arm_collides = true;
         double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)
         bool pose_hold_joint_draw_wound = true; // drawing/sheathing and a blade in a wound stay on the joint (sent where the old rules put it)
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
