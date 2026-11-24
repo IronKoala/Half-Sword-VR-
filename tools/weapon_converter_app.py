@@ -662,7 +662,9 @@ class App:
             names.add(name.lower())
             item = {"path": f, "name": name, "raw": None, "length_cm": None, "mass_kg": None,
                     "type": TYPES[0][0], "flip": False, "slide": False, "spots": {}, "splits": None, "part_len": {},
-                    "title": base.replace("_", " ").strip() or "Weapon", "stats": {}, "free_play": True, "progression": False, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
+                    "title": base.replace("_", " ").strip() or "Weapon",
+                    # Reduce detail ticked before a model is added (or on the model shown) carries to new models.
+                    "stats": {"reduce": True} if self.reduce_var.get() else {}, "free_play": True, "progression": False, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
                     "result": None, "result_inputs": None, "views": None, "status": "reading the model...",
                     "iid": f"item{id(f)}_{len(self.items)}"}
             self.items.append(item)
@@ -1582,6 +1584,10 @@ class App:
         elif hafted:
             parts = (f"haft {L(-zn['handle_bottom'])}, head {L(zn['tip'])}"
                      + (f", butt cap {L(zn['handle_bottom'] - zn['pommel_end'])}" if zn['handle_bottom'] > zn['pommel_end'] + 0.5 else ""))
+        elif self.cur is not None and self.cur.get("pending_b"):  # lines moved since the Preview
+            pl = self.shown_part_lengths(self.cur)
+            parts = (f"pommel {L(pl['pommel'])}, grip {L(pl['grip'])}, guard {L(pl['guard'], 1)}, "
+                     f"blade {L(pl['blade'])} (press Preview to see them)")
         else:
             parts = (f"pommel {L(zn['handle_bottom'] - zn['pommel_end'])}, grip {L(-zn['handle_bottom'])}, "
                      f"guard {L(zn['guard_top'], 1)}, blade {L(zn['tip'] - zn['guard_top'])}")
