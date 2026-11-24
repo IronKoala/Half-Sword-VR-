@@ -587,7 +587,19 @@ namespace hsvr
         // its speed (before 2026-11-24), which could turn braking a spin into a throw the joint then turned back into spin.
         bool pose_hold_joint_turn_couple = true;
         // A weapon held in one hand collides with the free hand (B&S: the free hand stays solid). 0 = the free arm is ignored too.
-        bool pose_hold_free_hand_collides = true;
+        // One hand held exactly as Blade & Sorcery holds it (bs_vs_hsvr_hold.md, docs/bs-melee-reference.md; Matthew 2026-11-24
+        // 03:56Z: "getting the weapons to handle and physicaly behave like blade and sorcery"): B&S's fixed spring 5000 N/m, 100,
+        // 3000 N and turn 1100 N m/rad, 45, 250 N m (caps still x his strength), with none of our layers: no arm lag or heft lag,
+        // no shoulder cap, no weight carried outside the cap, no smoothing of the hand's speed, no wrist stop, spin brake or
+        // turn-by-grip limit. On, it overrides those settings when the ini is read. 0 = our hold as tuned.
+        bool pose_hold_bs_pure = false;
+        bool pose_hold_free_hand_collides = true; // (Matthew 2026-11-24 04:12Z chose solid, like B&S, with the rest stop pose_hand_held_weapon_stop_cm: parked axe 34 deg/s, 244-481 without the stop)
+        // With the free hand solid (above): its forearm and upper arm too (1, B&S Player Self Collision), or only the hand (0).
+        bool pose_hold_free_arm_collides = true;
+        // B&S: a hand that lets go of a weapon the other hand still holds passes through it for at least this long (s) and until its grip
+        // point is this far (cm) from it (RagdollHand.cs:1502-1548: 0.25 s, 0.13 m). 0 = solid again at once.
+        double pose_hold_release_ignore_s = 0.25;
+        double pose_hold_release_clear_cm = 13.0;
         double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)
         bool pose_hold_joint_draw_wound = true; // drawing/sheathing and a blade in a wound stay on the joint (sent where the old rules put it)
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
@@ -602,7 +614,8 @@ namespace hsvr
         double pose_two_hand_bs_pos_k = 10000.0, pose_two_hand_bs_pos_c = 150.0, pose_two_hand_bs_pos_max = 6000.0; // each hand's pull: N/m, N s/m, N
         double pose_two_hand_bs_rot_k = 2200.0, pose_two_hand_bs_rot_c = 90.0, pose_two_hand_bs_rot_max = 500.0;    // the main hand's turn: N m/rad, N m s/rad, N m
         bool pose_two_hand_bs_solve_pulls = false; // (off: run 6cec1f5 no better on the waggle, and lost the war staff once) the mod's solve does both hands' pulls (the joints pull nothing)
-        bool pose_two_hand_bs_front_turns = true; // B&S two hands: the hand further up the weapon turns it (AutoFront), not always the first
+        bool pose_two_hand_bs_front_turns = true;
+        double pose_two_hand_bs_opposite_scale = 0.1; // B&S two hands whose grips face opposite ways along the handle: the turn x this (Handle.cs:1778). 1 = off // B&S two hands: the hand further up the weapon turns it (AutoFront), not always the first
         double pose_two_hand_auto_slide_cm = 0.0; // (off: Matthew 2026-11-24 00:08Z "do it just like Blade and Sorcery", trigger-only slide) B&S two hands on a haft: a hand this far from its spot along the shaft follows your hand without the trigger (0 = off)
         bool pose_two_hand_joint_both_turn = true; // joint hold, both hands on fixed grips: both wrists turn it (rerun 388ca67: 60 deg pitch followed, 2.5-3.3 cm / 5-6 deg off; off: 27-37 deg, creeps back)
         bool pose_two_hand_fixed_rebase = true; // fixed grips, both wrists: the second hand's turn and spot taken from the first hand at the grab
@@ -940,6 +953,7 @@ namespace hsvr
         bool pose_fist_slap = true;
         double pose_fist_slap_ass = 30.0;
         double pose_fist_slap_keep_s = 0.3;
+        double pose_fist_slap_own_weapon_cm = 20.0; // no slap fist while the open hand is this close (cm) to a weapon his other hand holds (0 = off)
         // No fist while the hand is inside another Willie (playtest 2026-11-20 588 s: a fist made at his
         // neck as a throat grab let go threw his head and neck at 37-87 m/s). The fist waits until its
         // ball (radius measured from the live fist, 13 cm until then) plus margin_cm is clear of every
@@ -1028,6 +1042,11 @@ namespace hsvr
         bool pose_hand_world_stop = true;
         double pose_hand_world_radius_cm = 3.5;
         double pose_hand_world_reach_cm = 6.0;
+        // A free hand's drawn place stays this far (cm, from the palm's middle) outside a weapon the other hand holds. 0 = off.
+        double pose_hand_held_weapon_stop_cm = 4.0;
+        // ...and his real hand body kept at least this far (cm) off it, by moving its drawn place away, at most _body_max_cm (0 = off).
+        double pose_hand_held_weapon_body_gap_cm = 1.5;
+        double pose_hand_held_weapon_body_max_cm = 6.0;
         // 1 = an empty hand's arm is corrected after his body is evaluated, from this frame's shoulder
         // (the solve only has last frame's, so the hand bobbed with each step while walking).
         bool pose_arm_fresh_shoulder = true;

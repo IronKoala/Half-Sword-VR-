@@ -2345,6 +2345,7 @@ namespace
     std::atomic<bool> g_fake_look{true}; // test: hsvr.fake_look 0 = the made-up head stops looking about
     std::atomic<int> g_fake_arm_epoch{0}; // bumped by every hsvr.arm_move: timed test paths restart
     std::atomic<double> g_fake_two_up{20.0};
+    std::atomic<bool> g_fake_two_online{false}; // hsvr.arm_move 7 <cm> 1: the left hand onto the held weapon's own line (not the right controller's)
     // hsvr.arm_move 10 <speed cm/s> <pitch deg> <height cm>: the right hand thrusts (stab tests).
     std::atomic<double> g_fake_thrust_pitch{60.0};
     std::atomic<double> g_fake_thrust_up{-5.0};
@@ -2362,6 +2363,23 @@ namespace
     bool hand_rides_grab(int side);
     bool hand_on_scenery(int side); // the hand is pinned on fixed scenery (a world grab)
     bool hand_has_weapon(int side); // the game's hold has a weapon in this hand (his fist doesn't count)
+    UObject* held_weapon_of(int side);
+    double item_gap(UObject* item, UObject* comp, FName bone, hsvr::Vec3 p);
+    struct ReleaseLinger
+    {
+        UObject* weapon = nullptr;
+        double t = -1.0;
+    };
+    ReleaseLinger g_release_linger[2];
+    void clear_arm_ignore(int side);
+    UObject* arm_ignore_weapon(int side);
+    bool is_second_hand(int side);
+    hsvr::Vec3 hand_grab_point(UObject* mesh, int side);
+    hsvr::Vec3 g_free_palm_unstopped[2]; // the free hand's palm middle where you put it, before the stops on a held weapon (for taking it)
+    bool g_free_palm_valid[2] = {false, false};
+    hsvr::Vec3 g_free_rest_off[2]; // the free hand's drawn place moved off a weapon the other hand holds, from his real hand body (pose_hand_held_weapon_body_gap_cm)
+    hsvr::Vec3 g_thumb_world[2]; // each hand's thumb-ward line through the fist this frame (the grip's direction on a handle) // the weapon the mod's hold has in this hand (or null)
+    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part);
     bool hand_is_fist(int side);    // the game's hold has his fist in this hand
     bool g_wrap_on_side(int side);
     bool hand_world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, hsvr::Vec3& stop);
@@ -2385,6 +2403,16 @@ namespace
     std::atomic<double> g_two_wrist_sum{0.0}, g_two_lag_sum{0.0}; // sums since hsvr.two_reset: weapon off the main wrist (deg), main grip off its hand (cm)
     std::atomic<double> g_two_turn_sum{0.0}, g_two_hlag_sum{0.0}; // the main hold's turn_deg and lag (the replay's columns), summed
     std::atomic<int> g_two_mean_n{0};
+    // Test measure (hsvr.expect one_gap_r_* / one_turn_r_*, cleared by hsvr.two_reset): one hand's grip gap (cm) and turn off the hand (deg)
+    // each tick, binned by the hand's speed as B&S's logs are (bs_hold_measured.md: under 1, 1-3, over 3 m/s), for medians.
+    std::mutex g_one_bins_mu;
+    std::vector<double> g_one_gap[2][3], g_one_turn[2][3];
+    double one_bin_median(std::vector<double> v)
+    {
+        if (v.empty()) return -1.0;
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    }
     std::atomic<int> g_two_ticks{0}, g_two_revs{0}, g_two_revs_own{0}; // two-hand ticks since hsvr.two_reset, those where the weapon's spin reversed (jitter), and those not matched by his hands' own reversal
     std::atomic<double> g_two_spin_max{0.0}; // deg/s, the weapon's worst sustained spin (least of 3 ticks) since hsvr.two_reset (test measure)
     std::atomic<double> g_held_spin[2] = {0.0, 0.0};     // deg/s, each hand's held weapon's spin this tick (test measure)
@@ -3054,7 +3082,8 @@ namespace
                 {
                     Vec3 along{0, 0, 1};
                     UObject* held = g_pose.pawn ? object_property(g_pose.pawn, STR("Weapon R")) : nullptr;
-                    if (UObject* wb = held ? object_property(held, STR("BaseMesh")) : nullptr) along = body.inverse().rotate(component_rotation(wb).rotate(Vec3{0, 0, 1}));
+                    UObject* wb = held ? object_property(held, STR("BaseMesh")) : nullptr;
+                    if (wb) along = body.inverse().rotate(component_rotation(wb).rotate(Vec3{0, 0, 1}));
                     // Along where the weapon actually hangs, as a real hand reaches for the handle where it is. (456cfc5 used the right
                     // hold's target axis instead: the left hand then missed drooping long weapons by 12-29 cm and never took them,
                     // run 2 2026-11-23: polehammer, war staff, mace, crossbow.)
@@ -3064,6 +3093,7 @@ namespace
                     // (Kept from when the command came: kept from when two hands took hold, it was the axis
                     // of a staff already drooping in one hand, 2026-11-22 r2.)
                     static Vec3 kept_along{0, 0, 1};
+                    static Vec3 kept_line{0, 0, 0};
                     static int kept_epoch = -1;
                     static UObject* kept_for = nullptr;
                     if (kept_epoch != g_fake_arm_epoch.load() || kept_for != held)
@@ -3071,10 +3101,22 @@ namespace
                         kept_epoch = g_fake_arm_epoch.load();
                         kept_for = held;
                         kept_along = along;
+                        kept_line = Vec3{};
+                        // With the "onto the line" flag: from the weapon's own grip point and axis, not from the right controller
+                        // (a69b19e+3d47c22 switch_polehammer: after the cut the polehammer hung 11-29 cm off the line through the
+                        // right controller, and every retake missed). Taken once per command, kept in his body's frame as above.
+                        if (wb && g_fake_two_online.load())
+                        {
+                            Vec3 r = shoulder + body.rotate(local);
+                            Vec3 p0 = component_location(wb);
+                            Vec3 a = component_rotation(wb).rotate(Vec3{0, 0, 1});
+                            Vec3 on = p0 + a * dot(r - p0, a);
+                            kept_line = body.inverse().rotate(on - r);
+                        }
                     }
                     along = kept_along;
                     (void)&two_hands_hold;
-                    local = local + along * g_fake_two_up.load();
+                    local = local + kept_line + along * g_fake_two_up.load();
                     if (mode == 24) local = local + Vec3{0.0, 15.0 * std::sin(now * 3.14159265358979), 0.0};
                 }
             }
@@ -3476,6 +3518,7 @@ namespace
         double k = cfg.pose_knuckle_deg * 3.14159265358979323846 / 180.0;
         Vec3 fingers_world = hand_grip.rotate(Vec3{std::sin(k), 0.0, -std::cos(k)});
         Vec3 thumb_world = hand_grip.rotate(Vec3{std::cos(k), 0.0, std::sin(k)});
+        g_thumb_world[side] = thumb_world;
         Quat Wh = (quat_from_two(fingers_world, thumb_world) * quat_from_two(a.fingers_local, a.thumb_local).inverse()).normalized();
         g_pose.hand_rot[side] = Wh;
         g_pose.hand_valid[side] = true;
@@ -3505,6 +3548,109 @@ namespace
                 stopped = true;
                 HSVR_LOG_EVERY(1.0, "Hand: %s hand stopped by the world %.1f cm short of your controller", side == 0 ? "left" : "right", length(at - palm_mid));
             }
+        }
+        g_free_palm_unstopped[side] = target + fingers_world * cfg.pose_hand_world_reach_cm;
+        g_free_palm_valid[side] = !on_weapon && !hand_has_weapon(side);
+        // A free hand rests ON a weapon his other hand holds, not in it (pose_hand_held_weapon_stop): drawn into it, his arm's
+        // motors pressed the hand into the haft every step and the weapon wobbled at 450-540 deg/s (park cases 2026-11-24, axe;
+        // gone with the free arm not colliding). B&S's free hand is a light body on soft springs (5000 N/m, max 3000 N), which
+        // a held item pushes aside; his is the ragdoll's, far stiffer, so its drawn place stops at the weapon's surface instead.
+        if (cfg.pose_hand_held_weapon_stop_cm > 0.0 && !on_weapon && (g_solved_on[side] & ~1) == 0 && !hand_has_weapon(side) && hand_has_weapon(1 - side))
+        {
+            UObject* hw = held_weapon_of(1 - side);
+            Vec3 palm_mid = target + fingers_world * cfg.pose_hand_world_reach_cm;
+            Vec3 q;
+            double d = closest_on_weapon(hw, palm_mid, &q, nullptr);
+            double r = cfg.pose_hand_held_weapon_stop_cm;
+            if (d >= 0.0 && d < r)
+            {
+                Vec3 away = palm_mid - q;
+                if (d < 0.05)
+                {
+                    // Inside it: out from the weapon's long axis.
+                    UObject* hb = object_property(hw, STR("BaseMesh"));
+                    Vec3 ax = hb ? component_rotation(hb).rotate(Vec3{0, 0, 1}) : Vec3{0, 0, 1};
+                    Vec3 o = hb ? component_location(hb) : q;
+                    Vec3 rel = palm_mid - o;
+                    away = rel - ax * dot(rel, ax);
+                    double inside = length(away);
+                    if (inside < 1e-3) away = cross(ax, Vec3{0, 0, 1});
+                }
+                if (length(away) > 1e-6)
+                {
+                    Vec3 push = normalized(away) * (r - d);
+                    target = target + push;
+                    stopped = true;
+                    HSVR_LOG_EVERY(1.0, "Hand: %s free hand rests on %ls (held by the other hand): moved %.1f cm out of it", side == 0 ? "left" : "right",
+                                   hw->GetName().c_str(), length(push));
+                }
+            }
+        }
+        // A hand that just let go of a weapon the other hand holds passes through it until clear (end_two_hand, B&S).
+        if (g_release_linger[side].weapon)
+        {
+            ReleaseLinger& L = g_release_linger[side];
+            UObject* fm = g_pose.pawn ? object_property(g_pose.pawn, STR("Mesh")) : nullptr;
+            bool gone = arm_ignore_weapon(side) != L.weapon || !object_alive(L.weapon) || !hand_has_weapon(1 - side) || held_weapon_of(1 - side) != L.weapon;
+            if (!gone && is_second_hand(side)) L = ReleaseLinger{}; // took it again: its hold's own ignore stays
+            else if (gone)
+            {
+                bool mine = arm_ignore_weapon(side) == L.weapon && !hand_has_weapon(side);
+                L = ReleaseLinger{};
+                if (mine) clear_arm_ignore(side);
+            }
+            else if (fm && now_seconds() - L.t >= cfg.pose_hold_release_ignore_s)
+            {
+                Vec3 gp = hand_grab_point(fm, side);
+                double d = closest_on_weapon(L.weapon, gp, nullptr, nullptr);
+                if (d < 0.0 || d >= cfg.pose_hold_release_clear_cm)
+                {
+                    HSVR_LOG("Two hands: %s hand is %.0f cm clear of %ls %.2f s after letting go: solid against it again", side == 0 ? "left" : "right", d,
+                             L.weapon->GetName().c_str(), now_seconds() - L.t);
+                    clear_arm_ignore(side);
+                }
+            }
+        }
+        // ...and from his REAL hand body (796b650 / e616b9b park runs: the hand's physics body, driven by stiff arm motors, overshot its
+        // drawn place and bounced off the held axe every ~0.2 s (blocker log: hand_l only, impulse up to 298) while the drawn place
+        // was already 4 cm clear; the axe wobbled 186-504 deg/s in about half the launches). Each frame the hand body is closer than
+        // pose_hand_held_weapon_body_gap_cm, its drawn place is moved further off the weapon (at most _body_max_cm); clear, it eases back.
+        {
+            Vec3& off = g_free_rest_off[side];
+            bool active = false;
+            if (cfg.pose_hand_held_weapon_body_gap_cm > 0.0 && !on_weapon && (g_solved_on[side] & ~1) == 0 && !hand_has_weapon(side) && hand_has_weapon(1 - side) && g_pose.pawn)
+            {
+                UObject* hw = held_weapon_of(1 - side);
+                UObject* fm = object_property(g_pose.pawn, STR("Mesh"));
+                FName hb = bone_fname(side == 0 ? "hand_l" : "hand_r");
+                Vec3 hp = fm ? socket_location(fm, hb) : Vec3{};
+                Vec3 q;
+                double near_cm = hw && fm ? closest_on_weapon(hw, hp, &q, nullptr) : -1.0;
+                if (near_cm >= 0.0 && near_cm < 20.0)
+                {
+                    active = true;
+                    double g = item_gap(hw, fm, hb, hp);
+                    double g0 = cfg.pose_hand_held_weapon_body_gap_cm;
+                    if (g >= 0.0 && g < g0 && hs.squeeze <= 0.3f)
+                    {
+                        Vec3 away = hp - q;
+                        if (length(away) > 1e-3)
+                        {
+                            off = off + normalized(away) * ((g0 - g) * 0.5);
+                            double most = (std::max)(0.0, cfg.pose_hand_held_weapon_body_max_cm);
+                            if (length(off) > most) off = normalized(off) * most;
+                            HSVR_LOG_EVERY(1.0, "Hand: %s free hand body %.1f cm from %ls (held by the other hand): drawn place moved %.1f cm off it", side == 0 ? "left" : "right", g,
+                                           hw->GetName().c_str(), length(off));
+                        }
+                    }
+                }
+            }
+            // Squeezing to take it (a second hand on the weapon): the hand goes where you put it, at once.
+            if (hs.squeeze > 0.3f) active = false, off = Vec3{};
+            if (!active) off = off * 0.9;
+            else if (length(off) > 0.0) off = off * 0.995;
+            if (length(off) < 0.05) off = Vec3{};
+            if (length(off) > 0.0) target = target + off, stopped = true;
         }
         if (!on_weapon && hand_on_grab(side, cfg, target, Wh))
         {
@@ -5684,6 +5830,7 @@ namespace
         std::vector<UObject*> cm_joints; // that dropped item's no-collide pairs with his CM_* armour proxies
     };
     ArmIgnore g_arm_ignore[2];
+    UObject* arm_ignore_weapon(int side) { return g_arm_ignore[side].weapon; }
     std::atomic<int> g_grip_ignore_arm{1};
     // hsvr.weapon_channel <channel> <response>: sets the held weapon's response to one collision
     // channel (0 ignore, 1 overlap, 2 block). Changing responses only updates the physics filter,
@@ -5815,6 +5962,7 @@ namespace
 
     void clear_arm_ignore(int side)
     {
+        g_release_linger[side] = ReleaseLinger{};
         for (UObject* j : g_arm_ignore[side].joints)
         {
             Call d(j, STR("K2_DestroyComponent"));
@@ -5923,7 +6071,11 @@ namespace
             bool free_ignored = one_hand && (!ac.pose_hold_free_hand_collides || class_name_starts(weapon, STR("Shield")));
             if (ac.pose_hold_ignore_body && ac.pose_hold_self_collision)
             {
-                if (!in_arm(mesh, bone, side) && !(free_ignored && in_arm(mesh, bone, 1 - side))) continue;
+                // pose_hold_free_arm_collides=0: of the free arm only the hand stays solid; its forearm and upper arm pass through
+                // (796b650 park_axe2h: the axe was pushed 15-20 cm off the hand and held there against his free arm at 446-504 deg/s).
+                bool free_hand_bone = bone.ToString() == (side == 0 ? STR("hand_r") : STR("hand_l"));
+                bool free_arm_ignored = one_hand && !ac.pose_hold_free_arm_collides && !free_hand_bone;
+                if (!in_arm(mesh, bone, side) && !((free_ignored || free_arm_ignored) && in_arm(mesh, bone, 1 - side))) continue;
             }
             else if (whole)
             {
@@ -6534,6 +6686,7 @@ namespace
     };
     HoldState g_hold[2];
     bool hand_has_weapon(int side) { return g_hold[side].weapon != nullptr && !is_fist(g_hold[side].weapon); }
+    UObject* held_weapon_of(int side) { return g_hold[side].weapon; }
     bool hand_is_fist(int side) { return is_fist(g_hold[side].weapon); }
 
     // The game's off-hand search: with a two-handed weapon (longswords) in one hand and the other
@@ -8522,6 +8675,7 @@ namespace
     }
     double g_pending_slide[2] = {1e9, 1e9}; // a hand-over: where the new hand holds, applied when its hold starts
 
+    bool is_second_hand(int side) { return g_two.active && g_two.second == side; }
     void end_two_hand(const char* why)
     {
         if (!g_two.active) return;
@@ -8533,7 +8687,20 @@ namespace
                      ok ? "" : ": NOT SET", read_number_variable(g_pose.pawn, grip_type_name(g_two.main)));
         }
         HSVR_LOG("Two hands: %s hand lets go of %ls (%s)", g_two.second == 0 ? "left" : "right", g_two.weapon ? g_two.weapon->GetName().c_str() : STR("?"), why);
-        if (g_two.weapon && g_arm_ignore[g_two.second].weapon == g_two.weapon) clear_arm_ignore(g_two.second);
+        if (g_two.weapon && g_arm_ignore[g_two.second].weapon == g_two.weapon)
+        {
+            // B&S (RagdollHand.HandOverlapCoroutine, RagdollHand.cs:1502-1548): a hand that lets go keeps ignoring the item until
+            // collisionUngrabMinDelay 0.25 s has passed AND a collisionUngrabRadius 0.13 m sphere at its grip is clear. With the free
+            // hand solid, letting go inside the haft kicked it (5e085fa switch2_warstaff: 559 deg/s, then dropped).
+            if (hsvr::config().pose_hold_release_ignore_s > 0.0 && g_hold[g_two.main].weapon == g_two.weapon)
+            {
+                g_release_linger[g_two.second] = {g_two.weapon, hsvr::now_seconds()};
+                HSVR_LOG("Two hands: %s hand keeps passing through %ls until it is %.0f cm clear (at least %.2f s)", g_two.second == 0 ? "left" : "right",
+                         g_two.weapon->GetName().c_str(), hsvr::config().pose_hold_release_clear_cm, hsvr::config().pose_hold_release_ignore_s);
+            }
+            else
+                clear_arm_ignore(g_two.second);
+        }
         g_two = TwoHand{};
         g_anim_grip_two_side = -1;
     }
@@ -8743,6 +8910,19 @@ namespace
         if (!base) return false;
         Vec3 at = hand_grab_point(mesh, side);
         double touch_d = closest_on_weapon(weapon, at);
+        // Your own hand's place (before the rest stops hold his drawn hand off the weapon): the solid free hand rests 4 cm off it and its
+        // body further (f790b94 runs: retakes squeezed 11-31 cm off). B&S takes by touch of your controller-driven hand.
+        if (g_free_palm_valid[side])
+        {
+            double d2 = closest_on_weapon(weapon, g_free_palm_unstopped[side]);
+            if (d2 >= 0.0 && (touch_d < 0.0 || d2 < touch_d))
+            {
+                HSVR_LOG("Two hands: %s grip squeezed %.1f cm from %ls by your hand (%.1f by his drawn hand, held off it)", side == 0 ? "left" : "right", d2,
+                         weapon->GetName().c_str(), touch_d);
+                touch_d = d2;
+                at = g_free_palm_unstopped[side];
+            }
+        }
         if (touch_d < 0.0 || touch_d > cfg.pose_grab_touch_cm)
         {
             HSVR_LOG("Two hands: %s grip squeezed %.0f cm from %ls (needs %.0f), not on it", side == 0 ? "left" : "right", touch_d, weapon->GetName().c_str(),
@@ -14600,7 +14780,22 @@ namespace
             double t = hsvr::now_seconds();
             double lo = cfg.pose_swing_speed_lo, hi = (std::max)(lo + 0.1, cfg.pose_swing_speed_hi);
             double hand_ass = g_swing_v[side] <= lo ? 0.0 : (std::min)(75.0, (g_swing_v[side] - lo) / (hi - lo) * 75.0);
-            if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass) g_slap_until[side] = t + cfg.pose_fist_slap_keep_s;
+            // No slap fist right by a weapon his other hand holds (f790b94 park run: the free hand moving in at swing speed 31 spawned the
+            // fist's 13 cm ball against the held axe and spun it at 545 deg/s): the ball would hit his own weapon.
+            bool by_own = false;
+            if (cfg.pose_fist_slap_own_weapon_cm > 0.0 && !is_fist(mine) && hand_has_weapon(1 - side))
+                if (UObject* fm = object_property(pawn, STR("Mesh")))
+                {
+                    double d = closest_on_weapon(held_weapon_of(1 - side), socket_location(fm, bone_fname(side == 0 ? "hand_l" : "hand_r")), nullptr, nullptr);
+                    by_own = d >= 0.0 && d < cfg.pose_fist_slap_own_weapon_cm;
+                }
+            // Nor a hand that is on the weapon as second hand or just let go of it (a69b19e+3d47c22 switch_polehammer: the left hand let
+            // go at 70.002 and slapped at 70.030, speed 31, inside the haft it still passes through).
+            if (cfg.pose_fist_slap_own_weapon_cm > 0.0 && !is_fist(mine) && (is_second_hand(side) || g_release_linger[side].weapon))
+                by_own = true;
+            if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass && by_own)
+                HSVR_LOG_EVERY(1.0, "Fist: %s hand no slap (hand swing speed %.0f): within %.0f cm of the weapon the other hand holds", hand, hand_ass, cfg.pose_fist_slap_own_weapon_cm);
+            if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass && !by_own) g_slap_until[side] = t + cfg.pose_fist_slap_keep_s;
             bool slap = !now && t < g_slap_until[side];
             if (slap != g_fist_open[side].load() && (slap || is_fist(mine)))
                 HSVR_LOG("Fist: %s hand %s (hand swing speed %.0f)", hand, slap ? "slaps: open-hand fist" : "closed over its slap fist", hand_ass);
@@ -19128,6 +19323,31 @@ namespace
                     }
                     else
                         spin_lines[side] = 0;
+                    // Which of his free arm's bodies touch it, and how fast they move, while it spins with one hand on it (park cases
+                    // 2026-11-24: the free left hand parked beside a held axe set it wobbling at ~500 deg/s, nothing on the axis).
+                    static double free_log_t[2] = {-1.0, -1.0};
+                    double ft = now_seconds();
+                    if (rs > 5.0 && !two && ft - free_log_t[side] >= 0.1)
+                        if (UObject* fm = object_property(pawn, STR("Mesh")))
+                        {
+                            free_log_t[side] = ft;
+                            std::string parts;
+                            const char* other = side == 0 ? "_r" : "_l";
+                            for (const char* b0 : {"hand", "lowerarm", "upperarm"})
+                            {
+                                std::string bn = std::string(b0) + other;
+                                FName bf = bone_fname(bn.c_str());
+                                Vec3 bp = socket_location(fm, bf);
+                                double gp = item_gap(weapon, fm, bf, bp);
+                                Call bv(fm, STR("GetPhysicsLinearVelocity"));
+                                bv.name(STR("BoneName"), bf);
+                                bv.run();
+                                char buf[96];
+                                snprintf(buf, sizeof buf, "%s%s %.1f cm (%.0f cm/s)", parts.empty() ? "" : ", ", bn.c_str(), gp, length(bv.vec()));
+                                parts += buf;
+                            }
+                            HSVR_LOG("Spin: %s %ls free arm: %s", side == 0 ? "left" : "right", weapon->GetName().c_str(), parts.c_str());
+                        }
                 }
                 if (pts[0].slide && pts[0].slide_c > 0.0)
                 {
@@ -19284,6 +19504,28 @@ namespace
                     }
                     // (solve_pulls: the whole motion is this solve's, as the old B&S hold's: gravity this frame in, taken off after,
                     // the physics adds it; the joints pull nothing. Off: only the spin is kept and the joints pull in the physics.)
+                    // B&S (Handle.cs:1778/1783): two grips facing opposite ways along the handle (one hand reversed, as on a spear
+                    // taken thumbs toward each other) turn it at x0.1 (220 / 9 / 50): neither wrist can lever it against the other.
+                    double opp = 1.0;
+                    {
+                        static bool was_opp = false;
+                        static UObject* opp_for = nullptr;
+                        if (opp_for != weapon) was_opp = false, opp_for = weapon;
+                        double sc = cfg.pose_two_hand_bs_opposite_scale;
+                        if (sc > 0.0 && sc < 1.0)
+                        {
+                            Vec3 ax = normalized(rot.rotate(Vec3{0.0, 0.0, 1.0}));
+                            double d1 = dot(normalized(g_thumb_world[side]), ax), d2 = dot(normalized(g_thumb_world[g_two.second]), ax);
+                            bool now_opp = was_opp;
+                            if (std::fabs(d1) > 0.3 && std::fabs(d2) > 0.3) now_opp = d1 * d2 < 0.0; // (between: as before)
+                            if (now_opp != was_opp)
+                                HSVR_LOG("Two hands: %ls grips %s (thumbs %.2f / %.2f along it): turn x%.2f", weapon->GetName().c_str(),
+                                         now_opp ? "face opposite ways" : "face the same way", d1, d2, now_opp ? sc : 1.0);
+                            was_opp = now_opp;
+                            if (now_opp) opp = sc;
+                        }
+                    }
+                    tmax *= opp;
                     bool own = cfg.pose_two_hand_bs_solve_pulls;
                     Vec3 gravity{0.0, 0.0, g_weapon_gravity.load() == 0 ? 0.0 : -980.0};
                     Vec3 vb = own ? ev + gravity * DTb : ev, wb = ew, ang;
@@ -19291,7 +19533,7 @@ namespace
                     // comes from the physics step once, not also from this set. Three of his runaway spins (2026-11-23 markers 4/5, 9/10, 11)
                     // came 0.8-1.1 s after a switch between one and two hands.)
                     bs_solve(mass, about_com.inverse(), vb, wb, pts, (!own && cfg.pose_hold_joint_pull_once) ? 0 : 2, err_rot, tang,
-                             cfg.pose_two_hand_bs_rot_k * stb * 1e4, cfg.pose_two_hand_bs_rot_c * stb * 1e4, tmax, DTb, (std::max)(1, cfg.pose_bs_iterations), ang);
+                             cfg.pose_two_hand_bs_rot_k * stb * opp * 1e4, cfg.pose_two_hand_bs_rot_c * stb * opp * 1e4, tmax, DTb, (std::max)(1, cfg.pose_bs_iterations), ang);
                     w_next = clamp_length(wb, (std::max)(1.0, cfg.pose_bs_max_spin));
                     if (own) bs_v = clamp_length(vb - gravity * DTb, 2000.0), have_bs_v = true;
                     h.torque_nm = length(ang) / DTb / 1e4;
@@ -19476,6 +19718,22 @@ namespace
             h.far_since = -1.0;
         Quat dq = (target_rot * rot.inverse()).normalized();
         h.turn_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(dq.w))) * 180.0 / 3.14159265358979;
+        {
+            // (test measure one_gap_r_* / one_turn_r_*: one hand only, not sliding or drawing; the hand's own speed, unsmoothed)
+            static Vec3 prev_tp[2];
+            static double prev_tt[2] = {-1.0, -1.0};
+            double tn = now_seconds();
+            bool one = !(g_two.active && g_two.weapon == weapon) && !h.handle_slide && !(g_draw[side].active && g_draw[side].weapon == weapon);
+            if (one && prev_tt[side] > 0.0 && tn - prev_tt[side] > 1e-4 && tn - prev_tt[side] < 0.1)
+            {
+                double sp = length(target_pivot - prev_tp[side]) / (tn - prev_tt[side]) / 100.0; // m/s
+                int b = sp < 1.0 ? 0 : sp < 3.0 ? 1 : 2;
+                std::lock_guard<std::mutex> lk(g_one_bins_mu);
+                if (g_one_gap[side][b].size() < 200000) g_one_gap[side][b].push_back(h.lag), g_one_turn[side][b].push_back(h.turn_deg);
+            }
+            prev_tp[side] = target_pivot;
+            prev_tt[side] = tn;
+        }
     }
 
     // The kick hunt (kick-test1): the game's Check Stuck In Static Mesh (MW @77374), run on a 1 s
@@ -30330,6 +30588,15 @@ namespace
         else if (w == "two_turn_mean") value = g_two_mean_n.load() > 0 ? g_two_turn_sum.load() / g_two_mean_n.load() : 0.0;
         else if (w == "two_hold_lag_mean") value = g_two_mean_n.load() > 0 ? g_two_hlag_sum.load() / g_two_mean_n.load() : 0.0;
         else if (w == "two_off_max") value = g_two_off_cm.load();
+        else if (w.rfind("one_gap_r_", 0) == 0 || w.rfind("one_turn_r_", 0) == 0 || w.rfind("one_n_r_", 0) == 0)
+        {
+            // one hand (right), by the hand's speed: _slow under 1 m/s, _mid 1-3, _fast over 3 (B&S's bins); median cm / deg, or the tick count
+            std::string bin = w.substr(w.rfind('_') + 1);
+            int b = bin == "slow" ? 0 : bin == "mid" ? 1 : 2;
+            std::lock_guard<std::mutex> lk(g_one_bins_mu);
+            if (w.rfind("one_n_r_", 0) == 0) value = (double)g_one_gap[1][b].size();
+            else value = one_bin_median(w.rfind("one_gap_r_", 0) == 0 ? g_one_gap[1][b] : g_one_turn[1][b]);
+        }
         else if (w == "two_line") value = g_two_line_now.load();
         else if (w == "two_off") value = g_two_off_now.load();
         else if (w == "two_gap")
@@ -32594,6 +32861,7 @@ namespace
                 double a1 = 0, a2 = 0, a3 = 0;
                 int got = sscanf(entry.command.c_str() + 14, "%d %lf %lf %lf", &mode_arg, &a1, &a2, &a3);
                 if (got >= 2) g_fake_two_up.store(a1);
+                g_fake_two_online.store(mode_arg == 7 && got >= 3 && a2 != 0.0);
                 if (got >= 3) g_fake_thrust_pitch.store(a2);
                 if (got >= 4) g_fake_thrust_up.store(a3);
                 else if (mode_arg == 22) g_fake_thrust_up.store(0.0);
@@ -32722,6 +32990,11 @@ namespace
                 g_two_mean_n.store(0);
                 g_two_turn_sum.store(0.0);
                 g_two_hlag_sum.store(0.0);
+                {
+                    std::lock_guard<std::mutex> lk(g_one_bins_mu);
+                    for (int i = 0; i < 2; ++i)
+                        for (int b = 0; b < 3; ++b) g_one_gap[i][b].clear(), g_one_turn[i][b].clear();
+                }
                 HSVR_LOG("Script: hsvr.two_reset");
                 continue;
             }

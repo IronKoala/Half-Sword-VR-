@@ -534,7 +534,11 @@ namespace hsvr
         flag("pose_hold_joint_mod_turn", c.pose_hold_joint_mod_turn);
         flag("pose_hold_joint_pull_once", c.pose_hold_joint_pull_once);
         flag("pose_hold_joint_turn_couple", c.pose_hold_joint_turn_couple);
+        flag("pose_hold_bs_pure", c.pose_hold_bs_pure);
         flag("pose_hold_free_hand_collides", c.pose_hold_free_hand_collides);
+        flag("pose_hold_free_arm_collides", c.pose_hold_free_arm_collides);
+        num("pose_hold_release_ignore_s", c.pose_hold_release_ignore_s);
+        num("pose_hold_release_clear_cm", c.pose_hold_release_clear_cm);
         num("pose_hold_joint_target_max_speed", c.pose_hold_joint_target_max_speed);
         flag("pose_hold_joint_draw_wound", c.pose_hold_joint_draw_wound);
         flag("pose_hold_joint_turn_by_grip", c.pose_hold_joint_turn_by_grip);
@@ -721,6 +725,7 @@ namespace hsvr
         num("pose_two_hand_bs_rot_max", c.pose_two_hand_bs_rot_max);
         flag("pose_two_hand_bs_solve_pulls", c.pose_two_hand_bs_solve_pulls);
         flag("pose_two_hand_bs_front_turns", c.pose_two_hand_bs_front_turns);
+        num("pose_two_hand_bs_opposite_scale", c.pose_two_hand_bs_opposite_scale);
         num("pose_two_hand_auto_slide_cm", c.pose_two_hand_auto_slide_cm);
         flag("pose_two_hand_fixed_rebase", c.pose_two_hand_fixed_rebase);
         num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
@@ -737,6 +742,7 @@ namespace hsvr
         flag("pose_fist_slap", c.pose_fist_slap);
         num("pose_fist_slap_ass", c.pose_fist_slap_ass);
         num("pose_fist_slap_keep_s", c.pose_fist_slap_keep_s);
+        num("pose_fist_slap_own_weapon_cm", c.pose_fist_slap_own_weapon_cm);
         flag("pose_fist_clear", c.pose_fist_clear);
         num("pose_fist_clear_margin_cm", c.pose_fist_clear_margin_cm);
         num("pose_fist_clear_retry_s", c.pose_fist_clear_retry_s);
@@ -773,6 +779,9 @@ namespace hsvr
         flag("pose_hand_world_stop", c.pose_hand_world_stop);
         num("pose_hand_world_radius_cm", c.pose_hand_world_radius_cm);
         num("pose_hand_world_reach_cm", c.pose_hand_world_reach_cm);
+        num("pose_hand_held_weapon_stop_cm", c.pose_hand_held_weapon_stop_cm);
+        num("pose_hand_held_weapon_body_gap_cm", c.pose_hand_held_weapon_body_gap_cm);
+        num("pose_hand_held_weapon_body_max_cm", c.pose_hand_held_weapon_body_max_cm);
         flag("pose_arm_fresh_shoulder", c.pose_arm_fresh_shoulder);
         flag("pose_arm_fresh_shoulder_held", c.pose_arm_fresh_shoulder_held);
         flag("pose_no_fall_arms", c.pose_no_fall_arms);
@@ -970,6 +979,28 @@ namespace hsvr
         num("injury_dislocated_sag_cm", c.injury_dislocated_sag_cm);
         flag("injury_swing_relocate", c.injury_swing_relocate);
         flag("death_ragdoll", c.death_ragdoll);
+        if (c.pose_hold_bs_pure)
+        {
+            // B&S's one-hand hold (Creature_PlayerDefaultMale.json linear 5000/100/3000, angular 1000/50/250 x the Heavy/Light
+            // handle's 1.1/0.9 = 1100/45/250; Handle.SetJointConfig never uses the item's mass).
+            c.pose_hold_spring = 5000.0;
+            c.pose_hold_damper = 100.0;
+            c.pose_hold_max_force = 3000.0;
+            c.pose_hold_turn_spring = 1100.0;
+            c.pose_hold_turn_damper = 45.0;
+            c.pose_hold_max_torque = 250.0;
+            c.pose_hold_damping_ratio = 0.0;     // the fixed dampers above, not per weapon
+            c.pose_hold_arm_lag = false;
+            c.pose_hold_heft_lag_s = 0.0;
+            c.pose_hold_shoulder_torque = 0.0;
+            c.pose_hold_joint_shoulder = false;
+            c.pose_hold_joint_carry_weight = false;
+            c.pose_hold_target_vel_smooth_s = 0.0;
+            c.pose_hold_wrist_stop_torque = 0.0;
+            c.pose_hold_spin_brake_from = 0.0;
+            c.pose_hold_joint_turn_by_grip = false;
+            c.pose_hold_torque_strength_power = 1.0; // strength scales the turn as it does the pull
+        }
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;
