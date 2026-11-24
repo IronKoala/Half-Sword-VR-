@@ -26955,8 +26955,10 @@ namespace
         HSVR_LOG("Graphics: end of list");
     }
 
-    // mouse_clip_window: while playing (game in front, no menu, the game not asking for a pointer)
-    // the mouse pointer is held inside the game window's picture with ClipCursor. With
+    // mouse_clip_window: while the game window is in front the mouse pointer is held inside it with
+    // ClipCursor, menus included (as a fullscreen window would). Not gated on menus: in the Free Mode
+    // tavern the game asks for a pointer the whole time, so 934cd89 never clipped there (log
+    // 2026-11-24 19:00: pointer ran off to (3438, 746) on the desktop). Alt+Tab frees it. With
     // mirror_window_res the window no longer covers the monitor, and the engine leaves the pointer
     // free (playtest 2026-11-24: aiming far left or right ran the mouse out of the window). Windows
     // drops a clip on focus changes, so it is checked every tick and set again when it differs.
@@ -26967,8 +26969,7 @@ namespace
         RECT r{};
         wchar_t cls[32]{};
         if (front && (!GetClassNameW(front, cls, 32) || wcscmp(cls, L"UnrealWindow") != 0)) front = nullptr; // e.g. the UE4SS console
-        if (cfg.mouse_clip_window && front && !hsvr::shared().menu_up.load() && !hsvr::shared().game_wants_pointer.load() &&
-            !IsIconic(front) && GetClientRect(front, &r) && r.right > 0 && r.bottom > 0)
+        if (cfg.mouse_clip_window && front && !IsIconic(front) && GetClientRect(front, &r) && r.right > 0 && r.bottom > 0)
         {
             POINT tl{r.left, r.top}, br{r.right, r.bottom};
             if (ClientToScreen(front, &tl) && ClientToScreen(front, &br))
@@ -26990,7 +26991,7 @@ namespace
         {
             ClipCursor(nullptr);
             clipped = false;
-            HSVR_LOG("Mouse: free (menu, another program in front, or mouse_clip_window=0)");
+            HSVR_LOG("Mouse: free (another program in front, or mouse_clip_window=0)");
         }
     }
 
