@@ -451,9 +451,11 @@ namespace
     {
         UObject* base = nullptr;
         double sum = 0.0;
-        std::vector<UObject*> parts; // the simulating, unwelded parts (alive while their weapon is)
+        std::vector<UObject*> parts;  // the simulating, unwelded parts (alive while their weapon is)
+        std::vector<UObject*> joints; // its own PhysicsConstraintComponents (the chain's links)
     };
     std::map<UObject*, Hanging> g_hanging_mass;
+    std::atomic<double> g_hanging_light_kg{0.0}; // test: hsvr.hanging_light <kg> makes each hanging part this light (0 = off)
 
     struct SocketLocationParams
     {
@@ -2397,6 +2399,7 @@ namespace
     std::atomic<double> g_fake_stick[2] = {-9.0, 0.0}; // test: hsvr.stick <x> <y> holds the left stick (x -9 = off)
     std::string g_park_socket;                  // test: hsvr.arm_park <socket> (arm mode 13): right hand there
     double g_arm_floor[3] = {45.0, 15.0, 5.0};
+    std::wstring g_arm_item_name; // hsvr.arm_to_item's optional name part: only a weapon whose name has it
     double g_slot_test[5] = {1.0, 4.0, 0.0, 0.0, 0.0}; // test: hsvr.arm_to_slot <hand> <slot 0-4> <along cm> <out cm> [cm/s] (arm mode 22)
     std::atomic<double> g_fake_jitter_cm{0.0};
     bool two_hands_hold(UObject* weapon); // both hands on this weapon (defined with g_two)
@@ -3093,6 +3096,8 @@ namespace
                     {
                         if (!w || w->GetName().rfind(STR("Default__"), 0) == 0 || bool_property(w, STR("Is Sheathed")) || is_fist(w)) continue;
                         if (object_property(g_pose.pawn, STR("Weapon R")) == w || object_property(g_pose.pawn, STR("Weapon L")) == w) continue;
+                        // (run 5 c1b013c: without a name it took the light pavise strapped on his back)
+                        if (!g_arm_item_name.empty() && w->GetName().find(g_arm_item_name) == std::wstring::npos) continue;
                         UObject* b = object_property(w, STR("BaseMesh"));
                         if (!b) continue;
                         double d = length(component_location(b) - ap);
@@ -18602,6 +18607,17 @@ namespace
                                   dot(hc, side_h), hc.z, length(hv));
                     hang = b;
                 }
+                // Each of its own joints' pull (the chain's links), out / side / up, N.
+                for (UObject* j : hit->second.joints)
+                {
+                    if (!j) continue;
+                    Call f(j, STR("GetConstraintForce"));
+                    if (!f.run()) continue;
+                    Vec3 lf = f.vec(STR("OutLinearForce"));
+                    char b[64];
+                    std::snprintf(b, sizeof(b), "; joint %.0f/%.0f/%.0f N", dot(lf, out_h), dot(lf, side_h), lf.z);
+                    hang += b;
+                }
             }
             HSVR_LOG_EVERY(0.5, "Hold: %s %ls trails %.1f cm: %.1f out from him, %.1f to the side, %.1f up; hand pull %.0f N%s; hanging: %s", side == 0 ? "left" : "right",
                            weapon->GetName().c_str(), h.lag, dot(lag_v, out_h), dot(lag_v, side_h), lag_v.z, h.force_n, h.force_capped ? " (capped)" : "", hang.c_str());
@@ -24140,7 +24156,25 @@ namespace
             parts += c->GetName() + STR(" ");
             part_list.push_back(c);
         }
-        g_hanging_mass[weapon] = Hanging{base, sum, part_list};
+        std::vector<UObject*> joint_list, cons;
+        UObjectGlobals::FindAllOf(STR("PhysicsConstraintComponent"), cons);
+        for (UObject* j : cons)
+            if (j && j->GetOuterPrivate() == weapon) joint_list.push_back(j);
+        g_hanging_mass[weapon] = Hanging{base, sum, part_list, joint_list};
+        // Test: hsvr.hanging_light <kg> - each hanging part made that light, to see whether the chain is what holds the
+        // handle off your hand (chain lantern 2026-11-24 c1b013c: 14-18 cm off, toward him, left and down, with or without jitter).
+        if (double kg = g_hanging_light_kg.load(); kg > 0.0 && sum > 0.0)
+        {
+            for (UObject* c : part_list)
+            {
+                Call mo(c, STR("SetMassOverrideInKg"));
+                mo.name(STR("BoneName"), none_b);
+                mo.number(STR("MassInKg"), kg);
+                mo.flag(STR("bOverrideMass"), true);
+                mo.run();
+            }
+            HSVR_LOG("Hold: test: %ls's %d hanging parts made %.2f kg each", weapon->GetName().c_str(), (int)part_list.size(), kg);
+        }
         if (sum > 0.0) HSVR_LOG("Hold: %ls carries %.2f kg hanging on its own joints (%ls)", weapon->GetName().c_str(), sum, parts.c_str());
         // Test switch pose_hold_hanging_damping: those parts damped (linear and angular), so a chain held still
         // settles instead of circling (test 2026-11-24 48510c5: the lantern's handle spun 350-690 deg/s and sat
@@ -30547,6 +30581,13 @@ namespace
                 if (!moved) HSVR_LOG("Script: hsvr.foe_front: no foe found");
                 continue;
             }
+            if (entry.command.rfind("hsvr.hanging_light ", 0) == 0)
+            {
+                g_hanging_light_kg.store(atof(entry.command.c_str() + 19));
+                g_hanging_mass.clear(); // looked at again (and made light) at the next hold
+                HSVR_LOG("Script: hsvr.hanging_light %.2f kg", g_hanging_light_kg.load());
+                continue;
+            }
             if (entry.command.rfind("hsvr.force_watch ", 0) == 0)
             {
                 install_force_watch();
@@ -31361,9 +31402,14 @@ namespace
             }
             if (entry.command.rfind("hsvr.arm_to_item ", 0) == 0)
             {
-                g_arm_floor[2] = atof(entry.command.c_str() + 17);
+                // hsvr.arm_to_item <cm> [name part]
+                char nm[128] = {0};
+                g_arm_floor[2] = 0.0;
+                std::sscanf(entry.command.c_str() + 17, "%lf %127s", &g_arm_floor[2], nm);
+                std::string n8(nm);
+                g_arm_item_name.assign(n8.begin(), n8.end());
                 g_fake_arm_mode.store(15);
-                HSVR_LOG("Script: hsvr.arm_to_item %.0f cm above the nearest loose weapon's grip (right hand)", g_arm_floor[2]);
+                HSVR_LOG("Script: hsvr.arm_to_item %.0f cm above the nearest loose weapon's grip (right hand)%s%s", g_arm_floor[2], nm[0] ? ", name has " : "", nm);
                 continue;
             }
             if (entry.command.rfind("hsvr.fake_jitter ", 0) == 0)

@@ -1,5 +1,6 @@
 # Playtest 2026-11-23 17:04/17:23 local: kneeling, he could not pick a lantern up off the floor (his hand stops short of it).
 # The lantern put in his hand, dropped, then picked up off the floor: crouch 95 cm, right controller 3 cm above its grip.
+# (arm_to_item names the lantern: unnamed it went for the light pavise strapped on his back, run 5 c1b013c.)
 0.5:hsvr.wait room_ready = 1 6 0 room revealed
 0.8:hsvr.player_immortal
 1.0:hsvr.squeeze 0 1
@@ -14,7 +15,7 @@
 3.3:hsvr.squeeze 1 0
 3.6:hsvr.expect held_r = 0 dropped
 5.5:hsvr.fake_head_drop 95
-5.6:hsvr.arm_to_item 3
+5.6:hsvr.arm_to_item 3 Lantern
 8.0:hsvr.expect reach_short_r >= 0 how far his hand stops from your controller (record only)
 8.0:hsvr.expect hand_floor_r >= 0 his hand's height over the floor (record only)
 8.1:hsvr.squeeze 1 1

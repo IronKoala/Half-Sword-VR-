@@ -15,5 +15,7 @@
 4.0:hsvr.mark
 4.1:hsvr.contact_log 1
 4.1:hsvr.weapon_dump 1
+4.1:hsvr.force_watch 1
 9.0:hsvr.expect lag_r < 6 held still, the handle stays within 6 cm of the hand
 9.1:hsvr.contact_log 0
+9.1:hsvr.force_watch 0
