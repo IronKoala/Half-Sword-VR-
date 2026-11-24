@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Two-hand test cases with REAL-hand conditions (playtest 2026-11-23: two-handing worked on the rig and
+failed in his hands). The old cases put the second fake hand exactly where the weapon's second grip was, with
+its wrist turned as the first hand had it. Real hands are 15-33 cm further apart than the grips and the second
+wrist is 30-90 deg off the first's; that is what made the two hands' pulls fight.
+
+Each case: weapon in the right hand, the left hand takes it near its second spot, then
+  static (hands on it), spread (left controller 20 cm further away + wrist rolled 70 deg),
+  slow swing, fast swing (the left controller rigid to the right one), back to rest.
+Checks (hsvr.expect on the mod's measures, worst since hsvr.two_reset):
+  two_line_max  deg between the weapon's grip-to-grip line and the two-hand pose the mod asks for (the hands'
+                line on wide grips and the crossbow; mostly the main wrist on close sword grips)
+  two_off_max   cm either grip spot of that pose is off the weapon's line (across it)
+  two_wrist     deg between the weapon and where the main wrist alone points it (swords' wrist phase)
+  two_gap       cm between the two hands' points on the weapon (>= 9: never inside each other)
+  two_hand      the second hand still holds it
+
+Usage: make_steps.py weapons.txt   (lines: name|asset class path|left hand cm along the weapon from the right|front for the crossbow)
+Writes steps-<name>.txt and list.txt next to this file.
+"""
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+HEAD = """0.5:hsvr.fake_head_drop 0
+0.6:hsvr.fake_look 0
+1:hsvr.squeeze 0 1
+1:hsvr.squeeze 1 1
+1.5:hsvr.squeeze 0 0
+1.5:hsvr.squeeze 1 0
+2.4:hsvr.expect held_r = 0 right hand empty
+2.5:hsvr.arm_move 1
+3:hsvr.squeeze 1 1
+3.5:hsvr.give_weapon {path}
+5:hsvr.weapon_dump 1
+5.5:hsvr.expect held_r = 1 weapon in the right hand
+"""
+TAKE_ALONG = """6:hsvr.arm_move 7 {along}
+8:hsvr.squeeze 0 1
+"""
+TAKE_FRONT = """6:hsvr.xbow_hand 0 front
+9:hsvr.squeeze 0 1
+"""
+BODY = """10:hsvr.expect two_hand = 1 second hand took it
+10:hsvr.expect two_gap >= 8.9 hands a hand's width apart, never inside each other
+10.1:hsvr.xbow_hand 0 keep
+10.2:hsvr.two_reset
+12:hsvr.expect two_line_max < 6 static: follows the two-hand pose
+12:hsvr.expect two_off_max < 3 static: grips on the pose
+12.1:hsvr.hand_spread 0 20
+12.1:hsvr.xbow_wrist 0 roll 70 1
+13.5:hsvr.two_reset
+15.5:hsvr.expect two_hand = 1 spread + wrist: still held
+15.5:hsvr.expect two_line_max < 8 spread + wrist: follows the two-hand pose
+15.5:hsvr.expect two_off_max < 5 spread + wrist: grips on the pose
+15.6:hsvr.arm_move 2
+15.7:hsvr.two_reset
+20:hsvr.expect two_hand = 1 slow swing: still held
+20:hsvr.expect two_line_max < 15 slow swing: follows the two-hand pose
+20:hsvr.expect two_off_max < 8 slow swing: grips on the pose
+20.1:hsvr.arm_move 3
+20.2:hsvr.two_reset
+24:hsvr.expect two_hand = 1 fast swing: still held
+24:hsvr.expect two_line_max < 30 fast swing: follows the two-hand pose
+24:hsvr.expect two_off_max < 15 fast swing: grips on the pose
+24.1:hsvr.arm_move 1
+24.1:hsvr.hand_spread 0 0
+24.1:hsvr.xbow_wrist 0 roll 0 0.5
+25.5:hsvr.two_reset
+27.5:hsvr.expect two_hand = 1 rest: still held
+27.5:hsvr.expect two_line_max < 6 rest: follows the two-hand pose
+27.5:hsvr.expect two_off_max < 3 rest: grips on the pose
+27.6:hsvr.expect two_gap >= 8.9 rest: hands apart
+28:quit
+"""
+# Swords only (grips close together): the main wrist alone points the tip, the second hand stays put
+# (playtest 2026-11-23: "I can't properly point the tip outward"). The left controller stops riding the
+# right one and holds where it is; the right wrist pitches 35 deg, then a fast 50 deg cut and back.
+WRIST = """28:hsvr.xbow_hand 0 off
+28:hsvr.arm_move 7 {along}
+28.1:hsvr.two_reset
+29:hsvr.xbow_wrist 1 pitch 35 1
+31:hsvr.expect two_hand = 1 wrist point: still held
+31:hsvr.expect two_wrist < 12 wrist point: the tip goes where the main wrist points it
+31.1:hsvr.xbow_wrist 1 pitch -15 0.15
+31.2:hsvr.two_reset
+32:hsvr.expect two_hand = 1 wrist cut: still held
+32.5:hsvr.expect two_wrist < 12 wrist cut: settled where the wrist points
+32.6:hsvr.xbow_wrist 1 pitch 0 0.5
+34:quit
+"""
+
+
+def main():
+    rows = []
+    for line in Path(sys.argv[1]).read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, path, along = [p.strip() for p in line.split("|")]
+        steps = HEAD.format(path=path) + (TAKE_FRONT if along == "front" else TAKE_ALONG.format(along=along)) + BODY
+        if along != "front" and abs(float(along)) <= 15.0:
+            steps = steps.replace("28:quit\n", "") + WRIST.format(along=along)
+        (HERE / ("steps-%s.txt" % name)).write_text(steps, newline="\n")
+        rows.append(name)
+    lst = ["# Two hands with real-hand conditions (playtest 2026-11-23). Control run: the same with pose_two_hand_joint_line=0 must FAIL."]
+    lst += ["two_%s|steps-%s.txt" % (n, n) for n in rows]
+    lst += ["ctl_%s|steps-%s.txt|pose_two_hand_joint_line=0" % (n, n) for n in rows]
+    (HERE / "list.txt").write_text("\n".join(lst) + "\n", newline="\n")
+    print("wrote %d cases (+%d control)" % (len(rows), len(rows)))
+
+
+if __name__ == "__main__":
+    main()
