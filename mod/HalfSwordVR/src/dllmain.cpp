@@ -7507,6 +7507,22 @@ namespace
                 if (w && w->GetName().rfind(STR("Default__"), 0) != 0 && w->GetName().find(g_watch_name) != std::wstring::npos) { item = w; break; }
             if (item) HSVR_LOG("Watch: %ls", item->GetName().c_str());
             g_watch_item = item;
+            // Every part reports its hits (run 18: only the lamp and the base did; a link or the holder touching him said nothing).
+            if (item)
+                if (UObject* wb = object_property(item, STR("BaseMesh")))
+                {
+                    std::vector<UObject*> wp;
+                    attached_meshes(wb, nullptr, wp, 0);
+                    std::wstring was;
+                    for (UObject* part : wp)
+                    {
+                        was += part->GetName() + (bool_property(part, STR("bNotifyRigidBodyCollision")) ? STR(":1 ") : STR(":0 "));
+                        Call nc(part, STR("SetNotifyRigidBodyCollision"));
+                        nc.first_flag(true);
+                        nc.run();
+                    }
+                    HSVR_LOG("Watch: hit events on for all %zu parts (were %ls)", wp.size(), was.c_str());
+                }
             have_mark = false;
         }
         if (!item) return;
@@ -20353,6 +20369,7 @@ namespace
         uint8_t* locals = context.TheStack.Locals();
         if (!locals) return;
         UObject *other = nullptr, *other_comp = nullptr, *my_comp = nullptr;
+        FProperty* hit_prop = nullptr;
         double ni[3] = {0, 0, 0};
         for (FProperty* p : fn->ForEachProperty())
         {
@@ -20362,12 +20379,17 @@ namespace
             else if (n == STR("OtherComp") || n == STR("Other Comp")) other_comp = *reinterpret_cast<UObject**>(at);
             else if (n == STR("HitComponent") || n == STR("Hit Component") || n == STR("MyComp")) my_comp = *reinterpret_cast<UObject**>(at);
             else if (n == STR("NormalImpulse") || n == STR("Normal Impulse")) read_three(at, p, ni);
+            else if (n == STR("Hit")) hit_prop = p;
         }
         double imp = hsvr::length(hsvr::Vec3{ni[0], ni[1], ni[2]});
         bool his = other && other == g_hitf.pawn;
         if (!his && imp < 50.0) return; // resting on the floor
+        // The event has no Other Comp: the hit result names the component and bone (run 18: his read "?").
+        HitInfo hit = break_hit(context, hit_prop);
+        if (!other_comp) other_comp = hit.comp;
         static std::map<std::wstring, double> said;
         std::wstring key = (other_comp ? other_comp->GetName() : STR("?"));
+        if (hit.ok && hit.bone.ToString() != STR("None")) key += STR(":") + hit.bone.ToString();
         double now = hsvr::now_seconds();
         if (now - said[key] < 0.1) return;
         said[key] = now;
