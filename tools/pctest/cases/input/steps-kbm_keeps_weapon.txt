@@ -8,6 +8,7 @@
 3.5:hsvr.squeeze 1 0
 6.0:hsvr.expect input_kbm = 1 on mouse and keyboard
 6.0:hsvr.expect held_r = 1 grip opened on mouse and keyboard: sword kept
+6.0:hsvr.expect posed = 0 plain game
 6.1:hsvr.input_mode controllers
 8.0:hsvr.expect input_kbm = 0 back on the controllers
 8.0:hsvr.expect held_r = 1 back on the controllers with the grip open: sword kept

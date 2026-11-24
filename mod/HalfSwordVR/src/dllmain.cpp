@@ -2046,6 +2046,7 @@ namespace
     // moved, his drawn hand showed the previous frame's solve (96% of the worst ticks, playtest 10:36),
     // which shook the hand on a steady sword. The engine tick still runs it when this has not fired.
     void pose_body(const hsvr::Config& cfg);
+    void enter_plain_game(UObject* pawn);
     std::atomic<double> g_pose_in_anim_at{-1.0};
     double number_property(UObject* owner, FProperty* p);
     bool write_three(uint8_t* field, FProperty* property, double a, double b, double c);
@@ -4313,8 +4314,12 @@ namespace
         UObject* driver = willie ? object_property(pawn, STR("DriverSkeleton")) : nullptr;
         UObject* instance = object_property(driver, STR("AnimScriptInstance"));
         bool abp = instance && instance->GetClassPrivate()->GetName().find(STR("ABP_Willie")) != std::wstring::npos;
-        g_hold_capsule.store(cfg.pose_body && cfg.pose_hold_capsule && abp && mesh && g_pose.calibrated && g_pose.pawn == pawn);
-        g_pose_active.store(cfg.pose_body && abp && mesh && g_pose.calibrated && g_pose.pawn == pawn);
+        // Mouse and keyboard (input_mode): the plain flat game in the headset, as the mod's first build was
+        // (Matthew 2026-11-24): no posing, no VR hold, grab, lean, turning, capsule hold or the rest.
+        bool want_pose = cfg.pose_body && !g_kbm.load();
+        if (!want_pose && g_kbm.load() && g_pose.pawn && g_pose.pawn == pawn) enter_plain_game(pawn);
+        g_hold_capsule.store(want_pose && cfg.pose_hold_capsule && abp && mesh && g_pose.calibrated && g_pose.pawn == pawn);
+        g_pose_active.store(want_pose && abp && mesh && g_pose.calibrated && g_pose.pawn == pawn);
         g_pose_cfg_turn = cfg.pose_body_turn;
         g_pose_cfg_crouch = cfg.pose_crouch;
         g_pose_fake = cfg.dev_pose_fake_tracking;
@@ -4322,7 +4327,7 @@ namespace
         g_turn_speed_dps = cfg.pose_turn_speed_dps;
         g_turn_max_deg = (std::max)(g_turn_dead_deg, cfg.pose_turn_max_deg);
         if (!g_pose_active.load()) g_turn_valid = false;
-        if (!cfg.pose_body || !abp || !mesh)
+        if (!want_pose || !abp || !mesh)
         {
             if (g_pose.pawn && (pawn == g_pose.pawn)) pose_release();
             else if (g_pose.pawn)
@@ -11809,6 +11814,7 @@ namespace
         gc_sync();
         HSVR_PROF(PerfPunchPre);
         if (g_elbow_calling.load()) return;
+        if (g_kbm.load()) return; // mouse and keyboard: the game's own punches
         UFunction* fn = static_cast<UFunction*>(custom_data);
         uint8_t* locals = context.TheStack.Locals();
         UObject* victim = context.Context;
@@ -21585,7 +21591,7 @@ namespace
     // "poking him with a stick".
     void stab_no_rubber_band(UObject* pawn)
     {
-        if (!hsvr::config().stab_no_rubber_band || !pawn) return;
+        if (!hsvr::config().stab_no_rubber_band || !pawn || g_kbm.load()) return;
         static int cleared[2] = {0, 0};
         static double last_log = 0.0;
         for (int side = 0; side < 2; ++side)
@@ -21624,7 +21630,7 @@ namespace
     void cut_through_tick(UObject* pawn)
     {
         hsvr::Config cfg = hsvr::config();
-        if (!cfg.cut_follow_through || !pawn) return;
+        if (!cfg.cut_follow_through || !pawn || g_kbm.load()) return;
         static double since[2] = {-1.0, -1.0};
         for (int side = 0; side < 2; ++side)
         {
@@ -21789,7 +21795,7 @@ namespace
     {
         using namespace hsvr;
         Config cfg = config();
-        if (!cfg.grip_flip || !pawn) return;
+        if (!cfg.grip_flip || !pawn || g_kbm.load()) return;
         ControllerState state = controllers_state();
         static bool was[2] = {false, false};
         static double down_at[2] = {-1.0, -1.0};
@@ -25598,6 +25604,29 @@ namespace
         g_thrown.clear();
         g_item_track.clear();
         g_sheath_fit.clear();
+    }
+
+    // Into the plain game (mouse and keyboard): everything the VR hands set up is taken off, so what is
+    // left is the game's own: its hand joints (it re-shapes them every tick, Willie_BP @454086-455803)
+    // hold what he holds, his own arm and weapon collide as in the flat game, his body goes back to
+    // physics (pose_release, next in pose_body). Nothing he holds is dropped.
+    void enter_plain_game(UObject* pawn)
+    {
+        if (g_two.active) end_two_hand("mouse and keyboard");
+        for (int side = 0; side < 2; ++side)
+        {
+            if (scabbard_held(side)) scabbard_let_go(side, "mouse and keyboard");
+            for (JointHand& j : g_jh[side]) jh_destroy(j);
+            jh_destroy(g_jo[side]);
+            clear_arm_ignore(side);
+            g_fwant[side].on = false;
+            // The mod's own grabs (scenery, loose objects, disarms); a body the game's grab holds stays (its own grab).
+            g_object_grab[side] = ObjectGrab{};
+            disarm_end(side);
+            g_world[side] = WorldGrab{};
+        }
+        forget_level_objects();
+        HSVR_LOG("Input: mouse and keyboard: the plain game (VR holds, joints, arm no-collide pairs and posing taken off; nothing dropped)");
     }
 
     void capsule_after_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
@@ -30747,6 +30776,7 @@ namespace
         bool known = true;
         if (w == "held_r") value = object_property(pawn, STR("Weapon R")) ? 1.0 : 0.0;
         else if (w == "input_kbm") value = g_kbm.load() ? 1.0 : 0.0;
+        else if (w == "posed") value = g_pose_active.load() ? 1.0 : 0.0;
         else if (w == "walk_speed")
         {
             // his capsule's speed along the ground, cm/s (CharacterMovement Velocity)
