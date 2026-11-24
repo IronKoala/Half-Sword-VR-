@@ -2229,12 +2229,16 @@ namespace
         std::vector<hsvr::Quat> pelvis;
         std::vector<hsvr::Vec3> pos[2][3];
         std::vector<hsvr::Quat> rot[2][3];
+        std::vector<double> planted[2]; // 1 = the foot stands still on the clip's ground (under 30 cm/s)
+        hsvr::Vec3 foot_mean[2];        // the foot's mean spot from the pelvis over the cycle (stride centre)
     };
     struct CrouchPose
     {
         hsvr::Quat pelvis;
         hsvr::Vec3 pos[2][3];
         hsvr::Quat rot[2][3];
+        double planted[2] = {0.0, 0.0};
+        hsvr::Vec3 foot_mean[2];
     };
     struct CrouchAnim
     {
@@ -2254,6 +2258,7 @@ namespace
         double floor_z[2] = {0.0, 0.0};
         bool have_floor[2] = {false, false};
         hsvr::Vec3 target_prev_world[2];
+        hsvr::Vec3 target_prev_cs[2]; // where the foot was sent last frame, his component space (unscaled)
         bool target_prev_ok[2] = {false, false};
         // log stats since the last line
         double slip_sum = 0.0, slip_worst = 0.0;
@@ -2386,6 +2391,27 @@ namespace
             // Root motion is in the starting root's frame; walking clips don't turn, so this is the velocity.
             clip.velocity = Vec3{(rx1 - rx0) / t_last, (ry1 - ry0) / t_last, 0.0};
             clip.yaw_rate = yaw_total / t_last;
+            {
+                // A foot is planted where it stands still in the clip's world: its move from the pelvis
+                // plus the root's (walking clips don't turn; turning clips are judged in the root's frame).
+                size_t n = clip.pelvis.size();
+                double sdt = t_last / (double)(n - 1);
+                for (int sd = 0; sd < 2; ++sd)
+                {
+                    clip.planted[sd].assign(n, 0.0);
+                    Vec3 sum;
+                    for (size_t i = 0; i < n; ++i)
+                    {
+                        size_t j = i + 1 < n ? i + 1 : 1; // looping
+                        Vec3 v = (clip.pos[sd][2][j] - clip.pos[sd][2][i]) * (1.0 / sdt) + clip.velocity;
+                        v.z = 0.0;
+                        clip.planted[sd][i] = length(v) < 30.0 ? 1.0 : 0.0;
+                        sum = sum + clip.pos[sd][2][i];
+                    }
+                    clip.foot_mean[sd] = sum * (1.0 / (double)n);
+                    clip.foot_mean[sd].z = 0.0;
+                }
+            }
             int index = (int)A.clips.size();
             if (ci < 8) A.walk[ci] = index;
             else if (ci == 8) A.loop = index;
@@ -2419,6 +2445,11 @@ namespace
                 out.pos[s][k] = c.pos[s][k][i] + (c.pos[s][k][i + 1] - c.pos[s][k][i]) * f;
                 out.rot[s][k] = qnlerp(c.rot[s][k][i], c.rot[s][k][i + 1], f);
             }
+        for (int s = 0; s < 2; ++s)
+        {
+            out.planted[s] = f < 0.5 ? c.planted[s][i] : c.planted[s][i + 1];
+            out.foot_mean[s] = c.foot_mean[s];
+        }
     }
 
     // Weighted mix of poses (weights sum to 1); quaternions summed on one hemisphere and normalized.
@@ -2435,9 +2466,11 @@ namespace
         Quat rot[2][3];
         for (int s = 0; s < 2; ++s)
             for (int k = 0; k < 3; ++k) { rot[s][k] = {0, 0, 0, 0}; out.pos[s][k] = {}; }
+        for (int s = 0; s < 2; ++s) { out.planted[s] = 0.0; out.foot_mean[s] = {}; }
         for (const auto& [p, w] : in)
         {
             add(pel, r.pelvis, p->pelvis, w);
+            for (int s = 0; s < 2; ++s) { out.planted[s] += p->planted[s] * w; out.foot_mean[s] = out.foot_mean[s] + p->foot_mean[s] * w; }
             for (int s = 0; s < 2; ++s)
                 for (int k = 0; k < 3; ++k)
                 {
@@ -2514,11 +2547,17 @@ namespace
             for (int s2 = 0; s2 < 2; ++s2)
                 if (A.target_prev_ok[s2])
                 {
-                    double e = length(socket_location(driver, bone_fname(s2 == 0 ? "foot_l" : "foot_r")) - A.target_prev_world[s2]);
+                    // In his component space: the body moved on since (v x one frame), the pose didn't.
+                    Vec3 drawn = cinv.rotate(socket_location(driver, bone_fname(s2 == 0 ? "foot_l" : "foot_r")) - loc) * (1.0 / scale);
+                    double e = length(drawn - A.target_prev_cs[s2]);
                     S.foot_err_sum += e, ++S.foot_err_n;
                     S.foot_err_worst = (std::max)(S.foot_err_worst, e);
                 }
-            // His chest (spine_05) heading against his body's: the hips' turn must not carry it.
+        }
+        {
+            // His chest (spine_05) heading against his body's, on or off (the torso twist turns it toward
+            // your look; with the animation on, the hips' turn must not add to that).
+            CrouchAnimStats& S = g_canim_stats;
             Vec3 cf = cinv.rotate(socket_rotation(driver, bone_fname("spine_05")).rotate(Vec3{0, 1, 0}));
             double chest = std::fabs(std::atan2(-cf.x, cf.y) * kRadToDeg);
             S.chest_sum += chest, ++S.chest_n;
@@ -2582,7 +2621,7 @@ namespace
         A.moving += (std::max)(-fade_rate, (std::min)(fade_rate, want_moving - A.moving));
         CrouchPose walk_pose, idle_pose, pose;
         double walk_w[8] = {0};
-        double walk_rate = 0.0;
+        double walk_rate = 0.0, stride = 1.0;
         if (A.moving > 0.0)
         {
             Vec3 pts[8];
@@ -2593,7 +2632,11 @@ namespace
             Vec3 cv;
             for (int i = 0; i < 8; ++i) { dur += walk_w[i] * A.clips[A.walk[i]].length; cv = cv + A.clips[A.walk[i]].velocity * walk_w[i]; }
             double cs = length(cv);
-            walk_rate = cs > 1.0 ? (std::min)(2.0, (std::max)(0.25, speed / cs)) : 1.0;
+            // Faster or slower than the clips: cadence and stride share it (time x sqrt, stride x sqrt), so
+            // the planted foot still stands still without the legs spinning at double time.
+            double ratio = cs > 1.0 ? speed / cs : 1.0;
+            walk_rate = (std::min)(1.6, (std::max)(0.5, std::sqrt(ratio)));
+            stride = (std::min)(1.6, (std::max)(0.3, ratio / walk_rate));
             A.walk_phase += dur > 1e-3 ? walk_rate * dt / dur : 0.0;
             A.walk_phase -= std::floor(A.walk_phase);
             static CrouchPose parts[8];
@@ -2637,6 +2680,13 @@ namespace
             if (a < 10.0 || b < 10.0) { a = 43.33, b = 42.20; }
             Vec3 H = pelvis_cs + hips.rotate(hip_off[s]);
             Vec3 foot_rel = pose.pos[s][2];
+            {
+                // Stride: the foot's swing about its mean spot, longer or shorter (walking tree only).
+                double k = 1.0 + (stride - 1.0) * A.moving;
+                Vec3 m = pose.foot_mean[s];
+                foot_rel.x = m.x + (foot_rel.x - m.x) * k;
+                foot_rel.y = m.y + (foot_rel.y - m.y) * k;
+            }
             Vec3 F{pelvis_cs.x + foot_rel.x, pelvis_cs.y + foot_rel.y, 0.0};
             // The floor under that spot (looking through him, weapons and people), from a step above his last floor.
             Vec3 Fw = loc + crot.rotate(F * scale);
@@ -2666,7 +2716,7 @@ namespace
             wrote[s][0] = thigh, wrote[s][1] = calf, wrote[s][2] = pose.rot[s][2];
             // How far the planted foot's spot moves over the floor (a clip foot under 12 cm is down).
             Vec3 Few = loc + crot.rotate(Fe * scale);
-            if (foot_rel.z < 12.0 && A.target_prev_ok[s] && dt > 0.0 && A.fade >= 1.0)
+            if (pose.planted[s] > 0.99 && A.target_prev_ok[s] && dt > 0.0 && A.fade >= 1.0)
             {
                 Vec3 m = Few - A.target_prev_world[s];
                 m.z = 0.0;
@@ -2677,6 +2727,7 @@ namespace
                 g_canim_stats.slip_worst = (std::max)(g_canim_stats.slip_worst, v);
             }
             A.target_prev_world[s] = Few;
+            A.target_prev_cs[s] = Fe;
             A.target_prev_ok[s] = true;
         }
         float alpha = (float)A.fade;
@@ -2728,9 +2779,9 @@ namespace
             for (int i = 0; i < 8; ++i)
                 if (walk_w[i] > 0.05) { char part[32]; std::snprintf(part, sizeof(part), " %s %.2f", wn[i], walk_w[i]); top += part; }
             double hips_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(hips.w))) * kRadToDeg;
-            HSVR_LOG("CrouchAnim: shown %.2f, head %.2f of standing (%.0f cm down, legs %.0f), moving %.2f at %.0f cm/s (%.0f, %.0f) walk[%s ] phase %.2f x%.2f; "
+            HSVR_LOG("CrouchAnim: shown %.2f, head %.2f of standing (%.0f cm down, legs %.0f), moving %.2f at %.0f cm/s (%.0f, %.0f) walk[%s ] phase %.2f x%.2f stride x%.2f; "
                      "still: L %.2f loop %.2f R %.2f (turn %.0f deg/s); hips turned %.0f deg; planted foot slides %.1f cm/s mean, %.1f worst; leg short of the floor %.1f cm",
-                     A.fade, h, g_crouch_want_cm, g_crouch_drop, A.moving, speed, A.vel.x, A.vel.y, top.c_str(), A.walk_phase, walk_rate, idle_w[0], idle_w[1], idle_w[2],
+                     A.fade, h, g_crouch_want_cm, g_crouch_drop, A.moving, speed, A.vel.x, A.vel.y, top.c_str(), A.walk_phase, walk_rate, stride, idle_w[0], idle_w[1], idle_w[2],
                      A.yaw_rate, hips_deg, A.slip_n ? A.slip_sum / A.slip_n : 0.0, A.slip_worst, A.reach_short_worst);
             A.slip_sum = A.slip_worst = A.reach_short_worst = 0.0;
             A.slip_n = 0;

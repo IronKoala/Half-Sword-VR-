@@ -6,5 +6,6 @@
 5.0:hsvr.expect canim_frames <= 0 no crouch animation when off
 5.0:hsvr.expect steps >= 0 steps in 3 s (record)
 5.0:hsvr.expect walk_speed >= 0 walk speed (record)
+5.0:hsvr.expect canim_chest >= 0 chest off his heading, deg mean (record)
 5.1:hsvr.stick -9 0
 5.2:hsvr.fake_head_drop -1
