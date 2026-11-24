@@ -575,6 +575,7 @@ LAYOUT = [
         ('pose_fist_slap', '1 = an open hand swung fast enough slaps (hits like a fist, fingers open).'),
         ('pose_fist_slap_ass', 'Swing speed for a slap (game units; its fist speed is 30).'),
         ('pose_fist_slap_keep_s', 'Slap stays on this long after the hand slows (s).'),
+        ('pose_fist_slap_own_weapon_cm', 'No open-hand slap fist while that hand is this close (cm) to a weapon your other hand holds: its ball would hit your own weapon. 0 = off.'),
         ('pose_fist_clear', 'No fist while the hand is inside another Willie.'),
         ('pose_fist_clear_margin_cm', 'Extra clearance the fist needs from him (cm).'),
         ('pose_fist_clear_retry_s', 'How often it checks again (s).'),

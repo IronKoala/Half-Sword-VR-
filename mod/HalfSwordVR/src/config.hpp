@@ -917,6 +917,7 @@ namespace hsvr
         bool pose_fist_slap = true;
         double pose_fist_slap_ass = 30.0;
         double pose_fist_slap_keep_s = 0.3;
+        double pose_fist_slap_own_weapon_cm = 20.0; // no slap fist while the open hand is this close (cm) to a weapon his other hand holds (0 = off)
         // No fist while the hand is inside another Willie (playtest 2026-11-20 588 s: a fist made at his
         // neck as a throat grab let go threw his head and neck at 37-87 m/s). The fist waits until its
         // ball (radius measured from the live fist, 13 cm until then) plus margin_cm is clear of every

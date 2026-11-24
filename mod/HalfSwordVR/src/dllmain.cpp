@@ -2329,6 +2329,8 @@ namespace
     bool hand_has_weapon(int side); // the game's hold has a weapon in this hand (his fist doesn't count)
     UObject* held_weapon_of(int side);
     double item_gap(UObject* item, UObject* comp, FName bone, hsvr::Vec3 p);
+    hsvr::Vec3 g_free_palm_unstopped[2]; // the free hand's palm middle where you put it, before the stops on a held weapon (for taking it)
+    bool g_free_palm_valid[2] = {false, false};
     hsvr::Vec3 g_free_rest_off[2]; // the free hand's drawn place moved off a weapon the other hand holds, from his real hand body (pose_hand_held_weapon_body_gap_cm)
     hsvr::Vec3 g_thumb_world[2]; // each hand's thumb-ward line through the fist this frame (the grip's direction on a handle) // the weapon the mod's hold has in this hand (or null)
     double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part);
@@ -3426,6 +3428,8 @@ namespace
                 HSVR_LOG_EVERY(1.0, "Hand: %s hand stopped by the world %.1f cm short of your controller", side == 0 ? "left" : "right", length(at - palm_mid));
             }
         }
+        g_free_palm_unstopped[side] = target + fingers_world * cfg.pose_hand_world_reach_cm;
+        g_free_palm_valid[side] = !on_weapon && !hand_has_weapon(side);
         // A free hand rests ON a weapon his other hand holds, not in it (pose_hand_held_weapon_stop): drawn into it, his arm's
         // motors pressed the hand into the haft every step and the weapon wobbled at 450-540 deg/s (park cases 2026-11-24, axe;
         // gone with the free arm not colliding). B&S's free hand is a light body on soft springs (5000 N/m, max 3000 N), which
@@ -8118,6 +8122,19 @@ namespace
         if (!base) return false;
         Vec3 at = hand_grab_point(mesh, side);
         double touch_d = closest_on_weapon(weapon, at);
+        // Your own hand's place (before the rest stops hold his drawn hand off the weapon): the solid free hand rests 4 cm off it and its
+        // body further (f790b94 runs: retakes squeezed 11-31 cm off). B&S takes by touch of your controller-driven hand.
+        if (g_free_palm_valid[side])
+        {
+            double d2 = closest_on_weapon(weapon, g_free_palm_unstopped[side]);
+            if (d2 >= 0.0 && (touch_d < 0.0 || d2 < touch_d))
+            {
+                HSVR_LOG("Two hands: %s grip squeezed %.1f cm from %ls by your hand (%.1f by his drawn hand, held off it)", side == 0 ? "left" : "right", d2,
+                         weapon->GetName().c_str(), touch_d);
+                touch_d = d2;
+                at = g_free_palm_unstopped[side];
+            }
+        }
         if (touch_d < 0.0 || touch_d > cfg.pose_grab_touch_cm)
         {
             HSVR_LOG("Two hands: %s grip squeezed %.0f cm from %ls (needs %.0f), not on it", side == 0 ? "left" : "right", touch_d, weapon->GetName().c_str(),
@@ -13819,7 +13836,18 @@ namespace
             double t = hsvr::now_seconds();
             double lo = cfg.pose_swing_speed_lo, hi = (std::max)(lo + 0.1, cfg.pose_swing_speed_hi);
             double hand_ass = g_swing_v[side] <= lo ? 0.0 : (std::min)(75.0, (g_swing_v[side] - lo) / (hi - lo) * 75.0);
-            if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass) g_slap_until[side] = t + cfg.pose_fist_slap_keep_s;
+            // No slap fist right by a weapon his other hand holds (f790b94 park run: the free hand moving in at swing speed 31 spawned the
+            // fist's 13 cm ball against the held axe and spun it at 545 deg/s): the ball would hit his own weapon.
+            bool by_own = false;
+            if (cfg.pose_fist_slap_own_weapon_cm > 0.0 && !is_fist(mine) && hand_has_weapon(1 - side))
+                if (UObject* fm = object_property(pawn, STR("Mesh")))
+                {
+                    double d = closest_on_weapon(held_weapon_of(1 - side), socket_location(fm, bone_fname(side == 0 ? "hand_l" : "hand_r")), nullptr, nullptr);
+                    by_own = d >= 0.0 && d < cfg.pose_fist_slap_own_weapon_cm;
+                }
+            if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass && by_own)
+                HSVR_LOG_EVERY(1.0, "Fist: %s hand no slap (hand swing speed %.0f): within %.0f cm of the weapon the other hand holds", hand, hand_ass, cfg.pose_fist_slap_own_weapon_cm);
+            if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass && !by_own) g_slap_until[side] = t + cfg.pose_fist_slap_keep_s;
             bool slap = !now && t < g_slap_until[side];
             if (slap != g_fist_open[side].load() && (slap || is_fist(mine)))
                 HSVR_LOG("Fist: %s hand %s (hand swing speed %.0f)", hand, slap ? "slaps: open-hand fist" : "closed over its slap fist", hand_ass);
