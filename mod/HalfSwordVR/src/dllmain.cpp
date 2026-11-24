@@ -2327,6 +2327,8 @@ namespace
     bool hand_rides_grab(int side);
     bool hand_on_scenery(int side); // the hand is pinned on fixed scenery (a world grab)
     bool hand_has_weapon(int side); // the game's hold has a weapon in this hand (his fist doesn't count)
+    UObject* held_weapon_of(int side); // the weapon the mod's hold has in this hand (or null)
+    double closest_on_weapon(UObject* weapon, const hsvr::Vec3& point, hsvr::Vec3* out, UObject** out_part);
     bool hand_is_fist(int side);    // the game's hold has his fist in this hand
     bool g_wrap_on_side(int side);
     bool hand_world_sweep(const hsvr::Vec3& from, const hsvr::Vec3& to, double radius, hsvr::Vec3& stop);
@@ -3408,6 +3410,41 @@ namespace
                 target = target + (at - palm_mid);
                 stopped = true;
                 HSVR_LOG_EVERY(1.0, "Hand: %s hand stopped by the world %.1f cm short of your controller", side == 0 ? "left" : "right", length(at - palm_mid));
+            }
+        }
+        // A free hand rests ON a weapon his other hand holds, not in it (pose_hand_held_weapon_stop): drawn into it, his arm's
+        // motors pressed the hand into the haft every step and the weapon wobbled at 450-540 deg/s (park cases 2026-11-24, axe;
+        // gone with the free arm not colliding). B&S's free hand is a light body on soft springs (5000 N/m, max 3000 N), which
+        // a held item pushes aside; his is the ragdoll's, far stiffer, so its drawn place stops at the weapon's surface instead.
+        if (cfg.pose_hand_held_weapon_stop_cm > 0.0 && !on_weapon && (g_solved_on[side] & ~1) == 0 && !hand_has_weapon(side) && hand_has_weapon(1 - side))
+        {
+            UObject* hw = held_weapon_of(1 - side);
+            Vec3 palm_mid = target + fingers_world * cfg.pose_hand_world_reach_cm;
+            Vec3 q;
+            double d = closest_on_weapon(hw, palm_mid, &q, nullptr);
+            double r = cfg.pose_hand_held_weapon_stop_cm;
+            if (d >= 0.0 && d < r)
+            {
+                Vec3 away = palm_mid - q;
+                if (d < 0.05)
+                {
+                    // Inside it: out from the weapon's long axis.
+                    UObject* hb = object_property(hw, STR("BaseMesh"));
+                    Vec3 ax = hb ? component_rotation(hb).rotate(Vec3{0, 0, 1}) : Vec3{0, 0, 1};
+                    Vec3 o = hb ? component_location(hb) : q;
+                    Vec3 rel = palm_mid - o;
+                    away = rel - ax * dot(rel, ax);
+                    double inside = length(away);
+                    if (inside < 1e-3) away = cross(ax, Vec3{0, 0, 1});
+                }
+                if (length(away) > 1e-6)
+                {
+                    Vec3 push = normalized(away) * (r - d);
+                    target = target + push;
+                    stopped = true;
+                    HSVR_LOG_EVERY(1.0, "Hand: %s free hand rests on %ls (held by the other hand): moved %.1f cm out of it", side == 0 ? "left" : "right",
+                                   hw->GetName().c_str(), length(push));
+                }
             }
         }
         if (!on_weapon && hand_on_grab(side, cfg, target, Wh))
@@ -6388,6 +6425,7 @@ namespace
     };
     HoldState g_hold[2];
     bool hand_has_weapon(int side) { return g_hold[side].weapon != nullptr && !is_fist(g_hold[side].weapon); }
+    UObject* held_weapon_of(int side) { return g_hold[side].weapon; }
     bool hand_is_fist(int side) { return is_fist(g_hold[side].weapon); }
 
     // The game's off-hand search: with a two-handed weapon (longswords) in one hand and the other

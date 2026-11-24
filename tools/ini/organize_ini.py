@@ -246,6 +246,7 @@ LAYOUT = [
         ('pose_hand_world_stop', '1 = an empty hand stops at walls and scenery instead of going into them.'),
         ('pose_hand_world_radius_cm', 'pose_hand_world_stop: radius of the sphere at the middle of the palm that stops on walls (cm).'),
         ('pose_hand_world_reach_cm', 'pose_hand_world_stop: that sphere sits this far past the wrist along the fingers (cm).'),
+        ('pose_hand_held_weapon_stop_cm', 'Your free hand rests on a weapon your other hand holds instead of sinking into it: how far (cm) its palm stays outside it. 0 = off.'),
         ('pose_arm_fresh_shoulder', '1 = an empty hand does not bob with your steps while walking (its arm is re-aimed from this frame\'s shoulder after his body is evaluated).'),
         ('pose_arm_fresh_shoulder_held', "pose_arm_fresh_shoulder for a hand holding a weapon too (two hands, scabbard): 0 = empty hands only."),
         ('pose_no_fall_arms', "1 = walking fast doesn't swap his arms into the game's falling-backwards swing (that opened the weapon hand)."),

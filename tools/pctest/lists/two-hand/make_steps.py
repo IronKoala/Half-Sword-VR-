@@ -323,7 +323,9 @@ def main():
                        ("old_switch2", "|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0")):
         lst += ["%s_%s|steps-switch_%s.txt%s" % (pre, n, n, extra) for n in switch]
     lst += ["park_%s|steps-park_%s.txt" % (n, n) for n in park]
+    # (park_solid_: the free hand solid, resting on the weapon (pose_hand_held_weapon_stop_cm 4); park_press_: solid and drawn into it, as 4e16486)
     lst += ["park_solid_%s|steps-park_%s.txt|pose_hold_free_hand_collides=1" % (n, n) for n in park]
+    lst += ["park_press_%s|steps-park_%s.txt|pose_hold_free_hand_collides=1;pose_hand_held_weapon_stop_cm=0" % (n, n) for n in park]
     lst += ["park_whole_%s|steps-park_%s.txt|pose_hold_self_collision=0" % (n, n) for n in park]
     # (a second launch of each: the one runaway seen so far came in only one of two launches)
     lst += ["reach2_%s|steps-reach_%s.txt" % (n, n) for n in reach]
