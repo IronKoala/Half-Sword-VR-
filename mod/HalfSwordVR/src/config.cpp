@@ -854,6 +854,14 @@ namespace hsvr
         num("pose_eat_cm", c.pose_eat_cm);
         num("pose_drink_tip", c.pose_drink_tip);
         num("pose_drink_sip_s", c.pose_drink_sip_s);
+        flag("armor_hands", c.armor_hands);
+        num("armor_hold_s", c.armor_hold_s);
+        num("armor_trigger_on", c.armor_trigger_on);
+        num("armor_trigger_off", c.armor_trigger_off);
+        num("armor_equip_cm", c.armor_equip_cm);
+        num("armor_take_cm", c.armor_take_cm);
+        num("armor_strip_cm", c.armor_strip_cm);
+        num("armor_take_still_cms", c.armor_take_still_cms);
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
         flag("pose_grab_objects", c.pose_grab_objects);
         flag("pose_grab_world", c.pose_grab_world);
