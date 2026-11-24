@@ -2336,6 +2336,7 @@ namespace
         double t = -1.0;
     };
     ReleaseLinger g_release_linger[2];
+    double g_two_let_go_t[2] = {-10.0, -10.0}; // when this hand last let go as second hand (end_two_hand); never cleared, for the slap rule
     void clear_arm_ignore(int side);
     UObject* arm_ignore_weapon(int side);
     bool is_second_hand(int side);
@@ -7965,6 +7966,7 @@ namespace
                      ok ? "" : ": NOT SET", read_number_variable(g_pose.pawn, grip_type_name(g_two.main)));
         }
         HSVR_LOG("Two hands: %s hand lets go of %ls (%s)", g_two.second == 0 ? "left" : "right", g_two.weapon ? g_two.weapon->GetName().c_str() : STR("?"), why);
+        if (g_two.second == 0 || g_two.second == 1) g_two_let_go_t[g_two.second] = hsvr::now_seconds();
         if (g_two.weapon && g_arm_ignore[g_two.second].weapon == g_two.weapon)
         {
             // B&S (RagdollHand.HandOverlapCoroutine, RagdollHand.cs:1502-1548): a hand that lets go keeps ignoring the item until
@@ -13905,22 +13907,36 @@ namespace
             // No slap fist right by a weapon his other hand holds (f790b94 park run: the free hand moving in at swing speed 31 spawned the
             // fist's 13 cm ball against the held axe and spun it at 545 deg/s): the ball would hit his own weapon.
             bool by_own = false;
-            if (cfg.pose_fist_slap_own_weapon_cm > 0.0 && !is_fist(mine) && hand_has_weapon(1 - side))
+            const char* own_why = "";
+            double own_d = -1.0;
+            bool own_on = cfg.pose_fist_slap_own_weapon_cm > 0.0 && !is_fist(mine);
+            if (own_on && hand_has_weapon(1 - side))
                 if (UObject* fm = object_property(pawn, STR("Mesh")))
                 {
-                    double d = closest_on_weapon(held_weapon_of(1 - side), socket_location(fm, bone_fname(side == 0 ? "hand_l" : "hand_r")), nullptr, nullptr);
-                    by_own = d >= 0.0 && d < cfg.pose_fist_slap_own_weapon_cm;
+                    own_d = closest_on_weapon(held_weapon_of(1 - side), socket_location(fm, bone_fname(side == 0 ? "hand_l" : "hand_r")), nullptr, nullptr);
+                    if (own_d >= 0.0 && own_d < cfg.pose_fist_slap_own_weapon_cm) by_own = true, own_why = "within reach of the weapon the other hand holds";
                 }
             // Nor a hand that is on the weapon as second hand or just let go of it (a69b19e+3d47c22 switch_polehammer: the left hand let
-            // go at 70.002 and slapped at 70.030, speed 31, inside the haft it still passes through).
-            if (cfg.pose_fist_slap_own_weapon_cm > 0.0 && !is_fist(mine) && (is_second_hand(side) || g_release_linger[side].weapon))
-                by_own = true;
+            // go at 70.002 and slapped at 70.030, speed 31, inside the haft it still passes through). The let-go time is kept on its own
+            // (43dfdad full gate switch_warstaff: let go 100.451, slapped 100.506 with the hand body 1.5 cm from the staff anyway).
+            if (own_on && !by_own && is_second_hand(side)) by_own = true, own_why = "it is the second hand on that weapon";
+            if (own_on && !by_own && g_release_linger[side].weapon) by_own = true, own_why = "it still passes through the weapon it let go of";
+            if (own_on && !by_own && t - g_two_let_go_t[side] < 0.5) by_own = true, own_why = "it let go of a weapon under 0.5 s ago";
             if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass && by_own)
-                HSVR_LOG_EVERY(1.0, "Fist: %s hand no slap (hand swing speed %.0f): within %.0f cm of the weapon the other hand holds", hand, hand_ass, cfg.pose_fist_slap_own_weapon_cm);
+                HSVR_LOG_EVERY(1.0, "Fist: %s hand no slap (hand swing speed %.0f): %s", hand, hand_ass, own_why);
             if (cfg.pose_fist_slap && hand_ass >= cfg.pose_fist_slap_ass && !by_own) g_slap_until[side] = t + cfg.pose_fist_slap_keep_s;
             bool slap = !now && t < g_slap_until[side];
             if (slap != g_fist_open[side].load() && (slap || is_fist(mine)))
+            {
                 HSVR_LOG("Fist: %s hand %s (hand swing speed %.0f)", hand, slap ? "slaps: open-hand fist" : "closed over its slap fist", hand_ass);
+                // What the own-weapon rule saw, so a slap by his own weapon can be traced.
+                if (slap && !hand_has_weapon(side))
+                    HSVR_LOG("Fist: %s slap checks: own rule %d, his weapon %ls, other hand holds %d (%ls) %.1f cm, second hand %d, passing through %d, "
+                             "let go %.2f s ago",
+                             hand, (int)own_on, mine ? mine->GetName().c_str() : STR("none"), (int)hand_has_weapon(1 - side),
+                             held_weapon_of(1 - side) ? held_weapon_of(1 - side)->GetName().c_str() : STR("none"), own_d, (int)is_second_hand(side),
+                             (int)(g_release_linger[side].weapon != nullptr), t - g_two_let_go_t[side]);
+            }
             g_fist_open[side].store(slap);
             if (!now && !slap)
             {
