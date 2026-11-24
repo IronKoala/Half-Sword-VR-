@@ -31,13 +31,18 @@ HEAD = """0.5:hsvr.fake_head_drop 0
 1.5:hsvr.squeeze 1 0
 2.4:hsvr.expect held_r = 0 right hand empty
 2.5:hsvr.arm_move 1
+2.6:hsvr.pawn_call Event Clear Sheathed Weapon Slots
 3:hsvr.squeeze 1 1
 3.5:hsvr.give_weapon {path}
 5:hsvr.weapon_dump 1
 5.5:hsvr.expect held_r = 1 weapon in the right hand
 """
 TAKE_ALONG = """6:hsvr.arm_move 7 {along}
+7.7:hsvr.arm_move 7 {along}
 8:hsvr.squeeze 0 1
+8.8:hsvr.if_free 0 hsvr.squeeze 0 0
+9:hsvr.if_free 0 hsvr.arm_move 7 {along}
+9.3:hsvr.if_free 0 hsvr.squeeze 0 1
 """
 TAKE_FRONT = """6:hsvr.xbow_hand 0 front
 9:hsvr.squeeze 0 1
@@ -150,6 +155,98 @@ REPLAY = """10:hsvr.expect two_hand = 1 second hand took it
 """
 
 
+# Auto slide (pose_two_hand_auto_slide_cm, playtest 2026-11-23 4:59 PM polearm): two hands on a haft, then the left hand moves
+# 18 cm along the shaft toward the right without the trigger: its spot must follow it (B&S rest gap 6-9 cm), not stay and stretch.
+AUTO = [("polehammer", 30, 12), ("warstaff", 30, 12)]
+AUTO_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
+10.5:hsvr.arm_move 7 {to}
+13:hsvr.expect two_hand = 1 hand moved along the shaft: still held
+13:hsvr.expect two_spot_off < 6 hand moved along the shaft: its spot followed it (B&S rest gap 6-9 cm)
+13.5:hsvr.arm_move 7 {back}
+16:hsvr.expect two_hand = 1 hand moved back: still held
+16:hsvr.expect two_spot_off < 6 hand moved back: its spot followed it
+16.5:quit
+"""
+
+
+# Still hands far from the grips (playtest 2026-11-23 17:09-17:10: a two-handed war hammer spun up to 3500-9000 deg/s with
+# both controllers still and the second hand 19-31 cm from its spot): left controller 25 cm further than its spot, held still.
+SPREAD = [("axe2h", -25), ("polehammer", 30), ("warstaff", 30), ("longsword", -12)]
+SPREAD_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
+10.3:hsvr.hand_spread 0 25
+11.8:hsvr.two_reset
+16:hsvr.expect two_hand = 1 hands still, 25 cm wider than the grips: still held
+16:hsvr.expect two_spin_max < 200 hands still, 25 cm wider than the grips: the weapon does not spin up (deg/s)
+16:hsvr.expect two_jitter < 2 hands still, 25 cm wider than the grips: no shaking (% of ticks the spin reversed)
+16.1:hsvr.hand_spread 0 0
+16.5:quit
+"""
+
+
+# Spin brake (one hand; playtest 2026-11-23 17:01: a one-handed mace spun end over end at 1300-1700 deg/s for 10 s in a still
+# hand): the held weapon is set spinning 1500 deg/s end over end, the hand still; it must come to rest with the hand.
+SPIN = ["mace", "axe2h", "polehammer", "longsword"]
+SPIN_STEPS = """6:hsvr.spin_kick 1 1500
+6.5:hsvr.expect held_spin_max_r > 300 (check) the kick took: it spun
+8.5:hsvr.expect held_r = 1 still in the hand
+8.5:hsvr.expect held_spin_r < 120 2.5 s after: back at rest in the still hand (deg/s)
+9:hsvr.spin_kick 1 -1500
+11.5:hsvr.expect held_r = 1 the other way: still in the hand
+11.5:hsvr.expect held_spin_r < 120 the other way: back at rest (deg/s)
+12:quit
+"""
+
+
+# Reach (2026-11-24): his mace spin started with his controller ~40 cm past where the drawn hand could be (log 250.4:
+# "42 cm from hand_r"), a swing that stopped, one hand. The kick cases never reproduced it (the kick died in a tick in every
+# mode). arm_move 6 holds the hand 54-70 cm out (past his 53 cm arm); then a fast cut and a stop out there.
+REACH = ["mace", "axe2h", "polehammer", "longsword"]
+REACH_STEPS = """6:hsvr.arm_move 6
+6.5:hsvr.spin_reset 1
+9.5:hsvr.expect held_spin_max_r < 400 reaching past his arm: the weapon does not spin up on its own (deg/s)
+9.6:hsvr.arm_move 3
+12.6:hsvr.arm_move 6
+12.6:hsvr.expect held_spin_max_r < 900 fast cut out past his arm: no runaway spin (the mace ran at 1300-1800 deg/s)
+12.7:hsvr.spin_reset 1
+15.5:hsvr.expect held_spin_max_r < 900 stopped out past his arm: no runaway spin
+15.5:hsvr.expect held_spin_r < 120 stopped out past his arm: at rest 3 s later (deg/s)
+15.5:hsvr.expect held_r = 1
+16:quit
+"""
+
+# Switch (2026-11-24, his markers 2026-11-23: three runaway spins 0.82-1.06 s after a switch between one and two hands, controllers
+# still, right hand main throughout; one same switch with no spin). A fast two-hand cut, the left lets go out there, then takes again.
+SWITCH = [("axe2h", -25), ("polehammer", 30), ("warstaff", 30), ("longsword", -12)]
+SWITCH_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
+10.1:hsvr.arm_move 3
+12:hsvr.arm_move 7 {along}
+12.1:hsvr.squeeze 0 0
+12.4:hsvr.spin_reset 1
+15:hsvr.expect held_r = 1
+15:hsvr.expect held_spin_max_r < 300 from 0.3 s after the left let go (2 to 1 hands), hands still: no spin-up (deg/s; his ran 1300-2700)
+15.1:hsvr.arm_move 7 {along}
+16.2:hsvr.arm_move 7 {along}
+16.5:hsvr.squeeze 0 1
+17.3:hsvr.if_free 0 hsvr.squeeze 0 0
+17.5:hsvr.if_free 0 hsvr.arm_move 7 {along}
+17.8:hsvr.if_free 0 hsvr.squeeze 0 1
+18.1:hsvr.spin_reset 1
+20.8:hsvr.expect two_hand = 1 took it again
+20.8:hsvr.expect held_spin_max_r < 300 after the left took it again (1 to 2 hands; from 0.3 s after the latest try), hands still: no spin-up (deg/s)
+20.9:quit
+"""
+
+# Park (2026-11-24, 885d369 run): the free left hand parked beside a weapon the right holds pushed it (and the right hand 15 cm off
+# its still target) into a 300-670 deg/s wobble for 1.3 s. Coordinator: a bug, not a watch item.
+PARK = [("axe2h", -25), ("polehammer", 30), ("warstaff", 30), ("longsword", -12)]
+PARK_STEPS = """6:hsvr.arm_move 7 {along}
+6.1:hsvr.spin_reset 1
+10:hsvr.expect held_spin_max_r < 150 the free hand parked beside it: no wobble (deg/s)
+10:hsvr.expect held_r = 1
+10.1:quit
+"""
+
+
 def main():
     rows = []
     for line in Path(sys.argv[1]).read_text().splitlines():
@@ -157,6 +254,8 @@ def main():
         if not line or line.startswith("#"):
             continue
         name, path, along = [p.strip() for p in line.split("|")]
+        if along == "-":
+            continue  # one hand only
         steps = HEAD.format(path=path) + (TAKE_FRONT if along == "front" else TAKE_ALONG.format(along=along)) + BODY
         if along != "front" and abs(float(along)) <= 15.0:
             steps = steps.replace("28:quit\n", "") + WRIST.format(along=along)
@@ -176,12 +275,61 @@ def main():
         steps = HEAD.format(path=paths[weapon]) + TAKE_ALONG.format(along=along) + REPLAY.format(track=tracks + "\\" + track, turn=turn, lag=lag)
         (HERE / ("steps-rp_%s.txt" % name)).write_text(steps, newline="\n")
         rp.append(name)
+    auto = []
+    for weapon, along, to in AUTO:
+        steps = HEAD.format(path=paths[weapon]) + TAKE_ALONG.format(along=along) + AUTO_STEPS.format(to=to, back=along)
+        (HERE / ("steps-auto_%s.txt" % weapon)).write_text(steps, newline="\n")
+        auto.append(weapon)
+    spread = []
+    for weapon, along in SPREAD:
+        steps = HEAD.format(path=paths[weapon]) + TAKE_ALONG.format(along=along) + SPREAD_STEPS
+        (HERE / ("steps-spread_%s.txt" % weapon)).write_text(steps, newline="\n")
+        spread.append(weapon)
+    spin = []
+    for weapon in SPIN:
+        steps = HEAD.format(path=paths[weapon]) + SPIN_STEPS
+        (HERE / ("steps-spin_%s.txt" % weapon)).write_text(steps, newline="\n")
+        spin.append(weapon)
+    reach = []
+    for weapon in REACH:
+        (HERE / ("steps-reach_%s.txt" % weapon)).write_text(HEAD.format(path=paths[weapon]) + REACH_STEPS, newline="\n")
+        reach.append(weapon)
+    switch = []
+    for weapon, along in SWITCH:
+        steps = HEAD.format(path=paths[weapon]) + TAKE_ALONG.format(along=along) + SWITCH_STEPS.format(along=along)
+        (HERE / ("steps-switch_%s.txt" % weapon)).write_text(steps, newline="\n")
+        switch.append(weapon)
+    park = []
+    for weapon, along in PARK:
+        (HERE / ("steps-park_%s.txt" % weapon)).write_text(HEAD.format(path=paths[weapon]) + PARK_STEPS.format(along=along), newline="\n")
+        park.append(weapon)
     lst = ["# Two hands with real-hand conditions (playtest 2026-11-23); two hands are held as B&S holds them (pose_two_hand_bs=1).",
            "# rp_: his own recorded controller motion. ctl_: the same cases in the previous line mode (pose_two_hand_bs=0), for comparison."]
     lst += ["two_%s|steps-%s.txt" % (n, n) for n in rows]
     lst += ["rp_%s|steps-rp_%s.txt" % (n, n) for n in rp]
     lst += ["ctl_%s|steps-line-%s.txt|pose_two_hand_bs=0" % (n, n) for n in rows]
     lst += ["ctl_rp_%s|steps-rp_%s.txt|pose_two_hand_bs=0" % (n, n) for n in rp]
+    lst += ["spread_%s|steps-spread_%s.txt" % (n, n) for n in spread]
+    lst += ["ctl_spread_%s|steps-spread_%s.txt|pose_two_hand_bs=0" % (n, n) for n in spread]
+    lst += ["spin_%s|steps-spin_%s.txt" % (n, n) for n in spin]
+    lst += ["ctl_spin_%s|steps-spin_%s.txt|pose_hold_spin_brake_from=0" % (n, n) for n in spin]
+    # (pull once, 2026-11-24: the one-hand spin the mod sets no longer carries the joint's pull a second time. old_: as installed
+    # a3bde48, both off, expected to keep spinning (the mace bug); pull2_: the pull twice with the brake on)
+    lst += ["old_spin_%s|steps-spin_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in spin]
+    lst += ["pull2_spin_%s|steps-spin_%s.txt|pose_hold_joint_pull_once=0" % (n, n) for n in spin]
+    lst += ["reach_%s|steps-reach_%s.txt" % (n, n) for n in reach]
+    lst += ["old_reach_%s|steps-reach_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in reach]
+    for pre, extra in (("switch", ""), ("switch2", ""), ("grip_switch", "|pose_hold_joint_turn_couple=0"), ("old_switch", "|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0"),
+                       ("old_switch2", "|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0")):
+        lst += ["%s_%s|steps-switch_%s.txt%s" % (pre, n, n, extra) for n in switch]
+    lst += ["park_%s|steps-park_%s.txt" % (n, n) for n in park]
+    lst += ["park_nofree_%s|steps-park_%s.txt|pose_hold_free_hand_collides=0" % (n, n) for n in park]
+    lst += ["park_whole_%s|steps-park_%s.txt|pose_hold_self_collision=0" % (n, n) for n in park]
+    # (a second launch of each: the one runaway seen so far came in only one of two launches)
+    lst += ["reach2_%s|steps-reach_%s.txt" % (n, n) for n in reach]
+    lst += ["old_reach2_%s|steps-reach_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in reach]
+    # (auto slide is off by default since Matthew 2026-11-24 00:08Z chose B&S's trigger-only slide; these turn it on)
+    lst += ["auto_%s|steps-auto_%s.txt|pose_two_hand_auto_slide_cm=10" % (n, n) for n in auto]
     (HERE / "list.txt").write_text("\n".join(lst) + "\n", newline="\n")
     print("wrote %d cases (+%d control)" % (len(rows), len(rows)))
 

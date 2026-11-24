@@ -6,12 +6,17 @@
 1.5:hsvr.squeeze 1 0
 2.4:hsvr.expect held_r = 0 right hand empty
 2.5:hsvr.arm_move 1
+2.6:hsvr.pawn_call Event Clear Sheathed Weapon Slots
 3:hsvr.squeeze 1 1
 3.5:hsvr.give_weapon passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight 1
 5:hsvr.weapon_dump 1
 5.5:hsvr.expect held_r = 1 weapon in the right hand
 6:hsvr.arm_move 7 -12
+7.7:hsvr.arm_move 7 -12
 8:hsvr.squeeze 0 1
+8.8:hsvr.if_free 0 hsvr.squeeze 0 0
+9:hsvr.if_free 0 hsvr.arm_move 7 -12
+9.3:hsvr.if_free 0 hsvr.squeeze 0 1
 10:hsvr.expect two_hand = 1 second hand took it
 10.2:hsvr.ctl_replay C:\dev\hsvr-2h0303\tools\pctest\lists\two-hand\tracks\sword2h-waggle.csv 0.5
 11.3:hsvr.hold_rebase 1

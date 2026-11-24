@@ -463,6 +463,10 @@ namespace hsvr
         // down to where the wrist's turning limit carries it (Matthew 2026-11-20: a pole hammer held out by
         // its end barely sagged for a weak Willie). 0 = it also holds still weight, as before.
         double pose_hold_wrist_stop_spin = 2.0;
+        // The spin brake: a held weapon spinning this much faster than the hand (rad/s) gets the wrist stop's turning limit
+        // (fully by from + span), whichever way it is bent, so it cannot keep spinning in a still hand (mace 2026-11-23 17:01). 0 = off.
+        double pose_hold_spin_brake_from = 6.0;
+        double pose_hold_spin_brake_span = 6.0;
         // His strength on the turning limits (wrist and stop) is raised to this power: a wrist is weaker in
         // proportion than the whole arm (min/min Willie x0.58 -> x0.34, biggest x1.27 -> x1.6). 1 = as the force.
         double pose_hold_torque_strength_power = 2.0; // below a default body only: above it, x strength as the force
@@ -496,6 +500,7 @@ namespace hsvr
         bool pose_hold_ignore_own_helmet = true;
         bool hold_blocker_log = false; // test: name what a held weapon hits, and what is along it while it is held off
         bool pose_hold_ignore_body = true;   // the held weapon never collides with his own body (B&S)
+        bool pose_hold_self_collision = true; // B&S Player Self Collision: the held weapon ignores only the holding arm(s); off = whole body but feet and free hand
         double pose_bs_max_spin = 60.0; // rad/s
         // The weight's own swing never spins it faster than the turn wanted plus this (rad/s): one tick
         // of a deadbeat grip pull fed back into the lever spun the axe to the 60 rad/s cap (playtest 09:38).
@@ -558,6 +563,14 @@ namespace hsvr
         double pose_hold_joint_fade_after_s = 0.0;  // s: no ease to B&S's cap this soon after a joint is made (was 0.3 before the grab's speed was zeroed)
         bool pose_hold_joint_slerp = true; // 1 = the joint turns the weapon by one SLERP drive (0 = twist and swing drives)
         bool pose_hold_joint_mod_turn = true; // one hand: 1 = the old hold's turn (spin set each tick), the joint only pulls; 0 = the joint's turn drive
+        // One hand (and B&S two hands) on the joint with the mod's turn: the joint(s) alone pull; the spin the mod sets is the turn only. 0 = the
+        // spin set also carries the pull's lever (as before 2026-11-24), so the pull acted twice a tick (mace spin 2026-11-23 17:01).
+        bool pose_hold_joint_pull_once = true;
+        // The turn the mod sets on a held weapon (joint hold) is a pure couple: its centre of mass keeps its speed. 0 = the grip keeps
+        // its speed (before 2026-11-24), which could turn braking a spin into a throw the joint then turned back into spin.
+        bool pose_hold_joint_turn_couple = true;
+        // A weapon held in one hand collides with the free hand (B&S: the free hand stays solid). 0 = the free arm is ignored too.
+        bool pose_hold_free_hand_collides = true;
         double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)
         bool pose_hold_joint_draw_wound = true; // drawing/sheathing and a blade in a wound stay on the joint (sent where the old rules put it)
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
@@ -572,6 +585,8 @@ namespace hsvr
         double pose_two_hand_bs_pos_k = 10000.0, pose_two_hand_bs_pos_c = 150.0, pose_two_hand_bs_pos_max = 6000.0; // each hand's pull: N/m, N s/m, N
         double pose_two_hand_bs_rot_k = 2200.0, pose_two_hand_bs_rot_c = 90.0, pose_two_hand_bs_rot_max = 500.0;    // the main hand's turn: N m/rad, N m s/rad, N m
         bool pose_two_hand_bs_solve_pulls = false; // (off: run 6cec1f5 no better on the waggle, and lost the war staff once) the mod's solve does both hands' pulls (the joints pull nothing)
+        bool pose_two_hand_bs_front_turns = true; // B&S two hands: the hand further up the weapon turns it (AutoFront), not always the first
+        double pose_two_hand_auto_slide_cm = 0.0; // (off: Matthew 2026-11-24 00:08Z "do it just like Blade and Sorcery", trigger-only slide) B&S two hands on a haft: a hand this far from its spot along the shaft follows your hand without the trigger (0 = off)
         bool pose_two_hand_joint_both_turn = true; // joint hold, both hands on fixed grips: both wrists turn it (rerun 388ca67: 60 deg pitch followed, 2.5-3.3 cm / 5-6 deg off; off: 27-37 deg, creeps back)
         bool pose_two_hand_fixed_rebase = true; // fixed grips, both wrists: the second hand's turn and spot taken from the first hand at the grab
         double pose_two_hand_swing_share = 0.0;
