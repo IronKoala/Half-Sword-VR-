@@ -530,6 +530,7 @@ namespace hsvr
         flag("pose_hold_joint_mod_turn", c.pose_hold_joint_mod_turn);
         flag("pose_hold_joint_pull_once", c.pose_hold_joint_pull_once);
         flag("pose_hold_joint_turn_couple", c.pose_hold_joint_turn_couple);
+        flag("pose_hold_free_hand_collides", c.pose_hold_free_hand_collides);
         num("pose_hold_joint_target_max_speed", c.pose_hold_joint_target_max_speed);
         flag("pose_hold_joint_draw_wound", c.pose_hold_joint_draw_wound);
         flag("pose_hold_joint_turn_by_grip", c.pose_hold_joint_turn_by_grip);

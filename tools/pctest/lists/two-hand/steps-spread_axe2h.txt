@@ -12,7 +12,11 @@
 5:hsvr.weapon_dump 1
 5.5:hsvr.expect held_r = 1 weapon in the right hand
 6:hsvr.arm_move 7 -25
+7.7:hsvr.arm_move 7 -25
 8:hsvr.squeeze 0 1
+8.8:hsvr.if_free 0 hsvr.squeeze 0 0
+9:hsvr.if_free 0 hsvr.arm_move 7 -25
+9.3:hsvr.if_free 0 hsvr.squeeze 0 1
 10:hsvr.expect two_hand = 1 second hand took it
 10.3:hsvr.hand_spread 0 25
 11.8:hsvr.two_reset

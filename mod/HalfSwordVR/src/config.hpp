@@ -566,6 +566,8 @@ namespace hsvr
         // The turn the mod sets on a held weapon (joint hold) is a pure couple: its centre of mass keeps its speed. 0 = the grip keeps
         // its speed (before 2026-11-24), which could turn braking a spin into a throw the joint then turned back into spin.
         bool pose_hold_joint_turn_couple = true;
+        // A weapon held in one hand collides with the free hand (B&S: the free hand stays solid). 0 = the free arm is ignored too.
+        bool pose_hold_free_hand_collides = true;
         double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)
         bool pose_hold_joint_draw_wound = true; // drawing/sheathing and a blade in a wound stay on the joint (sent where the old rules put it)
         // Two hands: the turning hand only twists the weapon about the line between the hands; where it
