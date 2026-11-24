@@ -38,6 +38,7 @@ HEAD = """0.5:hsvr.fake_head_drop 0
 5.5:hsvr.expect held_r = 1 weapon in the right hand
 """
 TAKE_ALONG = """6:hsvr.arm_move 7 {along}
+7.7:hsvr.arm_move 7 {along}
 8:hsvr.squeeze 0 1
 """
 TAKE_FRONT = """6:hsvr.xbow_hand 0 front
@@ -221,6 +222,7 @@ SWITCH_STEPS = """10:hsvr.expect two_hand = 1 second hand took it
 15:hsvr.expect held_r = 1
 15:hsvr.expect held_spin_max_r < 300 from 0.3 s after the left let go (2 to 1 hands), hands still: no spin-up (deg/s; his ran 1300-2700)
 15.1:hsvr.arm_move 7 {along}
+16.2:hsvr.arm_move 7 {along}
 16.5:hsvr.squeeze 0 1
 16.85:hsvr.spin_reset 1
 19.5:hsvr.expect two_hand = 1 took it again

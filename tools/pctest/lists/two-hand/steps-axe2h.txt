@@ -12,6 +12,7 @@
 5:hsvr.weapon_dump 1
 5.5:hsvr.expect held_r = 1 weapon in the right hand
 6:hsvr.arm_move 7 -25
+7.7:hsvr.arm_move 7 -25
 8:hsvr.squeeze 0 1
 10:hsvr.expect two_hand = 1 second hand took it
 10:hsvr.expect two_gap >= 8.9 hands a hand's width apart, never inside each other

@@ -12,6 +12,7 @@
 5:hsvr.weapon_dump 1
 5.5:hsvr.expect held_r = 1 weapon in the right hand
 6:hsvr.arm_move 7 30
+7.7:hsvr.arm_move 7 30
 8:hsvr.squeeze 0 1
 10:hsvr.expect two_hand = 1 second hand took it
 10.2:hsvr.ctl_replay C:\dev\hsvr-2h0303\tools\pctest\lists\two-hand\tracks\mace2h.csv 0.5
