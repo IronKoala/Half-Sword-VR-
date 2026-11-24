@@ -446,6 +446,14 @@ namespace
     UObject* live_posed_pawn();
     void forget_level_objects();
     double hanging_mass(UObject* weapon, UObject* base);
+    // Mass hanging on a weapon's own joints, per weapon (hanging_mass fills it).
+    struct Hanging
+    {
+        UObject* base = nullptr;
+        double sum = 0.0;
+        std::vector<UObject*> parts; // the simulating, unwelded parts (alive while their weapon is)
+    };
+    std::map<UObject*, Hanging> g_hanging_mass;
 
     struct SocketLocationParams
     {
@@ -18556,6 +18564,48 @@ namespace
         h.last_set_w = w_next;
         h.lag = length(to);
         if (h.lag > g_worst_lag[side].load()) g_worst_lag[side].store(h.lag);
+        // Which way it trails, and where its hanging parts are (chain lantern 2026-11-24 9ed2430: 15-19 cm off with its hand
+        // bone on the grip, whatever the damping): down, toward his body, or sideways; the hanging parts' centre from the grip
+        // and their speed. Logged only while it trails.
+        if (h.lag > 8.0 && g_pose.pawn)
+        {
+            Vec3 ap = actor_location(g_pose.pawn);
+            Vec3 out_h{pivot_now.x - ap.x, pivot_now.y - ap.y, 0.0};
+            double lh = length(out_h);
+            out_h = lh > 1.0 ? out_h * (1.0 / lh) : Vec3{1.0, 0.0, 0.0};
+            Vec3 side_h{-out_h.y, out_h.x, 0.0};
+            Vec3 lag_v = pivot_now - target_pivot; // where the grip is, from where the hand wants it
+            std::string hang = "none";
+            auto hit = g_hanging_mass.find(weapon);
+            if (hit != g_hanging_mass.end() && hit->second.sum > 0.0)
+            {
+                Vec3 c_sum{}, v_sum{};
+                double m_sum = 0.0;
+                for (UObject* c : hit->second.parts)
+                {
+                    if (!c) continue;
+                    Call gm(c, STR("GetMass"));
+                    gm.run();
+                    double m = gm.number();
+                    if (!(m > 0.0)) continue;
+                    Call gv(c, STR("GetPhysicsLinearVelocity"));
+                    gv.run();
+                    c_sum = c_sum + component_location(c) * m;
+                    v_sum = v_sum + gv.vec() * m;
+                    m_sum += m;
+                }
+                if (m_sum > 0.0)
+                {
+                    Vec3 hc = c_sum * (1.0 / m_sum) - pivot_now, hv = v_sum * (1.0 / m_sum);
+                    char b[200];
+                    std::snprintf(b, sizeof(b), "%.2f kg centred %.0f cm out, %.0f to the side, %.0f up from the grip, moving %.0f cm/s", m_sum, dot(hc, out_h),
+                                  dot(hc, side_h), hc.z, length(hv));
+                    hang = b;
+                }
+            }
+            HSVR_LOG_EVERY(0.5, "Hold: %s %ls trails %.1f cm: %.1f out from him, %.1f to the side, %.1f up; hand pull %.0f N%s; hanging: %s", side == 0 ? "left" : "right",
+                           weapon->GetName().c_str(), h.lag, dot(lag_v, out_h), dot(lag_v, side_h), lag_v.z, h.force_n, h.force_capped ? " (capped)" : "", hang.c_str());
+        }
         // Far behind for a while: why it isn't coming (asleep, not simulating, what it does with the
         // velocity it was given, its damping, and how it answers the world's channels).
         if (h.lag > 20.0)
@@ -24064,13 +24114,13 @@ namespace
     // lantern's chain links and lamp, a flail's links and head). The hand carries their weight through the
     // handle, though BaseMesh's GetMass is the handle alone (chain lantern 1.36 kg, with 2.95 kg swinging under
     // it: test 2026-11-24 a462c97, held still it hung 9-20 cm off your controller). Cached per weapon.
-    std::map<UObject*, std::pair<UObject*, double>> g_hanging_mass;
     double hanging_mass(UObject* weapon, UObject* base)
     {
         auto it = g_hanging_mass.find(weapon);
-        if (it != g_hanging_mass.end() && it->second.first == base) return it->second.second;
+        if (it != g_hanging_mass.end() && it->second.base == base) return it->second.sum;
         double sum = 0.0;
         std::wstring parts;
+        std::vector<UObject*> part_list;
         std::vector<UObject*> comps;
         UObjectGlobals::FindAllOf(STR("StaticMeshComponent"), comps);
         static const FName none_b = FName(STR("None"), FNAME_Add);
@@ -24088,8 +24138,9 @@ namespace
             if (!(m > 0.0)) continue;
             sum += m;
             parts += c->GetName() + STR(" ");
+            part_list.push_back(c);
         }
-        g_hanging_mass[weapon] = {base, sum};
+        g_hanging_mass[weapon] = Hanging{base, sum, part_list};
         if (sum > 0.0) HSVR_LOG("Hold: %ls carries %.2f kg hanging on its own joints (%ls)", weapon->GetName().c_str(), sum, parts.c_str());
         // Test switch pose_hold_hanging_damping: those parts damped (linear and angular), so a chain held still
         // settles instead of circling (test 2026-11-24 48510c5: the lantern's handle spun 350-690 deg/s and sat

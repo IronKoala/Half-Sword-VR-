@@ -1,0 +1,25 @@
+# Playtest 2026-11-23 17:04/17:23 local: kneeling, he could not pick a lantern up off the floor (his hand stops short of it).
+# The lantern put in his hand, dropped, then picked up off the floor: crouch 95 cm, right controller 3 cm above its grip.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.8:hsvr.player_immortal
+1.0:hsvr.squeeze 0 1
+1.0:hsvr.squeeze 1 1
+1.4:hsvr.squeeze 0 0
+1.4:hsvr.squeeze 1 0
+1.9:hsvr.expect held_r = 0 right hand empty (the test room starts him with a crossbow)
+2.0:hsvr.arm_move 1
+2.2:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
+2.4:hsvr.wait held_r = 1 3 0 the lantern is in the right hand
+3.0:hsvr.squeeze 1 1
+3.3:hsvr.squeeze 1 0
+3.6:hsvr.expect held_r = 0 dropped
+5.5:hsvr.fake_head_drop 95
+5.6:hsvr.arm_to_item 3
+8.0:hsvr.expect reach_short_r >= 0 how far his hand stops from your controller (record only)
+8.0:hsvr.expect hand_floor_r >= 0 his hand's height over the floor (record only)
+8.1:hsvr.squeeze 1 1
+8.2:hsvr.wait held_r = 1 2 0 he picks it up off the floor
+10.5:hsvr.expect held_r = 1 and keeps it
+10.5:hsvr.expect scenery_r = 0 not the floor
+10.6:hsvr.squeeze 1 0
+10.7:hsvr.fake_head_drop -1
