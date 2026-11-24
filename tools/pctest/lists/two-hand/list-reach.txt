@@ -1,0 +1,6 @@
+reach_warhammer_long|steps-reach_warhammer_long.txt
+reach_polehammer|steps-reach_polehammer.txt
+reach_longsword|steps-reach_longsword.txt
+old_reach_warhammer_long|steps-reach_warhammer_long.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0
+old_reach_polehammer|steps-reach_polehammer.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0
+old_reach_longsword|steps-reach_longsword.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0

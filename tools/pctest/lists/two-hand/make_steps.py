@@ -192,6 +192,24 @@ SPIN_STEPS = """6:hsvr.spin_kick 1 1500
 """
 
 
+# Reach (2026-11-24): his mace spin started with his controller ~40 cm past where the drawn hand could be (log 250.4:
+# "42 cm from hand_r"), a swing that stopped, one hand. The kick cases never reproduced it (the kick died in a tick in every
+# mode). arm_move 6 holds the hand 54-70 cm out (past his 53 cm arm); then a fast cut and a stop out there.
+REACH = ["warhammer_long", "polehammer", "longsword"]
+REACH_STEPS = """6:hsvr.arm_move 6
+6.5:hsvr.spin_reset 1
+9.5:hsvr.expect held_spin_max_r < 400 reaching past his arm: the weapon does not spin up on its own (deg/s)
+9.6:hsvr.arm_move 3
+12.6:hsvr.arm_move 6
+12.6:hsvr.expect held_spin_max_r < 900 fast cut out past his arm: no runaway spin (the mace ran at 1300-1800 deg/s)
+12.7:hsvr.spin_reset 1
+15.5:hsvr.expect held_spin_max_r < 900 stopped out past his arm: no runaway spin
+15.5:hsvr.expect held_spin_r < 120 stopped out past his arm: at rest 3 s later (deg/s)
+15.5:hsvr.expect held_r = 1
+16:quit
+"""
+
+
 def main():
     rows = []
     for line in Path(sys.argv[1]).read_text().splitlines():
@@ -233,6 +251,10 @@ def main():
         steps = HEAD.format(path=paths[weapon]) + SPIN_STEPS
         (HERE / ("steps-spin_%s.txt" % weapon)).write_text(steps, newline="\n")
         spin.append(weapon)
+    reach = []
+    for weapon in REACH:
+        (HERE / ("steps-reach_%s.txt" % weapon)).write_text(HEAD.format(path=paths[weapon]) + REACH_STEPS, newline="\n")
+        reach.append(weapon)
     lst = ["# Two hands with real-hand conditions (playtest 2026-11-23); two hands are held as B&S holds them (pose_two_hand_bs=1).",
            "# rp_: his own recorded controller motion. ctl_: the same cases in the previous line mode (pose_two_hand_bs=0), for comparison."]
     lst += ["two_%s|steps-%s.txt" % (n, n) for n in rows]
@@ -247,6 +269,8 @@ def main():
     # a3bde48, both off, expected to keep spinning (the mace bug); pull2_: the pull twice with the brake on)
     lst += ["old_spin_%s|steps-spin_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in spin]
     lst += ["pull2_spin_%s|steps-spin_%s.txt|pose_hold_joint_pull_once=0" % (n, n) for n in spin]
+    lst += ["reach_%s|steps-reach_%s.txt" % (n, n) for n in reach]
+    lst += ["old_reach_%s|steps-reach_%s.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0" % (n, n) for n in reach]
     # (auto slide is off by default since Matthew 2026-11-24 00:08Z chose B&S's trigger-only slide; these turn it on)
     lst += ["auto_%s|steps-auto_%s.txt|pose_two_hand_auto_slide_cm=10" % (n, n) for n in auto]
     (HERE / "list.txt").write_text("\n".join(lst) + "\n", newline="\n")
