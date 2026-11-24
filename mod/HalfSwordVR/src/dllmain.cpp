@@ -18408,6 +18408,59 @@ namespace
                            !main_turns ? 90.0 * rot_scale * mc2 : 0.0, !main_turns ? 500.0 * rot_scale * mk2 : 0.0, slide2, err2_l);
         }
         Vec3 stretch2 = g_two.bs_p2 - at_world;
+        {
+            // Test measures (hsvr.expect two_*), as before the port: the weapon's grip-to-grip line against the line between where
+            // the hands want those grips, either hand's point off the weapon's line, its sustained spin, and spin reversals (jitter).
+            Vec3 g1 = pivot_world, g2 = at_world, h1 = target_pivot, h2 = g_two.bs_p2;
+            Vec3 wl = g2 - g1, hl = h2 - h1;
+            g_two_spot_now.store(length(stretch2));
+            if (length(wl) > 5.0 && length(hl) > 5.0)
+            {
+                double lang = std::acos((std::min)(1.0, (std::max)(-1.0, dot(normalized(wl), normalized(hl))))) * 57.2958;
+                Vec3 u = normalized(wl);
+                auto across = [&](const Vec3& q) { Vec3 dd = q - g1; return length(dd - u * dot(dd, u)); };
+                double off = (std::max)(across(h1), across(h2));
+                static double last_ang[3] = {0, 0, 0}, last_off[3] = {0, 0, 0}, sp3[3] = {0, 0, 0};
+                static int k3 = 0;
+                static Vec3 prev_w{};
+                static bool have_w = false;
+                static double prev_t = -1.0;
+                Call avm(base, STR("GetPhysicsAngularVelocityInRadians"));
+                avm.run();
+                Vec3 wv = avm.vec();
+                double tn = now_seconds();
+                last_ang[k3 % 3] = lang;
+                last_off[k3 % 3] = off;
+                sp3[k3 % 3] = length(wv) * 57.2958;
+                ++k3;
+                double sa = (std::min)((std::min)(last_ang[0], last_ang[1]), last_ang[2]), so = (std::min)((std::min)(last_off[0], last_off[1]), last_off[2]);
+                double sm = (std::min)((std::min)(sp3[0], sp3[1]), sp3[2]);
+                if (sa > g_two_line_deg.load()) g_two_line_deg.store(sa);
+                if (so > g_two_off_cm.load()) g_two_off_cm.store(so);
+                if (sm > g_two_spin_max.load()) g_two_spin_max.store(sm);
+                g_two_line_now.store(lang);
+                g_two_off_now.store(off);
+                if (have_w && tn - prev_t < 0.1)
+                {
+                    bool rev = (std::fabs(wv.x) > 1.0 && std::fabs(prev_w.x) > 1.0 && wv.x * prev_w.x < 0.0) || (std::fabs(wv.y) > 1.0 && std::fabs(prev_w.y) > 1.0 && wv.y * prev_w.y < 0.0) ||
+                               (std::fabs(wv.z) > 1.0 && std::fabs(prev_w.z) > 1.0 && wv.z * prev_w.z < 0.0);
+                    g_two_ticks.fetch_add(1);
+                    if (rev) g_two_revs.fetch_add(1);
+                }
+                prev_w = wv;
+                prev_t = tn;
+                have_w = true;
+                Vec3 wz = normalized(target_rot.rotate(g_two.bs_local - pivot));
+                double wang = std::acos((std::min)(1.0, (std::max)(-1.0, dot(wz, normalized(wl))))) * 57.2958;
+                g_two_wrist_now.store(wang);
+                if (wang > g_two_wrist_deg.load()) g_two_wrist_deg.store(wang);
+                g_two_wrist_sum.store(g_two_wrist_sum.load() + wang);
+                g_two_lag_sum.store(g_two_lag_sum.load() + length(stretch));
+                g_two_turn_sum.store(g_two_turn_sum.load() + h.turn_deg);
+                g_two_hlag_sum.store(g_two_hlag_sum.load() + h.lag);
+                g_two_mean_n.fetch_add(1);
+            }
+        }
         out.turns = true;
         out.force_n = (std::min)(10000.0 * mk * length(stretch) * 0.01, 6000.0 * mk);
         out.force_capped = out.force_n >= 6000.0 * mk * 0.999;
@@ -18781,6 +18834,29 @@ namespace
             HSVR_LOG("Hold: %s hand holds %ls: mass %.2f kg, inertia %.0f/%.0f/%.0f kg cm^2 (as the joint sees it), centre of mass (%.1f, %.1f, %.1f), held at (%.1f, %.1f, %.1f)",
                      side == 0 ? "left" : "right", weapon->GetName().c_str(), mass, I.x, I.y, I.z, rot.inverse().rotate(com - pos).x, rot.inverse().rotate(com - pos).y,
                      rot.inverse().rotate(com - pos).z, pivot.x, pivot.y, pivot.z);
+        }
+        {
+            // Test measures: the held item's spin now and its worst sustained (least of 3 ticks); hsvr.spin_kick sets it spinning
+            // end over end once (as if a hit had), added to what the physics has.
+            double ds = length(av.vec()) * 57.2958;
+            g_held_spin[side].store(ds);
+            static double s3[2][3] = {{0, 0, 0}, {0, 0, 0}};
+            static int k3s[2] = {0, 0};
+            s3[side][k3s[side]++ % 3] = ds;
+            double sm = (std::min)((std::min)(s3[side][0], s3[side][1]), s3[side][2]);
+            if (sm > g_held_spin_max[side].load()) g_held_spin_max[side].store(sm);
+            double kick = g_spin_kick[side].exchange(0.0);
+            if (kick != 0.0)
+            {
+                Vec3 kax = rot.rotate(Vec3{1, 0, 0});
+                Vec3 nw = av.vec() + kax * (kick / 57.2958);
+                Call sav(base, STR("SetPhysicsAngularVelocityInRadians"));
+                sav.three(STR("NewAngVel"), nw.x, nw.y, nw.z);
+                sav.flag(STR("bAddToCurrent"), false);
+                sav.run();
+                g_held_spin_max[side].store(0.0);
+                HSVR_LOG("Script: hsvr.spin_kick: %s hand's %ls set spinning %.0f deg/s end over end", side == 0 ? "left" : "right", weapon->GetName().c_str(), kick);
+            }
         }
         // The hold itself: the joint(s), nothing else.
         double slide_c = h.handle_slide ? h.handle_damp : -1.0;
