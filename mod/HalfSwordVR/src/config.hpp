@@ -636,6 +636,8 @@ namespace hsvr
         // flail's links and head) as carried weight; 0 = the handle's mass alone (the chain lantern hung 9-20 cm
         // off your hand).
         bool pose_hold_count_hanging = true;
+        // Test switch: linear and angular damping set on those hanging parts once held (0 = the game's own).
+        double pose_hold_hanging_damping = 0.0;
         double pose_hold_arm_reach_cm = 55.0;
         // His shoulder's strength (N m, for a default fresh body; x his strength, injury and stamina; both arms
         // add): the arm-lag hold can't speed arm + weapon about the shoulder faster than this allows, so the

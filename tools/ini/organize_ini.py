@@ -371,6 +371,7 @@ LAYOUT = [
         ('pose_hold_arm_lag_max_s', 'Most lag any weapon gets (s).'),
         ('pose_hold_heft_lag_s', 'Heft floor: a weapon lags at least this x sqrt(its inertia about the shoulder) (s), so a greatsword never swings like a dagger.'),
         ('pose_hold_count_hanging', '1 = what hangs from a weapon on its own joints (lantern chain and lamp, flail links and head) counts as weight the hand carries; 0 = the handle alone.'),
+        ('pose_hold_hanging_damping', 'Test switch: damping set on those hanging parts once held, so a chain settles instead of circling (0 = the game\'s own).'),
         ('pose_hold_strength', 'Multiplier on the whole hold (force and turning).'),
         ('pose_hold_max_force', 'Most force one hand puts on a held item (N, x his strength).'),
         ('pose_hold_max_torque', 'Wrist strength: most turning force one hand has at the grip (N m, x his strength).'),

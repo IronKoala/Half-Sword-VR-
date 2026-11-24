@@ -24084,6 +24084,20 @@ namespace
         }
         g_hanging_mass[weapon] = {base, sum};
         if (sum > 0.0) HSVR_LOG("Hold: %ls carries %.2f kg hanging on its own joints (%ls)", weapon->GetName().c_str(), sum, parts.c_str());
+        // Test switch pose_hold_hanging_damping: those parts damped (linear and angular), so a chain held still
+        // settles instead of circling (test 2026-11-24 48510c5: the lantern's handle spun 350-690 deg/s and sat
+        // 14-19 cm off the hand with nothing touching it).
+        if (double dmp = hsvr::config().pose_hold_hanging_damping; dmp > 0.0 && sum > 0.0)
+            for (UObject* c : comps)
+            {
+                if (!c || c == base || c->GetOuterPrivate() != weapon || object_property(c, STR("AttachParent"))) continue;
+                Call ld(c, STR("SetLinearDamping"));
+                first_number(ld, dmp);
+                ld.run();
+                Call ad(c, STR("SetAngularDamping"));
+                first_number(ad, dmp);
+                ad.run();
+            }
         return sum;
     }
 
@@ -29232,6 +29246,13 @@ namespace
             // his hand bone's height above the floor he stands on (capsule bottom), cm
             if (!pawn || !g_pose.mesh) known = false;
             else value = socket_location(g_pose.mesh, bone_fname(w.back() == 'l' ? "hand_l" : "hand_r")).z - room_floor_z(pawn);
+        }
+        else if (w == "reach_short_l" || w == "reach_short_r")
+        {
+            // how far his hand bone is from where your controller puts it (scaled to his reach), cm: 0 = he reaches it
+            int sd = w.back() == 'l' ? 0 : 1;
+            if (!g_pose.mesh || !g_pose.hand_valid[sd]) known = false;
+            else value = length(g_pose.reach_target[sd] - socket_location(g_pose.mesh, bone_fname(sd == 0 ? "hand_l" : "hand_r")));
         }
         else if (w == "scenery_l" || w == "scenery_r") value = g_world[w.back() == 'l' ? 0 : 1].on ? 1.0 : 0.0; // the hand holds fixed scenery
         else if (w == "crouch_drop") value = g_crouch_drop; // cm his body is down this frame (your crouch + button, past the lean)

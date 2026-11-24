@@ -12,4 +12,5 @@
 # The controller 5 cm up: your fist around it is that thick when your knuckles touch the floor (it was at 0, inside the floor).
 2.1:hsvr.arm_floor 45 15 5
 6.5:hsvr.expect hand_floor_r >= 0 how high his hand stays (record only)
+6.5:hsvr.expect reach_short_r >= 0 how far the hand stays from where the controller asks (record only)
 6.6:hsvr.fake_head_drop -1
