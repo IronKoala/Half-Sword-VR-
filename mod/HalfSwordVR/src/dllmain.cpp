@@ -547,6 +547,7 @@ namespace
     void crouch_push_log(UObject* pawn, UObject* mesh);
     void item_watch_tick(UObject* pawn);
     void leg_guard_tick(UObject* pawn, UObject* mesh, const hsvr::Config& cfg);
+    void chain_calm_tick(UObject* pawn, const hsvr::Config& cfg);
     bool provide_anchor(hsvr::PlayerAnchor& out)
     {
         if (!g_engine) return false;
