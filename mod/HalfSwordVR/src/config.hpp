@@ -331,9 +331,9 @@ namespace hsvr
         // How near his legs (hip, knee, ankle or toe point) a loose weapon must come to pass through them (cm). It
         // collides with them again once 15 cm farther than this for 0.3 s, or when a hand takes it.
         double pose_legs_pass_loose_cm = 40.0;
-        // 1 = while a loose weapon passes through his legs it also ignores his capsule's object channel: the character
-        // movement's capsule sweeps and overlap repulsion are queries that no-collide pairs do not reach (run 13 4b7c188).
-        bool pose_legs_pass_capsule_channel = true;
+        // Test switch: 1 = while a loose weapon passes through his legs it also ignores his capsule's whole object channel
+        // (channel-wide, so off: the project keeps to per-pair ignores; his capsule's moves ignore the item instead).
+        bool pose_legs_pass_capsule_channel = false;
         // 1 = his body faces where you face: it follows your headset once you look more than
         // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
         // turns you as well.

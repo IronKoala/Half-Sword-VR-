@@ -7475,6 +7475,7 @@ namespace
         // Each part's response to his capsule's object channel before it was set to ignore (restored with the pairs).
         std::vector<std::pair<UObject*, int>> responses;
         int channel = -1;
+        UObject* capsule = nullptr; // his capsule, told to ignore this item when it moves (IgnoreActorWhenMoving)
     };
     std::map<UObject*, LegGuard> g_leg_guard;
     void item_watch_tick(UObject* pawn)
@@ -7611,6 +7612,14 @@ namespace
                 r.run();
             }
         g.responses.clear();
+        if (g.capsule && item && !gone(g.capsule) && !gone(item) && object_alive(g.capsule))
+        {
+            Call ig(g.capsule, STR("IgnoreActorWhenMoving"));
+            ig.object(STR("Actor"), item);
+            ig.flag(STR("bShouldIgnore"), false);
+            ig.run();
+        }
+        g.capsule = nullptr;
         if (item && !gone(item)) HSVR_LOG("Legs: %ls collides with his legs again (%s)", item->GetName().c_str(), why);
         g.joints.clear();
     }
@@ -7745,7 +7754,18 @@ namespace
                 // And his capsule's own movement: the character movement's sweeps and its repulsion of what overlaps the
                 // capsule are queries, which no-collide joints do not reach (run 13 4b7c188: a lantern lying inside his
                 // capsule went off at 9.4 m/s as he crouched to 82 cm, his capsule 0-1.7 cm from it, every pair in place).
-                // So each part ignores the capsule's object channel while guarded (only the filter changes, no rebuild).
+                // Per pair: his capsule's moves ignore this item (UPrimitiveComponent::IgnoreActorWhenMoving, its
+                // MoveIgnoreActors: the sweeps, and so the impact pushes from them, skip it), undone with the pairs.
+                if (UObject* cap = object_property(pawn, STR("CapsuleComponent")))
+                {
+                    Call ig(cap, STR("IgnoreActorWhenMoving"));
+                    ig.object(STR("Actor"), w);
+                    ig.flag(STR("bShouldIgnore"), true);
+                    if (ig.run()) g.capsule = cap;
+                    else HSVR_LOG("Legs: no IgnoreActorWhenMoving on %ls", cap->GetName().c_str());
+                }
+                // Channel-wide (test switch pose_legs_pass_capsule_channel, off: per-pair ignores only, project rule): each part
+                // ignores the capsule's object channel while guarded (only the filter changes, no rebuild).
                 std::wstring was_list;
                 if (UObject* cap = cfg.pose_legs_pass_capsule_channel ? object_property(pawn, STR("CapsuleComponent")) : nullptr)
                 {
@@ -7780,7 +7800,8 @@ namespace
                             r.run();
                         }
                 }
-                HSVR_LOG("Legs: capsule channel %d: the parts' responses were [%ls], now ignore", g.channel, was_list.c_str());
+                if (cfg.pose_legs_pass_capsule_channel)
+                    HSVR_LOG("Legs: capsule channel %d: the parts' responses were [%ls], now ignore", g.channel, was_list.c_str());
                 HSVR_LOG("Legs: %ls %.0f cm from his legs: passes through them and his worn gear (%zu no-collide pair(s), %zu part(s) x %zu gear part(s); "
                          "crouch %.0f; %s)",
                          w->GetName().c_str(), nearest, g.joints.size(), parts.size(), gear_parts.size(), g_crouch_drop, why);
@@ -7798,7 +7819,7 @@ namespace
             // ignore requests per pair, FIgnoreCollisionManager, UE 5.4.4 CollisionConstraintFlags.cpp:42-92.)
             if (cls && g.gear != gear)
             {
-                leg_guard_drop(nullptr, g, "");
+                leg_guard_drop(w, g, "his worn gear changed");
                 make_pairs(g, "his worn gear changed");
             }
             if (nearest <= within + 15.0)
@@ -8078,7 +8099,10 @@ namespace
                         Vec3 h, n;
                         floor_face = trace_component(c, Vec3{sp.x, sp.y, top + 20.0}, Vec3{sp.x, sp.y, sp.z - 5.0}, h, n) && n.z > 0.7 && h.z < top;
                     }
-                    if (sp.z < top && (d <= 0.5 || up.z > 0.6 || floor_face))
+                    // Or at or below the ground he stands on, whichever way it faces: the edge of a neighbouring, lower
+                    // floor tile (run 13 floor_no_grab: spots 5 and 11 cm under his feet, facing 17-21% up, were taken).
+                    bool under_feet = sp.z <= feet_z + 2.0;
+                    if (sp.z < top && (d <= 0.5 || up.z > 0.6 || floor_face || under_feet))
                     {
                         seen += STR("(the floor) ");
                         continue;
