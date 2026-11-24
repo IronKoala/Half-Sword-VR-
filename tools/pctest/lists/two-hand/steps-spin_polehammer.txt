@@ -1,0 +1,21 @@
+0.5:hsvr.fake_head_drop 0
+0.6:hsvr.fake_look 0
+1:hsvr.squeeze 0 1
+1:hsvr.squeeze 1 1
+1.5:hsvr.squeeze 0 0
+1.5:hsvr.squeeze 1 0
+2.4:hsvr.expect held_r = 0 right hand empty
+2.5:hsvr.arm_move 1
+2.6:hsvr.pawn_call Event Clear Sheathed Weapon Slots
+3:hsvr.squeeze 1 1
+3.5:hsvr.give_weapon passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight 0
+5:hsvr.weapon_dump 1
+5.5:hsvr.expect held_r = 1 weapon in the right hand
+6:hsvr.spin_kick 1 1500
+6.5:hsvr.expect held_spin_max_r > 300 (check) the kick took: it spun
+8.5:hsvr.expect held_r = 1 still in the hand
+8.5:hsvr.expect held_spin_r < 120 2.5 s after: back at rest in the still hand (deg/s)
+9:hsvr.spin_kick 1 -1500
+11.5:hsvr.expect held_r = 1 the other way: still in the hand
+11.5:hsvr.expect held_spin_r < 120 the other way: back at rest (deg/s)
+12:quit

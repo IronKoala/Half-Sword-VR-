@@ -1,0 +1,2 @@
+# Diagnostic: the B&S two-hand hold's swing lag with a strapped pavise (B&S thread's)
+sm_two_hand_light_l|steps-sm_two_hand_light_l.txt

@@ -1,0 +1,14 @@
+# The key flip with a grip held: the hand keeps its weapon on mouse and keyboard, and keeps it back on the controllers.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.player_immortal
+1.0:hsvr.squeeze 1 1
+1.5:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/ModularWeaponBP_BastardSword_T1.ModularWeaponBP_BastardSword_T1_C
+3.0:hsvr.expect held_r = 1 sword in the right hand
+3.1:hsvr.input_mode keyboard
+3.5:hsvr.squeeze 1 0
+6.0:hsvr.expect input_kbm = 1 on mouse and keyboard
+6.0:hsvr.expect held_r = 1 grip opened on mouse and keyboard: sword kept
+6.0:hsvr.expect posed = 0 plain game
+6.1:hsvr.input_mode controllers
+8.0:hsvr.expect input_kbm = 0 back on the controllers
+8.0:hsvr.expect held_r = 1 back on the controllers with the grip open: sword kept

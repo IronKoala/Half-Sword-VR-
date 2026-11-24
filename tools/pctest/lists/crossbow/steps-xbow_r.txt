@@ -17,6 +17,7 @@
 6:hsvr.xbow_hand 0 front
 9.5:hsvr.squeeze 0 1
 10.5:hsvr.expect two_hand = 1 front grip taken by grip
+10.5:hsvr.expect xforearm_l < -0.2 front forearm under the stock
 10.5:hsvr.xbow_report
 10.6:hsvr.trigger 0 1
 10.8:hsvr.trigger 0 0
@@ -27,32 +28,33 @@
 12:hsvr.squeeze 0 0
 13:hsvr.expect two_hand = 0 front grip let go
 13.5:hsvr.xbow_hand 0 string
-17:hsvr.squeeze 0 1
-17.5:hsvr.expect xstring = 0 grip at the string does not take it
-18:hsvr.squeeze 0 0
-18.5:hsvr.expect two_hand = 0 grip at the string let go
-19.5:hsvr.trigger 0 1
-20:hsvr.expect xstring = 1 trigger takes the string
-20:hsvr.xbow_hand 0 pull 30
-23.5:hsvr.expect xbow_string = 1 cocked
-23.5:hsvr.xbow_report
-24:hsvr.trigger 0 0
-24.5:hsvr.expect xstring = 0 trigger let go of the string
-25:hsvr.expect xbow_string = 1 stays cocked
-25.5:hsvr.xbow_hand 0 quiver
-29:hsvr.squeeze 0 1
-30:hsvr.expect bolt_l = 1 bolt from quiver
-30:hsvr.expect xbow_quiver = 19 one fewer
-30.5:hsvr.xbow_hand 0 cradle
-34:hsvr.expect xbow_bolt = 1 bolt in the cradle
-34:hsvr.expect bolt_l = 0 bolt left the hand
-34:hsvr.xbow_report
-34.5:hsvr.squeeze 0 0
-34.6:hsvr.xbow_hand 0 off
-35:hsvr.trigger 1 1
-35.5:hsvr.trigger 1 0
-36:hsvr.expect xbow_bolt = 0 shot
-36:hsvr.expect xbow_string = 0 uncocked by the shot
-37.5:hsvr.expect held_r = 1 still holds the crossbow
-37.5:hsvr.xbow_report
-39:quit
+14.8:hsvr.trigger 0 1
+15.3:hsvr.expect xstring = 1 trigger takes the string
+15.3:hsvr.xbow_hand 0 pull 30
+18.8:hsvr.expect xbow_string = 1 cocked
+18.8:hsvr.xbow_report
+19.3:hsvr.trigger 0 0
+19.8:hsvr.expect xstring = 0 trigger let go of the string
+20.3:hsvr.expect xbow_string = 1 stays cocked
+20.8:hsvr.xbow_hand 0 quiver
+24.3:hsvr.squeeze 0 1
+25.3:hsvr.expect bolt_l = 1 bolt from quiver
+25.3:hsvr.expect xbow_quiver = 19 one fewer
+25.8:hsvr.xbow_hand 0 cradle
+29.3:hsvr.expect xbow_bolt = 1 bolt in the cradle
+29.3:hsvr.expect bolt_l = 0 bolt left the hand
+29.3:hsvr.xbow_report
+29.8:hsvr.squeeze 0 0
+29.9:hsvr.xbow_hand 0 off
+30.3:hsvr.trigger 1 1
+30.8:hsvr.trigger 1 0
+31.3:hsvr.expect xbow_bolt = 0 shot
+31.3:hsvr.expect xbow_string = 0 uncocked by the shot
+32.8:hsvr.expect held_r = 1 still holds the crossbow
+32.8:hsvr.xbow_report
+33:hsvr.xbow_hand 0 string
+34.5:hsvr.squeeze 0 1
+35:hsvr.expect xstring = 0 grip at the string does not take it
+35.5:hsvr.squeeze 0 0
+36:hsvr.expect two_hand = 0 grip at the string let go
+36.5:quit

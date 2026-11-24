@@ -2,3 +2,8 @@
 # cock, bolt from the quiver into the cradle, rear-grip trigger fires. Crossbow in the right, then the left hand.
 xbow_r|steps-xbow_r.txt|pose_hold_joint=1
 xbow_l|steps-xbow_l.txt|pose_hold_joint=1
+# fixed hand poses (Matthew 2026-11-23): the fore end taken with the left wrist rolled / pitched each way first
+xbow_roll_p|steps-xbow_roll_p.txt|pose_hold_joint=1
+xbow_roll_m|steps-xbow_roll_m.txt|pose_hold_joint=1
+xbow_pitch_p|steps-xbow_pitch_p.txt|pose_hold_joint=1
+xbow_pitch_m|steps-xbow_pitch_m.txt|pose_hold_joint=1

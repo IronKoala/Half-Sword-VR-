@@ -1,0 +1,17 @@
+# Baseline for lantern_hold: a plain knight-tier weapon held still the same way (in his playtest the hand sits 8-9 cm off the controller with any weapon).
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.8:hsvr.player_immortal
+1.0:hsvr.squeeze 0 1
+1.0:hsvr.squeeze 1 1
+1.4:hsvr.squeeze 0 0
+1.4:hsvr.squeeze 1 0
+1.9:hsvr.expect held_r = 0 right hand empty
+2.0:hsvr.arm_move 1
+2.2:hsvr.give_weapon passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight 0
+2.4:hsvr.wait held_r = 1 3 0 the weapon is in the right hand
+3.0:hsvr.fake_jitter 0.5
+4.0:hsvr.mark
+4.1:hsvr.contact_log 1
+4.1:hsvr.weapon_dump 1
+9.0:hsvr.expect lag_r >= 0 a plain weapon held still the same way: the baseline lag (record only)
+9.1:hsvr.contact_log 0

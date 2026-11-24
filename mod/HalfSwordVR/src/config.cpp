@@ -358,6 +358,7 @@ namespace hsvr
         integer("mirror_view", c.mirror_view);
         num("mirror_aspect", c.mirror_aspect);
         text("mirror_window_res", c.mirror_window_res);
+        flag("mouse_clip_window", c.mouse_clip_window);
         num("mirror_fov_deg", c.mirror_fov_deg);
         num("mirror_smooth_s", c.mirror_smooth_s);
         flag("mirror_level", c.mirror_level);
@@ -445,8 +446,18 @@ namespace hsvr
         flag("pose_arms", c.pose_arms);
         flag("pose_follow_room", c.pose_follow_room);
         flag("pose_hold_capsule", c.pose_hold_capsule);
+        flag("pose_capsule_no_push", c.pose_capsule_no_push);
+        flag("pose_legs_pass_loose", c.pose_legs_pass_loose);
+        num("pose_legs_pass_loose_cm", c.pose_legs_pass_loose_cm);
+        flag("pose_legs_pass_capsule_channel", c.pose_legs_pass_capsule_channel);
+        flag("pose_chain_no_self_collision", c.pose_chain_no_self_collision);
+        num("pose_chain_damping", c.pose_chain_damping);
         flag("pose_body_turn", c.pose_body_turn);
         flag("pose_mouse_off_with_controllers", c.pose_mouse_off_with_controllers);
+        text("input_mode", c.input_mode);
+        num("input_kbm_quiet_s", c.input_kbm_quiet_s);
+        integer("input_mode_key", c.input_mode_key);
+        flag("input_kbm_mouse_pitch", c.input_kbm_mouse_pitch);
         num("pose_turn_dead_zone_deg", c.pose_turn_dead_zone_deg);
         num("pose_turn_speed_dps", c.pose_turn_speed_dps);
         num("pose_turn_max_deg", c.pose_turn_max_deg);
@@ -494,6 +505,7 @@ namespace hsvr
         integer("pose_bs_iterations", c.pose_bs_iterations);
         num("pose_bs_two_let_go_cm", c.pose_bs_two_let_go_cm);
         flag("pose_hold_ignore_body", c.pose_hold_ignore_body);
+        flag("pose_hold_self_collision", c.pose_hold_self_collision);
         flag("pose_hold_ignore_own_helmet", c.pose_hold_ignore_own_helmet);
         flag("hold_blocker_log", c.hold_blocker_log);
         num("pose_hold_weight_spin_extra", c.pose_hold_weight_spin_extra);
@@ -523,6 +535,13 @@ namespace hsvr
         num("pose_hold_joint_fade_after_s", c.pose_hold_joint_fade_after_s);
         flag("pose_hold_joint_slerp", c.pose_hold_joint_slerp);
         flag("pose_hold_joint_mod_turn", c.pose_hold_joint_mod_turn);
+        flag("pose_hold_joint_pull_once", c.pose_hold_joint_pull_once);
+        flag("pose_hold_joint_turn_couple", c.pose_hold_joint_turn_couple);
+        flag("pose_hold_bs_pure", c.pose_hold_bs_pure);
+        flag("pose_hold_free_hand_collides", c.pose_hold_free_hand_collides);
+        flag("pose_hold_free_arm_collides", c.pose_hold_free_arm_collides);
+        num("pose_hold_release_ignore_s", c.pose_hold_release_ignore_s);
+        num("pose_hold_release_clear_cm", c.pose_hold_release_clear_cm);
         num("pose_hold_joint_target_max_speed", c.pose_hold_joint_target_max_speed);
         flag("pose_hold_joint_draw_wound", c.pose_hold_joint_draw_wound);
         flag("pose_hold_joint_turn_by_grip", c.pose_hold_joint_turn_by_grip);
@@ -546,12 +565,16 @@ namespace hsvr
         num("pose_hold_arm_lag_s", c.pose_hold_arm_lag_s);
         num("pose_hold_arm_lag_max_s", c.pose_hold_arm_lag_max_s);
         num("pose_hold_heft_lag_s", c.pose_hold_heft_lag_s);
+        flag("pose_hold_count_hanging", c.pose_hold_count_hanging);
+        num("pose_hold_hanging_damping", c.pose_hold_hanging_damping);
         num("pose_hold_arm_reach_cm", c.pose_hold_arm_reach_cm);
         num("pose_hold_shoulder_torque", c.pose_hold_shoulder_torque);
         num("pose_hold_shoulder_fade_from_cm", c.pose_hold_shoulder_fade_from_cm);
         num("pose_hold_shoulder_fade_to_cm", c.pose_hold_shoulder_fade_to_cm);
         num("pose_hold_let_go_reach_slack_cm", c.pose_hold_let_go_reach_slack_cm);
         num("pose_hold_wrist_stop_spin", c.pose_hold_wrist_stop_spin);
+        num("pose_hold_spin_brake_from", c.pose_hold_spin_brake_from);
+        num("pose_hold_spin_brake_span", c.pose_hold_spin_brake_span);
         num("pose_hold_torque_strength_power", c.pose_hold_torque_strength_power);
         num("pose_slide_ring_max_len_cm", c.pose_slide_ring_max_len_cm);
         num("pose_slide_ring_max_width_cm", c.pose_slide_ring_max_width_cm);
@@ -594,6 +617,9 @@ namespace hsvr
         flag("pose_pavise_forearm", c.pose_pavise_forearm);
         flag("pose_pavise_strap", c.pose_pavise_strap);
         num("pose_pavise_mount_cm", c.pose_pavise_mount_cm);
+        integer("pose_mount_fist_grip", c.pose_mount_fist_grip);
+        num("pose_mount_handle_cm", c.pose_mount_handle_cm);
+        flag("pose_mount_head_ignore", c.pose_mount_head_ignore);
         flag("pose_two_hand", c.pose_two_hand);
         num("pose_two_hand_strength", c.pose_two_hand_strength);
         num("pose_two_hand_blade_gap_cm", c.pose_two_hand_blade_gap_cm);
@@ -612,6 +638,7 @@ namespace hsvr
         flag("log_frames", c.log_frames);
         flag("replay_capture", c.replay_capture);
         num("replay_hold_s", c.replay_hold_s);
+        num("jump_marker_guard_s", c.jump_marker_guard_s);
         num("replay_before_s", c.replay_before_s);
         num("replay_after_s", c.replay_after_s);
         flag("pose_keep_scabbard_on_drop", c.pose_keep_scabbard_on_drop);
@@ -680,6 +707,7 @@ namespace hsvr
         num("pose_grab_seat_reverse_bias_deg", c.pose_grab_seat_reverse_bias_deg);
         num("pose_swing_speed_lo", c.pose_swing_speed_lo);
         num("pose_swing_speed_hi", c.pose_swing_speed_hi);
+        flag("pose_swing_from_chest", c.pose_swing_from_chest);
         num("pose_swing_speed_fall_s", c.pose_swing_speed_fall_s);
         flag("pose_two_hand_lock_rotation", c.pose_two_hand_lock_rotation);
         {
@@ -690,6 +718,18 @@ namespace hsvr
         flag("pose_two_hand_twist_only", c.pose_two_hand_twist_only);
         flag("pose_two_hand_joint_both_turn", c.pose_two_hand_joint_both_turn);
         flag("pose_two_hand_joint_line", c.pose_two_hand_joint_line);
+        num("pose_two_hand_line_ref_cm", c.pose_two_hand_line_ref_cm);
+        flag("pose_two_hand_bs", c.pose_two_hand_bs);
+        num("pose_two_hand_bs_pos_k", c.pose_two_hand_bs_pos_k);
+        num("pose_two_hand_bs_pos_c", c.pose_two_hand_bs_pos_c);
+        num("pose_two_hand_bs_pos_max", c.pose_two_hand_bs_pos_max);
+        num("pose_two_hand_bs_rot_k", c.pose_two_hand_bs_rot_k);
+        num("pose_two_hand_bs_rot_c", c.pose_two_hand_bs_rot_c);
+        num("pose_two_hand_bs_rot_max", c.pose_two_hand_bs_rot_max);
+        flag("pose_two_hand_bs_solve_pulls", c.pose_two_hand_bs_solve_pulls);
+        flag("pose_two_hand_bs_front_turns", c.pose_two_hand_bs_front_turns);
+        num("pose_two_hand_bs_opposite_scale", c.pose_two_hand_bs_opposite_scale);
+        num("pose_two_hand_auto_slide_cm", c.pose_two_hand_auto_slide_cm);
         flag("pose_two_hand_fixed_rebase", c.pose_two_hand_fixed_rebase);
         num("pose_two_hand_swing_share", c.pose_two_hand_swing_share);
         flag("pose_fists", c.pose_fists);
@@ -705,6 +745,7 @@ namespace hsvr
         flag("pose_fist_slap", c.pose_fist_slap);
         num("pose_fist_slap_ass", c.pose_fist_slap_ass);
         num("pose_fist_slap_keep_s", c.pose_fist_slap_keep_s);
+        num("pose_fist_slap_own_weapon_cm", c.pose_fist_slap_own_weapon_cm);
         flag("pose_fist_clear", c.pose_fist_clear);
         num("pose_fist_clear_margin_cm", c.pose_fist_clear_margin_cm);
         num("pose_fist_clear_retry_s", c.pose_fist_clear_retry_s);
@@ -714,6 +755,8 @@ namespace hsvr
         num("pose_drop_ignore_s", c.pose_drop_ignore_s);
         num("pose_drop_ignore_clear_cm", c.pose_drop_ignore_clear_cm);
         flag("pose_fist_full_impulse", c.pose_fist_full_impulse);
+        flag("pose_fist_new_punch_counts", c.pose_fist_new_punch_counts);
+        num("pose_fist_new_punch_gap_s", c.pose_fist_new_punch_gap_s);
         flag("disarm", c.disarm);
         num("disarm_grip_scale", c.disarm_grip_scale);
         num("disarm_hold_s", c.disarm_hold_s);
@@ -739,6 +782,9 @@ namespace hsvr
         flag("pose_hand_world_stop", c.pose_hand_world_stop);
         num("pose_hand_world_radius_cm", c.pose_hand_world_radius_cm);
         num("pose_hand_world_reach_cm", c.pose_hand_world_reach_cm);
+        num("pose_hand_held_weapon_stop_cm", c.pose_hand_held_weapon_stop_cm);
+        num("pose_hand_held_weapon_body_gap_cm", c.pose_hand_held_weapon_body_gap_cm);
+        num("pose_hand_held_weapon_body_max_cm", c.pose_hand_held_weapon_body_max_cm);
         flag("pose_arm_fresh_shoulder", c.pose_arm_fresh_shoulder);
         flag("pose_arm_fresh_shoulder_held", c.pose_arm_fresh_shoulder_held);
         flag("pose_no_fall_arms", c.pose_no_fall_arms);
@@ -787,6 +833,12 @@ namespace hsvr
         num("joint_break_free_min", c.joint_break_free_min);
         flag("joint_break_legs", c.joint_break_legs);
         num("joint_break_scale", c.joint_break_scale);
+        flag("joint_break_twist_needs_wrist", c.joint_break_twist_needs_wrist);
+        num("joint_break_wrist_free_deg", c.joint_break_wrist_free_deg);
+        num("joint_break_wrench_nm_per_deg", c.joint_break_wrench_nm_per_deg);
+        num("joint_break_wrench_from_deg", c.joint_break_wrench_from_deg);
+        num("joint_break_wrench_max_nm", c.joint_break_wrench_max_nm);
+        num("joint_break_min_s", c.joint_break_min_s);
         flag("log_body_hits", c.log_body_hits);
         integer("pose_grab_body_hold", c.pose_grab_body_hold);
         num("pose_grab_body_spring", c.pose_grab_body_spring);
@@ -805,6 +857,8 @@ namespace hsvr
         flag("pose_grab_release_drops", c.pose_grab_release_drops);
         flag("pose_grab_objects", c.pose_grab_objects);
         flag("pose_grab_world", c.pose_grab_world);
+        flag("pose_grab_world_no_floor", c.pose_grab_world_no_floor);
+        num("pose_grab_world_floor_cm", c.pose_grab_world_floor_cm);
         flag("pose_ghost_hand", c.pose_ghost_hand);
         num("pose_ghost_from_cm", c.pose_ghost_from_cm);
         text("pose_ghost_mesh", c.pose_ghost_mesh);
@@ -834,8 +888,11 @@ namespace hsvr
         num("pose_teleport_above_cm", c.pose_teleport_above_cm);
         flag("pose_crouch", c.pose_crouch);
         num("pose_crouch_dead_zone_cm", c.pose_crouch_dead_zone_cm);
+        flag("pose_crouch_at_neck_base", c.pose_crouch_at_neck_base);
         num("pose_crouch_max_cm", c.pose_crouch_max_cm);
         flag("pose_crouch_bend_for_depth", c.pose_crouch_bend_for_depth);
+        num("pose_crouch_bend_max_deg", c.pose_crouch_bend_max_deg);
+        num("pose_crouch_bend_neck_follow", c.pose_crouch_bend_neck_follow);
         num("pose_crouch_button_cm", c.pose_crouch_button_cm);
         num("pose_crouch_button_cms", c.pose_crouch_button_cms);
         flag("kick_on_a", c.kick_on_a);
@@ -865,6 +922,8 @@ namespace hsvr
         num("pose_step_time_s", c.pose_step_time_s);
         num("pose_step_lift_cm", c.pose_step_lift_cm);
         num("pose_step_lead_s", c.pose_step_lead_s);
+        num("pose_step_crouch_scale", c.pose_step_crouch_scale);
+        num("pose_step_crouch_full_cm", c.pose_step_crouch_full_cm);
         flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
         flag("dev_grip_trace", c.dev_grip_trace);
         flag("stab_log", c.stab_log);
@@ -882,6 +941,8 @@ namespace hsvr
         num("hit_buzz_min_intensity", c.hit_buzz_min_intensity);
         num("hit_buzz_limb_min_ms", c.hit_buzz_limb_min_ms);
         num("whoosh_vr_threshold_scale", c.whoosh_vr_threshold_scale);
+        flag("whoosh_strike_gate", c.whoosh_strike_gate);
+        num("whoosh_strike_speed_ratio", c.whoosh_strike_speed_ratio);
         num("whoosh_walk_speed_scale", c.whoosh_walk_speed_scale);
         flag("whoosh_log", c.whoosh_log);
         num("whoosh_log_min_speed", c.whoosh_log_min_speed);
@@ -921,6 +982,28 @@ namespace hsvr
         num("injury_dislocated_sag_cm", c.injury_dislocated_sag_cm);
         flag("injury_swing_relocate", c.injury_swing_relocate);
         flag("death_ragdoll", c.death_ragdoll);
+        if (c.pose_hold_bs_pure)
+        {
+            // B&S's one-hand hold (Creature_PlayerDefaultMale.json linear 5000/100/3000, angular 1000/50/250 x the Heavy/Light
+            // handle's 1.1/0.9 = 1100/45/250; Handle.SetJointConfig never uses the item's mass).
+            c.pose_hold_spring = 5000.0;
+            c.pose_hold_damper = 100.0;
+            c.pose_hold_max_force = 3000.0;
+            c.pose_hold_turn_spring = 1100.0;
+            c.pose_hold_turn_damper = 45.0;
+            c.pose_hold_max_torque = 250.0;
+            c.pose_hold_damping_ratio = 0.0;     // the fixed dampers above, not per weapon
+            c.pose_hold_arm_lag = false;
+            c.pose_hold_heft_lag_s = 0.0;
+            c.pose_hold_shoulder_torque = 0.0;
+            c.pose_hold_joint_shoulder = false;
+            c.pose_hold_joint_carry_weight = false;
+            c.pose_hold_target_vel_smooth_s = 0.0;
+            c.pose_hold_wrist_stop_torque = 0.0;
+            c.pose_hold_spin_brake_from = 0.0;
+            c.pose_hold_joint_turn_by_grip = false;
+            c.pose_hold_torque_strength_power = 1.0; // strength scales the turn as it does the pull
+        }
         if (c.render_scale < 0.2) c.render_scale = 0.2;
         if (c.render_scale > 2.0) c.render_scale = 2.0;
         if (c.world_scale < 0.1) c.world_scale = 0.1;

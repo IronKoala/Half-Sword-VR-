@@ -1,0 +1,4 @@
+# Two-handed sheathe with the right hand still gripping (Matthew's marks 6 and 12). Needs the usual test hook patch
+# (hand_at scabbard, arm_blade, scab_l expect). Look for "Sheathe:" lines: no "pulls it back out" after "in past the mouth".
+sh_two_hand_r|steps-sh_two_hand_r.txt
+sh_two_hand_r_tilt|steps-sh_two_hand_r_tilt.txt
