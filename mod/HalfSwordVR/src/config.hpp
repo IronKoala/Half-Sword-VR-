@@ -1090,6 +1090,9 @@ namespace hsvr
         double body_step_height_cm = 8.0;
         double body_foot_spacing_cm = 24.0;
         double body_moving_cms = 100.0;        // B&S: at this speed the legs are all gait, none balance steps
+        // Torso lean (Matthew 2026-11-25: "keep the torso leaning, it's immersive"): standing, his feet stay and
+        // his spine bends to put his head at yours, up to this far (cm) of hip offset; further, he steps. 0 = off.
+        double body_lean_max_cm = 35.0;
         // How quickly the elbow's swing around the arm follows (seconds; the hand is never smoothed).
         double pose_swivel_smooth_s = 0.06;
         // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and

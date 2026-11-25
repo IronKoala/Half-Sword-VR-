@@ -22,13 +22,14 @@
 2.90:hsvr.fake_head_shift 17.5 9.7
 2.95:hsvr.fake_head_shift 17.9 9.9
 3.00:hsvr.fake_head_shift 18.0 10.0
+3.50:hsvr.expect body_lean >= 12 the torso bends toward your head (cm of hip offset it takes back)
 6.0:hsvr.expect body_active = 1 the body solver poses him
 6.0:hsvr.expect body_err <= 1.5 drawn vs sent, cm mean
 6.0:hsvr.expect body_err_worst <= 6 drawn vs sent, cm worst
 6.0:hsvr.expect body_flips = 0 a knee never swaps sides
 6.0:hsvr.expect body_knee_max <= 141 knees never past the fold limit
 6.0:hsvr.expect body_twitches = 0 no knee twitch
-6.0:hsvr.expect body_steps <= 2 steps for a lean
+6.0:hsvr.expect body_steps <= 1 he leans instead of stepping
 6.0:hsvr.expect body_kneepos_worst <= 3 knee moved a tick, cm
 6.05:hsvr.fake_head_shift 17.9 9.9
 6.10:hsvr.fake_head_shift 17.5 9.7

@@ -151,6 +151,7 @@ LAYOUT = [
         ('body_hips_pull_max_cm', 'His hips come down at most this far (cm) to keep a far foot on the floor; further, the foot lifts.'),
         ('body_step_height_cm', 'How high a foot lifts in a step (cm).'),
         ('body_foot_spacing_cm', 'How far apart his feet stand (cm).'),
+        ('body_lean_max_cm', 'Torso lean: standing, his spine bends toward your head up to this much hip offset (cm) before he steps (0 = off).'),
         ('body_moving_cms', 'Moving this fast (cm/s) his legs are all walking cycle, standing still all balance steps (B&S: 100).'),
         ('pose_room_neck_base_cm', "Room steps are measured this far below your head joint (base of the neck), so nodding or tilting your head doesn't move him (0 = at the head joint)."),
     ]),

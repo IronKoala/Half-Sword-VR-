@@ -66,6 +66,7 @@ namespace hsvr::body
         double root_dead_zone_deg = 25.0;
         double gait_stride_share = 0.8, gait_step_time_floor = 0.16; // stride held to the legs' reach (see feet_update)
         double hips_pull_max_cm = 12.0;
+        double lean_max_cm = 35.0, lean_tau = 0.1; // torso lean: most hip offset it takes back, smoothing
         double loco_speed = 100.0, loco_turn_dps = 30.0; // B&S ikLocomotionSpeedThreshold (1 m/s), ...AngularSpeedThreshold // the hips come down at most this far to keep a foot on the floor
         // Chasm: the hips (the button crouch, a recentre) never move faster than this, cm/s.
         double hips_max_speed = 250.0;
@@ -99,6 +100,7 @@ namespace hsvr::body
         double torso_yaw_deg = 0;      // chest's yaw
         double hips_short_cm = 0;      // how far the hips were held up by the knees (spine bent instead)
         double hips_pulled_cm = 0;     // how far the hips were pulled down to reach the feet
+        double lean_cm = 0;            // the torso lean: how far it carries the hips back over the feet
         double heel_deg[2] = {0, 0};
         double lift_cm[2] = {0, 0};
         bool stepping[2] = {false, false};
@@ -143,7 +145,8 @@ namespace hsvr::body
         int gait_ = -1; // (unused: the moving legs are the gait cycle)
         double gait_phase_ = 0.0, last_root_yaw_ = 0.0, turn_rate_ = 0.0;
         Vec3 gait_dir_{1, 0, 0};
-        Vec3 last_capsule_, capsule_vel_;
+        Vec3 last_capsule_, capsule_vel_, lean_vec_;
+        double last_weight_ = 1.0;
         bool have_capsule_ = false;
         double still_time_ = 0;
         Vec3 com_, com_vel_;

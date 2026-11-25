@@ -4120,6 +4120,7 @@ namespace
         P.step_height = cfg.body_step_height_cm;
         P.foot_spacing = cfg.body_foot_spacing_cm;
         P.loco_speed = cfg.body_moving_cms;
+        P.lean_max_cm = cfg.body_lean_max_cm;
 
         body::Input in;
         in.dt = dt;
@@ -4259,9 +4260,9 @@ namespace
         {
             last_log = now;
             HSVR_LOG("Body: spine pitch %.0f, chest yaw %.0f (heading %.0f), hips %.0f cm over the floor (%.0f down), knees %.0f / %.0f deg, heels %.0f / %.0f, "
-                     "hips held up %.1f / pulled down %.1f cm, %s (B&S weight %.2f), %s%s, %d steps; drawn vs sent worst %.2f cm (%s) mean %.2f",
+                     "hips held up %.1f / pulled down %.1f cm, lean %.1f cm, %s (B&S weight %.2f), %s%s, %d steps; drawn vs sent worst %.2f cm (%s) mean %.2f",
                      o.pitch_deg, o.torso_yaw_deg, heading, o.pos[body::J_PELVIS].z - floor_low, g_crouch_drop, o.knee_deg[0], o.knee_deg[1], o.heel_deg[0],
-                     o.heel_deg[1], o.hips_short_cm, o.hips_pulled_cm, o.walking ? "walking" : "standing", o.locomotion_weight, o.stepping[0] ? "left stepping " : "",
+                     o.heel_deg[1], o.hips_short_cm, o.hips_pulled_cm, o.lean_cm, o.walking ? "walking" : "standing", o.locomotion_weight, o.stepping[0] ? "left stepping " : "",
                      o.stepping[1] ? "right stepping" : "", o.steps, B.err_worst, B.err_bone, B.err_n ? B.err_sum / B.err_n : 0.0);
             B.err_worst = B.err_sum = 0.0;
             B.err_n = 0;
@@ -30043,6 +30044,7 @@ namespace
             else if (w == "body_slip") value = mean(S.slip_sum, S.slip_n);    // planted foot sliding, cm/s mean
             else if (w == "body_slip_worst") value = S.slip_worst;
             else if (w == "body_steps") value = S.steps;
+            else if (w == "body_lean") value = g_body.last.lean_cm;          // now, cm
             else if (w == "body_pitch") value = g_body.last.pitch_deg;        // now
             else if (w == "body_hips") value = g_body.last.pos[hsvr::body::J_PELVIS].z - (std::min)(g_body.floor_z[0], g_body.floor_z[1]); // now, cm over the floor
             else if (w == "body_knee_l") value = g_body.last.knee_deg[0];

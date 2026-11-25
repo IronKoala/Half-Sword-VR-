@@ -351,6 +351,8 @@ namespace hsvr::body
             have_prev_raw_ = flipped_ = false;
             have_capsule_ = false;
             capsule_vel_ = {};
+            lean_vec_ = {};
+            last_weight_ = 1.0;
         }
 
         // ---- torso ----
@@ -389,9 +391,10 @@ namespace hsvr::body
             Quat seg[5]; // segment frames (yaw then pitch), body T -> world
             Vec3 neck_dir[2];
         };
+        Quat lean_q[5]; // the torso lean (below), per segment
         auto chain_at = [&](double pitch) {
             Chain c;
-            for (int i = 0; i < 5; ++i) c.seg[i] = (yaw_rot(seg_yaw[i]) * quat_axis_angle({0, 1, 0}, pitch * kPitchShare[i])).normalized();
+            for (int i = 0; i < 5; ++i) c.seg[i] = (lean_q[i] * yaw_rot(seg_yaw[i]) * quat_axis_angle({0, 1, 0}, pitch * kPitchShare[i])).normalized();
             c.pos[7] = head_joint;
             for (int k = 1; k >= 0; --k)
             {
@@ -411,6 +414,36 @@ namespace hsvr::body
             out2[1] = c.pos[0] + c.seg[0].rotate(K.joint[J_THIGH_R] - K.joint[J_PELVIS]);
         };
         Chain chain = chain_at(pitch_.value);
+
+        // ---- torso lean (Matthew 2026-11-25: "keep the torso leaning, it's immersive") ----
+        // Standing, his feet stay where they are and his torso bends to put his head at yours: the spine
+        // tilts (forward, back or to a side) until his centre of mass is back over his feet, instead of
+        // the whole body sliding under your head. Past body_lean_max_cm of head offset he steps instead
+        // (the balance steps), and walking there is no lean.
+        {
+            Vec3 feet_mid = flat((feet_[0].pos + feet_[1].pos) * 0.5);
+            Vec3 hips0 = chain.pos[0];
+            // centre of mass = hips + (head - hips) * k over the feet  ->  hips where it would be.
+            Vec3 want_hips = (feet_mid - flat(head_joint) * kComUpTheSpine) * (1.0 / (1.0 - kComUpTheSpine));
+            Vec3 d = flat(want_hips - hips0);
+            double dl = length(d);
+            double cap = p.lean_max_cm * s;
+            if (dl > cap) d = d * (cap / dl);
+            d = d * last_weight_; // only standing
+            lean_vec_ = lerp(lean_vec_, d, smoothing(dt, p.lean_tau));
+            double ls = length(chain.pos[5] - chain.pos[0]);
+            double ll = length(lean_vec_);
+            if (ll > 0.1 && ls > 1.0)
+            {
+                // Tilting the segments' tops away from where the hips must go moves the hips there.
+                Vec3 away = lean_vec_ * (-1.0 / ll);
+                Vec3 axis = normalized(cross(kUp, away));
+                double theta = std::asin(std::clamp(ll / ls, 0.0, 0.8));
+                for (int i = 0; i < 5; ++i) lean_q[i] = quat_axis_angle(axis, theta * kPitchShare[i]);
+                chain = chain_at(pitch_.value);
+            }
+            out.lean_cm = ll;
+        }
 
         // ---- feet ----
         Vec3 com = lerp(chain.pos[0], head_joint, kComUpTheSpine);
@@ -495,6 +528,7 @@ namespace hsvr::body
                     feet_[i].stepping = false;
                 }
             out.locomotion_weight = weight;
+            last_weight_ = weight;
         }
         double thigh_len[2] = {length(K.joint[J_CALF_L] - K.joint[J_THIGH_L]), length(K.joint[J_CALF_R] - K.joint[J_THIGH_R])};
         double shin_len[2] = {length(K.joint[J_FOOT_L] - K.joint[J_CALF_L]), length(K.joint[J_FOOT_R] - K.joint[J_CALF_R])};
