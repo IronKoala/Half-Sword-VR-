@@ -19189,16 +19189,23 @@ namespace
         return true;
     }
 
-    // The item's inertia as the joint solver sees it: the body's principal values (kg cm^2), with Chaos's conditioning
-    // (p.Chaos.Solver.Joint.MaxInertiaRatio 5: no axis below a fifth of the largest).
+    // The item's inertia for the B&S drives (kg cm^2, item frame: X/Y across, Z along its length). The engine's own values
+    // (GetInertiaTensor) are the principal values of the welded parts in a rotated mass frame the mod can't read
+    // (BodyInstance.cpp: Combine "leaves the inertia in diagonal form with a rotation of mass"), and for these weapons they are
+    // not a rod's (11-24 polearm 3.0 kg / 216 cm: 25921 / 5184 / 5184 after conditioning, one big axis): read as if in the item's
+    // frame they made the turn drive up to 5x B&S's 250 N m, and a one-handed polearm followed his wrist like a flashlight
+    // (playtest 2026-11-24 7:19 PM). B&S's items are rigid bodies whose inertia comes from their colliders, a rod for a long
+    // weapon: both axes across it the same. So: across = the largest principal value, along = the smallest (at least a fifth of
+    // the largest, as Chaos conditions joints). Acceleration-mode drives scaled by these give the item B&S's motion whatever
+    // the engine's own tensor is.
     hsvr::Vec3 bs_joint_inertia(UObject* base)
     {
         Call it(base, STR("GetInertiaTensor"));
         it.run();
         hsvr::Vec3 I = it.vec();
-        double most = (std::max)((std::max)(I.x, I.y), I.z);
-        double least = most / 5.0;
-        return hsvr::Vec3{(std::max)(least, (std::max)(1e-3, I.x)), (std::max)(least, (std::max)(1e-3, I.y)), (std::max)(least, (std::max)(1e-3, I.z))};
+        double most = (std::max)(1e-3, (std::max)((std::max)(I.x, I.y), I.z));
+        double least = (std::max)(most / 5.0, (std::min)((std::min)(I.x, I.y), I.z));
+        return hsvr::Vec3{most, most, least};
     }
 
     // 1 / effective mass (1/kg) of a point r (cm, item frame, from its centre of mass) along n (item frame, unit).
@@ -21209,7 +21216,11 @@ namespace
             boosted = (std::max)(ni_len, cfg.stab_arm_mass_kg * v);
             write_three(locals + ni_prop->GetOffset_Internal(), ni_prop, -tip_fwd.x * boosted, -tip_fwd.y * boosted, -tip_fwd.z * boosted);
         }
-        else if (cfg.hit_assist && ni_prop && ni_len > 1.0 && h.weapon == weapon && !stuck)
+        // A held WEAPON's blow is never boosted any more (B&S has no swing assist: its blows are the item's own physics, and the B&S
+        // joint already presses the weapon on with up to 3000 N; with the arm's 3 kg added on top a sword strike sent a foe 1 m and
+        // his buckler across the map, playtest 2026-11-24 7:27-7:28 PM: impulse 1760 -> 4263). Only a fist keeps it: its 0.05 kg
+        // ball stands in for B&S's 1 kg physics hand, which carries the punch.
+        else if (cfg.hit_assist && is_fist(weapon) && ni_prop && ni_len > 1.0 && h.weapon == weapon && !stuck)
         {
             // Every other hit on a person (cuts, blunt blows, armour): the game reads the blow from
             // the contact impulse (its hit velocity is the larger of the weapon's speed and that
