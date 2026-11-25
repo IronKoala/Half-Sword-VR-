@@ -23494,6 +23494,25 @@ namespace
                 double left = length(scaled_axis((want * cur.inverse()).normalized())) * 57.2958;
                 if ((left < 2.0 && off_belt < 1.5) || now - s.t0 > 1.0)
                 {
+                    // Out of time and still far off its belt angle: put it there before the lock, never lock it crooked
+                    // (playtest 11-24 2:44 PM: the hand pulled off it, "back on the belt (100.5 deg, 3.9 cm off)" after the
+                    // 1 s, the sword in its slot then "NOT seated ... scabbard 13.0 cm from Sheath_Slot_R_1").
+                    if (left > 5.0 || off_belt > 2.0)
+                    {
+                        Vec3 at = pelvis_p + pelvis_q.rotate(s.rest_pos);
+                        set_component_transform(s.scab, at, want, true);
+                        Call z1(s.scab, STR("SetPhysicsAngularVelocityInRadians"));
+                        z1.three(STR("NewAngVel"), 0.0, 0.0, 0.0);
+                        z1.flag(STR("bAddToCurrent"), false);
+                        z1.run();
+                        Call z2(s.scab, STR("SetPhysicsLinearVelocity"));
+                        z2.three(STR("NewVel"), pelvis_v.x, pelvis_v.y, pelvis_v.z);
+                        z2.flag(STR("bAddToCurrent"), false);
+                        z2.run();
+                        HSVR_LOG("Scabbard: still %.1f deg / %.1f cm off its belt place after %.1f s: put on it before the lock", left, off_belt, now - s.t0);
+                        left = 0.0;
+                        off_belt = 0.0;
+                    }
                     UObject* scab = s.scab;
                     s = ScabHold{};
                     bool drawing = false;
