@@ -1211,7 +1211,9 @@ namespace hsvr
         double whoosh_bs_max_speed = 14.0; // m/s: full intensity
         double whoosh_bs_dampening = 0.1;  // share of the way to the new intensity per B&S update
         double whoosh_bs_update_hz = 45.0; // B&S updates a point every 2nd frame
-        double whoosh_volume = 1.0;        // x B&S's curve volume on the game's whoosh loop
+        // x B&S's curve volume on the game's whoosh loop. B&S's curve tops out at 0.6 of its own mixer; the game's loop
+        // ran to 1.0 for its own full whoosh, so 1/0.6 makes B&S's full whoosh the game's full whoosh (same curve shape).
+        double whoosh_volume = 1.6667;
         // "Whoosh:" lines every 0.5 s while a held weapon's whoosh point moves faster than whoosh_log_min_speed (cm/s) or it sounds.
         bool whoosh_log = true;
         double whoosh_log_min_speed = 300.0;

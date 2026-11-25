@@ -548,7 +548,7 @@ LAYOUT = [
         ('whoosh_bs_max_speed', 'B&S whoosh: full volume at this tip speed (m/s; B&S median 14).'),
         ('whoosh_bs_dampening', 'B&S whoosh smoothing: share of the way to the new intensity per update (B&S 0.1; higher = quicker, short jolts heard more).'),
         ('whoosh_bs_update_hz', 'B&S whoosh updates per second (B&S: every 2nd frame, 45 at 90 fps).'),
-        ('whoosh_volume', 'B&S whoosh volume x this.'),
+        ('whoosh_volume', "B&S whoosh volume x this (1.6667 = B&S's loudest whoosh is the game's own loudest; 1 = B&S's raw 0.6 top)."),
         ('pose_feed_swing_speed', "1 = the game's swing speed is fed from your controllers."),
         ('pose_swing_speed_lo', 'Hand speed that counts as no swing (m/s).'),
         ('pose_swing_speed_hi', 'Hand speed that counts as a full swing (m/s).'),
