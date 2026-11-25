@@ -1,0 +1,4 @@
+# Stamina while walking (pose_stamina_still_m_s); _old = the old rule
+sword_a|steps-sword.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+fists_a|steps-fists.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+sword_old|steps-sword.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_stamina_still_m_s=0

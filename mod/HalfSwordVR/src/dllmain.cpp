@@ -4923,6 +4923,8 @@ namespace
     // pose_swing_speed_lo..hi m/s -> 0..75, exactly 0 at rest (some game rules need == 0).
     double read_number_variable(UObject* owner, const TCHAR* name);
     double g_hand_world_v[2] = {0.0, 0.0}; // m/s
+    double g_hand_rel_v[2] = {0.0, 0.0};   // m/s, each hand against his body (its capsule's own move, step snaps included, taken out)
+    hsvr::Vec3 g_body_move_v;              // cm/s, his capsule's move over the last tick (walk, stairs, step snaps)
     // A draw from a scabbard in progress, per hand (see try_draw).
     struct DrawState
     {
@@ -5004,10 +5006,20 @@ namespace
         g_swing_written = 0.0;
         {
             // Each hand's speed in the world (for throws), ~30 ms smoothing.
-            static hsvr::Vec3 last[2];
+            static hsvr::Vec3 last[2], last_cap;
+            static bool have_cap = false;
             static double last_t = -1.0;
             double t = now_seconds(), d = last_t > 0.0 ? t - last_t : 0.0;
             last_t = t;
+            // His body's own move this tick (the capsule, step snaps on stairs included): a hand carried along by it is
+            // not a hand that moves (playtest 11-24 7:36 PM: going downstairs burned stamina and whooshed, the body
+            // at 3.6 m/s with the hands still against it).
+            UObject* cap = pawn ? object_property(pawn, STR("CapsuleComponent")) : nullptr;
+            Vec3 cp = cap ? component_location(cap) : Vec3{};
+            Vec3 body_d = have_cap && cap ? cp - last_cap : Vec3{};
+            have_cap = cap != nullptr;
+            last_cap = cp;
+            g_body_move_v = d > 1e-4 && d < 0.1 ? body_d * (1.0 / d) : Vec3{};
             for (int side = 0; side < 2; ++side)
             {
                 Vec3 at = g_pose.target[side];
@@ -5015,8 +5027,10 @@ namespace
                 {
                     double v = length(at - last[side]) / d / 100.0;
                     g_hand_world_v[side] += (v - g_hand_world_v[side]) * (1.0 - std::exp(-d / 0.03));
+                    double vr = length(at - last[side] - body_d) / d / 100.0;
+                    g_hand_rel_v[side] += (vr - g_hand_rel_v[side]) * (1.0 - std::exp(-d / 0.05));
                 }
-                else g_hand_world_v[side] = 0.0;
+                else g_hand_world_v[side] = g_hand_rel_v[side] = 0.0;
                 last[side] = at;
             }
         }
@@ -17757,6 +17771,30 @@ namespace
         double mr = number_var(pawn, STR("Muscle Rate"), has_mr);
         double strength = has_mr ? map_range(mr, 0.0, 3.0, 1.0, 0.1) : 1.0;
         double f = (std::min)(force_n, cfg.pose_stamina_force_cap_n), t = (std::min)(torque_nm, cfg.pose_stamina_torque_cap_nm);
+        // Only effort tires him: holding the item's weight, and moving it with his arms. The rest of the hold's force and turn
+        // drags the item along with his body (walking, crouch-walking, stairs, step snaps, a hand held still against him),
+        // which the game never charges: in the playtest of 11-24 7:39 PM the bar went 65 -> 33 in 4 s walking and
+        // crouch-walking with a sword and a lantern, hands still, the hold's 100-400 N / 30-70 N m read as effort (burn
+        // 170-180). Below pose_stamina_still_m_s of hand speed against his body only the weight counts; over 3x it, all of it.
+        if (!is_fist(weapon) && cfg.pose_stamina_still_m_s > 0.0)
+        {
+            static std::unordered_map<UObject*, double> mass_of;
+            static bool tr = on_freed([] { erase_gone_keys(mass_of); });
+            (void)tr;
+            double mass = 1.0;
+            auto mi = mass_of.find(weapon);
+            if (mi != mass_of.end()) mass = mi->second;
+            else if (UObject* b = object_property(weapon, STR("BaseMesh")))
+            {
+                Call gm(b, STR("GetMass"));
+                mass = gm.run() ? (std::max)(0.05, gm.number()) : 1.0;
+                mass_of[weapon] = mass;
+            }
+            double moving = map_range(g_hand_rel_v[side], cfg.pose_stamina_still_m_s, 3.0 * cfg.pose_stamina_still_m_s, 0.0, 1.0);
+            double fw = mass * 9.81, tw = mass * 9.81 * 0.3;
+            f = (std::min)(f, fw) + (std::max)(0.0, f - fw) * moving;
+            t = (std::min)(t, tw) + (std::max)(0.0, t - tw) * moving;
+        }
         // A fist (grip 0, nothing grabbed): the game's factor is Hands Rigidity (Gauntlets) x MRC(R/L Fisting Rate,
         // 0.1..1 -> 0..1) in place of the weapon's 0.01 (@407212, fists_eating.md 1.5), i.e. 100x it
         // here; Fisting Rate is the mod's own (fist_flags_after_tick), as the tick zeroes the game's.
@@ -17770,7 +17808,9 @@ namespace
             // The game's Fisting Rate rises with a mouse thrust (R Thrust Alpha), which VR never makes,
             // so in VR it stays under the 0.1 floor (stamina runs 2026-11-21: 0.02-0.06 vs flat 0.38):
             // the punching hand's speed counts too, over the B&S punch range 2..9 m/s.
-            double rate = (std::max)(map_range(g_fisting_rate[side], 0.1, 1.0, 0.0, 1.0), map_range(g_hand_world_v[side], 2.0, 9.0, 0.0, 1.0));
+            // (The hand's speed against his body, not through the world: crouch-walking with two fists at 4 m/s burned the bar
+            // 100 -> 49 in 4 s, playtest 11-24 7:16 PM, the fists only carried along.)
+            double rate = (std::max)(map_range(g_fisting_rate[side], 0.1, 1.0, 0.0, 1.0), map_range(g_hand_rel_v[side], 2.0, 9.0, 0.0, 1.0));
             kind = 100.0 * (has_rig ? rigidity : 0.0) * rate * cfg.pose_stamina_fist_scale;
         }
         double raw = (f + 100.0 * t) / 60.0 * kind * strength * cfg.pose_stamina_scale;
@@ -18237,16 +18277,23 @@ namespace
         return true;
     }
 
-    // The item's inertia as the joint solver sees it: the body's principal values (kg cm^2), with Chaos's conditioning
-    // (p.Chaos.Solver.Joint.MaxInertiaRatio 5: no axis below a fifth of the largest).
+    // The item's inertia for the B&S drives (kg cm^2, item frame: X/Y across, Z along its length). The engine's own values
+    // (GetInertiaTensor) are the principal values of the welded parts in a rotated mass frame the mod can't read
+    // (BodyInstance.cpp: Combine "leaves the inertia in diagonal form with a rotation of mass"), and for these weapons they are
+    // not a rod's (11-24 polearm 3.0 kg / 216 cm: 25921 / 5184 / 5184 after conditioning, one big axis): read as if in the item's
+    // frame they made the turn drive up to 5x B&S's 250 N m, and a one-handed polearm followed his wrist like a flashlight
+    // (playtest 2026-11-24 7:19 PM). B&S's items are rigid bodies whose inertia comes from their colliders, a rod for a long
+    // weapon: both axes across it the same. So: across = the largest principal value, along = the smallest (at least a fifth of
+    // the largest, as Chaos conditions joints). Acceleration-mode drives scaled by these give the item B&S's motion whatever
+    // the engine's own tensor is.
     hsvr::Vec3 bs_joint_inertia(UObject* base)
     {
         Call it(base, STR("GetInertiaTensor"));
         it.run();
         hsvr::Vec3 I = it.vec();
-        double most = (std::max)((std::max)(I.x, I.y), I.z);
-        double least = most / 5.0;
-        return hsvr::Vec3{(std::max)(least, (std::max)(1e-3, I.x)), (std::max)(least, (std::max)(1e-3, I.y)), (std::max)(least, (std::max)(1e-3, I.z))};
+        double most = (std::max)(1e-3, (std::max)((std::max)(I.x, I.y), I.z));
+        double least = (std::max)(most / 5.0, (std::min)((std::min)(I.x, I.y), I.z));
+        return hsvr::Vec3{most, most, least};
     }
 
     // 1 / effective mass (1/kg) of a point r (cm, item frame, from its centre of mass) along n (item frame, unit).
@@ -20257,7 +20304,11 @@ namespace
             boosted = (std::max)(ni_len, cfg.stab_arm_mass_kg * v);
             write_three(locals + ni_prop->GetOffset_Internal(), ni_prop, -tip_fwd.x * boosted, -tip_fwd.y * boosted, -tip_fwd.z * boosted);
         }
-        else if (cfg.hit_assist && ni_prop && ni_len > 1.0 && h.weapon == weapon && !stuck)
+        // A held WEAPON's blow is never boosted any more (B&S has no swing assist: its blows are the item's own physics, and the B&S
+        // joint already presses the weapon on with up to 3000 N; with the arm's 3 kg added on top a sword strike sent a foe 1 m and
+        // his buckler across the map, playtest 2026-11-24 7:27-7:28 PM: impulse 1760 -> 4263). Only a fist keeps it: its 0.05 kg
+        // ball stands in for B&S's 1 kg physics hand, which carries the punch.
+        else if (cfg.hit_assist && is_fist(weapon) && ni_prop && ni_len > 1.0 && h.weapon == weapon && !stuck)
         {
             // Every other hit on a person (cuts, blunt blows, armour): the game reads the blow from
             // the contact impulse (its hit velocity is the larger of the weapon's speed and that
@@ -20501,6 +20552,9 @@ namespace
             {
                 hsvr::Vec3 v = gv.vec();
                 g_whoosh_body_v = v;
+                // His capsule's real move (step snaps on stairs included), where it is the larger: going downstairs at 3.6 m/s
+                // whooshed his still-held sword at 9-14 m/s (playtest 11-24 7:36 PM).
+                if (length(g_body_move_v) > length(v)) g_whoosh_body_v = g_body_move_v;
                 if (cfg.whoosh_walk_speed_scale > 0.0) g_whoosh_walk = std::sqrt(v.x * v.x + v.y * v.y) * cfg.whoosh_walk_speed_scale;
             }
         }
@@ -26176,11 +26230,43 @@ namespace
         }
         if (want)
         {
+            // Diagnostics (playtest 2026-11-25: the pointer still got out with the clip on): how often
+            // something else changed the clip, and where the pointer was whenever it was outside.
+            static double report_at = 0.0;
+            static int reclips = 0, outside = 0, pulled = 0;
+            static RECT foreign{};
+            static POINT last_out{};
             RECT now{};
-            if (!clipped || !GetClipCursor(&now) || now.left != r.left || now.top != r.top || now.right != r.right || now.bottom != r.bottom)
+            bool have_now = GetClipCursor(&now) != 0;
+            if (!clipped || !have_now || now.left != r.left || now.top != r.top || now.right != r.right || now.bottom != r.bottom)
             {
-                if (ClipCursor(&r) && !clipped) HSVR_LOG("Mouse: held inside the game window (%ld,%ld)-(%ld,%ld)", r.left, r.top, r.right, r.bottom);
+                if (clipped && have_now)
+                {
+                    ++reclips;
+                    foreign = now;
+                }
+                BOOL ok = ClipCursor(&r);
+                if (!clipped) HSVR_LOG("Mouse: held inside the game window (%ld,%ld)-(%ld,%ld)%s", r.left, r.top, r.right, r.bottom, ok ? "" : " (ClipCursor failed)");
                 clipped = true;
+            }
+            // Belt and braces: a pointer found outside the window is put back on its nearest edge.
+            POINT p{};
+            if (GetCursorPos(&p) && (p.x < r.left || p.x >= r.right || p.y < r.top || p.y >= r.bottom))
+            {
+                ++outside;
+                last_out = p;
+                POINT q{std::clamp(p.x, r.left, r.right - 1), std::clamp(p.y, r.top, r.bottom - 1)};
+                if (SetCursorPos(q.x, q.y)) ++pulled;
+            }
+            double t = hsvr::now_seconds();
+            if (t >= report_at && (reclips || outside))
+            {
+                HSVR_LOG("Mouse: last 10 s: clip changed by something else %d time(s) (last to (%ld,%ld)-(%ld,%ld)), pointer outside the window %d time(s) "
+                         "(last at (%ld,%ld)), put back %d; window (%ld,%ld)-(%ld,%ld)",
+                         reclips, foreign.left, foreign.top, foreign.right, foreign.bottom, outside, last_out.x, last_out.y, pulled, r.left, r.top, r.right,
+                         r.bottom);
+                reclips = outside = pulled = 0;
+                report_at = t + 10.0;
             }
         }
         else if (clipped)
