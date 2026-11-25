@@ -1,13 +1,27 @@
-# Lean forward 18 cm and to the right 10 cm (within the capsule's 20 cm): no step, no knee twitch.
+# Lean forward 18 cm and right 10 cm over 1 s (within the capsule's 20 cm): no step, no knee twitch.
 0.5:hsvr.wait room_ready = 1 6 0 room revealed
 1.0:hsvr.fake_head_pose 1
 2.0:hsvr.mark
-2.15:hsvr.fake_head_shift 3 1
-2.25:hsvr.fake_head_shift 6 3
-2.35:hsvr.fake_head_shift 9 5
-2.45:hsvr.fake_head_shift 12 6
-2.55:hsvr.fake_head_shift 15 8
-2.65:hsvr.fake_head_shift 18 10
+2.05:hsvr.fake_head_shift 0.1 0.1
+2.10:hsvr.fake_head_shift 0.5 0.3
+2.15:hsvr.fake_head_shift 1.1 0.6
+2.20:hsvr.fake_head_shift 1.9 1.0
+2.25:hsvr.fake_head_shift 2.8 1.6
+2.30:hsvr.fake_head_shift 3.9 2.2
+2.35:hsvr.fake_head_shift 5.1 2.8
+2.40:hsvr.fake_head_shift 6.3 3.5
+2.45:hsvr.fake_head_shift 7.7 4.3
+2.50:hsvr.fake_head_shift 9.0 5.0
+2.55:hsvr.fake_head_shift 10.3 5.7
+2.60:hsvr.fake_head_shift 11.7 6.5
+2.65:hsvr.fake_head_shift 12.9 7.2
+2.70:hsvr.fake_head_shift 14.1 7.8
+2.75:hsvr.fake_head_shift 15.2 8.4
+2.80:hsvr.fake_head_shift 16.1 9.0
+2.85:hsvr.fake_head_shift 16.9 9.4
+2.90:hsvr.fake_head_shift 17.5 9.7
+2.95:hsvr.fake_head_shift 17.9 9.9
+3.00:hsvr.fake_head_shift 18.0 10.0
 6.0:hsvr.expect body_active = 1 the body solver poses him
 6.0:hsvr.expect body_err <= 1.5 drawn vs sent, cm mean
 6.0:hsvr.expect body_err_worst <= 6 drawn vs sent, cm worst
@@ -15,4 +29,24 @@
 6.0:hsvr.expect body_knee_max <= 141 knees never past the fold limit
 6.0:hsvr.expect body_twitches = 0 no knee twitch
 6.0:hsvr.expect body_steps <= 2 steps for a lean
-6.1:hsvr.fake_head_shift 0 0
+6.0:hsvr.expect body_kneepos_worst <= 3 knee moved a tick, cm
+6.05:hsvr.fake_head_shift 17.9 9.9
+6.10:hsvr.fake_head_shift 17.5 9.7
+6.15:hsvr.fake_head_shift 16.9 9.4
+6.20:hsvr.fake_head_shift 16.1 9.0
+6.25:hsvr.fake_head_shift 15.2 8.4
+6.30:hsvr.fake_head_shift 14.1 7.8
+6.35:hsvr.fake_head_shift 12.9 7.2
+6.40:hsvr.fake_head_shift 11.7 6.5
+6.45:hsvr.fake_head_shift 10.3 5.7
+6.50:hsvr.fake_head_shift 9.0 5.0
+6.55:hsvr.fake_head_shift 7.7 4.3
+6.60:hsvr.fake_head_shift 6.3 3.5
+6.65:hsvr.fake_head_shift 5.1 2.8
+6.70:hsvr.fake_head_shift 3.9 2.2
+6.75:hsvr.fake_head_shift 2.8 1.6
+6.80:hsvr.fake_head_shift 1.9 1.0
+6.85:hsvr.fake_head_shift 1.1 0.6
+6.90:hsvr.fake_head_shift 0.5 0.3
+6.95:hsvr.fake_head_shift 0.1 0.1
+7.00:hsvr.fake_head_shift 0.0 0.0

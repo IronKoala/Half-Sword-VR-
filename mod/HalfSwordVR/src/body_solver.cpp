@@ -349,6 +349,8 @@ namespace hsvr::body
             hip_drop_ = 0.0;
             have_hips_ = false;
             have_prev_raw_ = flipped_ = false;
+            have_capsule_ = false;
+            capsule_vel_ = {};
         }
 
         // ---- torso ----
@@ -432,7 +434,17 @@ namespace hsvr::body
         } draw[2];
         double weight;
         {
-            Vec3 v = flat(com_vel_);
+            // B&S's weight is the locomotion's own speed (the capsule: stick or room walking), never the body's
+            // sway: crouching or bending over moves the hips fast without going anywhere.
+            if (have_capsule_ && dt > 1e-4)
+            {
+                Vec3 cv = flat(in.capsule - last_capsule_) * (1.0 / dt);
+                if (length(cv) > 2000.0) cv = {}; // a teleport or respawn
+                capsule_vel_ = lerp(capsule_vel_, cv, smoothing(dt, kVelocityTau));
+            }
+            last_capsule_ = in.capsule;
+            have_capsule_ = true;
+            Vec3 v = flat(capsule_vel_);
             double speed = length(v);
             double turn = 0.0;
             if (dt > 1e-4) turn = std::fabs(wrap(root_yaw - last_root_yaw_)) * kRadToDeg / dt;
@@ -442,8 +454,10 @@ namespace hsvr::body
             if (speed > 1.0) gait_dir_ = normalize_or(lerp(gait_dir_, v * (1.0 / speed), smoothing(dt, 0.1)), gait_dir_);
             if (length(gait_dir_) < 0.5) gait_dir_ = yaw_dir(root_yaw);
             double h = (std::max)(0.0, (hips_now[0].z + hips_now[1].z) * 0.5 - (in.floor_z[0] + in.floor_z[1]) * 0.5 - skel.ankle_height);
-            double reach = (skel.thigh + skel.shin) * 0.95;
+            // The leg reaches its length plus what rising onto the toes adds (the trailing foot pushes off).
+            double reach = skel.thigh + skel.shin + skel.ball_from_ankle.x * std::sin(p.heel_lift_max_deg * kDegToRad);
             double s_max = 2.0 * std::sqrt((std::max)(0.0, reach * reach - h * h)) * p.gait_stride_share;
+            s_max = (std::max)(s_max, 0.3 * (skel.thigh + skel.shin));
             double duty = 0.62 + (0.45 - 0.62) * smoothstep(150.0 * s, 300.0 * s, speed);
             double T = std::clamp(1.0 - speed / (800.0 * s), 0.55, 1.0);
             double S = speed * T * duty;

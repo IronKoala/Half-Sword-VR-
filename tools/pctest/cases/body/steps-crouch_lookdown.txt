@@ -1,21 +1,77 @@
-# Matthew 11-24 11:21: crouching and leaning down made the legs freak out. Crouch 60 cm and look down 50 deg, eased in over 1.2 s.
+# Matthew 11-24 11:21: crouching and leaning down made the legs freak out. Crouch 60 cm and look down 50 deg over 1.5 s (a person's pace).
 0.5:hsvr.wait room_ready = 1 6 0 room revealed
 1.0:hsvr.fake_head_pose 1
 2.0:hsvr.mark
-2.1:hsvr.fake_head_tilt 8 0 10
-2.3:hsvr.fake_head_tilt 16 0 20
-2.5:hsvr.fake_head_tilt 25 0 30
-2.7:hsvr.fake_head_tilt 33 0 40
-2.9:hsvr.fake_head_tilt 41 0 50
-3.1:hsvr.fake_head_tilt 50 0 60
+2.05:hsvr.fake_head_tilt 0.2 0.0 0.2
+2.10:hsvr.fake_head_tilt 0.6 0.0 0.8
+2.15:hsvr.fake_head_tilt 1.4 0.0 1.7
+2.20:hsvr.fake_head_tilt 2.4 0.0 2.9
+2.25:hsvr.fake_head_tilt 3.7 0.0 4.4
+2.30:hsvr.fake_head_tilt 5.2 0.0 6.2
+2.35:hsvr.fake_head_tilt 6.9 0.0 8.3
+2.40:hsvr.fake_head_tilt 8.8 0.0 10.5
+2.45:hsvr.fake_head_tilt 10.8 0.0 13.0
+2.50:hsvr.fake_head_tilt 13.0 0.0 15.6
+2.55:hsvr.fake_head_tilt 15.2 0.0 18.3
+2.60:hsvr.fake_head_tilt 17.6 0.0 21.1
+2.65:hsvr.fake_head_tilt 20.0 0.0 24.0
+2.70:hsvr.fake_head_tilt 22.5 0.0 27.0
+2.75:hsvr.fake_head_tilt 25.0 0.0 30.0
+2.80:hsvr.fake_head_tilt 27.5 0.0 33.0
+2.85:hsvr.fake_head_tilt 30.0 0.0 36.0
+2.90:hsvr.fake_head_tilt 32.4 0.0 38.9
+2.95:hsvr.fake_head_tilt 34.8 0.0 41.7
+3.00:hsvr.fake_head_tilt 37.0 0.0 44.4
+3.05:hsvr.fake_head_tilt 39.2 0.0 47.0
+3.10:hsvr.fake_head_tilt 41.2 0.0 49.5
+3.15:hsvr.fake_head_tilt 43.1 0.0 51.7
+3.20:hsvr.fake_head_tilt 44.8 0.0 53.8
+3.25:hsvr.fake_head_tilt 46.3 0.0 55.6
+3.30:hsvr.fake_head_tilt 47.6 0.0 57.1
+3.35:hsvr.fake_head_tilt 48.6 0.0 58.3
+3.40:hsvr.fake_head_tilt 49.4 0.0 59.2
+3.45:hsvr.fake_head_tilt 49.8 0.0 59.8
+3.50:hsvr.fake_head_tilt 50.0 0.0 60.0
 7.0:hsvr.expect body_active = 1 the body solver poses him
 7.0:hsvr.expect body_err <= 1.5 drawn vs sent, cm mean
 7.0:hsvr.expect body_err_worst <= 6 drawn vs sent, cm worst
 7.0:hsvr.expect body_flips = 0 a knee never swaps sides
 7.0:hsvr.expect body_knee_max <= 141 knees never past the fold limit
 7.0:hsvr.expect body_twitches <= 1 no knee twitch
-7.0:hsvr.expect body_dknee_worst <= 15 knee bend change a tick, deg
-7.0:hsvr.expect body_kneepos_worst <= 6 knee moved a tick, cm
+7.0:hsvr.expect body_dknee_worst <= 12 knee bend change a tick, deg
+7.0:hsvr.expect body_kneepos_worst <= 5 knee moved a tick, cm
 7.0:hsvr.expect body_pitch_max >= 15 the spine bends when looking down
 7.0:hsvr.expect body_slip <= 2 planted feet slide, cm/s mean
-7.1:hsvr.fake_head_tilt 0 0 0
+7.0:hsvr.expect body_steps >= 0 (record)
+7.05:hsvr.fake_head_tilt 49.8 0.0 59.8
+7.10:hsvr.fake_head_tilt 49.4 0.0 59.2
+7.15:hsvr.fake_head_tilt 48.6 0.0 58.3
+7.20:hsvr.fake_head_tilt 47.6 0.0 57.1
+7.25:hsvr.fake_head_tilt 46.3 0.0 55.6
+7.30:hsvr.fake_head_tilt 44.8 0.0 53.8
+7.35:hsvr.fake_head_tilt 43.1 0.0 51.7
+7.40:hsvr.fake_head_tilt 41.2 0.0 49.5
+7.45:hsvr.fake_head_tilt 39.2 0.0 47.0
+7.50:hsvr.fake_head_tilt 37.0 0.0 44.4
+7.55:hsvr.fake_head_tilt 34.8 0.0 41.7
+7.60:hsvr.fake_head_tilt 32.4 0.0 38.9
+7.65:hsvr.fake_head_tilt 30.0 0.0 36.0
+7.70:hsvr.fake_head_tilt 27.5 0.0 33.0
+7.75:hsvr.fake_head_tilt 25.0 0.0 30.0
+7.80:hsvr.fake_head_tilt 22.5 0.0 27.0
+7.85:hsvr.fake_head_tilt 20.0 0.0 24.0
+7.90:hsvr.fake_head_tilt 17.6 0.0 21.1
+7.95:hsvr.fake_head_tilt 15.2 0.0 18.3
+8.00:hsvr.fake_head_tilt 13.0 0.0 15.6
+8.05:hsvr.fake_head_tilt 10.8 0.0 13.0
+8.10:hsvr.fake_head_tilt 8.8 0.0 10.5
+8.15:hsvr.fake_head_tilt 6.9 0.0 8.3
+8.20:hsvr.fake_head_tilt 5.2 0.0 6.2
+8.25:hsvr.fake_head_tilt 3.7 0.0 4.4
+8.30:hsvr.fake_head_tilt 2.4 0.0 2.9
+8.35:hsvr.fake_head_tilt 1.4 0.0 1.7
+8.40:hsvr.fake_head_tilt 0.6 0.0 0.8
+8.45:hsvr.fake_head_tilt 0.2 0.0 0.2
+8.50:hsvr.fake_head_tilt 0.0 0.0 0.0
+9.5:hsvr.expect body_twitches <= 2 no knee twitch standing up again
+9.5:hsvr.expect body_kneepos_worst <= 5 knee moved a tick, cm

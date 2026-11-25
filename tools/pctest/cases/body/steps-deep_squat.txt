@@ -1,15 +1,47 @@
-# Head down to 55 cm over the floor (deeper than his knees fold), level gaze: hips held at the fold limit, spine takes the rest.
+# Head down 110 cm (deeper than his knees fold), level gaze, over 2 s: hips held at the fold limit, the spine takes the rest.
 0.5:hsvr.wait room_ready = 1 6 0 room revealed
 1.0:hsvr.fake_head_pose 1
 2.0:hsvr.mark
-2.15:hsvr.fake_head_tilt 0 0 14
-2.25:hsvr.fake_head_tilt 0 0 28
-2.35:hsvr.fake_head_tilt 0 0 42
-2.45:hsvr.fake_head_tilt 0 0 56
-2.55:hsvr.fake_head_tilt 0 0 70
-2.65:hsvr.fake_head_tilt 0 0 84
-2.75:hsvr.fake_head_tilt 0 0 98
-2.85:hsvr.fake_head_tilt 0 0 112
+2.05:hsvr.fake_head_tilt 0.0 0.0 0.2
+2.10:hsvr.fake_head_tilt 0.0 0.0 0.8
+2.15:hsvr.fake_head_tilt 0.0 0.0 1.8
+2.20:hsvr.fake_head_tilt 0.0 0.0 3.1
+2.25:hsvr.fake_head_tilt 0.0 0.0 4.7
+2.30:hsvr.fake_head_tilt 0.0 0.0 6.7
+2.35:hsvr.fake_head_tilt 0.0 0.0 8.9
+2.40:hsvr.fake_head_tilt 0.0 0.0 11.4
+2.45:hsvr.fake_head_tilt 0.0 0.0 14.2
+2.50:hsvr.fake_head_tilt 0.0 0.0 17.2
+2.55:hsvr.fake_head_tilt 0.0 0.0 20.4
+2.60:hsvr.fake_head_tilt 0.0 0.0 23.8
+2.65:hsvr.fake_head_tilt 0.0 0.0 27.3
+2.70:hsvr.fake_head_tilt 0.0 0.0 31.0
+2.75:hsvr.fake_head_tilt 0.0 0.0 34.8
+2.80:hsvr.fake_head_tilt 0.0 0.0 38.7
+2.85:hsvr.fake_head_tilt 0.0 0.0 42.7
+2.90:hsvr.fake_head_tilt 0.0 0.0 46.8
+2.95:hsvr.fake_head_tilt 0.0 0.0 50.9
+3.00:hsvr.fake_head_tilt 0.0 0.0 55.0
+3.05:hsvr.fake_head_tilt 0.0 0.0 59.1
+3.10:hsvr.fake_head_tilt 0.0 0.0 63.2
+3.15:hsvr.fake_head_tilt 0.0 0.0 67.3
+3.20:hsvr.fake_head_tilt 0.0 0.0 71.3
+3.25:hsvr.fake_head_tilt 0.0 0.0 75.2
+3.30:hsvr.fake_head_tilt 0.0 0.0 79.0
+3.35:hsvr.fake_head_tilt 0.0 0.0 82.7
+3.40:hsvr.fake_head_tilt 0.0 0.0 86.2
+3.45:hsvr.fake_head_tilt 0.0 0.0 89.6
+3.50:hsvr.fake_head_tilt 0.0 0.0 92.8
+3.55:hsvr.fake_head_tilt 0.0 0.0 95.8
+3.60:hsvr.fake_head_tilt 0.0 0.0 98.6
+3.65:hsvr.fake_head_tilt 0.0 0.0 101.1
+3.70:hsvr.fake_head_tilt 0.0 0.0 103.3
+3.75:hsvr.fake_head_tilt 0.0 0.0 105.3
+3.80:hsvr.fake_head_tilt 0.0 0.0 106.9
+3.85:hsvr.fake_head_tilt 0.0 0.0 108.2
+3.90:hsvr.fake_head_tilt 0.0 0.0 109.2
+3.95:hsvr.fake_head_tilt 0.0 0.0 109.8
+4.00:hsvr.fake_head_tilt 0.0 0.0 110.0
 7.0:hsvr.expect body_active = 1 the body solver poses him
 7.0:hsvr.expect body_err <= 1.5 drawn vs sent, cm mean
 7.0:hsvr.expect body_err_worst <= 6 drawn vs sent, cm worst
@@ -17,5 +49,46 @@
 7.0:hsvr.expect body_knee_max <= 141 knees never past the fold limit
 7.0:hsvr.expect body_twitches <= 1 no knee twitch
 7.0:hsvr.expect body_short_max >= 0 hips held up by the knees, cm (record)
-7.0:hsvr.expect body_kneepos_worst <= 6 knee moved a tick, cm
-7.1:hsvr.fake_head_tilt 0 0 0
+7.0:hsvr.expect body_kneepos_worst <= 5 knee moved a tick, cm
+7.0:hsvr.expect body_pitch_max >= 0 (record)
+7.05:hsvr.fake_head_tilt 0.0 0.0 109.8
+7.10:hsvr.fake_head_tilt 0.0 0.0 109.2
+7.15:hsvr.fake_head_tilt 0.0 0.0 108.2
+7.20:hsvr.fake_head_tilt 0.0 0.0 106.9
+7.25:hsvr.fake_head_tilt 0.0 0.0 105.3
+7.30:hsvr.fake_head_tilt 0.0 0.0 103.3
+7.35:hsvr.fake_head_tilt 0.0 0.0 101.1
+7.40:hsvr.fake_head_tilt 0.0 0.0 98.6
+7.45:hsvr.fake_head_tilt 0.0 0.0 95.8
+7.50:hsvr.fake_head_tilt 0.0 0.0 92.8
+7.55:hsvr.fake_head_tilt 0.0 0.0 89.6
+7.60:hsvr.fake_head_tilt 0.0 0.0 86.2
+7.65:hsvr.fake_head_tilt 0.0 0.0 82.7
+7.70:hsvr.fake_head_tilt 0.0 0.0 79.0
+7.75:hsvr.fake_head_tilt 0.0 0.0 75.2
+7.80:hsvr.fake_head_tilt 0.0 0.0 71.3
+7.85:hsvr.fake_head_tilt 0.0 0.0 67.3
+7.90:hsvr.fake_head_tilt 0.0 0.0 63.2
+7.95:hsvr.fake_head_tilt 0.0 0.0 59.1
+8.00:hsvr.fake_head_tilt 0.0 0.0 55.0
+8.05:hsvr.fake_head_tilt 0.0 0.0 50.9
+8.10:hsvr.fake_head_tilt 0.0 0.0 46.8
+8.15:hsvr.fake_head_tilt 0.0 0.0 42.7
+8.20:hsvr.fake_head_tilt 0.0 0.0 38.7
+8.25:hsvr.fake_head_tilt 0.0 0.0 34.8
+8.30:hsvr.fake_head_tilt 0.0 0.0 31.0
+8.35:hsvr.fake_head_tilt 0.0 0.0 27.3
+8.40:hsvr.fake_head_tilt 0.0 0.0 23.8
+8.45:hsvr.fake_head_tilt 0.0 0.0 20.4
+8.50:hsvr.fake_head_tilt 0.0 0.0 17.2
+8.55:hsvr.fake_head_tilt 0.0 0.0 14.2
+8.60:hsvr.fake_head_tilt 0.0 0.0 11.4
+8.65:hsvr.fake_head_tilt 0.0 0.0 8.9
+8.70:hsvr.fake_head_tilt 0.0 0.0 6.7
+8.75:hsvr.fake_head_tilt 0.0 0.0 4.7
+8.80:hsvr.fake_head_tilt 0.0 0.0 3.1
+8.85:hsvr.fake_head_tilt 0.0 0.0 1.8
+8.90:hsvr.fake_head_tilt 0.0 0.0 0.8
+8.95:hsvr.fake_head_tilt 0.0 0.0 0.2
+9.00:hsvr.fake_head_tilt 0.0 0.0 0.0
+10.0:hsvr.expect body_kneepos_worst <= 5 knee moved a tick, cm (standing up)

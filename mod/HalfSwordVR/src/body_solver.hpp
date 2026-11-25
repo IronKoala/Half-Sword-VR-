@@ -143,6 +143,8 @@ namespace hsvr::body
         int gait_ = -1; // (unused: the moving legs are the gait cycle)
         double gait_phase_ = 0.0, last_root_yaw_ = 0.0, turn_rate_ = 0.0;
         Vec3 gait_dir_{1, 0, 0};
+        Vec3 last_capsule_, capsule_vel_;
+        bool have_capsule_ = false;
         double still_time_ = 0;
         Vec3 com_, com_vel_;
         bool have_com_ = false;
