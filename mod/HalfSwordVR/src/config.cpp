@@ -598,7 +598,6 @@ namespace hsvr
         num("pose_sheathe_mouth_cm", c.pose_sheathe_mouth_cm);
         num("pose_sheathe_angle_deg", c.pose_sheathe_angle_deg);
         flag("pose_sheathe_two_hand", c.pose_sheathe_two_hand);
-        flag("pose_scabbard_on_pickup", c.pose_scabbard_on_pickup);
         flag("pose_sheathe_cross", c.pose_sheathe_cross);
         flag("pose_scabbard_grab", c.pose_scabbard_grab);
         num("pose_scabbard_touch_cm", c.pose_scabbard_touch_cm);
@@ -830,10 +829,12 @@ namespace hsvr
         flag("perf_bp_segments", c.perf_bp_segments);
         num("hit_buzz_min_intensity", c.hit_buzz_min_intensity);
         num("hit_buzz_limb_min_ms", c.hit_buzz_limb_min_ms);
-        num("whoosh_vr_threshold_scale", c.whoosh_vr_threshold_scale);
-        flag("whoosh_strike_gate", c.whoosh_strike_gate);
-        num("whoosh_strike_speed_ratio", c.whoosh_strike_speed_ratio);
-        num("whoosh_walk_speed_scale", c.whoosh_walk_speed_scale);
+        flag("whoosh_bs", c.whoosh_bs);
+        num("whoosh_bs_min_speed", c.whoosh_bs_min_speed);
+        num("whoosh_bs_max_speed", c.whoosh_bs_max_speed);
+        num("whoosh_bs_dampening", c.whoosh_bs_dampening);
+        num("whoosh_bs_update_hz", c.whoosh_bs_update_hz);
+        num("whoosh_volume", c.whoosh_volume);
         flag("whoosh_log", c.whoosh_log);
         num("whoosh_log_min_speed", c.whoosh_log_min_speed);
         flag("stab_assist", c.stab_assist);

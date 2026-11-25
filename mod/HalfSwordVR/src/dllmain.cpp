@@ -2078,6 +2078,9 @@ namespace
 
     std::atomic<int> g_fake_arm_mode{0};
     std::atomic<bool> g_fake_look{true}; // test: hsvr.fake_look 0 = the made-up head stops looking about
+    // hsvr.still_trace 0/1/2: what moves a held weapon (Matthew 2026-11-24 "why is there small hand jitter
+    // at all?"). 1 = a "Still:" line every 0.5 s per held weapon, 2 = also one line every tick.
+    std::atomic<int> g_still_trace{0};
     std::atomic<int> g_fake_arm_epoch{0}; // bumped by every hsvr.arm_move: timed test paths restart
     std::atomic<double> g_fake_two_up{20.0};
     std::atomic<bool> g_fake_two_online{false}; // hsvr.arm_move 7 <cm> 1: the left hand onto the held weapon's own line (not the right controller's)
@@ -4970,7 +4973,6 @@ namespace
         bool pulling_back = false;   // and being pulled back out of it
         double length = 80.0;        // the blade's length (cm)
         bool block_cleared = false;
-        bool past_mouth = false;     // in past the mouth (the game's seat is held off until it is nearly home)
     };
     DrawState g_draw[2];
     const char* sheathing_socket(int side)
@@ -16866,15 +16868,6 @@ namespace
             // A pull that the yank will answer is not a let-go (flip-test3: the past-reach let-go fired
             // after 0.15 s and dropped the weapon before the 0.25 s yank could pull it out).
             if (in_body && cfg.stab_yank_cm > 0.0 && out_along > cfg.stab_yank_cm) out = false;
-            // Nor while he is sheathing or holding a scabbard: the blade catching on its own scabbard or his hip is no reason to
-            // drop it while his grip is held (playtest 11-24 marker 4: stuck 0.4 s by the scabbard mouth, "lets go ... stopped
-            // 70 cm from where you hold it" with the grip still 1.00 for 0.8 s more).
-            if (sheathing_socket(side) || scabbard_held(0) || scabbard_held(1))
-            {
-                if (out) HSVR_LOG_EVERY(1.0, "Hold: %s hand keeps %ls: stopped %.0f cm off while sheathing (no let-go)", side == 0 ? "left" : "right",
-                                        h.weapon->GetName().c_str(), h.blocked_cm);
-                out = false;
-            }
             // B&S's stuck rule (PlayerHand.cs:279-304, StuckBehaviour.Drop): the item is touching something, and the grip is past
             // his arm's length from the shoulder: the hand lets go at once. No timer, no grace, no own-body check (the held item
             // ignores his own body, as B&S's), and it keeps its speed (B&S: the joint just goes).
@@ -20525,67 +20518,73 @@ namespace
         HSVR_LOG("Hit buzz: watching the weapons' Collision Hit and Willie's mesh hits (B&S-style hit vibration)");
     }
 
-    // ---- Swing whoosh (HalfSwordDecomp defaults\hs_whoosh_sound.md) ---------------------------------
-    // The game plays a weapon's whoosh from its own tick (ModularWeaponBP ReceiveTick) out of two numbers:
-    // the speed of its BaseMesh's centre (GetPhysicsLinearVelocity, |v|) and how much that velocity changed
-    // since its last tick (dv). With T = "Sound Woosh Threshold" (arming sword 350, most weapons 500): the air
-    // loop sounds once |v| x min(dv/100, 1) > 1.5 T (full at 4.875 T), and a one-shot whoosh fires when
-    // dv > 0.5 T and |v| > 0.5 T (at most 5 a second; volume |v| x T x 1e-6).
-    // Matthew 2026-11-21: most VR swings make no whoosh. Test 2026-11-21 (whoosh_test_2026-11-21T063543Z.log):
-    // dv is NOT the problem (VR hold and the flat arm both give dv ~ 0.5 |v|); it is speed. The flat game's
-    // mouse swings move the weapon's centre at 10-20 m/s, and anything under 1.5 T (7.5 m/s, arming sword
-    // 5.25) is silent: a VR cut at 6-7 m/s made no sound. whoosh_vr_threshold_scale: while a weapon in a
-    // tracked hand ticks, its threshold is x this (and put back right after its tick), so the game's own
-    // rules sound slower, human-speed swings. "Whoosh:" lines log what each 0.5 s of swinging did.
-    struct WhooshSide
+    // ---- Swing whoosh: B&S's WhooshPoint, ported whole ------------------------------------------
+    // Matthew 2026-11-25: whoosh the way Blade & Sorcery does it, no patches on the game's rules.
+    // B&S (ThunderRoad WhooshPoint.UpdateWhooshPoint, every 2nd frame): the world speed of a whoosh
+    // point on the item (pb.GetPointVelocity, nothing subtracted) gives
+    //     intensity = Lerp(intensity, InverseLerp(minVelocity, maxVelocity, speed), dampening)
+    // and one looping clip plays with volume from intensity (effect curve 0 -> 0, 0.66 -> 0.26,
+    // 1 -> 0.6). No one-shots, no cooldown. Its 103 weapons: min 2-5 m/s (median 3), max 8-14
+    // (median 14), dampening 0.1 (0.2 on long axes/halberds). A one-frame jolt (a stair step) reaches
+    // ~2% volume: smoothed away.
+    // The game's own whoosh (hs_whoosh_sound.md; private\bs-whoosh\hs-audio-feasibility.md) lives in
+    // ModularWeaponBP ReceiveTick: one-shots (Woosh_Blunt/Sharp_Cue, only played there) plus the
+    // "Sound Slide" AudioComponent, a never-stopped loop of Weapon_Slide_Cue whose switch plays
+    // Sounds_sword_whoosh at Material 6 and the contact scrapes while "Sliding". Here, for every
+    // ModularWeaponBP that ticks unsheathed: its "Sound Woosh Threshold" is out of reach during its
+    // tick (no one-shot, the loop's air target 0), and right after the tick, unless it is sliding (the
+    // game's scrape sound, untouched), the mod sets Sound Slide's volume from B&S's intensity. The
+    // whoosh point is the weapon's TippyTipScene (the game puts it at the blade's far end); its world
+    // speed is its move over the tick's game time. The loop's pitch stays the game's own.
+    struct BsWhoosh
+    {
+        double intensity = 0.0;
+        hsvr::Vec3 point;
+        bool have = false;
+        double seen = 0.0;
+        double speed = 0.0, volume = 0.0;
+        bool slid = false;
+    };
+    std::unordered_map<UObject*, BsWhoosh> g_bs_whoosh;
+    std::unordered_map<UFunction*, bool> g_whoosh_ticks; // ReceiveTick functions: true = a ModularWeaponBP's
+    struct WhooshSide // log windows for the weapons in his hands
     {
         UObject* weapon = nullptr;
-        UFunction* tick = nullptr; // that weapon's ReceiveTick
-        double win_start = -1.0, max_v = 0.0, max_dv = 0.0, max_vol = 0.0, threshold = 0.0, used = 0.0;
-        int ticks = 0, sliding = 0, shots = 0, striking_ticks = 0;
+        double win_start = -1.0, max_speed = 0.0, max_int = 0.0, max_vol = 0.0;
+        int ticks = 0, sliding = 0;
         bool tracked = false;
-        bool striking = false; // the strike gate is open (whoosh_strike_gate)
-        bool restore = false; // its threshold is lowered for this tick: put saved back after it
-        double saved = 0.0;
-        double gate_until = -1.0;
     };
     WhooshSide g_whoosh[2];
+    bool g_whoosh_bs = true;
+    double g_whoosh_min = 300.0, g_whoosh_max = 1400.0, g_whoosh_damp = 0.1, g_whoosh_hz = 45.0, g_whoosh_volume = 1.0;
     bool g_whoosh_log = true;
-    double g_whoosh_scale = 1.0;
     double g_whoosh_log_min_speed = 300.0;
-    double g_whoosh_walk = 0.0; // cm/s added to a tracked weapon's whoosh threshold: his walking speed x whoosh_walk_speed_scale
-    bool g_whoosh_gate = true;
-    double g_whoosh_gate_ratio = 1.0;
-    hsvr::Vec3 g_whoosh_body_v; // his velocity (cm/s): the strike gate judges the weapon against his body
+    hsvr::Vec3 g_whoosh_body_v; // his velocity (cm/s), for the still trace only
+    FName g_receive_tick_name;
 
-    // From the engine tick: which weapons are in his hands now, and the settings (config() is a copy,
-    // too dear for every weapon tick).
+    // From the engine tick: settings (config() is a copy, too dear for every weapon tick) and which
+    // weapons are in his hands (for the log).
     void whoosh_refresh(const hsvr::Config& cfg)
     {
+        g_whoosh_bs = cfg.whoosh_bs;
+        g_whoosh_min = cfg.whoosh_bs_min_speed * 100.0;
+        g_whoosh_max = (std::max)(cfg.whoosh_bs_max_speed * 100.0, g_whoosh_min + 1.0);
+        g_whoosh_damp = std::clamp(cfg.whoosh_bs_dampening, 0.0, 1.0);
+        g_whoosh_hz = cfg.whoosh_bs_update_hz > 0.0 ? cfg.whoosh_bs_update_hz : 45.0;
+        g_whoosh_volume = cfg.whoosh_volume;
         g_whoosh_log = cfg.whoosh_log;
-        g_whoosh_scale = cfg.whoosh_vr_threshold_scale > 0.0 ? cfg.whoosh_vr_threshold_scale : 1.0;
         g_whoosh_log_min_speed = cfg.whoosh_log_min_speed;
-        UObject* pawn = nullptr;
-        g_whoosh_gate = cfg.whoosh_strike_gate;
-        g_whoosh_gate_ratio = cfg.whoosh_strike_speed_ratio;
-        if (g_whoosh_log || g_whoosh_scale != 1.0 || cfg.whoosh_walk_speed_scale > 0.0 || g_whoosh_gate) pawn = object_property(find_player_controller(), STR("Pawn"));
-        g_whoosh_walk = 0.0;
+        if (g_receive_tick_name.GetComparisonIndex() == 0) g_receive_tick_name = FName(STR("ReceiveTick"), FNAME_Add);
+        double now = hsvr::now_seconds();
+        for (auto it = g_bs_whoosh.begin(); it != g_bs_whoosh.end();)
+            if (now - it->second.seen > 5.0) it = g_bs_whoosh.erase(it);
+            else ++it;
+        UObject* pawn = object_property(find_player_controller(), STR("Pawn"));
         g_whoosh_body_v = hsvr::Vec3{};
-        if (pawn && (cfg.whoosh_walk_speed_scale > 0.0 || g_whoosh_gate))
+        if (pawn && g_still_trace.load() > 0)
         {
-            // The game whooshes on the weapon's speed through the world (> its threshold); walking at 3-4 m/s
-            // with a weapon nearly did that alone (playtest 2026-11-21 13:47). Raised by the walk, so a
-            // swing is judged on about its speed against his body.
             Call gv(pawn, STR("GetVelocity"));
-            if (gv.run())
-            {
-                hsvr::Vec3 v = gv.vec();
-                g_whoosh_body_v = v;
-                // His capsule's real move (step snaps on stairs included), where it is the larger: going downstairs at 3.6 m/s
-                // whooshed his still-held sword at 9-14 m/s (playtest 11-24 7:36 PM).
-                if (length(g_body_move_v) > length(v)) g_whoosh_body_v = g_body_move_v;
-                if (cfg.whoosh_walk_speed_scale > 0.0) g_whoosh_walk = std::sqrt(v.x * v.x + v.y * v.y) * cfg.whoosh_walk_speed_scale;
-            }
+            if (gv.run()) g_whoosh_body_v = gv.vec();
         }
         UObject* held[2] = {nullptr, nullptr};
         for (int side = 0; side < 2; ++side)
@@ -20603,110 +20602,199 @@ namespace
                 s = WhooshSide{};
                 s.weapon = held[side];
             }
-            s.tracked = g_pose.hand_valid[side]; // false with mouse and keyboard: the game's own arm moves it
+            s.tracked = g_pose.hand_valid[side];
         }
     }
 
-    int whoosh_side(UObject* context, UFunction* function)
+    // A ModularWeaponBP's ReceiveTick? FName compare first (every ProcessEvent comes through here),
+    // then one answer per ReceiveTick function.
+    bool is_weapon_tick(UObject* context, UFunction* function)
     {
-        if (!context || !function) return -1;
-        int side = context == g_whoosh[1].weapon ? 1 : context == g_whoosh[0].weapon ? 0 : -1;
-        if (side < 0) return -1;
-        WhooshSide& s = g_whoosh[side];
-        if (s.tick) return function == s.tick ? side : -1;
-        if (function->GetName() != STR("ReceiveTick")) return -1;
-        s.tick = function;
-        return side;
+        if (!context || !function || g_receive_tick_name.GetComparisonIndex() == 0) return false;
+        if (function->GetNamePrivate().GetComparisonIndex() != g_receive_tick_name.GetComparisonIndex()) return false;
+        auto it = g_whoosh_ticks.find(function);
+        if (it != g_whoosh_ticks.end()) return it->second;
+        bool ok = prop_chain(context, STR("Sound Woosh Threshold")) && prop_chain(context, STR("Sound Slide")) && prop_chain(context, STR("TippyTipScene"));
+        g_whoosh_ticks[function] = ok;
+        if (ok) HSVR_LOG("Whoosh: B&S whoosh drives %ls", function->GetFullName().c_str());
+        return ok;
+    }
+    int whoosh_side(UObject* context)
+    {
+        return context == g_whoosh[1].weapon ? 1 : context == g_whoosh[0].weapon ? 0 : -1;
+    }
+    // Still trace: each tick, just before the weapon's own tick, the speeds of everything between your
+    // controller and the weapon, so a weapon moving under a still hand can be pinned on one of them:
+    // target = the hand target from the controller (g_pose.target: tracking or fake arm), bone = his hand
+    // bone, shoulder = his upper arm, body = his actor, set = the velocity the hold gave the weapon last
+    // tick, weapon = the weapon's centre of mass now (what the game's whoosh reads). Each with its
+    // tick-to-tick change (d...): a part whose velocity flips every tick shows d ~ 2 x its speed.
+    struct StillTrace
+    {
+        bool have = false;
+        double t = 0.0;
+        hsvr::Vec3 target, bone, shoulder, v, set, v_target, v_bone, v_shoulder;
+        double win = -1.0;
+        int n = 0;
+        double mx[6] = {0, 0, 0, 0, 0, 0}, sq[6] = {0, 0, 0, 0, 0, 0}, dmx[6] = {0, 0, 0, 0, 0, 0};
+    };
+    StillTrace g_still[2];
+    void still_trace_tick(int side, UObject* weapon, const hsvr::Vec3& v)
+    {
+        using namespace hsvr;
+        int mode = g_still_trace.load();
+        StillTrace& st = g_still[side];
+        if (mode <= 0 || !g_pose.driver) { st = StillTrace{}; return; }
+        int hs = g_hold[side].weapon == weapon ? side : g_hold[1 - side].weapon == weapon ? 1 - side : side;
+        std::string sx = hs == 0 ? "_l" : "_r";
+        double now = now_seconds();
+        Vec3 target = g_pose.target[hs];
+        Vec3 bone = socket_location(g_pose.driver, bone_fname("hand" + sx));
+        Vec3 shoulder = socket_location(g_pose.driver, bone_fname("upperarm" + sx));
+        Vec3 set = g_hold[hs].weapon == weapon ? g_hold[hs].last_set_v : Vec3{};
+        if (st.have && now - st.t > 1e-4 && now - st.t < 0.1)
+        {
+            double d = now - st.t;
+            Vec3 vt = (target - st.target) * (1.0 / d), vb = (bone - st.bone) * (1.0 / d), vs = (shoulder - st.shoulder) * (1.0 / d);
+            Vec3 vals[6] = {vt, vb, vs, g_whoosh_body_v, set, v};
+            Vec3 prev[6] = {st.v_target, st.v_bone, st.v_shoulder, g_whoosh_body_v, st.set, st.v};
+            if (st.win < 0.0) st.win = now;
+            ++st.n;
+            for (int i = 0; i < 6; ++i)
+            {
+                double sp = length(vals[i]);
+                st.mx[i] = (std::max)(st.mx[i], sp);
+                st.sq[i] += sp * sp;
+                if (st.n > 1) st.dmx[i] = (std::max)(st.dmx[i], length(vals[i] - prev[i]));
+            }
+            if (mode >= 2)
+                HSVR_LOG("Still tick: %s target %.0f bone %.0f shoulder %.0f body %.0f set %.0f weapon %.0f cm/s | weapon vs bone %.0f, weapon vs set %.0f cm/s",
+                         hs == 0 ? "left" : "right", length(vt), length(vb), length(vs), length(g_whoosh_body_v), length(set), length(v), length(v - vb), length(v - set));
+            st.v_target = vt, st.v_bone = vb, st.v_shoulder = vs;
+            if (now - st.win >= 0.5 && st.n > 0)
+            {
+                const char* nm[6] = {"target", "bone", "shoulder", "body", "set", "weapon"};
+                std::string line;
+                char buf[96];
+                for (int i = 0; i < 6; ++i)
+                {
+                    snprintf(buf, sizeof(buf), "%s%s max %.0f rms %.0f d %.0f", i ? ", " : "", nm[i], st.mx[i], std::sqrt(st.sq[i] / st.n), st.dmx[i]);
+                    line += buf;
+                }
+                HSVR_LOG("Still: %s %ls (%d ticks), cm/s: %s", hs == 0 ? "left" : "right", weapon->GetName().c_str(), st.n, line.c_str());
+                st.win = now;
+                st.n = 0;
+                for (int i = 0; i < 6; ++i) st.mx[i] = st.sq[i] = st.dmx[i] = 0.0;
+            }
+        }
+        st.have = true;
+        st.t = now;
+        st.target = target, st.bone = bone, st.shoulder = shoulder, st.set = set, st.v = v;
     }
 
+    double* whoosh_threshold(UObject* weapon)
+    {
+        FProperty* tp = prop_chain(weapon, STR("Sound Woosh Threshold"));
+        if (!tp || tp->GetClass().GetName() != STR("DoubleProperty")) return nullptr;
+        return reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(weapon) + tp->GetOffset_Internal());
+    }
+    double g_whoosh_saved = 0.0;
+    UObject* g_whoosh_saved_for = nullptr;
+
+    // Before the weapon's tick: its threshold out of reach (no one-shot, the air loop's target 0).
     void whoosh_before_weapon_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
-        int side = whoosh_side(context, function);
-        if (side < 0) return;
-        WhooshSide& s = g_whoosh[side];
-        using namespace hsvr;
-        if (bool_property(context, STR("Sheathed"))) return; // the game zeroes it all while sheathed
-        FProperty* tp = prop_chain(context, STR("Sound Woosh Threshold"));
-        if (!tp) return;
-        double* tv = tp->GetClass().GetName() == STR("DoubleProperty") ? reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(context) + tp->GetOffset_Internal()) : nullptr;
+        if (!is_weapon_tick(context, function)) return;
+        int side = whoosh_side(context);
+        if (side >= 0 && g_whoosh[side].tracked && g_still_trace.load() > 0)
+            if (UObject* base = object_property(context, STR("BaseMesh")))
+            {
+                Call gv(base, STR("GetPhysicsLinearVelocity"));
+                if (gv.run()) still_trace_tick(side, context, gv.vec());
+            }
+        if (!g_whoosh_bs || bool_property(context, STR("Sheathed"))) return; // sheathed: the game sets the loop to 0
+        double* tv = whoosh_threshold(context);
         if (!tv) return;
-        double T = *tv, used = T;
-        if (s.tracked && (g_whoosh_scale != 1.0 || g_whoosh_walk > 0.0)) used = T * g_whoosh_scale + g_whoosh_walk;
-        bool need_v = g_whoosh_log || (s.tracked && g_whoosh_gate);
-        UObject* base = need_v ? object_property(context, STR("BaseMesh")) : nullptr;
-        FProperty* oldp = prop_chain(context, STR("Weapon Velocity_Old"));
-        Vec3 v{};
-        bool have_v = false;
-        if (base)
+        g_whoosh_saved = *tv;
+        g_whoosh_saved_for = context;
+        *tv = 1.0e7;
+    }
+
+    // B&S's piecewise effect volume curve (WhooshSword* effects): 0 -> 0, 0.66 -> 0.26, 1 -> 0.6.
+    double bs_whoosh_volume(double i)
+    {
+        if (i <= 0.0) return 0.0;
+        if (i < 0.66) return 0.26 * i / 0.66;
+        return 0.26 + (0.6 - 0.26) * (std::min)(1.0, (i - 0.66) / 0.34);
+    }
+
+    // After the weapon's tick: its threshold back, then B&S's whoosh on its Sound Slide loop.
+    void whoosh_after_weapon_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void* parms)
+    {
+        if (!is_weapon_tick(context, function)) return;
+        using namespace hsvr;
+        if (g_whoosh_saved_for == context)
         {
-            Call gv(base, STR("GetPhysicsLinearVelocity"));
-            if (gv.run()) v = gv.vec(), have_v = true;
+            if (double* tv = whoosh_threshold(context)) *tv = g_whoosh_saved;
+            g_whoosh_saved_for = nullptr;
         }
-        // Strike gate (Matthew 2026-11-24: "the whoosh is constantly going off, I only want to hear it when
-        // I'm actually striking"). Play log 2026-11-23: the game's one-shot fires at a third of the loop's
-        // speed (|v| and dv > 0.5 T: 1.5 m/s at the VR threshold), and a held weapon's tick-to-tick dv
-        // jitter reaches that while you only carry it. Like B&S (WhooshPoint: silent under minVelocity),
-        // a weapon in a tracked hand whooshes only while it moves against his body as fast as the game's
-        // own air loop needs (1.5 x the threshold used, x whoosh_strike_speed_ratio); the gate closes again
-        // under 70% of that. While closed its threshold is out of reach for this tick, so neither the loop
-        // nor a one-shot plays (contact scrapes, which don't use it, still do).
-        if (s.tracked && g_whoosh_gate && have_v)
-        {
-            double rel = length(v - g_whoosh_body_v);
-            double open = 1.5 * used * (g_whoosh_gate_ratio > 0.0 ? g_whoosh_gate_ratio : 1.0);
-            if (rel >= open) s.striking = true;
-            else if (rel < 0.7 * open) s.striking = false;
-            if (!s.striking) used = 1.0e7;
-        }
-        else s.striking = !s.tracked || !g_whoosh_gate;
-        if (used != T)
-        {
-            s.saved = T;
-            s.restore = true;
-            *tv = used;
-        }
-        if (!g_whoosh_log || !have_v || !oldp) return;
-        double o[3];
-        read_three(reinterpret_cast<uint8_t*>(context) + oldp->GetOffset_Internal(), oldp, o);
-        double speed = length(v);
-        double dv = length(v - Vec3{o[0], o[1], o[2]});
+        if (!g_whoosh_bs || bool_property(context, STR("Sheathed"))) return;
         double now = now_seconds();
+        BsWhoosh& w = g_bs_whoosh[context];
+        double real_dt = w.seen > 0.0 ? now - w.seen : 0.0;
+        w.seen = now;
+        // Game time of this tick (ReceiveTick(float DeltaSeconds)): slow motion keeps a swing's speed, as
+        // B&S's physics velocity does.
+        double dt = parms ? *reinterpret_cast<const float*>(parms) : 0.0;
+        if (!(dt > 1e-4 && dt < 0.25)) dt = real_dt;
+        UObject* tip = object_property(context, STR("TippyTipScene"));
+        UObject* base = object_property(context, STR("BaseMesh"));
+        Vec3 p = component_location(tip ? tip : base);
+        double speed = 0.0;
+        bool fresh = w.have && dt > 1e-4 && real_dt < 0.25;
+        if (fresh)
+        {
+            double moved = length(p - w.point);
+            if (moved < 200.0) speed = moved / dt; // more in one tick = a teleport (drawn, spawned, reset), not a swing
+        }
+        w.point = p;
+        w.have = true;
+        double target = std::clamp((speed - g_whoosh_min) / (g_whoosh_max - g_whoosh_min), 0.0, 1.0);
+        // B&S lerps by `dampening` once every 2nd frame; per tick here that is 1 - (1 - dampening)^(updates in this tick).
+        double a = fresh ? 1.0 - std::pow(1.0 - g_whoosh_damp, real_dt * g_whoosh_hz) : 0.0;
+        w.intensity += (target - w.intensity) * a;
+        if (w.intensity < 1e-4) w.intensity = 0.0;
+        w.speed = speed;
+        bool sliding = bool_property(context, STR("Sliding"));
+        w.slid = sliding;
+        w.volume = bs_whoosh_volume(w.intensity) * g_whoosh_volume;
+        UObject* slide = object_property(context, STR("Sound Slide"));
+        if (slide && !sliding) // touching something: the game's scrape plays on this loop
+        {
+            Call sv(slide, STR("SetVolumeMultiplier"));
+            sv.number(STR("NewVolumeMultiplier"), w.volume);
+            sv.run();
+        }
+        int side = whoosh_side(context);
+        if (side < 0 || !g_whoosh_log) return;
+        WhooshSide& s = g_whoosh[side];
         if (s.win_start < 0.0) s.win_start = now;
         ++s.ticks;
-        s.threshold = T;
-        s.max_v = (std::max)(s.max_v, speed);
-        s.max_dv = (std::max)(s.max_dv, dv);
-        if (s.striking) ++s.striking_ticks, s.used = used;
-        if (bool_property(context, STR("Sliding"))) ++s.sliding;
-        if (UObject* slide = object_property(context, STR("Sound Slide")))
-            if (float* vol = value_ptr<float>(slide, STR("VolumeMultiplier"))) s.max_vol = (std::max)(s.max_vol, (double)*vol);
-        // The game's one-shot rule with its 0.2 s gate.
-        if (dv > 0.5 * used && speed > 0.5 * used && now >= s.gate_until) ++s.shots, s.gate_until = now + 0.2;
+        if (sliding) ++s.sliding;
+        s.max_speed = (std::max)(s.max_speed, speed);
+        s.max_int = (std::max)(s.max_int, w.intensity);
+        if (!sliding) s.max_vol = (std::max)(s.max_vol, w.volume);
         if (now - s.win_start >= 0.5)
         {
-            if (s.max_v >= g_whoosh_log_min_speed || s.shots > 0)
-                HSVR_LOG("Whoosh: %s %ls (%s, threshold %.0f, used %.0f): speed max %.0f cm/s, game's dv max %.0f cm/s, striking %d/%d ticks, sliding %d/%d ticks, "
-                         "air loop volume max %.2f, one-shots %d",
-                         side == 0 ? "left" : "right", context->GetName().c_str(), s.tracked ? "VR hand" : "game's arm", s.threshold, s.used, s.max_v, s.max_dv,
-                         s.striking_ticks, s.ticks, s.sliding, s.ticks, s.max_vol, s.shots);
+            if (s.max_speed >= g_whoosh_log_min_speed || s.max_vol > 0.0)
+                HSVR_LOG("Whoosh: %s %ls (%s, B&S %.0f-%.0f cm/s): whoosh point speed max %.0f cm/s, intensity max %.2f, volume max %.2f, sliding %d/%d ticks",
+                         side == 0 ? "left" : "right", context->GetName().c_str(), s.tracked ? "VR hand" : "game's arm", g_whoosh_min, g_whoosh_max,
+                         s.max_speed, s.max_int, s.max_vol, s.sliding, s.ticks);
             s.win_start = now;
-            s.ticks = s.sliding = s.shots = s.striking_ticks = 0;
-            s.max_v = s.max_dv = s.max_vol = 0.0;
+            s.ticks = s.sliding = 0;
+            s.max_speed = s.max_int = s.max_vol = 0.0;
         }
     }
-
-    // Right after the weapon's tick: its own threshold back (nothing else in the game sees the lowered one).
-    void whoosh_after_weapon_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
-    {
-        int side = whoosh_side(context, function);
-        if (side < 0) return;
-        WhooshSide& s = g_whoosh[side];
-        if (!s.restore) return;
-        s.restore = false;
-        if (FProperty* tp = prop_chain(context, STR("Sound Woosh Threshold")))
-            *reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(context) + tp->GetOffset_Internal()) = s.saved;
-    }
-
     // Who lets a stuck blade go (stab-test7: the game stuck thrusts, then let them go within 0.15 s).
     // Logs every call of the stuck joint's Release Constraint and the weapon's release functions for
     // a weapon in his hands, with the calling Blueprint function and bytecode offset (the "@" of the
@@ -22214,114 +22302,6 @@ namespace
         return true;
     }
 
-    // ---- A picked-up sword's scabbard onto the belt (pose_scabbard_on_pickup, Matthew 2026-11-23) ---------
-    // A sword's scabbard is a part of the sword, kept out of sight until its first sheathe (add_new_weapons.md
-    // C4), so a sword picked up loose had none on the belt and two-handed sheathing could never start. Picked
-    // up, its empty scabbard goes to a free sword slot on that hand's hip (else the other hip's, when that
-    // hand is empty): the game's own sheathe-then-draw, at once. Assign + Create Sheath Constraint bring the
-    // scabbard to the socket and pin it; the game's Check, with Sheathing off and a length read below 0, then
-    // runs its break (the draw's: blade joint, slot, save entry, flags), which leaves the scabbard on the belt.
-    std::unordered_map<UObject*, double> g_scab_pickup_tried;
-    double g_scab_pickup_seen[2] = {-1.0, -1.0};
-    UObject* g_scab_pickup_w[2] = {nullptr, nullptr};
-
-    bool scabbard_to_belt(int side, UObject* pawn, UObject* w)
-    {
-        using namespace hsvr;
-        const char* hand = side == 0 ? "left" : "right";
-        UObject* scab = object_property(w, STR("Scabbard"));
-        UObject* base = object_property(w, STR("BaseMesh"));
-        if (!scab || !base) return false;
-        double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
-        if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
-            bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
-            return false;
-        // Its own hip only: the game's Create Sheath Constraint <T> reads Weapon <T>, and across that is the
-        // other hand's (sheathe_cross_begin's swap is for a weapon going IN, which this is not).
-        int ts = side;
-        bool free_slot = false;
-        for (int i = 0; i < 2; ++i)
-            if (!object_alive(object_property(pawn, k_belt[ts][i].var))) free_slot = true;
-        if (!free_slot)
-        {
-            HSVR_LOG("Scabbard: %ls picked up by the %s hand: no free sword slot on that hip; its scabbard stays hidden", w->GetName().c_str(), hand);
-            return false;
-        }
-        int slot = assign_scabbard_slot(side, ts, pawn, w);
-        if (slot < 0) return false;
-        const TCHAR* S = ts == 0 ? STR("L") : STR("R");
-        auto nm = [&](const wchar_t* fmt) {
-            wchar_t buf[96];
-            std::swprintf(buf, 96, fmt, S);
-            return std::wstring(buf);
-        };
-        Call make(pawn, nm(L"Create Sheath Constraint %ls").c_str());
-        make.byte(STR("Slot"), (uint8_t)slot);
-        bool made = make.run();
-        bool in_slot = object_property(pawn, k_belt[ts][slot].var) == w;
-        // The draw, as the game ends one: not sheathing, not blocked, unsheathing; Check breaks it.
-        set_bool_property(pawn, nm(L"Block %ls Weapon From Sheathing").c_str(), false);
-        set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), false);
-        set_bool_property(pawn, STR("Cross Unsheath"), false);
-        set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), true);
-        // Check seats a blade whose scabbard is within 20 cm up it (Z = the scabbard in BaseMesh's frame), and
-        // breaks it at Z >= its length x 0.85 (hs_draw_sheathe_calls.md §1-§3). Picked up by the hip, Z was
-        // small and it was seated: the sword went onto the belt (PC run 6499f79, 4 of 4). So for the one call
-        // the blade is put a whole length plus 15 cm out along its own line, then back in the hand.
-        Vec3 held_p = component_location(base);
-        Quat held_q = component_rotation(base);
-        double len = blade_length(w);
-        set_component_transform(base, component_location(scab) - held_q.rotate(Vec3{0, 0, 1}) * (len + 15.0), held_q, true);
-        double z_out = held_q.inverse().rotate(component_location(scab) - component_location(base)).z;
-        bool checked = in_slot && run_slot_check(pawn, ts, slot, len);
-        if (object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) == w) set_component_transform(base, held_p, held_q, true);
-        set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), false);
-        set_variable(pawn, nm(L"%ls Sheath Slot Concrete").c_str(), 11.0);
-        bool still_held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) == w;
-        bool slot_freed = object_property(pawn, k_belt[ts][slot].var) != w;
-        bool pinned = scabbard_pin(scab) != nullptr;
-        if (bool_property(w, STR("Sheathed"))) Call(w, STR("Unsheathed Mode")).run();
-        if (still_held)
-        {
-            clear_arm_ignore(side);
-            ignore_arm_collision(pawn, object_property(pawn, STR("Mesh")), w, base, side);
-        }
-        sheathe_disarm(side, ts);
-        HSVR_LOG("Scabbard: %ls picked up by the %s hand: its scabbard put on the %s hip's slot %d (Create %s, Check %s at %.1f cm out of %.1f, grip %.0f; scabbard %s, slot %s, sword %s)",
-                 w->GetName().c_str(), hand, ts == 0 ? "left" : "right", slot + 1, made ? "ran" : "NOT found", checked ? "ran" : "NOT run", z_out, len,
-                 read_number_variable(pawn, side == 0 ? STR("L_GripType_Current") : STR("R_GripType_Current")),
-                 pinned ? "pinned on the belt" : "NOT pinned", slot_freed ? "empty again" : "STILL HOLDS THE SWORD", still_held ? "still in the hand" : "NOT IN THE HAND");
-        return pinned && slot_freed && still_held;
-    }
-
-    void scabbard_pickup_tick(UObject* pawn, const hsvr::Config& cfg)
-    {
-        if (!cfg.pose_scabbard_on_pickup || !pawn) return;
-        static bool tracked = on_freed([] {
-            erase_gone_keys(g_scab_pickup_tried);
-            for (UObject*& o : g_scab_pickup_w)
-                if (gone(o)) o = nullptr;
-        });
-        (void)tracked;
-        double now = hsvr::now_seconds();
-        for (int side = 0; side < 2; ++side)
-        {
-            UObject* w = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
-            if (w != g_scab_pickup_w[side])
-            {
-                g_scab_pickup_w[side] = w;
-                g_scab_pickup_seen[side] = now;
-            }
-            if (!w || is_fist(w) || g_draw[side].active || g_two.active || now - g_scab_pickup_seen[side] < 0.3) continue;
-            UObject* scab = object_property(w, STR("Scabbard"));
-            if (!scab || scabbard_pin(scab) || read_number_variable(w, STR("SheathSlot")) != 0.0 || bool_property(w, STR("Is Ammo"))) continue;
-            auto t = g_scab_pickup_tried.find(w);
-            if (t != g_scab_pickup_tried.end() && now - t->second < 2.0) continue; // a slot may free up later
-            g_scab_pickup_tried[w] = now;
-            scabbard_to_belt(side, pawn, w);
-        }
-    }
-
     // The game's stuck-hand rule (ExecuteUbergraph_Willie_BP @474346-474446, then left @475366-476198, right
     // @474461-475313): with a two-handed grip in the right hand (R_GripType_Current 10 or 11) and a hand
     // in this zone of spine_02 (|X| <= 10, Y < 0, Z <= 50), "Weapon UnSheathing <that hand>" makes it Set
@@ -22542,11 +22522,8 @@ namespace
         if (cfg.pose_sheathe_two_hand)
         {
             UObject* held = held_scabbard(1 - side);
-            // A knife or dagger goes in one-handed (playtest 11-24: the kitchen knife could not be put away at all with the
-            // other hand busy; the holster refuses it for having a scabbard of its own). Into its own pinned scabbard only.
-            bool small_blade = blade_length(w) <= 28.0;
-            if (!held && !small_blade) return;
-            if (held && held != scab)
+            if (!held) return;
+            if (held != scab)
             {
                 HSVR_LOG_EVERY(2.0, "Sheathe: %s hand's sword: the other hand holds a scabbard that is not this sword's; not sheathed", hand);
                 return;
@@ -22691,9 +22668,6 @@ namespace
             {
                 if (d.sheathing)
                 {
-                    // Let go in past the mouth but before home: the game seats it now (as before), so it is never dropped.
-                    if (d.past_mouth && !d.block_cleared)
-                        set_bool_property(pawn, d.slot_side == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
                     HSVR_LOG("Sheathe: %s hand let go of its weapon after %.2f s; checking its seat", side == 0 ? "left" : "right", now - d.t0);
                     if (base) g_seat[side] = SeatWatch{d.weapon, slot_index(d.slot_side, d.slot), now};
                 }
@@ -22720,18 +22694,12 @@ namespace
             Vec3 bp = component_location(base);
             Quat bq = component_rotation(base);
             double z = d.scabbard ? bq.inverse().rotate(component_location(d.scabbard) - bp).z : 0.0;
-            if (d.sheathing && !d.past_mouth && z < 0.9 * d.length)
+            if (d.sheathing && !d.block_cleared && z < 0.9 * d.length)
             {
-                d.past_mouth = true;
-                HSVR_LOG("Sheathe: in past the mouth (%.1f cm out); the hand slides it home", z);
-            }
-            // The game's seat (which locks it at once) waits until the hand has slid it nearly home, as a real sword is pushed
-            // in (playtest 11-24: in past the mouth at 51.2 cm out, let go, "seated and locked" 15 ms later: "it just snapped").
-            if (d.sheathing && d.past_mouth && !d.block_cleared && z < (std::min)(0.9 * d.length, 25.0))
-            {
+                // In past the mouth: the game may now seat it (and let the hand go) at 20 cm.
                 set_bool_property(pawn, d.slot_side == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
                 d.block_cleared = true;
-                HSVR_LOG("Sheathe: nearly home (%.1f cm out): the game may seat it", z);
+                HSVR_LOG("Sheathe: in past the mouth (%.1f cm out)", z);
             }
             if (d.sheathing && !d.block_cleared)
             {
@@ -22755,12 +22723,7 @@ namespace
                 // 02:57Z: stuck 33-47 cm out of 57). So once pulled back 8 cm it is a draw (0.85 of the
                 // length, less when swung); pushed in again, a sheathe.
                 d.z_in = (std::min)(d.z_in, z);
-                // For its first 0.3 s it must come 20 cm back, not 8: as the blade goes in, the held scabbard swings
-                // onto its line and kicks it back a few cm (playtest 2026-11-23 17:04: in at 50.2 cm out, 0.04 s later
-                // 55.7 and "pulled back out", the scabbard 41 deg off its belt angle; Matthew: "it got in position for
-                // sheathing, but immediately got back out of position").
-                const double back_cm = now - d.t0 < 0.3 ? 20.0 : 8.0;
-                bool back = d.pulling_back ? z > d.z_in + 2.0 : z > d.z_in + back_cm;
+                bool back = d.pulling_back ? z > d.z_in + 2.0 : z > d.z_in + 8.0;
                 if (back != d.pulling_back)
                 {
                     d.pulling_back = back;
@@ -22818,7 +22781,6 @@ namespace
             }
         }
         seat_watch_tick(pawn);
-        scabbard_pickup_tick(pawn, cfg);
         for (int side = 0; side < 2; ++side) sheathe_check(side, pawn, cfg);
     }
 
@@ -23350,25 +23312,6 @@ namespace
                 double left = length(scaled_axis((want * cur.inverse()).normalized())) * 57.2958;
                 if ((left < 2.0 && off_belt < 1.5) || now - s.t0 > 1.0)
                 {
-                    // Out of time and still far off its belt angle: put it there before the lock, never lock it crooked
-                    // (playtest 11-24 2:44 PM: the hand pulled off it, "back on the belt (100.5 deg, 3.9 cm off)" after the
-                    // 1 s, the sword in its slot then "NOT seated ... scabbard 13.0 cm from Sheath_Slot_R_1").
-                    if (left > 5.0 || off_belt > 2.0)
-                    {
-                        Vec3 at = pelvis_p + pelvis_q.rotate(s.rest_pos);
-                        set_component_transform(s.scab, at, want, true);
-                        Call z1(s.scab, STR("SetPhysicsAngularVelocityInRadians"));
-                        z1.three(STR("NewAngVel"), 0.0, 0.0, 0.0);
-                        z1.flag(STR("bAddToCurrent"), false);
-                        z1.run();
-                        Call z2(s.scab, STR("SetPhysicsLinearVelocity"));
-                        z2.three(STR("NewVel"), pelvis_v.x, pelvis_v.y, pelvis_v.z);
-                        z2.flag(STR("bAddToCurrent"), false);
-                        z2.run();
-                        HSVR_LOG("Scabbard: still %.1f deg / %.1f cm off its belt place after %.1f s: put on it before the lock", left, off_belt, now - s.t0);
-                        left = 0.0;
-                        off_belt = 0.0;
-                    }
                     UObject* scab = s.scab;
                     s = ScabHold{};
                     bool drawing = false;
@@ -32466,6 +32409,12 @@ namespace
             if (entry.command.rfind("hsvr.contact_log ", 0) == 0)
             {
                 g_contact_log.store(atoi(entry.command.c_str() + 17) != 0);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.still_trace ", 0) == 0)
+            {
+                g_still_trace.store(atoi(entry.command.c_str() + 17));
+                HSVR_LOG("Script: still trace %d", g_still_trace.load());
                 continue;
             }
             if (entry.command.rfind("hsvr.arm_move ", 0) == 0)
