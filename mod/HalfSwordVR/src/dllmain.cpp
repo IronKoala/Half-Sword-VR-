@@ -2259,6 +2259,8 @@ namespace
         bool have_floor[2] = {false, false};
         hsvr::Vec3 target_prev_world[2];
         hsvr::Vec3 target_prev_cs[2]; // where the foot was sent last frame, his component space (unscaled)
+        double target_prev_t[2] = {0.0, 0.0};
+        int calls = 0, quick_calls = 0; // for the log: updates, and those under 2 ms after the last
         bool locked[2] = {false, false}; // foot lock (world spot while the clip has the foot planted)
         hsvr::Vec3 anchor[2], ease_off[2];
         double ease_t[2] = {1.0, 1.0};
@@ -2542,6 +2544,8 @@ namespace
         double now = now_seconds();
         double dt = A.last_t < 0.0 ? 0.0 : (std::min)(0.1, (std::max)(0.0, now - A.last_t));
         A.last_t = now;
+        ++A.calls;
+        if (dt < 0.002) ++A.quick_calls;
         Vec3 loc = component_location(driver);
         Quat crot = component_rotation(driver);
         Quat cinv = crot.inverse();
@@ -2764,17 +2768,20 @@ namespace
             wrote[s][0] = thigh, wrote[s][1] = calf, wrote[s][2] = pose.rot[s][2];
             // How far the planted foot's spot moves over the floor (a clip foot under 12 cm is down).
             Vec3 Few = loc + crot.rotate(Fe * scale);
-            if (pose.planted[s] > 0.99 && A.target_prev_ok[s] && dt > 0.0 && A.fade >= 1.0)
+            // Over at least 5 ms (his update can run twice in one frame: 0.1 mm over 0.1 ms read as 1 m/s).
+            double since = now - A.target_prev_t[s];
+            bool measure = since >= 0.005 || !A.target_prev_ok[s];
+            if (measure && pose.planted[s] > 0.99 && A.target_prev_ok[s] && A.fade >= 1.0 && since < 0.1)
             {
                 Vec3 m = Few - A.target_prev_world[s];
                 m.z = 0.0;
-                double v = length(m) / dt;
+                double v = length(m) / since;
                 A.slip_sum += v, ++A.slip_n;
                 A.slip_worst = (std::max)(A.slip_worst, v);
                 g_canim_stats.slip_sum += v, ++g_canim_stats.slip_n;
                 g_canim_stats.slip_worst = (std::max)(g_canim_stats.slip_worst, v);
             }
-            A.target_prev_world[s] = Few;
+            if (measure) { A.target_prev_world[s] = Few; A.target_prev_t[s] = now; }
             A.target_prev_cs[s] = Fe;
             A.target_prev_ok[s] = true;
         }
@@ -2828,9 +2835,10 @@ namespace
                 if (walk_w[i] > 0.05) { char part[32]; std::snprintf(part, sizeof(part), " %s %.2f", wn[i], walk_w[i]); top += part; }
             double hips_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(hips.w))) * kRadToDeg;
             HSVR_LOG("CrouchAnim: shown %.2f, head %.2f of standing (%.0f cm down, legs %.0f), moving %.2f at %.0f cm/s (%.0f, %.0f) walk[%s ] phase %.2f x%.2f stride x%.2f; "
-                     "still: L %.2f loop %.2f R %.2f (turn %.0f deg/s); hips turned %.0f deg; planted foot slides %.1f cm/s mean, %.1f worst; leg short of the floor %.1f cm; locked foot off the clip's spot %.1f cm worst",
+                     "still: L %.2f loop %.2f R %.2f (turn %.0f deg/s); hips turned %.0f deg; planted foot slides %.1f cm/s mean, %.1f worst; leg short of the floor %.1f cm; locked foot off the clip's spot %.1f cm worst; %d updates (%d under 2 ms apart)",
                      A.fade, h, g_crouch_want_cm, g_crouch_drop, A.moving, speed, A.vel.x, A.vel.y, top.c_str(), A.walk_phase, walk_rate, stride, idle_w[0], idle_w[1], idle_w[2],
-                     A.yaw_rate, hips_deg, A.slip_n ? A.slip_sum / A.slip_n : 0.0, A.slip_worst, A.reach_short_worst, A.lock_gap_worst);
+                     A.yaw_rate, hips_deg, A.slip_n ? A.slip_sum / A.slip_n : 0.0, A.slip_worst, A.reach_short_worst, A.lock_gap_worst, A.calls, A.quick_calls);
+            A.calls = A.quick_calls = 0;
             A.slip_sum = A.slip_worst = A.reach_short_worst = A.lock_gap_worst = 0.0;
             A.slip_n = 0;
         }
