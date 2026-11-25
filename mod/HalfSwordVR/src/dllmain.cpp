@@ -17745,24 +17745,6 @@ namespace
             // his arm's length from the shoulder: the hand lets go at once. No timer, no grace, no own-body check (the held item
             // ignores his own body, as B&S's), and it keeps its speed (B&S: the joint just goes).
             bool touching = now_seconds() - h.last_contact < 0.15;
-            // B&S's shoulder moves with the headset, smoothly. Willie's can jump (a button crouch toggles his body ~40 cm in one
-            // tick): then the grip is past reach for a few frames only because the shoulder jumped, and the rule tore the tongs out
-            // of his hand on standing up (playtest 2026-11-24 7:33 PM: "grip 65 cm from the shoulder (arm 53)", 57 ms after
-            // "button crouch off"). So no let-go for 0.3 s after the shoulder moves more than 10 cm in a tick.
-            {
-                static Vec3 last_sh[2];
-                static double last_sh_t[2] = {-1.0, -1.0}, jumped_at[2] = {-10.0, -10.0};
-                double tn = now_seconds();
-                if (last_sh_t[side] > 0.0 && tn - last_sh_t[side] < 0.1 && length(shoulder - last_sh[side]) > 10.0) jumped_at[side] = tn;
-                last_sh[side] = shoulder;
-                last_sh_t[side] = tn;
-                if (out && touching && tn - jumped_at[side] < 0.3)
-                {
-                    HSVR_LOG_EVERY(0.5, "Hold: %s hand keeps %ls: past reach only because his shoulder just jumped (crouch/stand), no let-go", side == 0 ? "left" : "right",
-                                   h.weapon->GetName().c_str());
-                    out = false;
-                }
-            }
             if (out && touching && !(g_two.active && g_two.second == side))
             {
                 HSVR_LOG("Hold: %s hand lets go of %ls (B&S stuck rule): touching, its grip %.0f cm from the shoulder (arm %.0f), your hand %.0f cm from it",
