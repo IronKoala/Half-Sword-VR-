@@ -1,0 +1,15 @@
+blk_park_axe2h|steps-park_axe2h.txt|hold_blocker_log=1
+park_handonly_axe2h|steps-park_axe2h.txt|pose_hold_free_arm_collides=0
+park_handonly_polehammer|steps-park_polehammer.txt|pose_hold_free_arm_collides=0
+park_handonly_warstaff|steps-park_warstaff.txt|pose_hold_free_arm_collides=0
+park_handonly_longsword|steps-park_longsword.txt|pose_hold_free_arm_collides=0
+park_handonly2_axe2h|steps-park_axe2h.txt|pose_hold_free_arm_collides=0
+park_handonly2_polehammer|steps-park_polehammer.txt|pose_hold_free_arm_collides=0
+park_handonly2_warstaff|steps-park_warstaff.txt|pose_hold_free_arm_collides=0
+park_handonly2_longsword|steps-park_longsword.txt|pose_hold_free_arm_collides=0
+blk_switch_warstaff|steps-switch_warstaff.txt|hold_blocker_log=1
+switch_handonly_axe2h|steps-switch_axe2h.txt|pose_hold_free_arm_collides=0
+switch_handonly_polehammer|steps-switch_polehammer.txt|pose_hold_free_arm_collides=0
+switch_handonly_warstaff|steps-switch_warstaff.txt|pose_hold_free_arm_collides=0
+switch_handonly_longsword|steps-switch_longsword.txt|pose_hold_free_arm_collides=0
+park_axe2h|steps-park_axe2h.txt

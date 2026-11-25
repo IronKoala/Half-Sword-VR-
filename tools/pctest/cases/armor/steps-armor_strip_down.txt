@@ -1,0 +1,35 @@
+# A downed foe: right hand holds his head, grip + trigger 2 s takes his helmet into the hand; then on your head, trigger 2 s puts it on you.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.6:hsvr.expect room_foes = 1 the one passive foe
+0.8:hsvr.player_immortal
+1.0:hsvr.squeeze 0 1
+1.0:hsvr.squeeze 1 1
+1.4:hsvr.squeeze 0 0
+1.4:hsvr.squeeze 1 0
+1.9:hsvr.expect held_r = 0 right hand empty
+2.0:hsvr.foe_wear /Game/Assets/Armor/Blueprints/Modular_Armor/BP_Armor_Modular_Core_Head_Barbute_B_001.BP_Armor_Modular_Core_Head_Barbute_B_001_C
+2.8:hsvr.expect foe_worn >= 1 foe has a helmet (record the count)
+2.9:hsvr.test_room_kill
+3.0:hsvr.wait foe_fallen = 1 10 0.5 he is down (killed: ragdoll on the floor)
+3.1:hsvr.arm_move 1
+3.7:hsvr.foe_bone_at_hand 1 3 head
+3.8:hsvr.foe_bone_at_hand 1 3 head
+3.8:hsvr.squeeze 1 1
+3.9:hsvr.wait grabbed_r = 1 2 0 his head is held
+4.0:hsvr.trigger 1 1
+# A dead body falls off a hand held at head height (run bdf917a: pulled 37 cm off, let go): kept at the hand while the trigger counts.
+4.3:hsvr.foe_bone_at_hand 1 3 head
+4.7:hsvr.foe_bone_at_hand 1 3 head
+5.0:hsvr.expect carried_r = 0 not yet after 1 s
+5.1:hsvr.foe_bone_at_hand 1 3 head
+5.5:hsvr.foe_bone_at_hand 1 3 head
+5.9:hsvr.foe_bone_at_hand 1 3 head
+6.5:hsvr.wait carried_r = 1 2 0 his helmet in your hand
+6.6:hsvr.expect grabbed_r = 1 the hand holds it
+6.7:hsvr.trigger 1 0
+6.8:hsvr.arm_park head
+6.9:hsvr.wait hand_speed_r < 5 3 0.2 hand at your head
+7.0:hsvr.trigger 1 1
+10.0:hsvr.wait carried_r = 0 3 0 on your head
+10.1:hsvr.expect worn >= 1 you wear it (record the count)
+10.2:hsvr.trigger 1 0

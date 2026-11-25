@@ -80,6 +80,9 @@ namespace hsvr
         // Size the mod sets the game window to, "<width>x<height>" (windowed), e.g. 2560x1440 for a
         // 16:9 recording on an ultrawide monitor. Empty = the game's own window size.
         std::string mirror_window_res;
+        // Keep the mouse pointer inside the game window while it is in front (menus too), so aiming with
+        // the mouse never runs out of the window when it does not cover the whole monitor.
+        bool mouse_clip_window = true;
         // Widest the monitor picture is, degrees side to side (less when the eye does not cover it).
         double mirror_fov_deg = 90.0;
         // The monitor picture follows the head smoothed over this many seconds (0 = exactly the head).
@@ -317,6 +320,30 @@ namespace hsvr
         // 1 = while posed, your character's capsule only moves when you walk: the game's own pull
         // toward the body (and hit stumbles, dodges and leans) is undone after each of his ticks.
         bool pose_hold_capsule = true;
+        // 1 = his capsule never shoves loose things: the engine's character physics interaction (a touch impulse of his
+        // speed x the item's mass, unclamped since the game's MaxTouchForce is 0, and the per-tick repulsion of what overlaps
+        // the capsule) is off. Playtest 2026-11-23 17:23 local: crouched with his legs still, a lantern by his capsule
+        // flew off at 6.7 m/s while the game dragged the capsule 48 cm a tick toward his hips.
+        // Off until proven: run 9 86af79d the floor_kick test reproduced no kick either way, and with it on walking into a
+        // passive foe slowed to 85 cm/s (319 off).
+        bool pose_capsule_no_push = false;
+        // 1 = loose weapons near his legs pass through them (thighs, calves, feet, hips, capsule, leg/cuirass proxies, worn gear):
+        // his posed legs never kick what lies at his feet (Matthew 2026-11-24: "I dont want willies feet kicking stuff
+        // around"; PC run 10 d82b641: a crouch to 85 cm pushed a lantern 50 cm at 2.5 m/s). The game's own kick still hits.
+        bool pose_legs_pass_loose = true;
+        bool pose_shoulder_slot_on_chest = true; // a shield slung on his shoulder slot hangs from his chest (spine_05), not his tracked left upper arm (Matthew 11-24: pavise jitters on his back standing still)
+        double pose_hanging_damping_held = 0.05; // a held item's hanging bodies (chain lantern lamp, links): linear and angular damping while held, B&S-like (Unity drag 0 / angular 0.05); the asset has 1.0 / 5.0 (Matthew 11-24: "zero gravity"); < 0 = leave as is
+        double pose_stamina_still_m_s = 0.5; // stamina: below this hand speed against his body only the held weight tires him, from 3x it all the hold's force/turn (Matthew 11-24: walking, crouch-walking, stairs drained stamina); 0 = off
+        // How near his legs (hip, knee, ankle or toe point) a loose weapon must come to pass through them (cm). It
+        // collides with them again once 15 cm farther than this for 0.3 s, or when a hand takes it.
+        double pose_legs_pass_loose_cm = 40.0;
+        // Test switch: 1 = while a loose weapon passes through his legs it also ignores his capsule's whole object channel
+        // (channel-wide, so off: the project keeps to per-pair ignores; his capsule's moves ignore the item instead).
+        bool pose_legs_pass_capsule_channel = false;
+        // A chain item (chain lantern, flail): its own bodies (handle, links, lamp) no longer bump each other, and the
+        // hanging ones get this much linear/angular damping (0 = the game's own). Loose, it rolled 0.5-2.6 m on its own.
+        bool pose_chain_no_self_collision = false;
+        double pose_chain_damping = 0.0;
         // 1 = his body faces where you face: it follows your headset once you look more than
         // pose_turn_dead_zone_deg away, turning at pose_turn_speed_dps. The mouse or stick still
         // turns you as well.
@@ -357,13 +384,9 @@ namespace hsvr
         // holds as well as the game's locked grip, tests 25-26), pose_grip_radius_cm
         // the lever used for the turning strength, pose_grip_buzz the buzz strength for the gap (0 off).
         bool pose_grip_spring = true;
-        // The hold from Matthew's Chasms VR Framework (replaces the spring when on): the game's hand
-        // joint goes free and the mod sets the weapon's velocity and spin each tick so the point held
-        // follows the controller. Its spring (N/m), damper (N s/m), most force (N), turning spring
-        // (N m/rad), turning damper (N m s/rad) and most torque (N m), the framework's one-hand values
-        // (turning x1.1 / x0.9 for a handle), all times pose_hold_strength (dampers by half of it past 1).
+        // The mod's hold (replaces the spring when on): the game's hand joint goes free and the mod's B&S joint holds the item
+        // (see THE HOLD below).
         bool pose_grip_hold = true;
-        double pose_hold_strength = 1.0;
         // His stats on the hold: strength (Muscle Rate), that arm's tonus (injury, exhaustion) times
         // consciousness, and stamina scale its force and torque caps (1 = a fresh, healthy Willie).
         // Stamina at 0 leaves pose_body_stamina_floor of it; never below pose_body_strength_min.
@@ -386,21 +409,7 @@ namespace hsvr
         bool pose_no_lawnmower = true;
         double pose_stamina_force_cap_n = 250.0;  // playtest 2026-11-21: clean holds p90 60 N, real swings 36-216 N, snags up to 1019 N
         double pose_stamina_torque_cap_nm = 30.0; // clean holds p90 26.5 N m, swings 8-32, snags up to 290
-        // Exact hold (B&S-style): each frame the weapon gets the velocity that puts it exactly where
-        // the hand is drawn at the end of this frame's physics, limited only by the hand's strength
-        // (pose_hold_max_force / max_torque). 0 = the spring below.
-        bool pose_hold_exact = true;
-        // Tuned in the headset 2026-11-19 (flat_hs_weight_vs_hold.md): half B&S's spring so a weapon trails
-        // the hand ~0.04-0.06 s (flat Half Sword's arm trails its aim by 0.1 s), and the dampers raised so a
-        // heavy, long weapon (war staff 2.38 kg, balance 108 cm up) settles without bouncing (damping ratio ~1).
-        double pose_hold_spring = 2500.0;
-        double pose_hold_damper = 150.0;
-        double pose_hold_max_force = 3000.0;
-        // While the held weapon is stuck in a body, the hold's force and torque caps are scaled by this.
-        double pose_hold_stuck_force_scale = 0.15;
-        // In a wound (the weapon Stuck In Body): the blade slides along it at most this fast in and
-        // out (cm/s; B&S's held dampers with the hand's strength), x stab_wound_head_factor in the
-        // head and neck; sideways and in turn it goes with the body.
+        // (A blade in a wound is held by the same joint as ever, B&S. This switch only keeps the wound bookkeeping.)
         bool stab_wound_hold = true;
         // A weapon the mod holds is never left "Being Rubber Banded" by the game (it then can't stick and hits at x0.1).
         bool stab_no_rubber_band = true;
@@ -410,7 +419,6 @@ namespace hsvr
         // only after pulling at full strength with the grip past reach for stab_drag_grip_s x his
         // strength. A yank (pull-out) counts only the hand's distance out along the wound.
         bool stab_drag = true;
-        double stab_drag_force_scale = 1.0;
         double stab_drag_grip_s = 2.0; // (unused since the arm's-length pull-out)
         double stab_drag_reach_slack_cm = 8.0; // a stuck thrust past arm's length by this much ...
         double stab_drag_reach_s = 0.15;       // ... this long comes out of the body (stays in the hand)
@@ -435,76 +443,22 @@ namespace hsvr
         double grip_flip_tap_s = 0.4;
         double stab_wound_settle_s = 0.2; // no pulling out for this long after it goes in
         double stab_wound_settle_max_s = 0.8; // a young stick is held open until the game's own keep trace passes, at most this long
-        double stab_wound_entry_cms = 70.0; // ...and it is carried in at this speed meanwhile (8 cm over 0.2 s)
         // A blade the game has just stuck is set this far into the wound along its tip (cm), plus
         // stab_start_depth_per_ms cm for each cm/s of the controller along it, at most _max_cm
         // (the game's stuck joint lets the blade slide 5 cm along a thrust).
         double stab_start_depth_cm = 0.0; // 0 = off (stab-test11: a teleport into the wound made it let go)
         double stab_start_depth_per_ms = 0.01;
         double stab_start_depth_max_cm = 4.5;
-        double stab_wound_in_cms = 120.0; // (was 50: daggers needed pushing and pushing, playtest 2026-11-20)
-        double stab_wound_head_in_factor = 0.6;
-        double stab_wound_out_cms = 60.0;
-        double stab_wound_head_factor = 0.6;
-        double pose_hold_turn_spring = 1100.0;
-        double pose_hold_turn_damper = 75.0;
-        // One hand's most turning force at the grip (N m, x his strength): a real wrist, not B&S's 250. A war
-        // staff held by its end (29 N m of weight) droops; one-handed swords (2-4 N m, hard swings ~20) stay free.
-        double pose_hold_max_torque = 30.0;
-        // The wrist's end stop: once the held item is bent more than pose_hold_wrist_free_deg from where
-        // the hand points it, the turning limit rises to pose_hold_wrist_stop_torque (N m, times his
-        // strength) by pose_hold_wrist_stop_deg, so a stopped swing does not carry the item on past the
-        // hand while a long weapon held at its end still droops. 0 = no stop.
-        double pose_hold_wrist_free_deg = 25.0;
-        double pose_hold_wrist_stop_deg = 50.0;
-        double pose_hold_wrist_stop_torque = 250.0;
-        // The wrist stop pushes back only against the weapon turning on past the hand, fully from this spin
-        // (rad/s) away, so it stops a swing's overshoot but a held weapon's own weight still sags it slowly
-        // down to where the wrist's turning limit carries it (Matthew 2026-11-20: a pole hammer held out by
-        // its end barely sagged for a weak Willie). 0 = it also holds still weight, as before.
-        double pose_hold_wrist_stop_spin = 2.0;
-        // The spin brake: a held weapon spinning this much faster than the hand (rad/s) gets the wrist stop's turning limit
-        // (fully by from + span), whichever way it is bent, so it cannot keep spinning in a still hand (mace 2026-11-23 17:01). 0 = off.
-        double pose_hold_spin_brake_from = 6.0;
-        double pose_hold_spin_brake_span = 6.0;
-        // His strength on the turning limits (wrist and stop) is raised to this power: a wrist is weaker in
-        // proportion than the whole arm (min/min Willie x0.58 -> x0.34, biggest x1.27 -> x1.6). 1 = as the force.
-        double pose_hold_torque_strength_power = 2.0; // below a default body only: above it, x strength as the force
-        // B&S hold dampers computed per weapon for this damping ratio (1 = critical: settles without
-        // bouncing, the least lag that does): from its mass and its inertia about the grip. 0 = the fixed
-        // pose_hold_damper / turn_damper / pose_bs_two_*_c values.
-        double pose_hold_damping_ratio = 1.0;
-        // The hand's velocity the hold's dampers follow, smoothed over this time (s): tracking noise
-        // differentiated frame to frame shook a held weapon ~1 cm at ~10 Hz. 0 = raw.
-        double pose_hold_target_vel_smooth_s = 0.05;
-        // Weight: the hold's turn is limited by torque about the grip, not the centre of mass (heavy and
-        // long weapons trail fast turns, B&S-style). torque_scale multiplies pose_hold_max_torque for it.
-        bool pose_hold_weight = true;
-        double pose_hold_weight_torque_scale = 1.0;
-        // Two hands turn a weapon by pushing the hands opposite ways: that couple (the second hand's
-        // force x their distance apart on it) adds to the torque cap (playtest 09:38: a 2.2 kg axe in
-        // two hands needed 550-930 N m against a 486 N m wrist cap and shook).
-        bool pose_hold_weight_two_hand_couple = true;
-        // B&S's hold (bs_hold_measured.md, from Matthew's B&S session 2026-11-19): soft drives instead
-        // of the exact hold. One hand: pose_hold_spring/damper/max_force and turn_spring/damper/
-        // max_torque (5000/100/3000, 1100/45/250). Two hands: both hands' points 10000/150/6000, only
-        // the first hand turns it (2200/90/500), the second has no turning. Solved per frame as soft
-        // constraints (pose_bs_iterations), all hands together.
-        bool pose_hold_bs = true;
-        double pose_bs_two_pos_k = 4000.0, pose_bs_two_pos_c = 200.0, pose_bs_two_pos_max = 6000.0;
-        double pose_bs_two_rot_k = 2200.0, pose_bs_two_rot_c = 120.0, pose_bs_two_rot_max = 500.0;
-        int pose_bs_iterations = 8;
-        double pose_bs_two_let_go_cm = 45.0; // B&S gaps reach 18 cm (p95) on fast two-hand swings
         // A worn helmet's collision is not part of his body mesh: the game welds it onto CM_Helmet, which
         // pose_hold_ignore_body doesn't cover. On: the held weapon ignores that too (his own only).
         bool pose_hold_ignore_own_helmet = true;
         bool hold_blocker_log = false; // test: name what a held weapon hits, and what is along it while it is held off
         bool pose_hold_ignore_body = true;   // the held weapon never collides with his own body (B&S)
-        bool pose_hold_self_collision = true; // B&S Player Self Collision: the held weapon ignores only the holding arm(s); off = whole body but feet and free hand
-        double pose_bs_max_spin = 60.0; // rad/s
-        // The weight's own swing never spins it faster than the turn wanted plus this (rad/s): one tick
-        // of a deadbeat grip pull fed back into the lever spun the axe to the 60 rad/s cap (playtest 09:38).
-        double pose_hold_weight_spin_extra = 5.0;
+        // B&S Player Self Collision (Item.RefreshCollision, Item.cs:3464-3480; Ragdoll.IgnoreCollision skips the parts named): ON (1,
+        // Matthew's choice) = the held item ignores only the holding arm(s) and hand(s) and collides with his torso, head, legs and free
+        // arm; OFF (0, B&S's own default) = it ignores his whole body but the feet and the free hand. With 1, a two-handed polearm pushed
+        // into his own body rests on it, as in B&S (PC run 2026-11-24 bshold-t2blk: pulled 40-58 cm off both hands against calf/spine).
+        bool pose_hold_self_collision = true;
         // While held, his visible hand sits on the weapon (1): when the weapon is stopped by something,
         // the hand stays on it instead of going on with your controller. It eases from following the
         // controller to sitting on the weapon as the weapon falls 1 to pose_hold_blocked_from_cm behind.
@@ -524,78 +478,30 @@ namespace hsvr
         int pose_hold_hand_follows_predict = 1;
         double pose_hold_follow_predict_max_cm = 12.0;
         double pose_hold_follow_predict_smooth_s = 0.03; // smoothing of that measured velocity (0 = none)
-        // The stuck rule: a stopped weapon whose grip is out of his reach from the shoulder, or more
-        // than an arm's length from your hand, for pose_hold_let_go_s, is let go (the game's own drop).
-        // A weapon stopped by his own body is never let go by the stuck rule (vanilla weapons collide with him too).
-        bool pose_hold_let_go_ignore_self = true;
         bool pose_hold_let_go = true;
-        double pose_hold_let_go_s = 0.15;
-        double pose_hold_let_go_reach_slack_cm = 15.0; // with the arm-lag hold: how far past his reach the grip may trail
-        // No let-go for this long after a weapon comes into the hand (long weapons swing into place).
-        double pose_hold_let_go_grace_s = 1.0;
-        // Stuck let-go drops the weapon dead (no velocity) instead of with the hold's last chase
-        // velocity (playtest 2026-11-21: stopped weapons left at 10-20 m/s and flew at him). 0 = old.
-        bool pose_hold_let_go_dead = true;
-        // While a held weapon is stopped, the hold uses its measured motion, not the velocity it last
-        // set (which never drops while it is blocked, so the hold wound up to 20 m/s). 0 = old.
-        bool pose_hold_measured_v = true;
-        // Experimental (hold rebuild, Matthew 2026-11-21): the held weapon is held by engine joints, B&S
-        // style. Each hand gets an invisible kinematic body that follows the controller; a Chaos joint
-        // with spring drives ties it to the weapon and the physics solves it with the collisions. One
-        // hand: pose_hold_spring/damper/max_force and turn_spring/damper/max_torque; two hands: each
-        // hand pulls (pose_bs_two_pos_*), only the main hand turns (pose_bs_two_rot_*). Caps scale with
-        // strength/stamina/injury. Not used while drawing, sliding or stuck in a wound. 0 = the old hold.
+        // THE HOLD (2026-11-24, design doc "B&S hold port"): Blade & Sorcery's model, whole, with no settings of its own.
+        // Each holding hand has one engine joint (a hidden kinematic body on your controller, a Chaos joint to the item at
+        // the point held, all motions free, drives only) with B&S's drive values: one hand 5000 N/m, 100 N s/m, 3000 N and
+        // turn 1000 x handle mult, 50, 250 N m; two hands 10000 / 100-150 / 6000 N each, the B&S dominant hand turns
+        // (2200, 90, 500 N m; x0.1 when the grips face opposite ways on one handle). His strength, stamina and injury
+        // scale it as B&S's jointForceMultiplier. Slide: spring 0 along the handle, damper 300 .. 20 N s/m by trigger.
+        // B&S's stuck rule: touching something with the grip past his arm's length from the shoulder = let go at once.
+        // pose_hold_joint: loose objects (cups, rocks) also go on a joint (pose_grab_joint); the hold itself always does.
         bool pose_hold_joint = true;
-        double pose_hold_joint_stiffness = 1.0; // multiplies the springs
-        double pose_hold_joint_damping = 1.0;   // multiplies the dampers (the lag in a steady swing is about damper / spring x speed)
-        double pose_hold_joint_max = 1.0;       // multiplies the force and torque caps
-        // The shoulder's limit on each hand's pull (the arm-lag decision 2026-11-20: weight shows as the arm
-        // being slow), as the old hold; it eases off to B&S's cap when the grip is far behind. 0 = B&S caps only.
-        bool pose_hold_joint_shoulder = true;
-        // The arm carries the weapon's weight at the grip outside that cap (as the old hold). 0 = the cap pays it.
-        bool pose_hold_joint_carry_weight = true;
-        // One hand: the joint's turn no stronger than the hand's pull can hold the grip still against.
-        bool pose_hold_joint_turn_by_grip = true;
-        // A joint-held weapon never goes faster than the old hold sets (2000 cm/s, pose_bs_max_spin).
-        bool pose_hold_joint_speed_limit = true;
-        double pose_hold_joint_fade_min_speed = 50.0; // cm/s: below it a grip far behind is stopped by something, no ease to B&S's cap
-        double pose_hold_joint_fade_keep_s = 0.4; // s: once allowed, the ease to B&S's cap stays allowed this long (so it brakes what it started)
-        double pose_hold_joint_fade_after_s = 0.0;  // s: no ease to B&S's cap this soon after a joint is made (was 0.3 before the grab's speed was zeroed)
-        bool pose_hold_joint_slerp = true; // 1 = the joint turns the weapon by one SLERP drive (0 = twist and swing drives)
-        bool pose_hold_joint_mod_turn = true; // one hand: 1 = the old hold's turn (spin set each tick), the joint only pulls; 0 = the joint's turn drive
-        // One hand (and B&S two hands) on the joint with the mod's turn: the joint(s) alone pull; the spin the mod sets is the turn only. 0 = the
-        // spin set also carries the pull's lever (as before 2026-11-24), so the pull acted twice a tick (mace spin 2026-11-23 17:01).
-        bool pose_hold_joint_pull_once = true;
-        // The turn the mod sets on a held weapon (joint hold) is a pure couple: its centre of mass keeps its speed. 0 = the grip keeps
-        // its speed (before 2026-11-24), which could turn braking a spin into a throw the joint then turned back into spin.
-        bool pose_hold_joint_turn_couple = true;
-        // A weapon held in one hand collides with the free hand (B&S: the free hand stays solid). 0 = the free arm is ignored too.
-        bool pose_hold_free_hand_collides = true;
-        double pose_hold_joint_target_max_speed = 1500.0; // cm/s: the point held follows a jumping hand target no faster (0 = off)
-        bool pose_hold_joint_draw_wound = true; // drawing/sheathing and a blade in a wound stay on the joint (sent where the old rules put it)
-        // Two hands: the turning hand only twists the weapon about the line between the hands; where it
-        // points is the two hands' positions (a real stick). pose_two_hand_swing_share = how much of the
-        // turning hand's pull on its direction is kept (0 = none, 1 = old behaviour).
-        bool pose_two_hand_twist_only = true;
-        double pose_two_hand_line_ref_cm = 25.0; // two hands: grips this far apart aim half by the wrist, half by the hands' line (closer = more the wrist)
-        bool pose_two_hand_joint_line = true; // joint hold, two hands: one pose along the hands' line, both joints to it (playtest 2026-11-23)
+        bool pose_hold_free_hand_collides = true; // (Matthew 2026-11-24 04:12Z chose solid, like B&S, with the rest stop pose_hand_held_weapon_stop_cm: parked axe 34 deg/s, 244-481 without the stop)
+        // With the free hand solid (above): its forearm and upper arm too (1, B&S Player Self Collision), or only the hand (0).
+        bool pose_hold_free_arm_collides = true;
+        // B&S: a hand that lets go of a weapon the other hand still holds passes through it for at least this long (s) and until its grip
+        // point is this far (cm) from it (RagdollHand.cs:1502-1548: 0.25 s, 0.13 m). 0 = solid again at once.
+        double pose_hold_release_ignore_s = 0.25;
+        double pose_hold_release_clear_cm = 13.0;
         // Two hands as Blade & Sorcery holds them (bs_hold_measured.md section 3; Matthew 2026-11-23 19:02Z: "It needs to copy blade and
         // sorcery"): the main hand pulls and turns, the second hand only pulls, each a stiff spring; no shared pose. Not the crossbow.
         bool pose_two_hand_bs = true;
-        double pose_two_hand_bs_pos_k = 10000.0, pose_two_hand_bs_pos_c = 150.0, pose_two_hand_bs_pos_max = 6000.0; // each hand's pull: N/m, N s/m, N
-        double pose_two_hand_bs_rot_k = 2200.0, pose_two_hand_bs_rot_c = 90.0, pose_two_hand_bs_rot_max = 500.0;    // the main hand's turn: N m/rad, N m s/rad, N m
-        bool pose_two_hand_bs_solve_pulls = false; // (off: run 6cec1f5 no better on the waggle, and lost the war staff once) the mod's solve does both hands' pulls (the joints pull nothing)
-        bool pose_two_hand_bs_front_turns = true; // B&S two hands: the hand further up the weapon turns it (AutoFront), not always the first
         double pose_two_hand_auto_slide_cm = 0.0; // (off: Matthew 2026-11-24 00:08Z "do it just like Blade and Sorcery", trigger-only slide) B&S two hands on a haft: a hand this far from its spot along the shaft follows your hand without the trigger (0 = off)
-        bool pose_two_hand_joint_both_turn = true; // joint hold, both hands on fixed grips: both wrists turn it (rerun 388ca67: 60 deg pitch followed, 2.5-3.3 cm / 5-6 deg off; off: 27-37 deg, creeps back)
-        bool pose_two_hand_fixed_rebase = true; // fixed grips, both wrists: the second hand's turn and spot taken from the first hand at the grab
-        double pose_two_hand_swing_share = 0.0;
         // Whoosh judged on the weapon's speed against your body: the game's whoosh threshold for a weapon in
         // a tracked hand is raised by your walking speed x this (0 = off).
         double whoosh_walk_speed_scale = 1.0;
-        // Something is in the held weapon's way when it ends a tick this far (cm) short of where the
-        // hold sent it; the stuck rule only lets go of a weapon that is in contact like that.
-        double pose_hold_contact_cm = 0.5;
         // The held weapon never collides with the hand holding it (as with the forearm).
         bool pose_hold_ignore_hand = true;
         // Keeps the game's off-hand search ("R/L Offhand Searching Grip") off while the mod holds a
@@ -625,32 +531,8 @@ namespace hsvr
         // The hold's force and torque caps x his arm mass against a default creator body's (height and
         // weight/muscle; 0.78 smallest .. 1.27 biggest), as flat Half Sword's weapon-to-arm mass ratio.
         bool pose_body_size_strength = true;
-        // Arm-inertia lag, like flat Half Sword's arm (Matthew 2026-11-20, option A: a weak Willie should
-        // feel weight and lag): the hold drives his arm and the weapon together, as flat Half Sword's arm
-        // motors do (same pull for every body, so the weapon's share of arm + weapon inertia about the
-        // shoulder sets how much it slows him). Empty-arm follow delay pose_hold_arm_lag_s (flat: 0.1 s),
-        // x sqrt((arm + weapon) / arm), x 1/sqrt(the weaker of injury and stamina), never past
-        // pose_hold_arm_lag_max_s. The weapon's weight at the grip is carried (no sag of the hand), its
-        // lever is not. Replaces the B&S springs and dampers; the caps stay. pose_hold_arm_reach_cm: the
-        // grip's distance from the shoulder for a default body (scaled with his size).
-        bool pose_hold_arm_lag = true;
-        double pose_hold_arm_lag_s = 0.05;
-        double pose_hold_arm_lag_max_s = 0.25;
-        // A heavy weapon's own heft, whoever holds it (Matthew 2026-11-21: a max-strength "GigaChad" Willie swung a
-        // greatsword like a dagger): the lag is never below this x sqrt(weapon inertia about the shoulder per arm,
-        // in kg m^2). 0.11: greatsword ~0.10 s two-handed / 0.14 one-handed, arming sword ~0.08, dagger ~0.05. 0 = off.
-        double pose_hold_heft_lag_s = 0.11;
-        double pose_hold_arm_reach_cm = 55.0;
-        // His shoulder's strength (N m, for a default fresh body; x his strength, injury and stamina; both arms
-        // add): the arm-lag hold can't speed arm + weapon about the shoulder faster than this allows, so the
-        // grip's pull on the weapon is capped at its mass x this torque x reach / (arm + weapon inertia).
-        // A two-hander in one hand trails and won't whip round like a one-hander (Matthew 2026-11-20). 0 = off.
-        double pose_hold_shoulder_torque = 110.0;
-        // The shoulder limit fades out as the grip trails the hand from shoulder_fade_from_cm to shoulder_fade_to_cm
-        // (the hand is on the weapon: it can't trail far), so a big jump or a hard swing never trails it far
-        // enough for the stuck rule to let go (unattended test: a longsword 53 cm behind was dropped).
-        double pose_hold_shoulder_fade_from_cm = 15.0;
-        double pose_hold_shoulder_fade_to_cm = 35.0;
+        // Test switch: linear and angular damping set on those hanging parts once held (0 = the game's own).
+        double pose_hold_hanging_damping = 0.0;
         // Thin bits on a haft the hand slides over: a wide stretch no longer than ring_max_len_cm along the
         // haft and reaching no more than ring_max_width_cm from its axis, or a gap between parts no longer
         // than gap_max_cm, with narrow haft past it (ring_max_len_cm 0 = every wide bit stops the hand).
@@ -666,15 +548,10 @@ namespace hsvr
         // no trigger slide along the grip (Matthew 2026-11-20). Hand-and-a-half and two-handed swords, and
         // every non-sword, keep the slide. The blade (half-swording) is unchanged.
         bool pose_slide_fixed_1h_sword = true;
-        // Two fixed grip zones, under the guard and above the pommel, no slide (Matthew 2026-11-21):
-        // 0 = off (grip slides), 1 = hand-and-a-half (bastard sword, Grip_15) only, 2 = every two-handed
-        // sword (also longswords and greatswords).
-        int pose_grip_two_zones_2h_sword = 1; // Matthew 2026-11-21: bastard swords only (unused while pose_grip_two_hand_swords_slide)
         bool pose_grip_two_hand_swords_slide = true; // Matthew 2026-11-23: all longswords, greatswords and hand-and-a-half swords slide
         // The lower zone sits just above the pommel (Matthew 2026-11-22: "you grab just above the pommel"): the
         // pommel's top is this far above its origin (measured 4.7 on a Grip_15 pommel, 8 cm long).
         double pose_grip_pommel_top_cm = 0.0; // the pommel's origin IS its top face (decomp 2026-11-23: meshes run 5.7-7.6 cm down from it); 4.7 kept hands 4.7 cm too high
-        double pose_grip_hands_overlap_cm = 3.5; // short two-zone grips: the hands may overlap each other this much to stay off the pommel
         // Daggers (no grip module, dagger or rondel icon): one fixed grip zone, no slide.
         bool pose_grip_dagger_fixed = true;
         double pose_slide_rate_min = 3.0;
@@ -688,21 +565,10 @@ namespace hsvr
         // within pose_grab_touch_cm of the item's real collision), on the nearest handle within
         // pose_grab_handle_cm (lined up with the hand's grip line), else where it touched. Both hands
         // work the same: the other hand's weapon is taken the same way. Sliding along a handle keeps
-        // pose_slide_keep_light (light trigger) .. pose_slide_keep_full (full) of the item's own
-        // motion along it. 0 = the old grab (radius, game grips, zones).
+        // B&S's slide (spring 0 along the handle, damper 300 .. 20 N s/m by trigger). 0 = the old grab (radius, game grips, zones).
         bool pose_grab_handles = true;
         double pose_grab_touch_cm = 10.0; // B&S fight session: ~6 cm typical, up to 25 cm from the handle surface (bs_full_measured.md)
         double pose_grab_handle_cm = 10.0;
-        double pose_slide_keep_light = 0.6;
-        double pose_slide_keep_full = 0.97;
-        // B&S slide damper along the handle (N s/m) at a light .. full trigger: the item keeps
-        // exp(-c dt / mass) of its motion along it each frame (replaces keep_light/full; 0 = use those).
-        double pose_slide_damper_light = 300.0;
-        double pose_slide_damper_full = 20.0;
-        // B&S's slide along the handle (Handle.cs UpdateSliding): spring 0, damper 300 -> 20 N s/m over trigger
-        // 0.2 -> 1, so gravity pulls an upright weapon through the hand and a level one is dragged along with it.
-        // 0 = the old free axis (no damper, and the arm also carried its weight along the handle, so it never fell).
-        bool pose_slide_bs_damper = true;
         // Draw: the scabbard seat's SetConstraintReferencePosition call with parameter names that match the
         // engine (the old names may write nothing). Off by default: draws feel as they do now.
         bool draw_seat_ref_fix = false;
@@ -755,6 +621,7 @@ namespace hsvr
         // game's own forearm grip; 0 only closes the hand on the strap. Opening it leaves the shield mounted.
         int pose_mount_fist_grip = 1;
         double pose_mount_handle_cm = 8.0;
+        double pose_mount_forward_cm = 16.0; // the forward grip (light pavise upright handle, heavy centre handle) is taken within this of the palm, the shield slid so it sits in the hand (Matthew 11-24)
         // A shield on his forearm goes in his Ignore Pick Up Array, as a held or sheathed weapon does, so the
         // game's head-room trace doesn't hit it and crouch him (Head Hitting Ceiling).
         bool pose_mount_head_ignore = true;
@@ -765,16 +632,19 @@ namespace hsvr
         // his drawn hand stays put on it with the fingers wrapped round it until you let go or pull your
         // hand pose_grab_ride_max_cm away from it.
         bool pose_grab_world = true;
+        // 1 = the ground under his feet is not scenery to grab: a surface below the hand and less than
+        // pose_grab_world_floor_cm above his feet (the floor) is skipped, so a grip near the floor takes
+        // what lies there or nothing.
+        bool pose_grab_world_no_floor = true;
+        double pose_grab_world_floor_cm = 12.0;
         // Two hands on one weapon (B&S rules): squeeze the free hand on a weapon the other hand holds,
-        // on its grip or anywhere along its blade (half-swording, Matthew 2026-11-18). The weapon then
-        // lies along the line between the hands, the first hand sets its roll, and the hold is
-        // pose_two_hand_strength times as strong. The blade zone starts pose_two_hand_blade_gap_cm
-        // past the guard. A controller pulled more than pose_two_hand_let_go_cm off its spot lets go.
+        // on its grip or anywhere along its blade (half-swording, Matthew 2026-11-18). Each hand then has
+        // its own joint on its own spot (THE HOLD). The blade handle starts pose_two_hand_blade_gap_cm
+        // past the guard. (pose_two_hand_strength: unused, kept for old inis.)
         bool pose_two_hand = true;
         double pose_two_hand_strength = 2.0;
         double pose_two_hand_blade_gap_cm = 3.0;
         double pose_two_hand_reach_cm = 6.0; // how far from the zones a squeeze still lands on them
-        double pose_two_hand_let_go_cm = 25.0;
         // The second hand's fingers close (its grip type set to the sword grip while it holds). Off:
         // the game then drops the first hand's two-handed grip type (11 -> 2) and with it its two-handed
         // rules (Master Stroke, the two-hand stamina factor, ...; fists_eating.md).
@@ -843,12 +713,10 @@ namespace hsvr
         double pose_draw_zone_cm = 10.0;
         double pose_draw_settle_s = 0.15;
         double pose_draw_step_cm = 6.0; // the most it moves along the scabbard per tick
-        double pose_draw_force_scale = 0.3; // the hold's force/torque caps while drawing or sheathing
         // With the drawn hand on the weapon during a draw/sheathe too (pose_hold_hand_follows_draw), the
         // game's hand joint no longer pulls the blade along (it follows the hand, which is on the blade),
         // so the hold pulls with this share of its strength instead (test b3: 0.3 alone took 6.5 s).
         bool pose_hold_hand_follows_draw = true;
-        double pose_draw_force_scale_follows = 1.0;
         bool pose_draw_scabbard_free = false; // the game's loose scabbard pin while drawing (else locked)
         // Sheathing: a held (scabbarded) weapon's tip within mouth_cm of its side's empty belt scabbard
         // mouth, its blade within angle_deg of the scabbard's line, goes in; the game seats it and lets go.
@@ -876,6 +744,10 @@ namespace hsvr
         double pose_grab_seat_reverse_bias_deg = 45.0; // a reversed seat must be this much nearer to win
         double pose_swing_speed_lo = 1.5;
         double pose_swing_speed_hi = 7.0;
+        // Test switch: 1 = hand swing speed (slaps, the game's swing feed) is measured against his posed chest; 0 = against his
+        // capsule. Off: run 16 34f9db2 showed the run-14 slaps came from the test rig's hand jump, not the capsule, and against
+        // the chest his bend and twist alone made the still left hand slap (swing speed 33-67).
+        bool pose_swing_from_chest = false;
         double pose_swing_speed_fall_s = 0.15;
         // The second hand turns with the weapon (locked onto it as the first hand holds it, mirrored)
         // instead of with your controller.
@@ -908,6 +780,7 @@ namespace hsvr
         bool pose_fist_slap = true;
         double pose_fist_slap_ass = 30.0;
         double pose_fist_slap_keep_s = 0.3;
+        double pose_fist_slap_own_weapon_cm = 20.0; // no slap fist while the open hand is this close (cm) to a weapon his other hand holds (0 = off)
         // No fist while the hand is inside another Willie (playtest 2026-11-20 588 s: a fist made at his
         // neck as a throat grab let go threw his head and neck at 37-87 m/s). The fist waits until its
         // ball (radius measured from the live fist, 13 cm until then) plus margin_cm is clear of every
@@ -996,6 +869,11 @@ namespace hsvr
         bool pose_hand_world_stop = true;
         double pose_hand_world_radius_cm = 3.5;
         double pose_hand_world_reach_cm = 6.0;
+        // A free hand's drawn place stays this far (cm, from the palm's middle) outside a weapon the other hand holds. 0 = off.
+        double pose_hand_held_weapon_stop_cm = 4.0;
+        // ...and his real hand body kept at least this far (cm) off it, by moving its drawn place away, at most _body_max_cm (0 = off).
+        double pose_hand_held_weapon_body_gap_cm = 1.5;
+        double pose_hand_held_weapon_body_max_cm = 6.0;
         // 1 = an empty hand's arm is corrected after his body is evaluated, from this frame's shoulder
         // (the solve only has last frame's, so the hand bobbed with each step while walking).
         bool pose_arm_fresh_shoulder = true;
@@ -1092,6 +970,22 @@ namespace hsvr
         bool joint_break_legs = false;
         // Every part's strain rate x this (1 = the old game).
         double joint_break_scale = 1.0;
+        // 1 = a twist counts only in the direction your own wrist (controller) turned since you took hold,
+        // and no further than it turned (playtest 2026-11-23: his head flopping as you dragged or choked him
+        // snapped his neck with your hand still). 0 = any twist of his while you hold him counts (old).
+        bool joint_break_twist_needs_wrist = true;
+        // With that on, your wrist must have turned at least this far past where it was (degrees) before the
+        // twist strains him, however weak he is (his own free range shrinks to 16 deg out cold).
+        double joint_break_wrist_free_deg = 35.0;
+        // Your wrist turns him: once your controller has turned past joint_break_wrench_from_deg about his
+        // neck (or upper arm), a torque on his head (upper arm) toward your wrist's turn, this many N m per
+        // degree he lags, at most joint_break_wrench_max_nm x your grip strength (T/121). 0 = off.
+        double joint_break_wrench_nm_per_deg = 1.5;
+        double joint_break_wrench_from_deg = 20.0;
+        double joint_break_wrench_max_nm = 150.0;
+        // The quickest a joint can go from unstrained to gone (seconds): a snap takes a held wrench, never
+        // a single jolt (the neck went in 0.15 s before). 0 = no limit (old).
+        double joint_break_min_s = 0.5;
         // Every other Willie's body hits (impulse, health, consciousness, what hit him), when they change.
         bool log_body_hits = true;
         // 1 = the game's grab joint is made soft (a capped spring, B&S-like) 0.25 s after it latches, so
@@ -1126,6 +1020,20 @@ namespace hsvr
         double pose_drink_tip = 0.0;
         // Seconds between sips while the bottle stays tipped at your mouth.
         double pose_drink_sip_s = 1.0;
+        // Armour on and off with your hands: grip held and the trigger held armor_hold_s. A carried piece
+        // within armor_equip_cm of its spot on your body is put on (the game's Equip Armor rules); a held
+        // person is stripped where you hold him (the game's own rule: only when he is down, Fallen); an
+        // empty hand within armor_take_cm of one of your worn pieces takes it off into the hand.
+        bool armor_hands = true;
+        double armor_hold_s = 2.0;
+        double armor_trigger_on = 0.6;
+        double armor_trigger_off = 0.35;
+        double armor_equip_cm = 30.0;
+        double armor_take_cm = 18.0;
+        // A held foe: his worn piece whose bones are this close to your hand comes off (cm).
+        double armor_strip_cm = 25.0;
+        // Taking your own piece off: the count restarts whenever the hand moves faster than this (cm/s).
+        double armor_take_still_cms = 25.0;
         // The ghost hand: while his hand stays on a stopped weapon more than pose_ghost_from_cm from
         // your real hand, a see-through glove shows where your hand is. Mesh and material are object
         // paths in the cooked game; offset (cm) and turn (deg) from the hand bone, and scale, for fitting.
@@ -1173,11 +1081,23 @@ namespace hsvr
         // less pose_crouch_dead_zone_cm).
         bool pose_crouch = true;
         double pose_crouch_dead_zone_cm = 3.0;
+        // 1 = the crouch is measured at the base of your neck (pose_room_neck_base_cm below the head joint),
+        // so looking down at your feet is not a crouch; 0 = at the head joint (looking 60 deg down read as
+        // a 7-10 cm crouch).
+        bool pose_crouch_at_neck_base = true;
         // How far his legs crouch him (cm, times his size). Deeper than that (your view lower still), he
         // bends forward until his head is down with your view, so his hands reach as low as yours
         // (pose_crouch_bend_for_depth; playtest 2026-11-21: he could not reach the ground).
-        double pose_crouch_max_cm = 62.0; // was a fixed 55; playtest 2026-11-21: view 114 cm down, his head bone 35 cm above it
+        // 85 (2026-11-24): hips nearly down on the heels, as you are kneeling to the floor; at 62 his head stayed
+        // 16-18 cm above a kneeling view even bent 85 deg, his hand 15-24 cm off the floor (test 04e802e).
+        double pose_crouch_max_cm = 85.0; // was a fixed 55, then 62; playtest 2026-11-21: view 114 cm down, his head bone 35 cm above it
         bool pose_crouch_bend_for_depth = true;
+        // That bend for depth: at most this many degrees, and this share of it (0..1) takes his head down
+        // with it instead of his neck bending back to keep the head up (0 = old: the neck bends back
+        // 0.375 x the bend twice, so at 85 deg his head stayed 17 cm above a kneeling view). Also, while he
+        // bends for depth, looking down no longer pushes his chest back (pose_lean_look_down_back_cm).
+        double pose_crouch_bend_max_deg = 85.0;
+        double pose_crouch_bend_neck_follow = 1.0;
         // Left stick click toggles a button crouch this deep (cm, eased at _cms); 0 = off.
         double pose_crouch_button_cm = 40.0;
         double pose_crouch_button_cms = 120.0;
@@ -1238,6 +1158,23 @@ namespace hsvr
         double pose_step_time_s = 0.3;  // how long a step takes standing (shorter when moving)
         double pose_step_lift_cm = 10.0; // how high the foot lifts
         double pose_step_lead_s = 0.2;   // how far ahead (in seconds of movement) a foot lands when walking
+        // Crouched: step distance, lead and time x up to pose_step_crouch_scale, reached at
+        // pose_step_crouch_full_cm of crouch (the game: crouched steps twice the standing size). 1 = off.
+        double pose_step_crouch_scale = 2.0;
+        double pose_step_crouch_full_cm = 15.0;
+        // Crouched, his legs play Blade & Sorcery's own crouch animations (Crouch_Walk* in 8 directions,
+        // CrouchLoop and the 90 degree crouch turns), baked onto his skeleton with Unity 2021.3.38f1's
+        // humanoid retargeting (tools/bs-crouch), blended like B&S's blend trees by where you move and
+        // how fast you turn, and played at the speed you move so the planted foot stays put. The feet
+        // are put on the floor under them (the clip's own lift above it) and the knees bend toward the
+        // clip's knee. The baked files are read from the bs-crouch folder next to the dll (made from your own
+        // B&S install; not shipped). It plays while your head is at most pose_crouch_anim_on_ratio of
+        // standing height (B&S: crouchHeightRatio 0.8) and stops above pose_crouch_anim_off_ratio.
+        bool pose_crouch_anim = true;
+        double pose_crouch_anim_on_ratio = 0.8, pose_crouch_anim_off_ratio = 0.85;
+        double pose_crouch_anim_fade_s = 0.25;  // in and out (and between standing still and moving)
+        double pose_crouch_anim_hips = 1.0;     // share of the clips' hip turn shown (B&S's crouch stands side-on); his chest keeps facing where it did
+        double pose_crouch_anim_still_cms = 10.0; // slower than this he stands (CrouchLoop / crouch turns)
         // How quickly the elbow's swing around the arm follows (seconds; the hand is never smoothed).
         double pose_swivel_smooth_s = 0.06;
         // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and

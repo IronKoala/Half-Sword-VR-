@@ -1,0 +1,21 @@
+# Playtest 2026-11-23 17:05/17:23 local: kneeling, his hands could not reach a shield or lantern on the floor.
+# Crouch 95 cm (past his legs' 62: he bends for the rest), right hand on the floor 45 cm ahead, 15 to the side.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.6:hsvr.expect room_foes = 1 the one passive foe
+0.8:hsvr.player_immortal
+1.0:hsvr.squeeze 0 1
+1.0:hsvr.squeeze 1 1
+1.4:hsvr.squeeze 0 0
+1.4:hsvr.squeeze 1 0
+1.9:hsvr.expect held_r = 0 right hand empty (the test room starts him with a crossbow)
+1.9:hsvr.expect held_l = 0 left hand empty
+2.0:hsvr.fake_head_drop 95
+# The controller 5 cm up: your fist around it is that thick when your knuckles touch the floor (it was at 0, inside the floor).
+2.1:hsvr.arm_floor 45 15 5
+# Run 3: the hand bone sat on its target, but the target itself is 14-18 cm up (the fake grip's wrist offset).
+# So judge the reach itself: how far the hand bone is from where the controller asks it to be.
+# Runs 4-6: it stays 19-20 cm short at legs 85 (30 cm at 62): his body reaches no lower. Picking things up off the floor works
+# anyway (the grab looks at your controller when his hand is held short: floor_pickup passes), so this is a record.
+6.4:hsvr.expect hand_floor_r >= 0 record only: hand height over the floor
+6.5:hsvr.expect reach_short_r >= 0 record only: how far his hand stops from your controller
+6.6:hsvr.fake_head_drop -1

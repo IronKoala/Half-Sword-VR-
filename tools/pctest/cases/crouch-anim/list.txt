@@ -1,0 +1,7 @@
+walk_fwd|steps-walk_fwd.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+walk_right|steps-walk_right.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+walk_backleft|steps-walk_backleft.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+still|steps-still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+standing|steps-standing.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+in_out|steps-in_out.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+walk_fwd_off|steps-walk_fwd_off.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_anim=0
