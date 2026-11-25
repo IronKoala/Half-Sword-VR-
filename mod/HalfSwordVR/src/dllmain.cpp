@@ -27128,11 +27128,43 @@ namespace
         }
         if (want)
         {
+            // Diagnostics (playtest 2026-11-25: the pointer still got out with the clip on): how often
+            // something else changed the clip, and where the pointer was whenever it was outside.
+            static double report_at = 0.0;
+            static int reclips = 0, outside = 0, pulled = 0;
+            static RECT foreign{};
+            static POINT last_out{};
             RECT now{};
-            if (!clipped || !GetClipCursor(&now) || now.left != r.left || now.top != r.top || now.right != r.right || now.bottom != r.bottom)
+            bool have_now = GetClipCursor(&now) != 0;
+            if (!clipped || !have_now || now.left != r.left || now.top != r.top || now.right != r.right || now.bottom != r.bottom)
             {
-                if (ClipCursor(&r) && !clipped) HSVR_LOG("Mouse: held inside the game window (%ld,%ld)-(%ld,%ld)", r.left, r.top, r.right, r.bottom);
+                if (clipped && have_now)
+                {
+                    ++reclips;
+                    foreign = now;
+                }
+                BOOL ok = ClipCursor(&r);
+                if (!clipped) HSVR_LOG("Mouse: held inside the game window (%ld,%ld)-(%ld,%ld)%s", r.left, r.top, r.right, r.bottom, ok ? "" : " (ClipCursor failed)");
                 clipped = true;
+            }
+            // Belt and braces: a pointer found outside the window is put back on its nearest edge.
+            POINT p{};
+            if (GetCursorPos(&p) && (p.x < r.left || p.x >= r.right || p.y < r.top || p.y >= r.bottom))
+            {
+                ++outside;
+                last_out = p;
+                POINT q{std::clamp(p.x, r.left, r.right - 1), std::clamp(p.y, r.top, r.bottom - 1)};
+                if (SetCursorPos(q.x, q.y)) ++pulled;
+            }
+            double t = hsvr::now_seconds();
+            if (t >= report_at && (reclips || outside))
+            {
+                HSVR_LOG("Mouse: last 10 s: clip changed by something else %d time(s) (last to (%ld,%ld)-(%ld,%ld)), pointer outside the window %d time(s) "
+                         "(last at (%ld,%ld)), put back %d; window (%ld,%ld)-(%ld,%ld)",
+                         reclips, foreign.left, foreign.top, foreign.right, foreign.bottom, outside, last_out.x, last_out.y, pulled, r.left, r.top, r.right,
+                         r.bottom);
+                reclips = outside = pulled = 0;
+                report_at = t + 10.0;
             }
         }
         else if (clipped)
