@@ -1285,8 +1285,7 @@ namespace
     };
     PoseState g_pose;
 
-    // ---- Torso lean (see pose_lean in config.hpp) -----------------------------------------------
-    // The bones it bends, parent first; the last one (head) is only measured, never bent here.
+    // ---- Test aids for the pretend headset, and the pose's shared state ----------------------------
     // Test: hsvr.fake_head_tilt <pitch down> <roll right> <drop cm> nods the TRACKED headset about the
     // base of the neck (12 cm below the head bone) and lowers it, for the pose only (not the view).
     std::atomic<double> g_fake_tilt_pitch{0.0}, g_fake_tilt_roll{0.0}, g_fake_tilt_drop{0.0};
