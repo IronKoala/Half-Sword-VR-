@@ -2261,7 +2261,9 @@ namespace
         hsvr::Vec3 target_prev_cs[2]; // where the foot was sent last frame, his component space (unscaled)
         double target_prev_t[2] = {0.0, 0.0};
         int calls = 0, quick_calls = 0; // for the log: updates, and those under 2 ms after the last
-        bool locked[2] = {false, false}; // foot lock (world spot while the clip has the foot planted)
+        bool locked[2] = {false, false};
+        bool no_relock[2] = {false, false};
+        int forced_releases = 0; // for the log: locks let go because the clip's spot ran 30 cm off // foot lock (world spot while the clip has the foot planted)
         hsvr::Vec3 anchor[2], ease_off[2];
         double ease_t[2] = {1.0, 1.0};
         double lock_gap_worst = 0.0;     // for the log: farthest a locked/easing foot was from the clip's spot (cm)
@@ -2529,6 +2531,7 @@ namespace
             }
         A.target_prev_ok[0] = A.target_prev_ok[1] = false;
         A.locked[0] = A.locked[1] = false;
+        A.no_relock[0] = A.no_relock[1] = false;
         A.ease_t[0] = A.ease_t[1] = 1.0;
     }
 
@@ -2708,15 +2711,20 @@ namespace
                 Vec3 flat_t{Fw.x, Fw.y, 0.0};
                 if (planted)
                 {
-                    if (!A.locked[s]) { A.locked[s] = true; A.anchor[s] = flat_t; }
-                    else if (length(A.anchor[s] - flat_t) > 30.0 * scale)
+                    // Let go (eased) once the clip's spot is 30 cm off, and not locked again until this
+                    // foot lifts: locking again at once jumped the foot up to 30 cm in a frame (run 4).
+                    if (!A.locked[s] && !A.no_relock[s]) { A.locked[s] = true; A.anchor[s] = flat_t; }
+                    else if (A.locked[s] && length(A.anchor[s] - flat_t) > 30.0 * scale)
                     {
                         A.locked[s] = false;
+                        A.no_relock[s] = true;
+                        ++A.forced_releases;
                         A.ease_off[s] = A.anchor[s] - flat_t;
                         A.ease_t[s] = 0.0;
                     }
                 }
-                else if (A.locked[s])
+                else if (!planted) A.no_relock[s] = false;
+                if (!planted && A.locked[s])
                 {
                     A.locked[s] = false;
                     A.ease_off[s] = A.anchor[s] - flat_t;
@@ -2835,10 +2843,10 @@ namespace
                 if (walk_w[i] > 0.05) { char part[32]; std::snprintf(part, sizeof(part), " %s %.2f", wn[i], walk_w[i]); top += part; }
             double hips_deg = 2.0 * std::acos((std::min)(1.0, std::fabs(hips.w))) * kRadToDeg;
             HSVR_LOG("CrouchAnim: shown %.2f, head %.2f of standing (%.0f cm down, legs %.0f), moving %.2f at %.0f cm/s (%.0f, %.0f) walk[%s ] phase %.2f x%.2f stride x%.2f; "
-                     "still: L %.2f loop %.2f R %.2f (turn %.0f deg/s); hips turned %.0f deg; planted foot slides %.1f cm/s mean, %.1f worst; leg short of the floor %.1f cm; locked foot off the clip's spot %.1f cm worst; %d updates (%d under 2 ms apart)",
+                     "still: L %.2f loop %.2f R %.2f (turn %.0f deg/s); hips turned %.0f deg; planted foot slides %.1f cm/s mean, %.1f worst; leg short of the floor %.1f cm; locked foot off the clip's spot %.1f cm worst; %d updates (%d under 2 ms apart); %d locks let go at 30 cm",
                      A.fade, h, g_crouch_want_cm, g_crouch_drop, A.moving, speed, A.vel.x, A.vel.y, top.c_str(), A.walk_phase, walk_rate, stride, idle_w[0], idle_w[1], idle_w[2],
-                     A.yaw_rate, hips_deg, A.slip_n ? A.slip_sum / A.slip_n : 0.0, A.slip_worst, A.reach_short_worst, A.lock_gap_worst, A.calls, A.quick_calls);
-            A.calls = A.quick_calls = 0;
+                     A.yaw_rate, hips_deg, A.slip_n ? A.slip_sum / A.slip_n : 0.0, A.slip_worst, A.reach_short_worst, A.lock_gap_worst, A.calls, A.quick_calls, A.forced_releases);
+            A.calls = A.quick_calls = A.forced_releases = 0;
             A.slip_sum = A.slip_worst = A.reach_short_worst = A.lock_gap_worst = 0.0;
             A.slip_n = 0;
         }
