@@ -5832,6 +5832,8 @@ namespace
     // pose_swing_speed_lo..hi m/s -> 0..75, exactly 0 at rest (some game rules need == 0).
     double read_number_variable(UObject* owner, const TCHAR* name);
     double g_hand_world_v[2] = {0.0, 0.0}; // m/s
+    double g_hand_rel_v[2] = {0.0, 0.0};   // m/s, each hand against his body (its capsule's own move, step snaps included, taken out)
+    hsvr::Vec3 g_body_move_v;              // cm/s, his capsule's move over the last tick (walk, stairs, step snaps)
     // A draw from a scabbard in progress, per hand (see try_draw).
     struct DrawState
     {
@@ -5913,10 +5915,20 @@ namespace
         g_swing_written = 0.0;
         {
             // Each hand's speed in the world (for throws), ~30 ms smoothing.
-            static hsvr::Vec3 last[2];
+            static hsvr::Vec3 last[2], last_cap;
+            static bool have_cap = false;
             static double last_t = -1.0;
             double t = now_seconds(), d = last_t > 0.0 ? t - last_t : 0.0;
             last_t = t;
+            // His body's own move this tick (the capsule, step snaps on stairs included): a hand carried along by it is
+            // not a hand that moves (playtest 11-24 7:36 PM: going downstairs burned stamina and whooshed, the body
+            // at 3.6 m/s with the hands still against it).
+            UObject* cap = pawn ? object_property(pawn, STR("CapsuleComponent")) : nullptr;
+            Vec3 cp = cap ? component_location(cap) : Vec3{};
+            Vec3 body_d = have_cap && cap ? cp - last_cap : Vec3{};
+            have_cap = cap != nullptr;
+            last_cap = cp;
+            g_body_move_v = d > 1e-4 && d < 0.1 ? body_d * (1.0 / d) : Vec3{};
             for (int side = 0; side < 2; ++side)
             {
                 Vec3 at = g_pose.target[side];
@@ -5924,8 +5936,10 @@ namespace
                 {
                     double v = length(at - last[side]) / d / 100.0;
                     g_hand_world_v[side] += (v - g_hand_world_v[side]) * (1.0 - std::exp(-d / 0.03));
+                    double vr = length(at - last[side] - body_d) / d / 100.0;
+                    g_hand_rel_v[side] += (vr - g_hand_rel_v[side]) * (1.0 - std::exp(-d / 0.05));
                 }
-                else g_hand_world_v[side] = 0.0;
+                else g_hand_world_v[side] = g_hand_rel_v[side] = 0.0;
                 last[side] = at;
             }
         }
@@ -18666,6 +18680,30 @@ namespace
         double mr = number_var(pawn, STR("Muscle Rate"), has_mr);
         double strength = has_mr ? map_range(mr, 0.0, 3.0, 1.0, 0.1) : 1.0;
         double f = (std::min)(force_n, cfg.pose_stamina_force_cap_n), t = (std::min)(torque_nm, cfg.pose_stamina_torque_cap_nm);
+        // Only effort tires him: holding the item's weight, and moving it with his arms. The rest of the hold's force and turn
+        // drags the item along with his body (walking, crouch-walking, stairs, step snaps, a hand held still against him),
+        // which the game never charges: in the playtest of 11-24 7:39 PM the bar went 65 -> 33 in 4 s walking and
+        // crouch-walking with a sword and a lantern, hands still, the hold's 100-400 N / 30-70 N m read as effort (burn
+        // 170-180). Below pose_stamina_still_m_s of hand speed against his body only the weight counts; over 3x it, all of it.
+        if (!is_fist(weapon) && cfg.pose_stamina_still_m_s > 0.0)
+        {
+            static std::unordered_map<UObject*, double> mass_of;
+            static bool tr = on_freed([] { erase_gone_keys(mass_of); });
+            (void)tr;
+            double mass = 1.0;
+            auto mi = mass_of.find(weapon);
+            if (mi != mass_of.end()) mass = mi->second;
+            else if (UObject* b = object_property(weapon, STR("BaseMesh")))
+            {
+                Call gm(b, STR("GetMass"));
+                mass = gm.run() ? (std::max)(0.05, gm.number()) : 1.0;
+                mass_of[weapon] = mass;
+            }
+            double moving = map_range(g_hand_rel_v[side], cfg.pose_stamina_still_m_s, 3.0 * cfg.pose_stamina_still_m_s, 0.0, 1.0);
+            double fw = mass * 9.81, tw = mass * 9.81 * 0.3;
+            f = (std::min)(f, fw) + (std::max)(0.0, f - fw) * moving;
+            t = (std::min)(t, tw) + (std::max)(0.0, t - tw) * moving;
+        }
         // A fist (grip 0, nothing grabbed): the game's factor is Hands Rigidity (Gauntlets) x MRC(R/L Fisting Rate,
         // 0.1..1 -> 0..1) in place of the weapon's 0.01 (@407212, fists_eating.md 1.5), i.e. 100x it
         // here; Fisting Rate is the mod's own (fist_flags_after_tick), as the tick zeroes the game's.
@@ -18679,7 +18717,9 @@ namespace
             // The game's Fisting Rate rises with a mouse thrust (R Thrust Alpha), which VR never makes,
             // so in VR it stays under the 0.1 floor (stamina runs 2026-11-21: 0.02-0.06 vs flat 0.38):
             // the punching hand's speed counts too, over the B&S punch range 2..9 m/s.
-            double rate = (std::max)(map_range(g_fisting_rate[side], 0.1, 1.0, 0.0, 1.0), map_range(g_hand_world_v[side], 2.0, 9.0, 0.0, 1.0));
+            // (The hand's speed against his body, not through the world: crouch-walking with two fists at 4 m/s burned the bar
+            // 100 -> 49 in 4 s, playtest 11-24 7:16 PM, the fists only carried along.)
+            double rate = (std::max)(map_range(g_fisting_rate[side], 0.1, 1.0, 0.0, 1.0), map_range(g_hand_rel_v[side], 2.0, 9.0, 0.0, 1.0));
             kind = 100.0 * (has_rig ? rigidity : 0.0) * rate * cfg.pose_stamina_fist_scale;
         }
         double raw = (f + 100.0 * t) / 60.0 * kind * strength * cfg.pose_stamina_scale;
@@ -21410,6 +21450,9 @@ namespace
             {
                 hsvr::Vec3 v = gv.vec();
                 g_whoosh_body_v = v;
+                // His capsule's real move (step snaps on stairs included), where it is the larger: going downstairs at 3.6 m/s
+                // whooshed his still-held sword at 9-14 m/s (playtest 11-24 7:36 PM).
+                if (length(g_body_move_v) > length(v)) g_whoosh_body_v = g_body_move_v;
                 if (cfg.whoosh_walk_speed_scale > 0.0) g_whoosh_walk = std::sqrt(v.x * v.x + v.y * v.y) * cfg.whoosh_walk_speed_scale;
             }
         }

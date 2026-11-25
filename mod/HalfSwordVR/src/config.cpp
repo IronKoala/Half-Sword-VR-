@@ -450,6 +450,7 @@ namespace hsvr
         flag("pose_legs_pass_loose", c.pose_legs_pass_loose);
         flag("pose_shoulder_slot_on_chest", c.pose_shoulder_slot_on_chest);
         num("pose_hanging_damping_held", c.pose_hanging_damping_held);
+        num("pose_stamina_still_m_s", c.pose_stamina_still_m_s);
         num("pose_legs_pass_loose_cm", c.pose_legs_pass_loose_cm);
         flag("pose_legs_pass_capsule_channel", c.pose_legs_pass_capsule_channel);
         flag("pose_chain_no_self_collision", c.pose_chain_no_self_collision);

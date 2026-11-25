@@ -333,6 +333,7 @@ namespace hsvr
         bool pose_legs_pass_loose = true;
         bool pose_shoulder_slot_on_chest = true; // a shield slung on his shoulder slot hangs from his chest (spine_05), not his tracked left upper arm (Matthew 11-24: pavise jitters on his back standing still)
         double pose_hanging_damping_held = 0.05; // a held item's hanging bodies (chain lantern lamp, links): linear and angular damping while held, B&S-like (Unity drag 0 / angular 0.05); the asset has 1.0 / 5.0 (Matthew 11-24: "zero gravity"); < 0 = leave as is
+        double pose_stamina_still_m_s = 0.5; // stamina: below this hand speed against his body only the held weight tires him, from 3x it all the hold's force/turn (Matthew 11-24: walking, crouch-walking, stairs drained stamina); 0 = off
         // How near his legs (hip, knee, ankle or toe point) a loose weapon must come to pass through them (cm). It
         // collides with them again once 15 cm farther than this for 0.3 s, or when a hand takes it.
         double pose_legs_pass_loose_cm = 40.0;
