@@ -255,7 +255,7 @@ namespace hsvr::body
         return false;
     }
 
-    void Solver::feet_update(const Input& in, double dt, const Vec3& com, double root_yaw, double hips_yaw, const Vec3 hip_joints[2])
+    void Solver::feet_update(const Input& in, double dt, const Vec3& com, const Vec3& com_home, double root_yaw, double hips_yaw, const Vec3 hip_joints[2])
     {
         for (int i = 0; i < 2; ++i) feet_[i].pos.z = in.floor_z[i];
         // Balance steps (VRIK's, as Chasm tuned them against motion capture).
@@ -265,7 +265,10 @@ namespace hsvr::body
         Vec3 ground = flat(com + ahead_vel * kComAhead);
         still_time_ = length(flat(com_vel_)) < kStillSpeed ? still_time_ + dt : 0.0;
         Vec3 targets[2];
-        for (int i = 0; i < 2; ++i) targets[i] = cross_guard(spot(ground, root_yaw, i, p.foot_spacing), feet_[1 - i].pos, root_yaw, i);
+        // Where the feet belong: under the body as it would stand without the torso lean (com_home), so a
+        // lean held still settles with a step under you after settle_delay, and a big lean steps there.
+        Vec3 home = flat(com_home + ahead_vel * kComAhead);
+        for (int i = 0; i < 2; ++i) targets[i] = cross_guard(spot(home, root_yaw, i, p.foot_spacing), feet_[1 - i].pos, root_yaw, i);
         for (int i = 0; i < 2; ++i)
             if (feet_[i].stepping)
             {
@@ -414,6 +417,7 @@ namespace hsvr::body
             out2[1] = c.pos[0] + c.seg[0].rotate(K.joint[J_THIGH_R] - K.joint[J_PELVIS]);
         };
         Chain chain = chain_at(pitch_.value);
+        Vec3 com_home = lerp(chain.pos[0], head_joint, kComUpTheSpine);
 
         // ---- torso lean (Matthew 2026-11-25: "keep the torso leaning, it's immersive") ----
         // Standing, his feet stay where they are and his torso bends to put his head at yours: the spine
@@ -423,6 +427,7 @@ namespace hsvr::body
         {
             Vec3 feet_mid = flat((feet_[0].pos + feet_[1].pos) * 0.5);
             Vec3 hips0 = chain.pos[0];
+            com_home = lerp(hips0, head_joint, kComUpTheSpine);
             // centre of mass = hips + (head - hips) * k over the feet  ->  hips where it would be.
             Vec3 want_hips = (feet_mid - flat(head_joint) * kComUpTheSpine) * (1.0 / (1.0 - kComUpTheSpine));
             Vec3 d = flat(want_hips - hips0);
@@ -453,7 +458,7 @@ namespace hsvr::body
         double hips_yaw = seg_yaw[0];
         Vec3 hips_now[2];
         hip_joints(chain, hips_now);
-        feet_update(in, dt, com, root_yaw, hips_yaw, hips_now);
+        feet_update(in, dt, com, com_home, root_yaw, hips_yaw, hips_now);
         double lifts[2] = {foot_lift(feet_[0]), foot_lift(feet_[1])};
 
         // ---- moving: a gait cycle (B&S: moving, the legs are the locomotion animation's) ----
@@ -512,7 +517,12 @@ namespace hsvr::body
                     x = -S * 0.5 + S * (0.5 - 0.5 * std::cos(kPi * q));
                     lift = lift_h * std::sin(kPi * q);
                 }
-                Vec3 cyc = mid + gait_dir_ * x + right_of(root_yaw) * ((i == 0 ? -0.5 : 0.5) * p.foot_spacing * s);
+                Vec3 side_dir = right_of(root_yaw) * (i == 0 ? -1.0 : 1.0);
+                Vec3 cyc = mid + gait_dir_ * x + side_dir * (0.5 * p.foot_spacing * s);
+                // Strafing, a foot never crosses to the other side of his midline (B&S strafes step out and back in).
+                double out_by = dot(cyc - mid, side_dir);
+                double min_out = 0.25 * p.foot_spacing * s;
+                if (out_by < min_out) cyc = cyc + side_dir * (min_out - out_by);
                 cyc.z = in.floor_z[i];
                 draw[i].pos = lerp(cyc, feet_[i].pos, weight);
                 draw[i].pos.z = in.floor_z[i];
@@ -548,7 +558,9 @@ namespace hsvr::body
             Vec3 fa = ankle_at(draw[i], lifts[i], 0.0, nullptr);
             double hor = length(flat(hip - fa));
             lo = fa.z + std::sqrt((std::max)(0.0, closest * closest - hor * hor));
-            Vec3 ra = ankle_at(draw[i], lifts[i], p.heel_lift_max_deg * kDegToRad, nullptr);
+            // Flat-footed reach: hips a little too high (your eyes over his) come down a few cm rather than
+            // standing him on his toes; only past hips_pull_max_cm do the heels rise.
+            Vec3 ra = ankle_at(draw[i], lifts[i], 0.0, nullptr);
             double reach = (a + b) * p.leg_stretch;
             double hor2 = length(flat(hip - ra));
             hi = ra.z + std::sqrt((std::max)(0.0, reach * reach - hor2 * hor2));

@@ -160,7 +160,7 @@ namespace hsvr::body
 
         double torso_update(const Input& in, double head_yaw, const Vec3& head_joint, double dt);
         double foot_lift(const Foot& f) const;
-        void feet_update(const Input& in, double dt, const Vec3& com, double root_yaw, double hips_yaw, const Vec3 hip_joints[2]);
+        void feet_update(const Input& in, double dt, const Vec3& com, const Vec3& com_home, double root_yaw, double hips_yaw, const Vec3 hip_joints[2]);
         bool advance(Foot& f, const Vec3& target, double yaw);
         Vec3 spot(const Vec3& center, double yaw, int side, double spacing) const;
         Vec3 cross_guard(const Vec3& target, const Vec3& other, double yaw, int side) const;
