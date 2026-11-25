@@ -738,7 +738,7 @@ namespace hsvr
         double pose_scabbard_let_go_cm = 25.0;
         double pose_scabbard_grip_type = 2.0;
         bool pose_scabbard_block_auto = true;
-        double pose_grab_seat_reverse_bias_deg = 45.0; // a reversed seat must be this much nearer to win
+        double pose_grab_seat_reverse_bias_deg = 0.0; // a reversed seat must be this much nearer to win (Matthew 2026-11-25: 0, B&S nearest pose; was 45)
         double pose_swing_speed_lo = 1.5;
         double pose_swing_speed_hi = 7.0;
         // Test switch: 1 = hand swing speed (slaps, the game's swing feed) is measured against his posed chest; 0 = against his
