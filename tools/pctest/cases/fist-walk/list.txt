@@ -1,0 +1,2 @@
+fist_walk|steps-fist_walk.txt
+fist_walk_b|steps-fist_walk.txt
