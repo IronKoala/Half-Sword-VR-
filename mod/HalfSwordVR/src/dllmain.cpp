@@ -4387,8 +4387,9 @@ namespace
                 Vec3 total = base.inverse().rotate(Vec3{neck_now.x - neck_then.x, neck_now.y - neck_then.y, 0.0});
                 total.z = 0.0;
                 Vec3 delta = total - g_pose_room_moved_local;
-                // The capsule walks after your neck once it is 20 cm away and stops within 5 cm (Chasm's VR
-                // Framework's roomscale); a lean inside that is the body solver's (the hips stay, the spine bends).
+                // The capsule walks after your neck once it is 20 cm away (past the torso lean's reach when that
+                // is on) and stops within 5 cm (Chasm's VR Framework's roomscale); a lean inside that is the body
+                // solver's (the hips stay, the spine bends).
                 Vec3 follow{0.0, 0.0, 0.0};
                 static double last_t = 0.0;
                 double tn = now_seconds(), dtn = tn - last_t;
@@ -4396,7 +4397,9 @@ namespace
                 {
                     static bool following = false;
                     double d = length(delta);
-                    if (d > 20.0) following = true;
+                    // With the torso lean on, it starts only past the lean's reach (the body leans first, then steps).
+                    double start = cfg.body_lean_max_cm > 0.0 ? (std::max)(20.0, cfg.body_lean_max_cm) : 20.0;
+                    if (d > start) following = true;
                     if (following)
                     {
                         double keep = (dtn > 0.0 && dtn < 0.2) ? std::exp(-dtn / 0.15) : 0.0;
@@ -4405,7 +4408,7 @@ namespace
                         if (d * keep < 5.0) following = false;
                     }
                 }
-                if (length(delta) > 50.0 + 20.0)
+                if (length(delta) > 50.0 + (std::max)(20.0, cfg.body_lean_max_cm))
                 {
                     g_pose_room_moved_local = total; // recentred or tracking jumped: take it as the new start
                 }

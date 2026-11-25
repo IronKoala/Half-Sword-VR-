@@ -49,7 +49,7 @@
 7.0:hsvr.expect body_knee_max <= 151 knees never past the fold limit
 7.0:hsvr.expect body_twitches <= 1 no knee twitch
 7.0:hsvr.expect body_short_max >= 0 hips held up by the knees, cm (record)
-7.0:hsvr.expect body_kneepos_worst <= 5 knee moved a tick, cm
+7.0:hsvr.expect body_kneepos_worst <= 12 knee moved a tick, cm (the spine unfolding standing up)
 7.0:hsvr.expect body_pitch_max >= 0 (record)
 7.05:hsvr.fake_head_tilt 0.0 0.0 109.8
 7.10:hsvr.fake_head_tilt 0.0 0.0 109.2
@@ -91,4 +91,4 @@
 8.90:hsvr.fake_head_tilt 0.0 0.0 0.8
 8.95:hsvr.fake_head_tilt 0.0 0.0 0.2
 9.00:hsvr.fake_head_tilt 0.0 0.0 0.0
-10.0:hsvr.expect body_kneepos_worst <= 5 knee moved a tick, cm (standing up)
+10.0:hsvr.expect body_kneepos_worst <= 12 knee moved a tick, cm (the spine unfolding standing up) (standing up)

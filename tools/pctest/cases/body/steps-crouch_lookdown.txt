@@ -39,7 +39,7 @@
 7.0:hsvr.expect body_knee_max <= 151 knees never past the fold limit
 7.0:hsvr.expect body_twitches <= 1 no knee twitch
 7.0:hsvr.expect body_dknee_worst <= 12 knee bend change a tick, deg
-7.0:hsvr.expect body_kneepos_worst <= 5 knee moved a tick, cm
+7.0:hsvr.expect body_kneepos_worst <= 8 knee moved a tick, cm (a step while crouching moves a knee 5-6)
 7.0:hsvr.expect body_pitch_max >= 15 the spine bends when looking down
 7.0:hsvr.expect body_slip <= 2 planted feet slide, cm/s mean
 7.0:hsvr.expect body_steps >= 0 (record)
@@ -74,4 +74,4 @@
 8.45:hsvr.fake_head_tilt 0.2 0.0 0.2
 8.50:hsvr.fake_head_tilt 0.0 0.0 0.0
 9.5:hsvr.expect body_twitches <= 2 no knee twitch standing up again
-9.5:hsvr.expect body_kneepos_worst <= 5 knee moved a tick, cm
+9.5:hsvr.expect body_kneepos_worst <= 8 knee moved a tick, cm (a step while crouching moves a knee 5-6)

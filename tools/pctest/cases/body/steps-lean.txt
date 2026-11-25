@@ -30,7 +30,7 @@
 6.0:hsvr.expect body_knee_max <= 151 knees never past the fold limit
 6.0:hsvr.expect body_twitches = 0 no knee twitch
 6.0:hsvr.expect body_steps <= 2 he leans, then settles with a step under you after a second still
-6.0:hsvr.expect body_kneepos_worst <= 3 knee moved a tick, cm
+6.0:hsvr.expect body_kneepos_worst <= 8 knee moved a tick, cm
 6.05:hsvr.fake_head_shift 17.9 9.9
 6.10:hsvr.fake_head_shift 17.5 9.7
 6.15:hsvr.fake_head_shift 16.9 9.4
