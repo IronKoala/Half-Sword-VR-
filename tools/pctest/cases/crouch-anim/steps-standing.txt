@@ -1,0 +1,13 @@
+# Standing (and 20 cm down, head ~0.88 of standing: above B&S's 0.8): no crouch animation; the old steps walk.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.fake_head_drop 0
+1.5:hsvr.stick 0 1
+2.0:hsvr.mark
+4.0:hsvr.expect canim_frames <= 0 no crouch animation standing
+4.0:hsvr.expect steps >= 2 standing walk still steps
+4.1:hsvr.fake_head_drop 20
+5.0:hsvr.mark
+7.0:hsvr.expect canim_frames <= 0 no crouch animation 20 cm down
+7.0:hsvr.expect steps >= 2 still steps
+7.1:hsvr.stick -9 0
+7.2:hsvr.fake_head_drop -1

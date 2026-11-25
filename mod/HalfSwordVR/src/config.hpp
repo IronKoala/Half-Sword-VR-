@@ -1161,6 +1161,19 @@ namespace hsvr
         // pose_step_crouch_full_cm of crouch (the game: crouched steps twice the standing size). 1 = off.
         double pose_step_crouch_scale = 2.0;
         double pose_step_crouch_full_cm = 15.0;
+        // Crouched, his legs play Blade & Sorcery's own crouch animations (Crouch_Walk* in 8 directions,
+        // CrouchLoop and the 90 degree crouch turns), baked onto his skeleton with Unity 2021.3.38f1's
+        // humanoid retargeting (tools/bs-crouch), blended like B&S's blend trees by where you move and
+        // how fast you turn, and played at the speed you move so the planted foot stays put. The feet
+        // are put on the floor under them (the clip's own lift above it) and the knees bend toward the
+        // clip's knee. The baked files are read from the bs-crouch folder next to the dll (made from your own
+        // B&S install; not shipped). It plays while your head is at most pose_crouch_anim_on_ratio of
+        // standing height (B&S: crouchHeightRatio 0.8) and stops above pose_crouch_anim_off_ratio.
+        bool pose_crouch_anim = true;
+        double pose_crouch_anim_on_ratio = 0.8, pose_crouch_anim_off_ratio = 0.85;
+        double pose_crouch_anim_fade_s = 0.25;  // in and out (and between standing still and moving)
+        double pose_crouch_anim_hips = 1.0;     // share of the clips' hip turn shown (B&S's crouch stands side-on); his chest keeps facing where it did
+        double pose_crouch_anim_still_cms = 10.0; // slower than this he stands (CrouchLoop / crouch turns)
         // How quickly the elbow's swing around the arm follows (seconds; the hand is never smoothed).
         double pose_swivel_smooth_s = 0.06;
         // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and
