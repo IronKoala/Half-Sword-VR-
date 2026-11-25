@@ -356,6 +356,7 @@ namespace hsvr::body
             capsule_vel_ = {};
             lean_vec_ = {};
             last_weight_ = 1.0;
+            stood_s_ = 1.0;
         }
 
         // ---- torso ----
@@ -434,7 +435,11 @@ namespace hsvr::body
             double dl = length(d);
             double cap = p.lean_max_cm * s;
             if (dl > cap) d = d * (cap / dl);
-            d = d * last_weight_; // only standing
+            // Only standing, and only once he has stood a moment: stopping from a walk, the feet are where the
+            // walk left them and the balance steps bring them under him (a lean there pulled him back over feet
+            // left 30 cm behind, on his toes; test run 5).
+            stood_s_ = last_weight_ > 0.98 ? stood_s_ + dt : 0.0;
+            d = d * (std::clamp((stood_s_ - 0.3) / 0.5, 0.0, 1.0) * last_weight_);
             lean_vec_ = lerp(lean_vec_, d, smoothing(dt, p.lean_tau));
             double ls = length(chain.pos[5] - chain.pos[0]);
             double ll = length(lean_vec_);

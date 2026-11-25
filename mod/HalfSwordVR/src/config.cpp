@@ -812,6 +812,7 @@ namespace hsvr
         num("body_foot_spacing_cm", c.body_foot_spacing_cm);
         num("body_moving_cms", c.body_moving_cms);
         num("body_lean_max_cm", c.body_lean_max_cm);
+        num("body_floor_cms", c.body_floor_cms);
         flag("dev_pose_fake_tracking", c.dev_pose_fake_tracking);
         flag("dev_grip_trace", c.dev_grip_trace);
         flag("stab_log", c.stab_log);

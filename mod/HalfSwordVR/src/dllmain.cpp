@@ -4143,7 +4143,18 @@ namespace
         {
             Vec3 at = B.have_floor[side] ? B.solver.foot_spot(side) : actor;
             double z = 0.0;
-            if (ground_below(pawn, at.x, at.y, actor.z + 20.0, z)) B.floor_z[side] = z, B.have_floor[side] = true;
+            if (ground_below(pawn, at.x, at.y, actor.z + 20.0, z))
+            {
+                // A foot crossing a step's edge (or a trace catching a ledge) moves its floor at most
+                // body_floor_cms, never in one frame (test run 5: a 25 cm floor jump folded a knee to 143 deg in a tick).
+                if (!B.have_floor[side] || reset) B.floor_z[side] = z;
+                else
+                {
+                    double most = (std::max)(1.0, cfg.body_floor_cms) * (std::min)(0.05, dt);
+                    B.floor_z[side] += (std::max)(-most, (std::min)(most, z - B.floor_z[side]));
+                }
+                B.have_floor[side] = true;
+            }
             else if (!B.have_floor[side]) B.floor_z[side] = actor.z - 87.0 * B.scale;
             in.floor_z[side] = B.floor_z[side];
         }
