@@ -726,9 +726,6 @@ namespace hsvr
         // Sheathing takes two hands (Matthew 2026-11-22): the other hand holds the sword's own scabbard
         // where it hangs; the blade never goes in by itself. 0 = the old one-hand sheathe at any free mouth.
         bool pose_sheathe_two_hand = true;
-        // A sword picked up whose scabbard is not on the belt (the game hides it until its first sheathe):
-        // its empty scabbard goes to a free sword slot on that hand's hip at once (Matthew 2026-11-23).
-        bool pose_scabbard_on_pickup = true;
         bool pose_sheathe_cross = true; // a weapon whose scabbard hangs on the other hip goes back across (the game's cross path)
         // The off hand on a belt scabbard: a squeeze within touch_cm of it takes it; it turns with the hand
         // up to angle_deg on the belt (the game's own loose limit is 30) and stays pinned there; let go and it
@@ -736,9 +733,9 @@ namespace hsvr
         // far off it for 0.3 s lets go. block_auto: keep the game's own teleporting off-hand grab from firing.
         bool pose_scabbard_grab = true;
         double pose_scabbard_touch_cm = 8.0;
-        double pose_scabbard_angle_deg = 60.0;
+        double pose_scabbard_angle_deg = 30.0;
         double pose_scabbard_follow_s = 0.015; // ~1 tick: it carries a sheathed sword and the soft cone (0.05 left 11-18 deg)
-        double pose_scabbard_let_go_cm = 40.0;
+        double pose_scabbard_let_go_cm = 25.0;
         double pose_scabbard_grip_type = 2.0;
         bool pose_scabbard_block_auto = true;
         double pose_grab_seat_reverse_bias_deg = 45.0; // a reversed seat must be this much nearer to win
