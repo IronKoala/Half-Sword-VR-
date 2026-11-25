@@ -30103,6 +30103,7 @@ namespace
             else if (w == "body_slip_worst") value = S.slip_worst;
             else if (w == "body_steps") value = S.steps;
             else if (w == "body_lean") value = g_body.last.lean_cm;          // now, cm
+            else if (w == "body_on_clips") value = g_body.last.clips ? 1.0 : 0.0; // now: the moving legs play B&S clips
             else if (w == "body_pitch") value = g_body.last.pitch_deg;        // now
             else if (w == "body_hips") value = g_body.last.pos[hsvr::body::J_PELVIS].z - (std::min)(g_body.floor_z[0], g_body.floor_z[1]); // now, cm over the floor
             else if (w == "body_knee_l") value = g_body.last.knee_deg[0];

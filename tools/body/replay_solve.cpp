@@ -36,9 +36,13 @@ static std::vector<std::string> split(const std::string& s)
 int main(int argc, char** argv)
 {
     if (argc < 3) { std::printf("replay_solve <replay.csv> <lopoly.csv> [--frames out.csv]\n"); return 1; }
-    std::string frames_out;
+    std::string frames_out, clip_dir;
     for (int i = 3; i + 1 < argc; ++i)
+    {
         if (std::string(argv[i]) == "--frames") frames_out = argv[i + 1];
+        if (std::string(argv[i]) == "--clips") clip_dir = argv[i + 1];
+    }
+    static body::LocomotionClips clips;
 
     // Reference skeleton.
     std::map<std::string, Vec3> ref;
@@ -72,6 +76,12 @@ int main(int argc, char** argv)
         solver.skel.joint[j] = it->second;
     }
     solver.skel.build(9.0, 7.0);
+    if (!clip_dir.empty())
+    {
+        clips.load(clip_dir);
+        std::printf("clips: %s\n", clips.report.c_str());
+        if (clips.loaded) solver.clips = &clips;
+    }
     std::printf("skeleton: thigh %.1f shin %.1f ankle %.1f eyes %.1f\n", solver.skel.thigh, solver.skel.shin, solver.skel.ankle_height, solver.skel.eye_height);
 
     std::ifstream f(argv[1]);

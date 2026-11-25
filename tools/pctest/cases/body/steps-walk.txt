@@ -3,6 +3,7 @@
 1.0:hsvr.fake_head_pose 1
 2.0:hsvr.mark
 2.2:hsvr.stick 0 1
+4.0:hsvr.expect body_on_clips = 1 walking on Blade & Sorcery's own clips
 5.2:hsvr.stick 0 0
 6.5:hsvr.expect body_active = 1 the body solver poses him
 6.5:hsvr.expect body_err <= 1.5 drawn vs sent, cm mean
