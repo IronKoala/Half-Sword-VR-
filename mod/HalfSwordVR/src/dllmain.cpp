@@ -4957,7 +4957,6 @@ namespace
         bool pulling_back = false;   // and being pulled back out of it
         double length = 80.0;        // the blade's length (cm)
         bool block_cleared = false;
-        bool past_mouth = false;     // in past the mouth (the game's seat is held off until it is nearly home)
     };
     DrawState g_draw[2];
     const char* sheathing_socket(int side)
@@ -16853,15 +16852,6 @@ namespace
             // A pull that the yank will answer is not a let-go (flip-test3: the past-reach let-go fired
             // after 0.15 s and dropped the weapon before the 0.25 s yank could pull it out).
             if (in_body && cfg.stab_yank_cm > 0.0 && out_along > cfg.stab_yank_cm) out = false;
-            // Nor while he is sheathing or holding a scabbard: the blade catching on its own scabbard or his hip is no reason to
-            // drop it while his grip is held (playtest 11-24 marker 4: stuck 0.4 s by the scabbard mouth, "lets go ... stopped
-            // 70 cm from where you hold it" with the grip still 1.00 for 0.8 s more).
-            if (sheathing_socket(side) || scabbard_held(0) || scabbard_held(1))
-            {
-                if (out) HSVR_LOG_EVERY(1.0, "Hold: %s hand keeps %ls: stopped %.0f cm off while sheathing (no let-go)", side == 0 ? "left" : "right",
-                                        h.weapon->GetName().c_str(), h.blocked_cm);
-                out = false;
-            }
             // B&S's stuck rule (PlayerHand.cs:279-304, StuckBehaviour.Drop): the item is touching something, and the grip is past
             // his arm's length from the shoulder: the hand lets go at once. No timer, no grace, no own-body check (the held item
             // ignores his own body, as B&S's), and it keeps its speed (B&S: the joint just goes).
@@ -22296,114 +22286,6 @@ namespace
         return true;
     }
 
-    // ---- A picked-up sword's scabbard onto the belt (pose_scabbard_on_pickup, Matthew 2026-11-23) ---------
-    // A sword's scabbard is a part of the sword, kept out of sight until its first sheathe (add_new_weapons.md
-    // C4), so a sword picked up loose had none on the belt and two-handed sheathing could never start. Picked
-    // up, its empty scabbard goes to a free sword slot on that hand's hip (else the other hip's, when that
-    // hand is empty): the game's own sheathe-then-draw, at once. Assign + Create Sheath Constraint bring the
-    // scabbard to the socket and pin it; the game's Check, with Sheathing off and a length read below 0, then
-    // runs its break (the draw's: blade joint, slot, save entry, flags), which leaves the scabbard on the belt.
-    std::unordered_map<UObject*, double> g_scab_pickup_tried;
-    double g_scab_pickup_seen[2] = {-1.0, -1.0};
-    UObject* g_scab_pickup_w[2] = {nullptr, nullptr};
-
-    bool scabbard_to_belt(int side, UObject* pawn, UObject* w)
-    {
-        using namespace hsvr;
-        const char* hand = side == 0 ? "left" : "right";
-        UObject* scab = object_property(w, STR("Scabbard"));
-        UObject* base = object_property(w, STR("BaseMesh"));
-        if (!scab || !base) return false;
-        double conc_r = read_number_variable(pawn, STR("R Sheath Slot Concrete")), conc_l = read_number_variable(pawn, STR("L Sheath Slot Concrete"));
-        if (conc_r != 11.0 || conc_l != 11.0 || bool_property(pawn, STR("Weapon UnSheathing R")) || bool_property(pawn, STR("Weapon UnSheathing L")) ||
-            bool_property(pawn, STR("R Weapon Sheathing")) || bool_property(pawn, STR("L Weapon Sheathing")))
-            return false;
-        // Its own hip only: the game's Create Sheath Constraint <T> reads Weapon <T>, and across that is the
-        // other hand's (sheathe_cross_begin's swap is for a weapon going IN, which this is not).
-        int ts = side;
-        bool free_slot = false;
-        for (int i = 0; i < 2; ++i)
-            if (!object_alive(object_property(pawn, k_belt[ts][i].var))) free_slot = true;
-        if (!free_slot)
-        {
-            HSVR_LOG("Scabbard: %ls picked up by the %s hand: no free sword slot on that hip; its scabbard stays hidden", w->GetName().c_str(), hand);
-            return false;
-        }
-        int slot = assign_scabbard_slot(side, ts, pawn, w);
-        if (slot < 0) return false;
-        const TCHAR* S = ts == 0 ? STR("L") : STR("R");
-        auto nm = [&](const wchar_t* fmt) {
-            wchar_t buf[96];
-            std::swprintf(buf, 96, fmt, S);
-            return std::wstring(buf);
-        };
-        Call make(pawn, nm(L"Create Sheath Constraint %ls").c_str());
-        make.byte(STR("Slot"), (uint8_t)slot);
-        bool made = make.run();
-        bool in_slot = object_property(pawn, k_belt[ts][slot].var) == w;
-        // The draw, as the game ends one: not sheathing, not blocked, unsheathing; Check breaks it.
-        set_bool_property(pawn, nm(L"Block %ls Weapon From Sheathing").c_str(), false);
-        set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), false);
-        set_bool_property(pawn, STR("Cross Unsheath"), false);
-        set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), true);
-        // Check seats a blade whose scabbard is within 20 cm up it (Z = the scabbard in BaseMesh's frame), and
-        // breaks it at Z >= its length x 0.85 (hs_draw_sheathe_calls.md §1-§3). Picked up by the hip, Z was
-        // small and it was seated: the sword went onto the belt (PC run 6499f79, 4 of 4). So for the one call
-        // the blade is put a whole length plus 15 cm out along its own line, then back in the hand.
-        Vec3 held_p = component_location(base);
-        Quat held_q = component_rotation(base);
-        double len = blade_length(w);
-        set_component_transform(base, component_location(scab) - held_q.rotate(Vec3{0, 0, 1}) * (len + 15.0), held_q, true);
-        double z_out = held_q.inverse().rotate(component_location(scab) - component_location(base)).z;
-        bool checked = in_slot && run_slot_check(pawn, ts, slot, len);
-        if (object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) == w) set_component_transform(base, held_p, held_q, true);
-        set_bool_property(pawn, nm(L"Weapon UnSheathing %ls").c_str(), false);
-        set_variable(pawn, nm(L"%ls Sheath Slot Concrete").c_str(), 11.0);
-        bool still_held = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R")) == w;
-        bool slot_freed = object_property(pawn, k_belt[ts][slot].var) != w;
-        bool pinned = scabbard_pin(scab) != nullptr;
-        if (bool_property(w, STR("Sheathed"))) Call(w, STR("Unsheathed Mode")).run();
-        if (still_held)
-        {
-            clear_arm_ignore(side);
-            ignore_arm_collision(pawn, object_property(pawn, STR("Mesh")), w, base, side);
-        }
-        sheathe_disarm(side, ts);
-        HSVR_LOG("Scabbard: %ls picked up by the %s hand: its scabbard put on the %s hip's slot %d (Create %s, Check %s at %.1f cm out of %.1f, grip %.0f; scabbard %s, slot %s, sword %s)",
-                 w->GetName().c_str(), hand, ts == 0 ? "left" : "right", slot + 1, made ? "ran" : "NOT found", checked ? "ran" : "NOT run", z_out, len,
-                 read_number_variable(pawn, side == 0 ? STR("L_GripType_Current") : STR("R_GripType_Current")),
-                 pinned ? "pinned on the belt" : "NOT pinned", slot_freed ? "empty again" : "STILL HOLDS THE SWORD", still_held ? "still in the hand" : "NOT IN THE HAND");
-        return pinned && slot_freed && still_held;
-    }
-
-    void scabbard_pickup_tick(UObject* pawn, const hsvr::Config& cfg)
-    {
-        if (!cfg.pose_scabbard_on_pickup || !pawn) return;
-        static bool tracked = on_freed([] {
-            erase_gone_keys(g_scab_pickup_tried);
-            for (UObject*& o : g_scab_pickup_w)
-                if (gone(o)) o = nullptr;
-        });
-        (void)tracked;
-        double now = hsvr::now_seconds();
-        for (int side = 0; side < 2; ++side)
-        {
-            UObject* w = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
-            if (w != g_scab_pickup_w[side])
-            {
-                g_scab_pickup_w[side] = w;
-                g_scab_pickup_seen[side] = now;
-            }
-            if (!w || is_fist(w) || g_draw[side].active || g_two.active || now - g_scab_pickup_seen[side] < 0.3) continue;
-            UObject* scab = object_property(w, STR("Scabbard"));
-            if (!scab || scabbard_pin(scab) || read_number_variable(w, STR("SheathSlot")) != 0.0 || bool_property(w, STR("Is Ammo"))) continue;
-            auto t = g_scab_pickup_tried.find(w);
-            if (t != g_scab_pickup_tried.end() && now - t->second < 2.0) continue; // a slot may free up later
-            g_scab_pickup_tried[w] = now;
-            scabbard_to_belt(side, pawn, w);
-        }
-    }
-
     // The game's stuck-hand rule (ExecuteUbergraph_Willie_BP @474346-474446, then left @475366-476198, right
     // @474461-475313): with a two-handed grip in the right hand (R_GripType_Current 10 or 11) and a hand
     // in this zone of spine_02 (|X| <= 10, Y < 0, Z <= 50), "Weapon UnSheathing <that hand>" makes it Set
@@ -22624,11 +22506,8 @@ namespace
         if (cfg.pose_sheathe_two_hand)
         {
             UObject* held = held_scabbard(1 - side);
-            // A knife or dagger goes in one-handed (playtest 11-24: the kitchen knife could not be put away at all with the
-            // other hand busy; the holster refuses it for having a scabbard of its own). Into its own pinned scabbard only.
-            bool small_blade = blade_length(w) <= 28.0;
-            if (!held && !small_blade) return;
-            if (held && held != scab)
+            if (!held) return;
+            if (held != scab)
             {
                 HSVR_LOG_EVERY(2.0, "Sheathe: %s hand's sword: the other hand holds a scabbard that is not this sword's; not sheathed", hand);
                 return;
@@ -22773,9 +22652,6 @@ namespace
             {
                 if (d.sheathing)
                 {
-                    // Let go in past the mouth but before home: the game seats it now (as before), so it is never dropped.
-                    if (d.past_mouth && !d.block_cleared)
-                        set_bool_property(pawn, d.slot_side == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
                     HSVR_LOG("Sheathe: %s hand let go of its weapon after %.2f s; checking its seat", side == 0 ? "left" : "right", now - d.t0);
                     if (base) g_seat[side] = SeatWatch{d.weapon, slot_index(d.slot_side, d.slot), now};
                 }
@@ -22802,18 +22678,12 @@ namespace
             Vec3 bp = component_location(base);
             Quat bq = component_rotation(base);
             double z = d.scabbard ? bq.inverse().rotate(component_location(d.scabbard) - bp).z : 0.0;
-            if (d.sheathing && !d.past_mouth && z < 0.9 * d.length)
+            if (d.sheathing && !d.block_cleared && z < 0.9 * d.length)
             {
-                d.past_mouth = true;
-                HSVR_LOG("Sheathe: in past the mouth (%.1f cm out); the hand slides it home", z);
-            }
-            // The game's seat (which locks it at once) waits until the hand has slid it nearly home, as a real sword is pushed
-            // in (playtest 11-24: in past the mouth at 51.2 cm out, let go, "seated and locked" 15 ms later: "it just snapped").
-            if (d.sheathing && d.past_mouth && !d.block_cleared && z < (std::min)(0.9 * d.length, 25.0))
-            {
+                // In past the mouth: the game may now seat it (and let the hand go) at 20 cm.
                 set_bool_property(pawn, d.slot_side == 0 ? STR("Block L Weapon From Sheathing") : STR("Block R Weapon From Sheathing"), false);
                 d.block_cleared = true;
-                HSVR_LOG("Sheathe: nearly home (%.1f cm out): the game may seat it", z);
+                HSVR_LOG("Sheathe: in past the mouth (%.1f cm out)", z);
             }
             if (d.sheathing && !d.block_cleared)
             {
@@ -22837,12 +22707,7 @@ namespace
                 // 02:57Z: stuck 33-47 cm out of 57). So once pulled back 8 cm it is a draw (0.85 of the
                 // length, less when swung); pushed in again, a sheathe.
                 d.z_in = (std::min)(d.z_in, z);
-                // For its first 0.3 s it must come 20 cm back, not 8: as the blade goes in, the held scabbard swings
-                // onto its line and kicks it back a few cm (playtest 2026-11-23 17:04: in at 50.2 cm out, 0.04 s later
-                // 55.7 and "pulled back out", the scabbard 41 deg off its belt angle; Matthew: "it got in position for
-                // sheathing, but immediately got back out of position").
-                const double back_cm = now - d.t0 < 0.3 ? 20.0 : 8.0;
-                bool back = d.pulling_back ? z > d.z_in + 2.0 : z > d.z_in + back_cm;
+                bool back = d.pulling_back ? z > d.z_in + 2.0 : z > d.z_in + 8.0;
                 if (back != d.pulling_back)
                 {
                     d.pulling_back = back;
@@ -22900,7 +22765,6 @@ namespace
             }
         }
         seat_watch_tick(pawn);
-        scabbard_pickup_tick(pawn, cfg);
         for (int side = 0; side < 2; ++side) sheathe_check(side, pawn, cfg);
     }
 
@@ -23432,25 +23296,6 @@ namespace
                 double left = length(scaled_axis((want * cur.inverse()).normalized())) * 57.2958;
                 if ((left < 2.0 && off_belt < 1.5) || now - s.t0 > 1.0)
                 {
-                    // Out of time and still far off its belt angle: put it there before the lock, never lock it crooked
-                    // (playtest 11-24 2:44 PM: the hand pulled off it, "back on the belt (100.5 deg, 3.9 cm off)" after the
-                    // 1 s, the sword in its slot then "NOT seated ... scabbard 13.0 cm from Sheath_Slot_R_1").
-                    if (left > 5.0 || off_belt > 2.0)
-                    {
-                        Vec3 at = pelvis_p + pelvis_q.rotate(s.rest_pos);
-                        set_component_transform(s.scab, at, want, true);
-                        Call z1(s.scab, STR("SetPhysicsAngularVelocityInRadians"));
-                        z1.three(STR("NewAngVel"), 0.0, 0.0, 0.0);
-                        z1.flag(STR("bAddToCurrent"), false);
-                        z1.run();
-                        Call z2(s.scab, STR("SetPhysicsLinearVelocity"));
-                        z2.three(STR("NewVel"), pelvis_v.x, pelvis_v.y, pelvis_v.z);
-                        z2.flag(STR("bAddToCurrent"), false);
-                        z2.run();
-                        HSVR_LOG("Scabbard: still %.1f deg / %.1f cm off its belt place after %.1f s: put on it before the lock", left, off_belt, now - s.t0);
-                        left = 0.0;
-                        off_belt = 0.0;
-                    }
                     UObject* scab = s.scab;
                     s = ScabHold{};
                     bool drawing = false;
