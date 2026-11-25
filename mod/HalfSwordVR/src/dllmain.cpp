@@ -2263,6 +2263,8 @@ namespace
         int calls = 0, quick_calls = 0; // for the log: updates, and those under 2 ms after the last
         bool locked[2] = {false, false};
         bool no_relock[2] = {false, false};
+        bool prev_locked[2] = {false, false};
+        hsvr::Vec3 dbg_loc;
         int forced_releases = 0; // for the log: locks let go because the clip's spot ran 30 cm off // foot lock (world spot while the clip has the foot planted)
         hsvr::Vec3 anchor[2], ease_off[2];
         double ease_t[2] = {1.0, 1.0};
@@ -2713,7 +2715,20 @@ namespace
                 {
                     // Let go (eased) once the clip's spot is 30 cm off, and not locked again until this
                     // foot lifts: locking again at once jumped the foot up to 30 cm in a frame (run 4).
-                    if (!A.locked[s] && !A.no_relock[s]) { A.locked[s] = true; A.anchor[s] = flat_t; }
+                    if (!A.locked[s] && !A.no_relock[s])
+                    {
+                        // Put down where the foot is drawn now: if it is still easing off its last spot,
+                        // from there (locking at the clip's spot jumped it up to 17 cm, run 5).
+                        Vec3 at = flat_t;
+                        if (A.ease_t[s] < 0.15)
+                        {
+                            double u = A.ease_t[s] / 0.15;
+                            at = flat_t + A.ease_off[s] * (1.0 - u * u * (3.0 - 2.0 * u));
+                        }
+                        A.locked[s] = true;
+                        A.anchor[s] = at;
+                        A.ease_t[s] = 1.0;
+                    }
                     else if (A.locked[s] && length(A.anchor[s] - flat_t) > 30.0 * scale)
                     {
                         A.locked[s] = false;
@@ -2779,17 +2794,23 @@ namespace
             // Over at least 5 ms (his update can run twice in one frame: 0.1 mm over 0.1 ms read as 1 m/s).
             double since = now - A.target_prev_t[s];
             bool measure = since >= 0.005 || !A.target_prev_ok[s];
-            if (measure && pose.planted[s] > 0.99 && A.target_prev_ok[s] && A.fade >= 1.0 && since < 0.1)
+            // Only between two frames the foot was locked (the frame it is put down it still moves with the clip).
+            if (measure && pose.planted[s] > 0.99 && A.target_prev_ok[s] && A.prev_locked[s] && A.locked[s] && A.fade >= 1.0 && since < 0.1)
             {
                 Vec3 m = Few - A.target_prev_world[s];
                 m.z = 0.0;
                 double v = length(m) / since;
+                if (v > 30.0)
+                    HSVR_LOG_EVERY(0.25, "CrouchAnim: %s planted foot's spot moved %.1f cm in %.1f ms: locked %d (anchor %.1f, %.1f) sent (%.1f, %.1f) was (%.1f, %.1f); easing %.2f s; leg %.1f of %.1f reach; planted %.2f; body moved %.1f cm",
+                                   s == 0 ? "left" : "right", length(m), since * 1000.0, (int)A.locked[s], A.anchor[s].x, A.anchor[s].y, Few.x, Few.y,
+                                   A.target_prev_world[s].x, A.target_prev_world[s].y, A.ease_t[s], length(F - H), a + b, pose.planted[s], length(Vec3{loc.x - A.dbg_loc.x, loc.y - A.dbg_loc.y, 0.0}));
                 A.slip_sum += v, ++A.slip_n;
                 A.slip_worst = (std::max)(A.slip_worst, v);
                 g_canim_stats.slip_sum += v, ++g_canim_stats.slip_n;
                 g_canim_stats.slip_worst = (std::max)(g_canim_stats.slip_worst, v);
             }
-            if (measure) { A.target_prev_world[s] = Few; A.target_prev_t[s] = now; }
+            if (measure) { A.target_prev_world[s] = Few; A.target_prev_t[s] = now; A.prev_locked[s] = A.locked[s]; }
+            if (measure && s == 1) A.dbg_loc = loc;
             A.target_prev_cs[s] = Fe;
             A.target_prev_ok[s] = true;
         }
