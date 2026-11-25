@@ -839,6 +839,12 @@ namespace hsvr
         num("pose_step_lead_s", c.pose_step_lead_s);
         num("pose_step_crouch_scale", c.pose_step_crouch_scale);
         num("pose_step_crouch_full_cm", c.pose_step_crouch_full_cm);
+        flag("body_solver", c.body_solver);
+        num("body_knee_max_deg", c.body_knee_max_deg);
+        num("body_hips_pull_max_cm", c.body_hips_pull_max_cm);
+        num("body_step_height_cm", c.body_step_height_cm);
+        num("body_foot_spacing_cm", c.body_foot_spacing_cm);
+        num("body_moving_cms", c.body_moving_cms);
         flag("pose_crouch_anim", c.pose_crouch_anim);
         num("pose_crouch_anim_on_ratio", c.pose_crouch_anim_on_ratio);
         num("pose_crouch_anim_off_ratio", c.pose_crouch_anim_off_ratio);

@@ -1169,6 +1169,16 @@ namespace hsvr
         // clip's knee. The baked files are read from the bs-crouch folder next to the dll (made from your own
         // B&S install; not shipped). It plays while your head is at most pose_crouch_anim_on_ratio of
         // standing height (B&S: crouchHeightRatio 0.8) and stops above pose_crouch_anim_off_ratio.
+        // The body solver (body_solver.cpp; Matthew 2026-11-24, design "VR body rebuild: our own body
+        // solver"): one solver poses the hips, spine, neck, head and legs from the headset and controllers
+        // (Chasm's VR Framework's IK, Blade & Sorcery's standing/moving split). On, the old torso lean,
+        // feet stepping, crouch animation, torso twist and crouch drop are not used.
+        bool body_solver = true;
+        double body_knee_max_deg = 140.0;      // the knees fold no further; past that the spine bends instead
+        double body_hips_pull_max_cm = 12.0;   // hips come down at most this far to keep a foot on the floor
+        double body_step_height_cm = 8.0;
+        double body_foot_spacing_cm = 24.0;
+        double body_moving_cms = 100.0;        // B&S: at this speed the legs are all gait, none balance steps
         bool pose_crouch_anim = true;
         double pose_crouch_anim_on_ratio = 0.8, pose_crouch_anim_off_ratio = 0.85;
         double pose_crouch_anim_fade_s = 0.25;  // in and out (and between standing still and moving)

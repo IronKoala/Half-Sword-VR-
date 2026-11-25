@@ -1,0 +1,14 @@
+# Standing still, looking ahead: legs steady, feet planted.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.fake_head_pose 1
+3.0:hsvr.mark
+8.0:hsvr.expect body_active = 1 the body solver poses him
+8.0:hsvr.expect body_err <= 1.5 drawn vs sent, cm mean
+8.0:hsvr.expect body_err_worst <= 6 drawn vs sent, cm worst
+8.0:hsvr.expect body_flips = 0 a knee never swaps sides
+8.0:hsvr.expect body_knee_max <= 141 knees never past the fold limit
+8.0:hsvr.expect body_twitches = 0 no knee twitch
+8.0:hsvr.expect body_dknee_worst <= 3 knee bend change a tick, deg
+8.0:hsvr.expect body_slip <= 1 planted feet slide, cm/s mean
+8.0:hsvr.expect body_steps <= 1 steps standing still
+8.0:hsvr.expect body_knee_max <= 25 knees nearly straight standing

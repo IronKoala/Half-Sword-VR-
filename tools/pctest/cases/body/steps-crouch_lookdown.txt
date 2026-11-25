@@ -1,0 +1,21 @@
+# Matthew 11-24 11:21: crouching and leaning down made the legs freak out. Crouch 60 cm and look down 50 deg, eased in over 1.2 s.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.fake_head_pose 1
+2.0:hsvr.mark
+2.1:hsvr.fake_head_tilt 8 0 10
+2.3:hsvr.fake_head_tilt 16 0 20
+2.5:hsvr.fake_head_tilt 25 0 30
+2.7:hsvr.fake_head_tilt 33 0 40
+2.9:hsvr.fake_head_tilt 41 0 50
+3.1:hsvr.fake_head_tilt 50 0 60
+7.0:hsvr.expect body_active = 1 the body solver poses him
+7.0:hsvr.expect body_err <= 1.5 drawn vs sent, cm mean
+7.0:hsvr.expect body_err_worst <= 6 drawn vs sent, cm worst
+7.0:hsvr.expect body_flips = 0 a knee never swaps sides
+7.0:hsvr.expect body_knee_max <= 141 knees never past the fold limit
+7.0:hsvr.expect body_twitches <= 1 no knee twitch
+7.0:hsvr.expect body_dknee_worst <= 15 knee bend change a tick, deg
+7.0:hsvr.expect body_kneepos_worst <= 6 knee moved a tick, cm
+7.0:hsvr.expect body_pitch_max >= 15 the spine bends when looking down
+7.0:hsvr.expect body_slip <= 2 planted feet slide, cm/s mean
+7.1:hsvr.fake_head_tilt 0 0 0

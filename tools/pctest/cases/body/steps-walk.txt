@@ -1,0 +1,14 @@
+# Stick walk forward 3 s, standing: gait, no twitch.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.fake_head_pose 1
+2.0:hsvr.mark
+2.2:hsvr.stick 0 1
+5.2:hsvr.stick 0 0
+6.5:hsvr.expect body_active = 1 the body solver poses him
+6.5:hsvr.expect body_err <= 1.5 drawn vs sent, cm mean
+6.5:hsvr.expect body_err_worst <= 6 drawn vs sent, cm worst
+6.5:hsvr.expect body_flips = 0 a knee never swaps sides
+6.5:hsvr.expect body_knee_max <= 141 knees never past the fold limit
+6.5:hsvr.expect body_twitches <= 2 knee twitches
+6.5:hsvr.expect body_kneepos_worst <= 12 knee moved a tick, cm
+6.5:hsvr.expect walk_speed >= 0 (record)

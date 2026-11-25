@@ -43,6 +43,7 @@
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UObjectArray.hpp>
 
+#include "body_solver.hpp"
 #include "config.hpp"
 #include "controllers.hpp"
 #include "engine_slot.hpp"
@@ -1400,7 +1401,11 @@ namespace
     bool g_kept_have = false;
     void pose_release()
     {
-        for (auto& [bone, n] : g_pose.chain) node_release(n);
+        for (auto& [bone, n] : g_pose.chain)
+        {
+            node_release(n);
+            node_release_translation(n);
+        }
         if (g_pose.mesh && g_pose.calibrated)
         {
             set_simulate(g_pose.mesh, true, true);
@@ -2545,6 +2550,7 @@ namespace
         UObject* driver = g_pose.driver ? g_pose.driver : g_pose.mesh;
         UObject* pawn = g_pose.pawn;
         if (!driver || !pawn) return;
+        if (cfg.body_solver) return; // the body solver poses his legs
         if (!A.tried && cfg.pose_crouch_anim) crouch_anim_load();
         double now = now_seconds();
         double dt = A.last_t < 0.0 ? 0.0 : (std::min)(0.1, (std::max)(0.0, now - A.last_t));
@@ -3587,6 +3593,82 @@ namespace
         bool from_set[2] = {false, false};
     };
     CtlTrack g_ctl_track;
+    // Test aid hsvr.head_replay <file> [blend s] | off (tools/body/head_track.py cuts one from a bug-marker replay): the
+    // pretend headset plays back his recorded head in the body's frame (relative to the capsule and its heading), looped,
+    // so the body solver is tested on his own crouches and leans (Matthew 2026-11-24 markers).
+    struct HeadTrack
+    {
+        bool on = false;
+        std::vector<std::array<double, 12>> rows; // t, actor x y z yaw(deg), head x y z qx qy qz qw (world, cm)
+        double start = -1.0;
+    };
+    HeadTrack g_head_track;
+    bool head_track_load(const std::string& file)
+    {
+        std::wstring path(file.begin(), file.end());
+        if (path.find(L':') == std::wstring::npos) path = hsvr::mod_dir() + path;
+        FILE* f = _wfopen(path.c_str(), L"rb");
+        if (!f) return false;
+        HeadTrack t;
+        char line[1024];
+        while (fgets(line, sizeof line, f))
+        {
+            if (line[0] == '#' || line[0] == 't') continue;
+            std::array<double, 12> r{};
+            int n = 0;
+            char* q = line;
+            while (n < 12 && *q)
+            {
+                char* e = nullptr;
+                r[n] = strtod(q, &e);
+                if (e == q) break;
+                ++n;
+                q = e;
+                if (*q == ',') ++q;
+            }
+            if (n == 12) t.rows.push_back(r);
+        }
+        fclose(f);
+        if (t.rows.size() < 2) return false;
+        t.on = true;
+        t.start = hsvr::now_seconds();
+        g_head_track = t;
+        return true;
+    }
+    // The track's head now, in the world (false when no track plays).
+    bool head_track_pose(hsvr::Vec3& w, hsvr::Quat& r)
+    {
+        using namespace hsvr;
+        HeadTrack& t = g_head_track;
+        if (!t.on || !g_pose.pawn) return false;
+        double now = now_seconds();
+        double t0 = t.rows.front()[0], len = t.rows.back()[0] - t0;
+        if (len <= 0.0) return false;
+        double at = t0 + std::fmod(now - t.start, len);
+        size_t i = 0;
+        while (i + 2 < t.rows.size() && t.rows[i + 1][0] < at) ++i;
+        const auto& a = t.rows[i];
+        const auto& b = t.rows[i + 1];
+        double u = b[0] > a[0] ? (std::min)(1.0, (std::max)(0.0, (at - a[0]) / (b[0] - a[0]))) : 0.0;
+        auto pose_of = [&](const std::array<double, 12>& row, Vec3& lp, Quat& lq) {
+            Quat yaw = quat_from_yaw_deg(row[4]);
+            lp = yaw.inverse().rotate(Vec3{row[5], row[6], row[7]} - Vec3{row[1], row[2], row[3]});
+            lq = (yaw.inverse() * Quat{row[8], row[9], row[10], row[11]}).normalized();
+        };
+        Vec3 pa, pb;
+        Quat qa, qb;
+        pose_of(a, pa, qa);
+        pose_of(b, pb, qb);
+        if (qa.x * qb.x + qa.y * qb.y + qa.z * qb.z + qa.w * qb.w < 0.0) qb = Quat{-qb.x, -qb.y, -qb.z, -qb.w};
+        Vec3 lp = pa + (pb - pa) * u;
+        Quat lq = Quat{qa.x + (qb.x - qa.x) * u, qa.y + (qb.y - qa.y) * u, qa.z + (qb.z - qa.z) * u, qa.w + (qb.w - qa.w) * u}.normalized();
+        Call rc(g_pose.pawn, STR("K2_GetActorRotation"));
+        rc.run();
+        Quat yaw_now = quat_from_yaw_deg(rc.vec().y);
+        w = actor_location(g_pose.pawn) + yaw_now.rotate(lp);
+        r = (yaw_now * lq).normalized();
+        return true;
+    }
     // Test aid hsvr.hold_rebase <side>: that hand's hold takes the weapon's turn in the hand as it is NOW (as if grabbed so). With
     // his replayed wrists the rig's grab turn was not his: the main wrist aimed the polehammer 135 deg from where his two hands
     // put it and the turn sat at its cap for the whole replay (runs 4750e14 / 6cec1f5). Cleared on a new case or weapon.
@@ -4823,6 +4905,7 @@ namespace
     bool head_pose_world(const hsvr::Config& cfg, const hsvr::ControllerState& state, hsvr::Vec3& w, hsvr::Quat& r)
     {
         using namespace hsvr;
+        if (!state.head_valid && head_track_pose(w, r)) return true; // test: a recorded head (hsvr.head_replay)
         if (state.head_valid)
         {
             if (!stereo_tracking_to_world(state.head, w, r)) return false;
@@ -4986,6 +5069,299 @@ namespace
         g_lean.head_moved = m;
     }
 
+
+    // ---- The body solver (body_solver.cpp; design "VR body rebuild: our own body solver") --------
+    // One solver poses his hips, spine, neck, head and legs from your headset and controllers each
+    // frame, after Chasm's VR Framework's full-body IK with Blade & Sorcery's standing/moving split.
+    // Every bone it owns is written Replace in component space (rotation and position) on the
+    // end-of-graph Modify Bone nodes, so the game's own animation under them no longer shows. The arms
+    // stay with pose_arm, which places them from the chest this writes.
+    struct BodySolverState
+    {
+        hsvr::body::Solver solver;
+        UObject* pawn = nullptr;
+        bool tried = false, ok = false;
+        hsvr::Quat mrel;      // the driver component's rotation in the body's frame (heading 0)
+        double scale = 1.0;
+        double last_t = -1.0;
+        double floor_z[2] = {0.0, 0.0};
+        bool have_floor[2] = {false, false};
+        hsvr::body::Output last;
+        hsvr::Vec3 sent[hsvr::body::J_COUNT]; // where each bone was sent last frame (world), for the drawn-vs-sent check
+        bool sent_ok = false;
+        double err_worst = 0.0, err_sum = 0.0;
+        int err_n = 0;
+        const char* err_bone = "";
+    };
+    BodySolverState g_body;
+    std::atomic<bool> g_body_active{false}; // posing his body this frame (readers: tests, replay)
+    // Since hsvr.mark (test readers body_*).
+    struct BodyStats
+    {
+        int frames = 0;
+        double err_sum = 0, err_worst = 0; int err_n = 0;   // drawn vs sent, cm
+        double knee_max = 0, dknee_worst = 0, kneepos_worst = 0; // deg, deg a tick, cm a tick
+        int twitches = 0, flips = 0;                         // knee bend reversing >10 deg a tick both ways; knee swapping sides
+        double pitch_max = 0, short_max = 0, pulled_max = 0;
+        double slip_sum = 0, slip_worst = 0; int slip_n = 0; // planted foot's ankle over the floor, cm/s
+        int steps0 = -1, steps = 0;
+        double prev_knee[2] = {0, 0}, prev_dk[2] = {0, 0}, prev_side[2] = {0, 0};
+        hsvr::Vec3 prev_kneepos[2], prev_ankle[2];
+        bool have_prev = false, prev_planted[2] = {false, false};
+    };
+    BodyStats g_body_stats;
+    void body_stats_reset() { g_body_stats = BodyStats{}; }
+
+    // The reference pose (Willie_Lopoly's T-pose: every bone's rotation is the identity) in the driver's
+    // component space: each bone's local reference position summed down from the root.
+    bool body_ref_pose(UObject* driver, const char* bone, hsvr::Vec3& out)
+    {
+        using namespace hsvr;
+        out = {0, 0, 0};
+        std::string name = bone;
+        for (int guard = 0; guard < 16 && !name.empty() && name != "None"; ++guard)
+        {
+            Call idx(driver, STR("GetBoneIndex"));
+            idx.name(STR("BoneName"), bone_fname(name));
+            if (!idx.run()) return false;
+            int32_t i = idx.integer();
+            if (i < 0) return guard > 0; // past the root
+            Call ref(driver, STR("GetRefPosePosition"));
+            if (!ref.fn) return false;
+            FProperty* bp = ref.param(STR("BoneIndex"));
+            if (!bp) return false;
+            *reinterpret_cast<int32_t*>(ref.buffer.data() + bp->GetOffset_Internal()) = i;
+            if (!ref.run()) return false;
+            out = out + ref.vec();
+            Call par(driver, STR("GetParentBone"));
+            if (!par.fn) return false;
+            par.name(STR("BoneName"), bone_fname(name));
+            if (!par.run()) return false;
+            FProperty* rp = par.param(STR("ReturnValue"));
+            if (!rp) return false;
+            FName parent = *reinterpret_cast<FName*>(par.buffer.data() + rp->GetOffset_Internal());
+            std::wstring pw = parent.ToString();
+            name.clear();
+            for (wchar_t ch : pw) name += (char)(ch < 128 ? ch : '?');
+        }
+        return true;
+    }
+
+    bool body_calibrate(const hsvr::Config& cfg, UObject* pawn, UObject* driver, double heading)
+    {
+        using namespace hsvr;
+        BodySolverState& B = g_body;
+        B.pawn = pawn;
+        B.tried = true;
+        B.ok = false;
+        B.last_t = -1.0;
+        B.have_floor[0] = B.have_floor[1] = false;
+        B.sent_ok = false;
+        B.solver = body::Solver{};
+        B.scale = (std::max)(1e-3, component_scale_z(driver));
+        B.mrel = (quat_from_yaw_deg(heading).inverse() * component_rotation(driver)).normalized();
+        body::Skeleton& K = B.solver.skel;
+        K.scale = B.scale;
+        std::string missing;
+        for (int j = 0; j < body::J_COUNT; ++j)
+        {
+            Vec3 cs;
+            if (!body_ref_pose(driver, body::joint_bone(j), cs))
+            {
+                missing += std::string(" ") + body::joint_bone(j);
+                continue;
+            }
+            K.joint[j] = B.mrel.rotate(cs) * B.scale;
+        }
+        // Relative to the floor under the pelvis.
+        Vec3 under{K.joint[body::J_PELVIS].x, K.joint[body::J_PELVIS].y, 0.0};
+        for (int j = 0; j < body::J_COUNT; ++j) K.joint[j] = K.joint[j] - under;
+        K.build(cfg.eye_forward_cm, cfg.eye_up_cm);
+        Vec3 fwd = B.mrel.rotate({0, 1, 0});
+        std::string why = missing.empty() ? std::string() : " (no reference pose for" + missing + ")";
+        HSVR_LOG("Body: solver skeleton %s%s: scale %.3f, thigh %.1f shin %.1f cm, ankle %.1f, pelvis %.1f, eyes %.1f cm; his component's forward (+Y) is (%.2f, %.2f, %.2f) in the body's frame",
+                 K.valid && missing.empty() && fwd.x > 0.9 ? "ready" : "NOT USED", why.c_str(), B.scale, K.thigh, K.shin, K.ankle_height,
+                 K.joint[body::J_PELVIS].z, K.eye_height, fwd.x, fwd.y, fwd.z);
+        B.ok = K.valid && missing.empty() && fwd.x > 0.9;
+        return B.ok;
+    }
+
+    void body_release()
+    {
+        for (int j = 0; j < hsvr::body::J_COUNT; ++j)
+            if (ModifyBoneNode* n = chain_node(hsvr::body::joint_bone(j)))
+            {
+                node_release(*n);
+                node_release_translation(*n);
+            }
+        g_body_active.store(false);
+    }
+
+    // Poses his body this frame. Returns false when it could not (no head pose, no skeleton): the caller
+    // leaves those bones to the game.
+    bool body_tick(const hsvr::Config& cfg, UObject* pawn, UObject* driver, const hsvr::ControllerState& state, double heading, const hsvr::Vec3& actor)
+    {
+        using namespace hsvr;
+        BodySolverState& B = g_body;
+        if (B.pawn != pawn || !B.tried) body_calibrate(cfg, pawn, driver, heading);
+        if (!B.ok) return false;
+        double now = now_seconds();
+        double dt = B.last_t < 0.0 ? 1.0 / 60.0 : now - B.last_t;
+        bool reset = B.last_t < 0.0 || dt > 0.5;
+        B.last_t = now;
+        body::Params& P = B.solver.p;
+        P.knee_max_flexion_deg = cfg.body_knee_max_deg;
+        P.hips_pull_max_cm = cfg.body_hips_pull_max_cm;
+        P.step_height = cfg.body_step_height_cm;
+        P.foot_spacing = cfg.body_foot_spacing_cm;
+        P.loco_speed = cfg.body_moving_cms;
+
+        body::Input in;
+        in.dt = dt;
+        in.reset = reset;
+        Vec3 head_world;
+        Quat head_rot;
+        if (!head_pose_world(cfg, state, head_world, head_rot)) return false;
+        in.eyes = head_world;
+        in.head_rot = head_rot;
+        in.eye_offset = {cfg.eye_forward_cm, 0.0, cfg.eye_up_cm};
+        for (int side = 0; side < 2; ++side)
+        {
+            const HandState& hs = state.hand[side];
+            Quat r;
+            in.hand_valid[side] = hs.grip_valid && stereo_tracking_to_world(hs.grip, in.hand[side], r);
+        }
+        in.heading_deg = heading;
+        in.capsule = actor;
+        // The floor under each foot (traced; held when nothing is found).
+        for (int side = 0; side < 2; ++side)
+        {
+            Vec3 at = B.have_floor[side] ? B.solver.foot_spot(side) : actor;
+            double z = 0.0;
+            if (ground_below(pawn, at.x, at.y, actor.z + 20.0, z)) B.floor_z[side] = z, B.have_floor[side] = true;
+            else if (!B.have_floor[side]) B.floor_z[side] = actor.z - 87.0 * B.scale;
+            in.floor_z[side] = B.floor_z[side];
+        }
+        // The game's kick has a leg: the leg is left to it.
+        for (int side = 0; side < 2; ++side)
+        {
+            bool flag = bool_property(pawn, side == 0 ? STR("Kicking L") : STR("Kicking R"));
+            bool kicking = cfg.pose_feet_free_on_kick && (flag || now - g_kick_fired_at < cfg.pose_feet_kick_free_s);
+            if (kicking != g_feet[side].kicking)
+                HSVR_LOG("Kick: %s leg %s", side == 0 ? "left" : "right", kicking ? "left to the game's kick" : "back on the body solver");
+            g_feet[side].kicking = kicking;
+        }
+        body::Output o = B.solver.solve(in);
+        if (!o.valid) return false;
+
+        // Drawn last frame vs sent last frame (the posed driver's sockets): does the graph show what was written?
+        if (B.sent_ok)
+        {
+            static const int check[] = {body::J_PELVIS, body::J_SPINE_05, body::J_HEAD, body::J_CALF_L, body::J_CALF_R, body::J_FOOT_L, body::J_FOOT_R};
+            for (int j : check)
+            {
+                if ((j == body::J_FOOT_L || j == body::J_CALF_L) && g_feet[0].kicking) continue;
+                if ((j == body::J_FOOT_R || j == body::J_CALF_R) && g_feet[1].kicking) continue;
+                double e = length(socket_location(driver, bone_fname(body::joint_bone(j))) - B.sent[j]);
+                if (e > B.err_worst) B.err_worst = e, B.err_bone = body::joint_bone(j);
+                B.err_sum += e, ++B.err_n;
+                g_body_stats.err_sum += e, ++g_body_stats.err_n, g_body_stats.err_worst = (std::max)(g_body_stats.err_worst, e);
+            }
+        }
+        Quat C = component_rotation(driver);
+        Quat Cinv = C.inverse();
+        Vec3 L = component_location(driver);
+        double sc = (std::max)(1e-3, component_scale_z(driver));
+        for (int j = 0; j < body::J_COUNT; ++j)
+        {
+            if (j == body::J_BALL_L || j == body::J_BALL_R) continue; // no node: rides on the foot
+            bool leg_l = j >= body::J_THIGH_L && j <= body::J_FOOT_L, leg_r = j >= body::J_THIGH_R && j <= body::J_FOOT_R;
+            ModifyBoneNode* n = chain_node(body::joint_bone(j));
+            if (!n) continue;
+            if ((leg_l && g_feet[0].kicking) || (leg_r && g_feet[1].kicking))
+            {
+                node_release(*n);
+                node_release_translation(*n);
+                continue;
+            }
+            Quat cs = (Cinv * o.rot[j] * B.mrel).normalized();
+            if (j == body::J_HEAD) cs = (Cinv * (head_rot * g_pose.head_offset)).normalized(); // the head bone as calibrated against the headset
+            node_set_rotation(*n, cs);
+            node_set_translation(*n, Cinv.rotate(o.pos[j] - L) * (1.0 / sc));
+            B.sent[j] = o.pos[j];
+        }
+        B.sent_ok = true;
+        // For the rest of the mod: how far his body is down (capsule height, logs) and where his feet are.
+        double floor_low = (std::min)(in.floor_z[0], in.floor_z[1]);
+        g_crouch_drop = (std::max)(0.0, B.solver.skel.joint[body::J_PELVIS].z - (o.pos[body::J_PELVIS].z - floor_low));
+        for (int side = 0; side < 2; ++side)
+        {
+            g_feet[side].at = o.pos[side == 0 ? body::J_FOOT_L : body::J_FOOT_R];
+            g_feet[side].ground_z = in.floor_z[side] + B.solver.skel.ankle_height;
+            g_feet[side].stepping = o.stepping[side];
+            g_feet[side].lift = o.lift_cm[side];
+            g_feet[side].steps = o.steps;
+        }
+        g_body_active.store(true);
+        B.last = o;
+        {
+            BodyStats& S = g_body_stats;
+            ++S.frames;
+            Vec3 hips_right = o.rot[body::J_PELVIS].rotate({0, 1, 0});
+            bool any = false;
+            for (int side = 0; side < 2; ++side)
+            {
+                if (g_feet[side].kicking) continue;
+                any = true;
+                int jt = side == 0 ? body::J_THIGH_L : body::J_THIGH_R;
+                Vec3 knee = o.pos[jt + 1], hip = o.pos[jt], ankle = o.pos[jt + 2];
+                double lat = dot(knee - (hip + ankle) * 0.5, hips_right) * (side == 0 ? -1.0 : 1.0);
+                S.knee_max = (std::max)(S.knee_max, o.knee_deg[side]);
+                bool planted = !o.stepping[side] && o.locomotion_weight > 0.98;
+                if (S.have_prev)
+                {
+                    double dk = o.knee_deg[side] - S.prev_knee[side];
+                    S.dknee_worst = (std::max)(S.dknee_worst, std::fabs(dk));
+                    S.kneepos_worst = (std::max)(S.kneepos_worst, length(knee - S.prev_kneepos[side]));
+                    if (dk * S.prev_dk[side] < 0.0 && std::fabs(dk) > 10.0 && std::fabs(S.prev_dk[side]) > 10.0) ++S.twitches;
+                    if (std::fabs(lat) > 5.0 && std::fabs(S.prev_side[side]) > 5.0 && lat * S.prev_side[side] < 0.0) ++S.flips;
+                    if (planted && S.prev_planted[side] && dt > 1e-4)
+                    {
+                        Vec3 d = ankle - S.prev_ankle[side];
+                        d.z = 0.0;
+                        double v = length(d) / dt;
+                        S.slip_sum += v, ++S.slip_n, S.slip_worst = (std::max)(S.slip_worst, v);
+                    }
+                    S.prev_dk[side] = dk;
+                }
+                S.prev_knee[side] = o.knee_deg[side];
+                S.prev_kneepos[side] = knee;
+                S.prev_ankle[side] = ankle;
+                S.prev_side[side] = lat;
+                S.prev_planted[side] = planted;
+            }
+            S.have_prev = any;
+            S.pitch_max = (std::max)(S.pitch_max, o.pitch_deg);
+            S.short_max = (std::max)(S.short_max, o.hips_short_cm);
+            S.pulled_max = (std::max)(S.pulled_max, o.hips_pulled_cm);
+            if (S.steps0 < 0) S.steps0 = o.steps;
+            S.steps = o.steps - S.steps0;
+        }
+        static double last_log = 0.0;
+        if (now - last_log >= 0.25)
+        {
+            last_log = now;
+            HSVR_LOG("Body: spine pitch %.0f, chest yaw %.0f (heading %.0f), hips %.0f cm over the floor (%.0f down), knees %.0f / %.0f deg, heels %.0f / %.0f, "
+                     "hips held up %.1f / pulled down %.1f cm, %s (B&S weight %.2f), %s%s, %d steps; drawn vs sent worst %.2f cm (%s) mean %.2f",
+                     o.pitch_deg, o.torso_yaw_deg, heading, o.pos[body::J_PELVIS].z - floor_low, g_crouch_drop, o.knee_deg[0], o.knee_deg[1], o.heel_deg[0],
+                     o.heel_deg[1], o.hips_short_cm, o.hips_pulled_cm, o.walking ? "walking" : "standing", o.locomotion_weight, o.stepping[0] ? "left stepping " : "",
+                     o.stepping[1] ? "right stepping" : "", o.steps, B.err_worst, B.err_bone, B.err_n ? B.err_sum / B.err_n : 0.0);
+            B.err_worst = B.err_sum = 0.0;
+            B.err_n = 0;
+        }
+        return true;
+    }
+
     void pose_body(const hsvr::Config& cfg)
     {
         using namespace hsvr;
@@ -5117,7 +5493,25 @@ namespace
                     still_s = neck_speed < cfg.pose_lean_settle_speed_cms ? still_s + dtn : 0.0;
                 }
                 last_neck = neck_now;
-                if (radius > 0.0)
+                if (cfg.body_solver)
+                {
+                    // The body solver: the capsule walks after your neck once it is 20 cm away and stops
+                    // within 5 cm (Chasm's VR Framework's roomscale); leaning inside that is the body's job.
+                    static bool following = false;
+                    double d = length(delta);
+                    if (d > 20.0) following = true;
+                    if (following)
+                    {
+                        double keep = (dtn > 0.0 && dtn < 0.2) ? std::exp(-dtn / 0.15) : 0.0;
+                        if (d > 0.6 && d * (1.0 - keep) < 0.6) keep = 1.0 - 0.6 / d;
+                        follow = delta * (1.0 - keep);
+                        if (d * keep < 5.0) following = false;
+                    }
+                    else
+                        follow = {0.0, 0.0, 0.0};
+                    stepping = false;
+                }
+                else if (radius > 0.0)
                 {
                     // Backwards he doesn't lean (nobody leans back to sit into a crouch): past
                     // pose_lean_back_radius_cm behind his hips, the capsule follows at once (playtest
@@ -5230,8 +5624,11 @@ namespace
         }
         actor.z = g_actor_z_smooth;
         Vec3 place = actor + body.rotate(g_pose.mesh_offset_local);
-        place.x = actor.x - pelvis_off.x;
-        place.y = actor.y - pelvis_off.y;
+        if (!cfg.body_solver) // (the body solver puts his pelvis itself)
+        {
+            place.x = actor.x - pelvis_off.x;
+            place.y = actor.y - pelvis_off.y;
+        }
         // Crouching: the body goes down by as much as your headset is below where you stood when
         // you recentred. His leg IK keeps the feet planted, so the knees bend. Never raised above
         // standing (the leg IK only stretches 1.1x), and at most pose_crouch_max_cm (times his size) down;
@@ -5301,6 +5698,7 @@ namespace
         g_crouch_drop = (std::min)(crouch_cap, crouch_want);
         // Torso lean: the bend carries his head forward and down; his hips go back by the forward part
         // and stay up by the downward part, so his head still ends at your neck and the chest moves in.
+        if (!cfg.body_solver)
         {
             Vec3 hw;
             Quat hr;
@@ -5336,7 +5734,7 @@ namespace
                     set_to = want;
                 }
         }
-        place.z -= g_crouch_drop;
+        if (!cfg.body_solver) place.z -= g_crouch_drop;
         // Moved, not teleported: a teleport snaps his kinematic physics bodies (the hand holding a
         // weapon) to the new spot with no velocity in the first physics substep, and the held weapon
         // jolts every frame (headset tests 2-3: even the game's locked grip wobbled ~14 deg). A plain
@@ -5418,7 +5816,7 @@ namespace
                     prev_ok = true;
                 }
             }
-            if (ModifyBoneNode* n = chain_node("head"))
+            if (ModifyBoneNode* n = cfg.body_solver ? nullptr : chain_node("head"))
             {
                 if (have) node_set_rotation(*n, component_inv * (head_rot * g_pose.head_offset));
                 else node_release(*n);
@@ -5450,21 +5848,31 @@ namespace
             have_look = have;
             look_rot = head_rot;
         }
-        else if (ModifyBoneNode* n = chain_node("head"))
+        else if (ModifyBoneNode* n = cfg.body_solver ? nullptr : chain_node("head"))
         {
             node_release(*n);
         }
-        pose_torso_twist(cfg, have_look, look_rot, heading, component_inv);
+        if (!cfg.body_solver) pose_torso_twist(cfg, have_look, look_rot, heading, component_inv);
         // The game's own forward bends (crouch Root Height, Lean Forward (Grabbing)) feed
         // Anim_Add_Bend_AO from the animation's copies, written by the update this runs after; with the
         // lean they are set to standing, so only your lean bends him (torso_lean_and_helmet.md).
-        if (cfg.pose_lean && cfg.pose_lean_cancel_game_bend && g_lean.calibrated && cfg.pose_in_anim_update && g_pose_in_anim_at.load() >= now - 0.001)
+        if (!cfg.body_solver && cfg.pose_lean && cfg.pose_lean_cancel_game_bend && g_lean.calibrated && cfg.pose_in_anim_update && g_pose_in_anim_at.load() >= now - 0.001)
         {
             set_named_number(g_pose.instance, STR("Root Height"), 85.0 * component_scale_z(mesh));
             set_named_number(g_pose.instance, STR("Lean Forward (Grabbing)"), 0.0);
         }
         armour_scan(cfg, pawn, mesh);
-        pose_feet(cfg, pawn, actor, heading, component_inv);
+        if (cfg.body_solver)
+        {
+            for (int side = 0; side < 2; ++side) g_feet[side].valid = false; // (the old foot effectors stay unwritten)
+            g_feet_active.store(false);
+            if (!body_tick(cfg, pawn, driver, state, heading, actor)) body_release();
+        }
+        else
+        {
+            if (g_body_active.load()) body_release();
+            pose_feet(cfg, pawn, actor, heading, component_inv);
+        }
         for (int side = 0; side < 2; ++side)
         {
             if (cfg.pose_arms)
@@ -30667,6 +31075,7 @@ namespace
         g_count_joint_breaks.store(0);
         g_count_steps.store(0);
         crouch_anim_stats_reset();
+        body_stats_reset();
         g_count_kicks.store(0);
         g_count_sheathe_back.store(0);
         g_count_sheathe_seated.store(0);
@@ -30681,6 +31090,7 @@ namespace
         g_floor_miss_until = -1.0;
         g_fake_rstick.store(false);
         g_fake_stick_click.store(false);
+        g_head_track.on = false;
         g_fake_stick[0].store(-9.0);
         g_fake_stick[1].store(0.0);
         g_park_socket.clear();
@@ -30932,6 +31342,32 @@ namespace
         else if (w == "crouch_drop") value = g_crouch_drop; // cm his body is down this frame (your crouch + button, past the lean)
         else if (w == "joint_breaks") value = g_count_joint_breaks.load();
         else if (w == "steps") value = g_count_steps.load();
+        else if (w.rfind("body_", 0) == 0)
+        {
+            // The body solver, since hsvr.mark
+            const BodyStats& S = g_body_stats;
+            auto mean = [](double sum, int n) { return n ? sum / n : 0.0; };
+            if (w == "body_frames") value = S.frames;
+            else if (w == "body_active") value = g_body_active.load() ? 1.0 : 0.0;
+            else if (w == "body_err") value = mean(S.err_sum, S.err_n);       // drawn vs sent, cm mean
+            else if (w == "body_err_worst") value = S.err_worst;
+            else if (w == "body_knee_max") value = S.knee_max;                // deg
+            else if (w == "body_dknee_worst") value = S.dknee_worst;          // deg in a tick
+            else if (w == "body_kneepos_worst") value = S.kneepos_worst;      // cm in a tick
+            else if (w == "body_twitches") value = S.twitches;
+            else if (w == "body_flips") value = S.flips;                      // knee swapping sides
+            else if (w == "body_pitch_max") value = S.pitch_max;
+            else if (w == "body_short_max") value = S.short_max;              // hips held up by the knees (spine bent instead), cm
+            else if (w == "body_pulled_max") value = S.pulled_max;
+            else if (w == "body_slip") value = mean(S.slip_sum, S.slip_n);    // planted foot sliding, cm/s mean
+            else if (w == "body_slip_worst") value = S.slip_worst;
+            else if (w == "body_steps") value = S.steps;
+            else if (w == "body_pitch") value = g_body.last.pitch_deg;        // now
+            else if (w == "body_hips") value = g_body.last.pos[hsvr::body::J_PELVIS].z - (std::min)(g_body.floor_z[0], g_body.floor_z[1]); // now, cm over the floor
+            else if (w == "body_knee_l") value = g_body.last.knee_deg[0];
+            else if (w == "body_knee_r") value = g_body.last.knee_deg[1];
+            else known = false;
+        }
         else if (w.rfind("canim_", 0) == 0)
         {
             // B&S crouch animation (pose_crouch_anim), since hsvr.mark
@@ -31511,6 +31947,7 @@ namespace
                 g_count_joint_breaks.store(0);
                 g_count_steps.store(0);
                 crouch_anim_stats_reset();
+        body_stats_reset();
                 g_count_kicks.store(0);
                 g_count_sheathe_back.store(0);
                 g_count_sheathe_seated.store(0);
@@ -33327,6 +33764,22 @@ namespace
             {
                 g_fake_look.store(atoi(entry.command.c_str() + 15) != 0);
                 HSVR_LOG("Script: hsvr.fake_look %d", (int)g_fake_look.load());
+                continue;
+            }
+            if (entry.command.rfind("hsvr.head_replay ", 0) == 0)
+            {
+                char file[512] = {0};
+                int got = sscanf(entry.command.c_str() + 17, "%511s", file);
+                if (got >= 1 && std::string(file) == "off")
+                {
+                    g_head_track.on = false;
+                    HSVR_LOG("Script: hsvr.head_replay off");
+                }
+                else if (got >= 1 && head_track_load(file))
+                    HSVR_LOG("Script: hsvr.head_replay %s: %d rows, %.2f s", file, (int)g_head_track.rows.size(),
+                             g_head_track.rows.back()[0] - g_head_track.rows.front()[0]);
+                else
+                    HSVR_LOG("Script: hsvr.head_replay: could not read %s", file);
                 continue;
             }
             if (entry.command.rfind("hsvr.ctl_replay ", 0) == 0)
