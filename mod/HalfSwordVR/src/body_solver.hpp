@@ -62,7 +62,7 @@ namespace hsvr::body
         double step_time_min = 0.22, step_time_max = 0.33, leg_cross_guard = 20.0, step_height = 8.0;
         double support_margin = 3.0, settle_distance = 10.0, settle_delay = 1.0;
         double gait_start_speed = 50.0, gait_stop_speed = 29.0, gait_step_time_min = 0.28, gait_step_time_max = 0.5, gait_spacing = 0.5;
-        double knee_max_flexion_deg = 140.0, heel_lift_max_deg = 35.0, leg_stretch = 1.02, hip_release_tau = 0.15;
+        double knee_max_flexion_deg = 150.0, fold_bend_dps = 240.0, heel_lift_max_deg = 35.0, leg_stretch = 1.02, hip_release_tau = 0.15;
         double root_dead_zone_deg = 25.0;
         double gait_stride_share = 0.8, gait_step_time_floor = 0.16; // stride held to the legs' reach (see feet_update)
         double hips_pull_max_cm = 12.0;

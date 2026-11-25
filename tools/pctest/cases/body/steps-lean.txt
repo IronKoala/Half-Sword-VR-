@@ -27,7 +27,7 @@
 6.0:hsvr.expect body_err <= 1.5 drawn vs sent, cm mean
 6.0:hsvr.expect body_err_worst <= 6 drawn vs sent, cm worst
 6.0:hsvr.expect body_flips = 0 a knee never swaps sides
-6.0:hsvr.expect body_knee_max <= 141 knees never past the fold limit
+6.0:hsvr.expect body_knee_max <= 151 knees never past the fold limit
 6.0:hsvr.expect body_twitches = 0 no knee twitch
 6.0:hsvr.expect body_steps <= 1 he leans instead of stepping
 6.0:hsvr.expect body_kneepos_worst <= 3 knee moved a tick, cm

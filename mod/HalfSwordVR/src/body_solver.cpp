@@ -584,8 +584,14 @@ namespace hsvr::body
                     else lo = mid;
                 }
             }
-            pitch_ = Spring{hi, 0.0};
-            chain = chain_at(hi);
+            // Bend there quickly but not in one frame (a head dropping straight down past the knees' limit
+            // asks for a large bend for a small drop): at most p.fold_bend_dps; the hips are squashed up
+            // the spine for the frames in between.
+            double most = p.fold_bend_dps * kDegToRad * dt;
+            double was = pitch_.value;
+            double now_pitch = (std::min)(hi, was + most);
+            pitch_ = Spring{now_pitch, (now_pitch - was) / (std::max)(1e-4, dt)};
+            chain = chain_at(now_pitch);
             double short_by = low - chain.pos[0].z;
             if (short_by > 0.0)
             {

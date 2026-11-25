@@ -1085,7 +1085,7 @@ namespace hsvr
         // (Chasm's VR Framework's IK, Blade & Sorcery's standing/moving split). 0 = those bones are the
         // game's own animation.
         bool body_solver = true;
-        double body_knee_max_deg = 140.0;      // the knees fold no further; past that the spine bends instead
+        double body_knee_max_deg = 150.0;      // the knees fold no further; past that the spine bends instead
         double body_hips_pull_max_cm = 12.0;   // hips come down at most this far to keep a foot on the floor
         double body_step_height_cm = 8.0;
         double body_foot_spacing_cm = 24.0;
