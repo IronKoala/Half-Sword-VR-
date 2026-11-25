@@ -21397,67 +21397,73 @@ namespace
         HSVR_LOG("Hit buzz: watching the weapons' Collision Hit and Willie's mesh hits (B&S-style hit vibration)");
     }
 
-    // ---- Swing whoosh (HalfSwordDecomp defaults\hs_whoosh_sound.md) ---------------------------------
-    // The game plays a weapon's whoosh from its own tick (ModularWeaponBP ReceiveTick) out of two numbers:
-    // the speed of its BaseMesh's centre (GetPhysicsLinearVelocity, |v|) and how much that velocity changed
-    // since its last tick (dv). With T = "Sound Woosh Threshold" (arming sword 350, most weapons 500): the air
-    // loop sounds once |v| x min(dv/100, 1) > 1.5 T (full at 4.875 T), and a one-shot whoosh fires when
-    // dv > 0.5 T and |v| > 0.5 T (at most 5 a second; volume |v| x T x 1e-6).
-    // Matthew 2026-11-21: most VR swings make no whoosh. Test 2026-11-21 (whoosh_test_2026-11-21T063543Z.log):
-    // dv is NOT the problem (VR hold and the flat arm both give dv ~ 0.5 |v|); it is speed. The flat game's
-    // mouse swings move the weapon's centre at 10-20 m/s, and anything under 1.5 T (7.5 m/s, arming sword
-    // 5.25) is silent: a VR cut at 6-7 m/s made no sound. whoosh_vr_threshold_scale: while a weapon in a
-    // tracked hand ticks, its threshold is x this (and put back right after its tick), so the game's own
-    // rules sound slower, human-speed swings. "Whoosh:" lines log what each 0.5 s of swinging did.
-    struct WhooshSide
+    // ---- Swing whoosh: B&S's WhooshPoint, ported whole ------------------------------------------
+    // Matthew 2026-11-25: whoosh the way Blade & Sorcery does it, no patches on the game's rules.
+    // B&S (ThunderRoad WhooshPoint.UpdateWhooshPoint, every 2nd frame): the world speed of a whoosh
+    // point on the item (pb.GetPointVelocity, nothing subtracted) gives
+    //     intensity = Lerp(intensity, InverseLerp(minVelocity, maxVelocity, speed), dampening)
+    // and one looping clip plays with volume from intensity (effect curve 0 -> 0, 0.66 -> 0.26,
+    // 1 -> 0.6). No one-shots, no cooldown. Its 103 weapons: min 2-5 m/s (median 3), max 8-14
+    // (median 14), dampening 0.1 (0.2 on long axes/halberds). A one-frame jolt (a stair step) reaches
+    // ~2% volume: smoothed away.
+    // The game's own whoosh (hs_whoosh_sound.md; private\bs-whoosh\hs-audio-feasibility.md) lives in
+    // ModularWeaponBP ReceiveTick: one-shots (Woosh_Blunt/Sharp_Cue, only played there) plus the
+    // "Sound Slide" AudioComponent, a never-stopped loop of Weapon_Slide_Cue whose switch plays
+    // Sounds_sword_whoosh at Material 6 and the contact scrapes while "Sliding". Here, for every
+    // ModularWeaponBP that ticks unsheathed: its "Sound Woosh Threshold" is out of reach during its
+    // tick (no one-shot, the loop's air target 0), and right after the tick, unless it is sliding (the
+    // game's scrape sound, untouched), the mod sets Sound Slide's volume from B&S's intensity. The
+    // whoosh point is the weapon's TippyTipScene (the game puts it at the blade's far end); its world
+    // speed is its move over the tick's game time. The loop's pitch stays the game's own.
+    struct BsWhoosh
+    {
+        double intensity = 0.0;
+        hsvr::Vec3 point;
+        bool have = false;
+        double seen = 0.0;
+        double speed = 0.0, volume = 0.0;
+        bool slid = false;
+    };
+    std::unordered_map<UObject*, BsWhoosh> g_bs_whoosh;
+    std::unordered_map<UFunction*, bool> g_whoosh_ticks; // ReceiveTick functions: true = a ModularWeaponBP's
+    struct WhooshSide // log windows for the weapons in his hands
     {
         UObject* weapon = nullptr;
-        UFunction* tick = nullptr; // that weapon's ReceiveTick
-        double win_start = -1.0, max_v = 0.0, max_dv = 0.0, max_vol = 0.0, threshold = 0.0, used = 0.0;
-        int ticks = 0, sliding = 0, shots = 0, striking_ticks = 0;
+        double win_start = -1.0, max_speed = 0.0, max_int = 0.0, max_vol = 0.0;
+        int ticks = 0, sliding = 0;
         bool tracked = false;
-        bool striking = false; // the strike gate is open (whoosh_strike_gate)
-        bool restore = false; // its threshold is lowered for this tick: put saved back after it
-        double saved = 0.0;
-        double gate_until = -1.0;
     };
     WhooshSide g_whoosh[2];
+    bool g_whoosh_bs = true;
+    double g_whoosh_min = 300.0, g_whoosh_max = 1400.0, g_whoosh_damp = 0.1, g_whoosh_hz = 45.0, g_whoosh_volume = 1.0;
     bool g_whoosh_log = true;
-    double g_whoosh_scale = 1.0;
     double g_whoosh_log_min_speed = 300.0;
-    double g_whoosh_walk = 0.0; // cm/s added to a tracked weapon's whoosh threshold: his walking speed x whoosh_walk_speed_scale
-    bool g_whoosh_gate = true;
-    double g_whoosh_gate_ratio = 1.0;
-    hsvr::Vec3 g_whoosh_body_v; // his velocity (cm/s): the strike gate judges the weapon against his body
+    hsvr::Vec3 g_whoosh_body_v; // his velocity (cm/s), for the still trace only
+    FName g_receive_tick_name;
 
-    // From the engine tick: which weapons are in his hands now, and the settings (config() is a copy,
-    // too dear for every weapon tick).
+    // From the engine tick: settings (config() is a copy, too dear for every weapon tick) and which
+    // weapons are in his hands (for the log).
     void whoosh_refresh(const hsvr::Config& cfg)
     {
+        g_whoosh_bs = cfg.whoosh_bs;
+        g_whoosh_min = cfg.whoosh_bs_min_speed * 100.0;
+        g_whoosh_max = (std::max)(cfg.whoosh_bs_max_speed * 100.0, g_whoosh_min + 1.0);
+        g_whoosh_damp = std::clamp(cfg.whoosh_bs_dampening, 0.0, 1.0);
+        g_whoosh_hz = cfg.whoosh_bs_update_hz > 0.0 ? cfg.whoosh_bs_update_hz : 45.0;
+        g_whoosh_volume = cfg.whoosh_volume;
         g_whoosh_log = cfg.whoosh_log;
-        g_whoosh_scale = cfg.whoosh_vr_threshold_scale > 0.0 ? cfg.whoosh_vr_threshold_scale : 1.0;
         g_whoosh_log_min_speed = cfg.whoosh_log_min_speed;
-        UObject* pawn = nullptr;
-        g_whoosh_gate = cfg.whoosh_strike_gate;
-        g_whoosh_gate_ratio = cfg.whoosh_strike_speed_ratio;
-        if (g_whoosh_log || g_whoosh_scale != 1.0 || cfg.whoosh_walk_speed_scale > 0.0 || g_whoosh_gate) pawn = object_property(find_player_controller(), STR("Pawn"));
-        g_whoosh_walk = 0.0;
+        if (g_receive_tick_name.GetComparisonIndex() == 0) g_receive_tick_name = FName(STR("ReceiveTick"), FNAME_Add);
+        double now = hsvr::now_seconds();
+        for (auto it = g_bs_whoosh.begin(); it != g_bs_whoosh.end();)
+            if (now - it->second.seen > 5.0) it = g_bs_whoosh.erase(it);
+            else ++it;
+        UObject* pawn = object_property(find_player_controller(), STR("Pawn"));
         g_whoosh_body_v = hsvr::Vec3{};
-        if (pawn && (cfg.whoosh_walk_speed_scale > 0.0 || g_whoosh_gate))
+        if (pawn && g_still_trace.load() > 0)
         {
-            // The game whooshes on the weapon's speed through the world (> its threshold); walking at 3-4 m/s
-            // with a weapon nearly did that alone (playtest 2026-11-21 13:47). Raised by the walk, so a
-            // swing is judged on about its speed against his body.
             Call gv(pawn, STR("GetVelocity"));
-            if (gv.run())
-            {
-                hsvr::Vec3 v = gv.vec();
-                g_whoosh_body_v = v;
-                // His capsule's real move (step snaps on stairs included), where it is the larger: going downstairs at 3.6 m/s
-                // whooshed his still-held sword at 9-14 m/s (playtest 11-24 7:36 PM).
-                if (length(g_body_move_v) > length(v)) g_whoosh_body_v = g_body_move_v;
-                if (cfg.whoosh_walk_speed_scale > 0.0) g_whoosh_walk = std::sqrt(v.x * v.x + v.y * v.y) * cfg.whoosh_walk_speed_scale;
-            }
+            if (gv.run()) g_whoosh_body_v = gv.vec();
         }
         UObject* held[2] = {nullptr, nullptr};
         for (int side = 0; side < 2; ++side)
@@ -21475,22 +21481,27 @@ namespace
                 s = WhooshSide{};
                 s.weapon = held[side];
             }
-            s.tracked = g_pose.hand_valid[side]; // false with mouse and keyboard: the game's own arm moves it
+            s.tracked = g_pose.hand_valid[side];
         }
     }
 
-    int whoosh_side(UObject* context, UFunction* function)
+    // A ModularWeaponBP's ReceiveTick? FName compare first (every ProcessEvent comes through here),
+    // then one answer per ReceiveTick function.
+    bool is_weapon_tick(UObject* context, UFunction* function)
     {
-        if (!context || !function) return -1;
-        int side = context == g_whoosh[1].weapon ? 1 : context == g_whoosh[0].weapon ? 0 : -1;
-        if (side < 0) return -1;
-        WhooshSide& s = g_whoosh[side];
-        if (s.tick) return function == s.tick ? side : -1;
-        if (function->GetName() != STR("ReceiveTick")) return -1;
-        s.tick = function;
-        return side;
+        if (!context || !function || g_receive_tick_name.GetComparisonIndex() == 0) return false;
+        if (function->GetNamePrivate().GetComparisonIndex() != g_receive_tick_name.GetComparisonIndex()) return false;
+        auto it = g_whoosh_ticks.find(function);
+        if (it != g_whoosh_ticks.end()) return it->second;
+        bool ok = prop_chain(context, STR("Sound Woosh Threshold")) && prop_chain(context, STR("Sound Slide")) && prop_chain(context, STR("TippyTipScene"));
+        g_whoosh_ticks[function] = ok;
+        if (ok) HSVR_LOG("Whoosh: B&S whoosh drives %ls", function->GetFullName().c_str());
+        return ok;
     }
-
+    int whoosh_side(UObject* context)
+    {
+        return context == g_whoosh[1].weapon ? 1 : context == g_whoosh[0].weapon ? 0 : -1;
+    }
     // Still trace: each tick, just before the weapon's own tick, the speeds of everything between your
     // controller and the weapon, so a weapon moving under a still hand can be pinned on one of them:
     // target = the hand target from the controller (g_pose.target: tracking or fake arm), bone = his hand
@@ -21560,95 +21571,109 @@ namespace
         st.target = target, st.bone = bone, st.shoulder = shoulder, st.set = set, st.v = v;
     }
 
+    double* whoosh_threshold(UObject* weapon)
+    {
+        FProperty* tp = prop_chain(weapon, STR("Sound Woosh Threshold"));
+        if (!tp || tp->GetClass().GetName() != STR("DoubleProperty")) return nullptr;
+        return reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(weapon) + tp->GetOffset_Internal());
+    }
+    double g_whoosh_saved = 0.0;
+    UObject* g_whoosh_saved_for = nullptr;
+
+    // Before the weapon's tick: its threshold out of reach (no one-shot, the air loop's target 0).
     void whoosh_before_weapon_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
-        int side = whoosh_side(context, function);
-        if (side < 0) return;
-        WhooshSide& s = g_whoosh[side];
-        using namespace hsvr;
-        if (bool_property(context, STR("Sheathed"))) return; // the game zeroes it all while sheathed
-        FProperty* tp = prop_chain(context, STR("Sound Woosh Threshold"));
-        if (!tp) return;
-        double* tv = tp->GetClass().GetName() == STR("DoubleProperty") ? reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(context) + tp->GetOffset_Internal()) : nullptr;
+        if (!is_weapon_tick(context, function)) return;
+        int side = whoosh_side(context);
+        if (side >= 0 && g_whoosh[side].tracked && g_still_trace.load() > 0)
+            if (UObject* base = object_property(context, STR("BaseMesh")))
+            {
+                Call gv(base, STR("GetPhysicsLinearVelocity"));
+                if (gv.run()) still_trace_tick(side, context, gv.vec());
+            }
+        if (!g_whoosh_bs || bool_property(context, STR("Sheathed"))) return; // sheathed: the game sets the loop to 0
+        double* tv = whoosh_threshold(context);
         if (!tv) return;
-        double T = *tv, used = T;
-        if (s.tracked && (g_whoosh_scale != 1.0 || g_whoosh_walk > 0.0)) used = T * g_whoosh_scale + g_whoosh_walk;
-        bool need_v = g_whoosh_log || (s.tracked && g_whoosh_gate) || g_still_trace.load() > 0;
-        UObject* base = need_v ? object_property(context, STR("BaseMesh")) : nullptr;
-        FProperty* oldp = prop_chain(context, STR("Weapon Velocity_Old"));
-        Vec3 v{};
-        bool have_v = false;
-        if (base)
+        g_whoosh_saved = *tv;
+        g_whoosh_saved_for = context;
+        *tv = 1.0e7;
+    }
+
+    // B&S's piecewise effect volume curve (WhooshSword* effects): 0 -> 0, 0.66 -> 0.26, 1 -> 0.6.
+    double bs_whoosh_volume(double i)
+    {
+        if (i <= 0.0) return 0.0;
+        if (i < 0.66) return 0.26 * i / 0.66;
+        return 0.26 + (0.6 - 0.26) * (std::min)(1.0, (i - 0.66) / 0.34);
+    }
+
+    // After the weapon's tick: its threshold back, then B&S's whoosh on its Sound Slide loop.
+    void whoosh_after_weapon_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void* parms)
+    {
+        if (!is_weapon_tick(context, function)) return;
+        using namespace hsvr;
+        if (g_whoosh_saved_for == context)
         {
-            Call gv(base, STR("GetPhysicsLinearVelocity"));
-            if (gv.run()) v = gv.vec(), have_v = true;
+            if (double* tv = whoosh_threshold(context)) *tv = g_whoosh_saved;
+            g_whoosh_saved_for = nullptr;
         }
-        if (have_v && s.tracked) still_trace_tick(side, context, v);
-        // Strike gate (Matthew 2026-11-24: "the whoosh is constantly going off, I only want to hear it when
-        // I'm actually striking"). Play log 2026-11-23: the game's one-shot fires at a third of the loop's
-        // speed (|v| and dv > 0.5 T: 1.5 m/s at the VR threshold), and a held weapon's tick-to-tick dv
-        // jitter reaches that while you only carry it. Like B&S (WhooshPoint: silent under minVelocity),
-        // a weapon in a tracked hand whooshes only while it moves against his body as fast as the game's
-        // own air loop needs (1.5 x the threshold used, x whoosh_strike_speed_ratio); the gate closes again
-        // under 70% of that. While closed its threshold is out of reach for this tick, so neither the loop
-        // nor a one-shot plays (contact scrapes, which don't use it, still do).
-        if (s.tracked && g_whoosh_gate && have_v)
-        {
-            double rel = length(v - g_whoosh_body_v);
-            double open = 1.5 * used * (g_whoosh_gate_ratio > 0.0 ? g_whoosh_gate_ratio : 1.0);
-            if (rel >= open) s.striking = true;
-            else if (rel < 0.7 * open) s.striking = false;
-            if (!s.striking) used = 1.0e7;
-        }
-        else s.striking = !s.tracked || !g_whoosh_gate;
-        if (used != T)
-        {
-            s.saved = T;
-            s.restore = true;
-            *tv = used;
-        }
-        if (!g_whoosh_log || !have_v || !oldp) return;
-        double o[3];
-        read_three(reinterpret_cast<uint8_t*>(context) + oldp->GetOffset_Internal(), oldp, o);
-        double speed = length(v);
-        double dv = length(v - Vec3{o[0], o[1], o[2]});
+        if (!g_whoosh_bs || bool_property(context, STR("Sheathed"))) return;
         double now = now_seconds();
+        BsWhoosh& w = g_bs_whoosh[context];
+        double real_dt = w.seen > 0.0 ? now - w.seen : 0.0;
+        w.seen = now;
+        // Game time of this tick (ReceiveTick(float DeltaSeconds)): slow motion keeps a swing's speed, as
+        // B&S's physics velocity does.
+        double dt = parms ? *reinterpret_cast<const float*>(parms) : 0.0;
+        if (!(dt > 1e-4 && dt < 0.25)) dt = real_dt;
+        UObject* tip = object_property(context, STR("TippyTipScene"));
+        UObject* base = object_property(context, STR("BaseMesh"));
+        Vec3 p = component_location(tip ? tip : base);
+        double speed = 0.0;
+        bool fresh = w.have && dt > 1e-4 && real_dt < 0.25;
+        if (fresh)
+        {
+            double moved = length(p - w.point);
+            if (moved < 200.0) speed = moved / dt; // more in one tick = a teleport (drawn, spawned, reset), not a swing
+        }
+        w.point = p;
+        w.have = true;
+        double target = std::clamp((speed - g_whoosh_min) / (g_whoosh_max - g_whoosh_min), 0.0, 1.0);
+        // B&S lerps by `dampening` once every 2nd frame; per tick here that is 1 - (1 - dampening)^(updates in this tick).
+        double a = fresh ? 1.0 - std::pow(1.0 - g_whoosh_damp, real_dt * g_whoosh_hz) : 0.0;
+        w.intensity += (target - w.intensity) * a;
+        if (w.intensity < 1e-4) w.intensity = 0.0;
+        w.speed = speed;
+        bool sliding = bool_property(context, STR("Sliding"));
+        w.slid = sliding;
+        w.volume = bs_whoosh_volume(w.intensity) * g_whoosh_volume;
+        UObject* slide = object_property(context, STR("Sound Slide"));
+        if (slide && !sliding) // touching something: the game's scrape plays on this loop
+        {
+            Call sv(slide, STR("SetVolumeMultiplier"));
+            sv.number(STR("NewVolumeMultiplier"), w.volume);
+            sv.run();
+        }
+        int side = whoosh_side(context);
+        if (side < 0 || !g_whoosh_log) return;
+        WhooshSide& s = g_whoosh[side];
         if (s.win_start < 0.0) s.win_start = now;
         ++s.ticks;
-        s.threshold = T;
-        s.max_v = (std::max)(s.max_v, speed);
-        s.max_dv = (std::max)(s.max_dv, dv);
-        if (s.striking) ++s.striking_ticks, s.used = used;
-        if (bool_property(context, STR("Sliding"))) ++s.sliding;
-        if (UObject* slide = object_property(context, STR("Sound Slide")))
-            if (float* vol = value_ptr<float>(slide, STR("VolumeMultiplier"))) s.max_vol = (std::max)(s.max_vol, (double)*vol);
-        // The game's one-shot rule with its 0.2 s gate.
-        if (dv > 0.5 * used && speed > 0.5 * used && now >= s.gate_until) ++s.shots, s.gate_until = now + 0.2;
+        if (sliding) ++s.sliding;
+        s.max_speed = (std::max)(s.max_speed, speed);
+        s.max_int = (std::max)(s.max_int, w.intensity);
+        if (!sliding) s.max_vol = (std::max)(s.max_vol, w.volume);
         if (now - s.win_start >= 0.5)
         {
-            if (s.max_v >= g_whoosh_log_min_speed || s.shots > 0)
-                HSVR_LOG("Whoosh: %s %ls (%s, threshold %.0f, used %.0f): speed max %.0f cm/s, game's dv max %.0f cm/s, striking %d/%d ticks, sliding %d/%d ticks, "
-                         "air loop volume max %.2f, one-shots %d",
-                         side == 0 ? "left" : "right", context->GetName().c_str(), s.tracked ? "VR hand" : "game's arm", s.threshold, s.used, s.max_v, s.max_dv,
-                         s.striking_ticks, s.ticks, s.sliding, s.ticks, s.max_vol, s.shots);
+            if (s.max_speed >= g_whoosh_log_min_speed || s.max_vol > 0.0)
+                HSVR_LOG("Whoosh: %s %ls (%s, B&S %.0f-%.0f cm/s): whoosh point speed max %.0f cm/s, intensity max %.2f, volume max %.2f, sliding %d/%d ticks",
+                         side == 0 ? "left" : "right", context->GetName().c_str(), s.tracked ? "VR hand" : "game's arm", g_whoosh_min, g_whoosh_max,
+                         s.max_speed, s.max_int, s.max_vol, s.sliding, s.ticks);
             s.win_start = now;
-            s.ticks = s.sliding = s.shots = s.striking_ticks = 0;
-            s.max_v = s.max_dv = s.max_vol = 0.0;
+            s.ticks = s.sliding = 0;
+            s.max_speed = s.max_int = s.max_vol = 0.0;
         }
     }
-
-    // Right after the weapon's tick: its own threshold back (nothing else in the game sees the lowered one).
-    void whoosh_after_weapon_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
-    {
-        int side = whoosh_side(context, function);
-        if (side < 0) return;
-        WhooshSide& s = g_whoosh[side];
-        if (!s.restore) return;
-        s.restore = false;
-        if (FProperty* tp = prop_chain(context, STR("Sound Woosh Threshold")))
-            *reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(context) + tp->GetOffset_Internal()) = s.saved;
-    }
-
     // Who lets a stuck blade go (stab-test7: the game stuck thrusts, then let them go within 0.15 s).
     // Logs every call of the stuck joint's Release Constraint and the weapon's release functions for
     // a weapon in his hands, with the calling Blueprint function and bytecode offset (the "@" of the

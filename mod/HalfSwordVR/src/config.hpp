@@ -499,9 +499,6 @@ namespace hsvr
         // sorcery"): the main hand pulls and turns, the second hand only pulls, each a stiff spring; no shared pose. Not the crossbow.
         bool pose_two_hand_bs = true;
         double pose_two_hand_auto_slide_cm = 0.0; // (off: Matthew 2026-11-24 00:08Z "do it just like Blade and Sorcery", trigger-only slide) B&S two hands on a haft: a hand this far from its spot along the shaft follows your hand without the trigger (0 = off)
-        // Whoosh judged on the weapon's speed against your body: the game's whoosh threshold for a weapon in
-        // a tracked hand is raised by your walking speed x this (0 = off).
-        double whoosh_walk_speed_scale = 1.0;
         // The held weapon never collides with the hand holding it (as with the forearm).
         bool pose_hold_ignore_hand = true;
         // Keeps the game's off-hand search ("R/L Offhand Searching Grip") off while the mod holds a
@@ -1204,19 +1201,18 @@ namespace hsvr
         // An open hand, forearm or arm on a person buzzes only when it strikes this fast (m/s,
         // against him at the contact).
         double hit_buzz_limb_min_ms = 3.0;
-        // Swing whoosh (hs_whoosh_sound.md). The game whooshes only when the weapon's centre moves faster than
-        // 1.5 x its "Sound Woosh Threshold" (7.5 m/s for most weapons, 5.25 for an arming sword): flat
-        // Willie's mouse swings reach 10-20 m/s, a human VR cut often doesn't (Matthew 2026-11-21: most VR
-        // swings were silent). A weapon in a tracked hand has its threshold x this during its tick
-        // (1 = the game's own; lower = slower swings whoosh; the one-shot is also that much quieter).
-        double whoosh_vr_threshold_scale = 0.6;
-        // Strike gate (Matthew 2026-11-24: whoosh only on real strikes): a weapon in a tracked hand whooshes
-        // only while it moves against his body at least as fast as the game's air loop needs (1.5 x the
-        // threshold used, x whoosh_strike_speed_ratio: 4.5 m/s for most weapons); slower carries, hand
-        // jitter and small moves stay silent. Off = the game's one-shots fire from 1.5 m/s.
-        bool whoosh_strike_gate = true;
-        double whoosh_strike_speed_ratio = 1.0;
-        // "Whoosh:" lines every 0.5 s while a held weapon moves faster than whoosh_log_min_speed (cm/s).
+        // Swing whoosh, B&S's WhooshPoint ported whole (Matthew 2026-11-25): every unsheathed weapon's
+        // whoosh is one loop whose volume follows intensity = Lerp(intensity, InverseLerp(min, max, speed of
+        // its tip through the world), dampening), B&S's effect curve (0.66 -> 0.26, 1 -> 0.6), no one-shots.
+        // Defaults = B&S's median weapon (3-14 m/s, dampening 0.1, updated every 2nd frame at 90 fps).
+        // Off = the game's own whoosh (one-shots and its air loop).
+        bool whoosh_bs = true;
+        double whoosh_bs_min_speed = 3.0;  // m/s: silent below
+        double whoosh_bs_max_speed = 14.0; // m/s: full intensity
+        double whoosh_bs_dampening = 0.1;  // share of the way to the new intensity per B&S update
+        double whoosh_bs_update_hz = 45.0; // B&S updates a point every 2nd frame
+        double whoosh_volume = 1.0;        // x B&S's curve volume on the game's whoosh loop
+        // "Whoosh:" lines every 0.5 s while a held weapon's whoosh point moves faster than whoosh_log_min_speed (cm/s) or it sounds.
         bool whoosh_log = true;
         double whoosh_log_min_speed = 300.0;
         // Log every hit buzz ("Hit buzz:" lines).
