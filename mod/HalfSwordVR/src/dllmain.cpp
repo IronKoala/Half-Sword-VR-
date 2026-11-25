@@ -4081,6 +4081,22 @@ namespace
         Vec3 under{K.joint[body::J_PELVIS].x, K.joint[body::J_PELVIS].y, 0.0};
         for (int j = 0; j < body::J_COUNT; ++j) K.joint[j] = K.joint[j] - under;
         K.build(cfg.eye_forward_cm, cfg.eye_up_cm);
+        // B&S's locomotion clips for the moving legs (made from your own B&S install with tools/bs-crouch; read
+        // once). Without them the solver walks his legs on its own computed gait.
+        {
+            static hsvr::body::LocomotionClips clips;
+            static bool tried = false;
+            if (!tried)
+            {
+                tried = true;
+                std::wstring w = hsvr::mod_dir() + L"bs-crouch\\";
+                std::string folder;
+                for (wchar_t ch : w) folder += (char)(ch < 128 ? ch : '?');
+                clips.load(folder);
+                HSVR_LOG("Body: B&S locomotion clips %s: %s", clips.loaded ? "ready" : "NOT USED (computed gait instead)", clips.report.c_str());
+            }
+            B.solver.clips = cfg.body_bs_clips && clips.loaded ? &clips : nullptr;
+        }
         Vec3 fwd = B.mrel.rotate({0, 1, 0});
         std::string why = missing.empty() ? std::string() : " (no reference pose for" + missing + ")";
         HSVR_LOG("Body: solver skeleton %s%s: scale %.3f, thigh %.1f shin %.1f cm, ankle %.1f, pelvis %.1f, eyes %.1f cm; his component's forward (+Y) is (%.2f, %.2f, %.2f) in the body's frame",
@@ -4270,9 +4286,9 @@ namespace
         {
             last_log = now;
             HSVR_LOG("Body: spine pitch %.0f, chest yaw %.0f (heading %.0f), hips %.0f cm over the floor (%.0f down), knees %.0f / %.0f deg, heels %.0f / %.0f, "
-                     "hips held up %.1f / pulled down %.1f cm, lean %.1f cm, %s (B&S weight %.2f), %s%s, %d steps; drawn vs sent worst %.2f cm (%s) mean %.2f",
+                     "hips held up %.1f / pulled down %.1f cm, lean %.1f cm, %s%s (B&S weight %.2f), %s%s, %d steps; drawn vs sent worst %.2f cm (%s) mean %.2f",
                      o.pitch_deg, o.torso_yaw_deg, heading, o.pos[body::J_PELVIS].z - floor_low, g_crouch_drop, o.knee_deg[0], o.knee_deg[1], o.heel_deg[0],
-                     o.heel_deg[1], o.hips_short_cm, o.hips_pulled_cm, o.lean_cm, o.walking ? "walking" : "standing", o.locomotion_weight, o.stepping[0] ? "left stepping " : "",
+                     o.heel_deg[1], o.hips_short_cm, o.hips_pulled_cm, o.lean_cm, o.walking ? "walking" : "standing", o.clips ? " on B&S clips" : "", o.locomotion_weight, o.stepping[0] ? "left stepping " : "",
                      o.stepping[1] ? "right stepping" : "", o.steps, B.err_worst, B.err_bone, B.err_n ? B.err_sum / B.err_n : 0.0);
             B.err_worst = B.err_sum = 0.0;
             B.err_n = 0;

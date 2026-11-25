@@ -370,12 +370,22 @@ namespace hsvr::body
         double twist = wrap(torso_yaw - root_yaw);
         double seg_yaw[5];
         for (int i = 0; i < 5; ++i) seg_yaw[i] = root_yaw + twist * (i == 0 ? p.twist_share_hips : kTwistShare[i]);
+        {
+            // Moving on B&S's clips, his hips turn as the clip's do (its crouch walk stands side-on); the spine
+            // turns back so the chest faces as before (17ab5a7's way). Last frame's clip turn, eased.
+            static const double hips_share[5] = {1.0, 0.6, 0.25, 0.0, 0.0};
+            double want = clip_hip_yaw_ * clip_weight_;
+            clip_hip_shown_ += wrap(want - clip_hip_shown_) * smoothing(dt, 0.1);
+            for (int i = 0; i < 5; ++i) seg_yaw[i] += clip_hip_shown_ * hips_share[i];
+        }
 
+        double height_ratio = 1.0; // B&S's Height: your level eye height over his standing eye height
         // ---- spine pitch: crouch versus bend (Parger, FRIK, Chasm) ----
         {
             double level_eyes = head_joint.z + in.eye_offset.z - floor;
             double h = (std::max)(level_eyes, p.min_head_height * s);
             double h0 = skel.eye_height;
+            height_ratio = h / h0;
             double drop = std::clamp((h0 - h) / h0, 0.0, 1.0);
             double gaze = smoothstep(p.bend_gaze_start_deg, p.bend_gaze_full_deg, head_pitch * kRadToDeg);
             double bend = drop * p.spine_bend_deg * kDegToRad * gaze + p.spine_bend_head_pitch * head_pitch;
@@ -509,11 +519,53 @@ namespace hsvr::body
                 S = s_max;
                 T = (std::max)(0.3, S / (duty * speed));
             }
-            if (speed > 1.0) gait_phase_ = std::fmod(gait_phase_ + dt / T, 1.0);
             Vec3 mid = flat((hips_now[0] + hips_now[1]) * 0.5);
+            bool use_clips = clips && clips->loaded;
+            ClipPose cp;
+            double stride = 1.0;
+            Quat facing = yaw_rot(root_yaw);
+            if (use_clips)
+            {
+                // B&S: the Unarmed (Moving) state's blend trees by Height and the local velocity; the clip plays
+                // at your speed (half of a speed difference in cadence, half in stride, as 17ab5a7 did), so its
+                // planted foot stays planted.
+                Vec3 local = facing.inverse().rotate(v);
+                double clip_len = 1.0, clip_speed = 0.0;
+                cp = clips->sample(local, height_ratio, clip_phase_, clip_len, clip_speed);
+                double k = clip_speed > 1.0 ? speed / clip_speed : 1.0;
+                stride = std::clamp(std::sqrt(k), 0.6, 1.4);
+                double cadence = k / stride;
+                if (speed > 1.0) clip_phase_ = std::fmod(clip_phase_ + dt * cadence / (std::max)(0.1, clip_len), 1.0);
+                cp = clips->sample(local, height_ratio, clip_phase_, clip_len, clip_speed);
+                clip_hip_yaw_ = cp.pelvis_yaw;
+            }
+            else if (speed > 1.0)
+                gait_phase_ = std::fmod(gait_phase_ + dt / T, 1.0);
             double lift_h = p.step_height * s * std::clamp(S / (25.0 * s), 0.0, 1.0);
             for (int i = 0; i < 2; ++i)
             {
+                if (use_clips)
+                {
+                    // The clip's foot from its pelvis, stretched along the way you move by the stride share, put
+                    // under his hips; its height above the clip's ground is the lift.
+                    Vec3 vdir = speed > 1.0 ? facing.inverse().rotate(v * (1.0 / speed)) : Vec3{1, 0, 0};
+                    Vec3 rel = cp.foot[i] - cp.pelvis;
+                    rel.z = 0.0;
+                    rel = rel + vdir * (dot(rel, vdir) * (stride - 1.0));
+                    Vec3 foot = mid + facing.rotate(rel);
+                    foot.z = in.floor_z[i];
+                    draw[i].pos = lerp(foot, feet_[i].pos, weight);
+                    draw[i].pos.z = in.floor_z[i];
+                    Vec3 bf = facing.rotate(cp.ball[i] - cp.foot[i]);
+                    double clip_yaw = length(flat(bf)) > 1.0 ? std::atan2(bf.y, bf.x) : root_yaw;
+                    draw[i].yaw = feet_[i].yaw + wrap(clip_yaw - feet_[i].yaw) * (1.0 - weight);
+                    double lift = (std::max)(0.0, cp.foot[i].z - skel.ankle_height);
+                    lifts[i] = lifts[i] * weight + lift * (1.0 - weight);
+                    // The knee bends where the clip's knee does (B&S's legs keep the animation's bend plane).
+                    Vec3 kd = cp.calf[i] - (cp.thigh[i] + cp.foot[i]) * 0.5;
+                    clip_knee_[i] = facing.rotate(kd);
+                    continue;
+                }
                 double ph = std::fmod(gait_phase_ + 0.5 * i, 1.0), x, lift = 0.0;
                 if (ph < duty) x = S * 0.5 - S * (ph / duty);
                 else
@@ -544,6 +596,8 @@ namespace hsvr::body
                 }
             out.locomotion_weight = weight;
             last_weight_ = weight;
+            clip_weight_ = use_clips ? 1.0 - weight : 0.0;
+            out.clips = use_clips && weight < 0.98;
         }
         double thigh_len[2] = {length(K.joint[J_CALF_L] - K.joint[J_THIGH_L]), length(K.joint[J_CALF_R] - K.joint[J_THIGH_R])};
         double shin_len[2] = {length(K.joint[J_FOOT_L] - K.joint[J_CALF_L]), length(K.joint[J_FOOT_R] - K.joint[J_CALF_R])};
@@ -642,6 +696,8 @@ namespace hsvr::body
             Vec3 ref_thigh = K.joint[jt + 1] - K.joint[jt], ref_shin = K.joint[jt + 2] - K.joint[jt + 1], ref_foot = K.joint[jt + 3] - K.joint[jt + 2];
             Vec3 fw = yaw_dir(f.yaw);
             Vec3 knee_dir = normalize_or(fw + normalize_or(hips_fwd, fw), fw);
+            if (clip_weight_ > 0.0 && length(clip_knee_[i]) > 1.0)
+                knee_dir = normalize_or(knee_dir * (1.0 - clip_weight_) + normalized(clip_knee_[i]) * clip_weight_, knee_dir);
             Vec3 hip = hj[i], ankle, ball;
             double heel = 0.0;
             double reach = std::sqrt(a * a + b * b + 2.0 * a * b * std::cos(kKneeMinFlex));

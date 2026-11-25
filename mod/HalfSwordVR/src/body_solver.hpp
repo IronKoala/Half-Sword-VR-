@@ -17,6 +17,7 @@
 // centimetres), with no engine calls, so it runs the same in the game and in the offline replay
 // test (tools/body/replay_solve.cpp).
 #pragma once
+#include "body_clips.hpp"
 #include "vrmath.hpp"
 
 namespace hsvr::body
@@ -101,6 +102,7 @@ namespace hsvr::body
         double hips_short_cm = 0;      // how far the hips were held up by the knees (spine bent instead)
         double hips_pulled_cm = 0;     // how far the hips were pulled down to reach the feet
         double lean_cm = 0;            // the torso lean: how far it carries the hips back over the feet
+        bool clips = false;            // the moving legs are B&S's clips
         double heel_deg[2] = {0, 0};
         double lift_cm[2] = {0, 0};
         bool stepping[2] = {false, false};
@@ -114,6 +116,7 @@ namespace hsvr::body
     public:
         Params p;
         Skeleton skel;
+        const LocomotionClips* clips = nullptr; // B&S's walk/run/crouch-walk clips for the moving legs (else a computed gait)
         Output solve(const Input& in);
         void reset() { have_state_ = false; }
         // The feet's floor spots (world, z on the floor) for the glue's ground traces.
@@ -147,6 +150,8 @@ namespace hsvr::body
         Vec3 gait_dir_{1, 0, 0};
         Vec3 last_capsule_, capsule_vel_, lean_vec_;
         double last_weight_ = 1.0, stood_s_ = 1.0;
+        double clip_phase_ = 0.0, clip_hip_yaw_ = 0.0, clip_hip_shown_ = 0.0, clip_weight_ = 0.0;
+        Vec3 clip_knee_[2];
         bool have_capsule_ = false;
         double still_time_ = 0;
         Vec3 com_, com_vel_;
