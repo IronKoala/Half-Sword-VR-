@@ -1,0 +1,4 @@
+# Shoulder-slung pavise stays still (pose_shoulder_slot_on_chest)
+still_a|steps-still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+still_b|steps-still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+still_off|steps-still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_shoulder_slot_on_chest=0

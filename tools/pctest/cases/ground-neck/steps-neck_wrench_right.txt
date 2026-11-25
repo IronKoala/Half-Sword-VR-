@@ -1,0 +1,30 @@
+# The same grab, then the wrist turns 90 deg about the vertical over 0.9 s (right) and holds: a deliberate
+# wrench snaps the neck (no sooner than joint_break_min_s of held strain).
+# The hand turns about his neck's own axis (test 2026-11-24: about the vertical, a 90 deg turn read as only 20-25 deg on his slumped neck).
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.6:hsvr.expect room_foes = 1 the one passive foe
+0.8:hsvr.player_immortal
+1.0:hsvr.squeeze 0 1
+1.0:hsvr.squeeze 1 1
+1.4:hsvr.squeeze 0 0
+1.4:hsvr.squeeze 1 0
+1.9:hsvr.expect held_r = 0 right hand empty (the test room starts him with a crossbow)
+1.9:hsvr.expect held_l = 0 left hand empty
+2.0:hsvr.arm_move 1
+2.6:hsvr.foe_bone_at_hand 1 3 neck_02
+# Placed again in the same tick as the squeeze: in the 0.1 s between, he was pushed off the hand (test 2026-11-24: 9 of 10 runs grabbed nothing or his upper arm).
+2.7:hsvr.foe_bone_at_hand 1 3 neck_02
+2.7:hsvr.squeeze 1 1
+2.8:hsvr.wait grabbed_r = 1 2 0 the neck is held
+2.9:hsvr.mark
+3.0:hsvr.hand_yaw 1 10 neck
+3.1:hsvr.hand_yaw 1 20 neck
+3.2:hsvr.hand_yaw 1 30 neck
+3.3:hsvr.hand_yaw 1 40 neck
+3.4:hsvr.hand_yaw 1 50 neck
+3.5:hsvr.hand_yaw 1 60 neck
+3.6:hsvr.hand_yaw 1 70 neck
+3.7:hsvr.hand_yaw 1 80 neck
+3.8:hsvr.hand_yaw 1 90 neck
+4.0:hsvr.wait neck_snaps = 1 4 0 the wrench snaps his neck
+8.1:hsvr.hand_yaw 1 0

@@ -1,0 +1,4 @@
+# Pavise forward grip on the forearm (Matthew 11-24). Needs the test hook patch (hand_at, clear_belt, slot_state).
+fwd_light_l_a|steps-fwd_light_l.txt
+fwd_light_l_b|steps-fwd_light_l.txt
+fwd_light_l_c|steps-fwd_light_l.txt

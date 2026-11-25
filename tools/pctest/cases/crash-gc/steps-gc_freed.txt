@@ -1,0 +1,83 @@
+# Playtest 11-24: 6 crashes in leg_guard_tick reading a weapon freed by the game's cleanup (GC) before the 0.25 s list rebuild.
+# Kills, weapon swaps and fist make/remove, each followed by a forced cleanup (hsvr.gc) 0.05-0.2 s later. Pass = the game lives.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.8:hsvr.player_immortal
+1.0:hsvr.arm_move 1
+2:hsvr.test_room_kill 0
+3:hsvr.test_room_kill 1
+4:hsvr.test_room_kill 2
+5:hsvr.test_room_kill 3
+9.2:hsvr.gc
+9.4:hsvr.gc
+10.2:hsvr.gc
+10.4:hsvr.gc
+11.2:hsvr.gc
+11.4:hsvr.gc
+12.2:hsvr.gc
+12.4:hsvr.gc
+13.2:hsvr.gc
+13.4:hsvr.gc
+15.0:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
+15.6:hsvr.squeeze 1 1
+15.9:hsvr.squeeze 1 0
+16.2:hsvr.gc
+16.3:hsvr.gc
+17.0:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
+17.6:hsvr.squeeze 1 1
+17.9:hsvr.squeeze 1 0
+18.2:hsvr.gc
+18.3:hsvr.gc
+19.0:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
+19.6:hsvr.squeeze 1 1
+19.9:hsvr.squeeze 1 0
+20.2:hsvr.gc
+20.3:hsvr.gc
+21.0:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
+21.6:hsvr.squeeze 1 1
+21.9:hsvr.squeeze 1 0
+22.2:hsvr.gc
+22.3:hsvr.gc
+23.0:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
+23.6:hsvr.squeeze 1 1
+23.9:hsvr.squeeze 1 0
+24.2:hsvr.gc
+24.3:hsvr.gc
+25.0:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
+25.6:hsvr.squeeze 1 1
+25.9:hsvr.squeeze 1 0
+26.2:hsvr.gc
+26.3:hsvr.gc
+27.0:hsvr.squeeze 1 1
+27.1:hsvr.gc
+27.5:hsvr.squeeze 1 0
+27.6:hsvr.gc
+28.0:hsvr.squeeze 1 1
+28.1:hsvr.gc
+28.5:hsvr.squeeze 1 0
+28.6:hsvr.gc
+29.0:hsvr.squeeze 1 1
+29.1:hsvr.gc
+29.5:hsvr.squeeze 1 0
+29.6:hsvr.gc
+30.0:hsvr.squeeze 1 1
+30.1:hsvr.gc
+30.5:hsvr.squeeze 1 0
+30.6:hsvr.gc
+31.0:hsvr.squeeze 1 1
+31.1:hsvr.gc
+31.5:hsvr.squeeze 1 0
+31.6:hsvr.gc
+32.0:hsvr.squeeze 1 1
+32.1:hsvr.gc
+32.5:hsvr.squeeze 1 0
+32.6:hsvr.gc
+33.0:hsvr.squeeze 1 1
+33.1:hsvr.gc
+33.5:hsvr.squeeze 1 0
+33.6:hsvr.gc
+34.0:hsvr.squeeze 1 1
+34.1:hsvr.gc
+34.5:hsvr.squeeze 1 0
+34.6:hsvr.gc
+35.0:hsvr.mark
+35.2:hsvr.expect room_ready = 1 still alive after the cleanups

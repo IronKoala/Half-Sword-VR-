@@ -1,0 +1,13 @@
+# Cap-85 crouch kicks only, repeated (they happen 1 in 2-4 runs): Watch hit lines name what the physics says the lantern hit.
+floor_kick_a|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_kick_b|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_kick_c|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_kick_fast_a|steps-floor_kick_fast.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_kick_fast_b|steps-floor_kick_fast.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_kick_legsoff_a|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85;pose_legs_pass_loose=0
+floor_kick_legsoff_b|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85;pose_legs_pass_loose=0
+floor_kick_chan|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85;pose_legs_pass_capsule_channel=1
+# Held chain lantern: lamp and links now paired with the holding arm
+lantern_hold_still|steps-lantern_hold_still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold_still_b|steps-lantern_hold_still.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_hold|steps-lantern_hold.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar

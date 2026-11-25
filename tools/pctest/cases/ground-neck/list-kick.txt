@@ -1,0 +1,10 @@
+# Leg guard (pose_legs_pass_loose): loose weapons pass through his legs. floor_kick_legsoff is the control (guard off: run 10 d82b641 pushed the lantern 50 cm).
+floor_kick|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_kick_62|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62
+floor_kick_fast|steps-floor_kick_fast.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_kick_fast_62|steps-floor_kick_fast.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62
+floor_kick_legsoff|steps-floor_kick.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85;pose_legs_pass_loose=0
+floor_pickup|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85
+floor_pickup_62|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62
+walk_over_items|steps-walk_over_items.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+walk_into_foe|steps-walk_into_foe.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
