@@ -1,0 +1,9 @@
+# auto: a key press while a grip is held (controllers in use) must not switch.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.player_immortal
+1.0:hsvr.squeeze 0 1
+2.5:hsvr.kbm_use
+3.5:hsvr.expect input_kbm = 0 a grip held: no switch
+3.6:hsvr.squeeze 0 0
+5.0:hsvr.kbm_use
+5.1:hsvr.wait input_kbm = 1 1 0 grip open 1.4 s: switches

@@ -1,0 +1,12 @@
+# Playtest 17:22 local: standing and looking down at his legs, he stood squatted (10 cm crouch at 66 deg down).
+# Pretend headset still at the recentre spot, nodded 66 deg down about the base of the neck: no crouch.
+# (dev_pose_fake_tracking=0 so the crouch comes from the head, as in the headset.)
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.fake_head_pose 1
+1.5:hsvr.expect crouch_drop < 1 standing: no crouch
+1.6:hsvr.fake_head_tilt 66 0 0
+3.0:hsvr.expect crouch_drop < 2 looking 66 deg down is not a crouch
+3.1:hsvr.fake_head_tilt 0 0 30
+4.5:hsvr.expect crouch_drop > 20 a real 30 cm drop still crouches
+4.6:hsvr.fake_head_tilt 0 0 0
+4.7:hsvr.fake_head_pose 0

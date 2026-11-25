@@ -1,0 +1,23 @@
+# Is the put-down lantern's roll the game's own chain physics? (Runs 23-24: put down from a crouch it sometimes rolled 0.5-2 m
+# away, touching only the floor and its own links.) A chain lantern spawned at the right controller 65 cm ahead and 40 to the side,
+# 10 cm over the floor, standing, his hands empty: nothing of his within the leg guard's 40 cm. Then it is watched 6 s.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.8:hsvr.player_immortal
+1.0:hsvr.squeeze 0 1
+1.0:hsvr.squeeze 1 1
+1.4:hsvr.squeeze 0 0
+1.4:hsvr.squeeze 1 0
+1.9:hsvr.expect held_r = 0 right hand empty
+# (Run 25: without arm_move 1 the fake arm stayed put and the lantern spawned against his thigh.) Crouched as floor_reach,
+# so the hand gets down there.
+2.0:hsvr.arm_move 1
+2.05:hsvr.fake_head_drop 95
+2.1:hsvr.arm_floor 65 40 15
+2.2:hsvr.watch_item Lantern
+5.0:hsvr.expect hand_floor_r >= 0 record: the hand's height over the floor at the spawn
+5.0:hsvr.spawn /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
+5.1:hsvr.mark
+11.0:hsvr.expect held_r = 0 not taken in the hand
+11.0:hsvr.expect item_moved < 30 a lantern let go 10-25 cm over the floor, nothing of his near it, comes to rest near where it landed (cm)
+11.0:hsvr.expect item_speed >= 0 record: its fastest, m/s
+11.1:hsvr.fake_head_drop -1

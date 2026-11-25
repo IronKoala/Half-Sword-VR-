@@ -1,0 +1,9 @@
+# Chain lantern calm (pose_chain_no_self_collision / pose_chain_damping): the floor settle and the pickups, each switch alone and both.
+settle_self_a|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_chain_no_self_collision=1
+settle_self_b|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_chain_no_self_collision=1
+settle_damp_a|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_chain_damping=1
+settle_damp_b|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_chain_damping=1
+settle_both_a|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_chain_no_self_collision=1;pose_chain_damping=1
+settle_both_b|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_chain_no_self_collision=1;pose_chain_damping=1
+pickup_both|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=85;pose_chain_no_self_collision=1;pose_chain_damping=1
+pickup_both_62|steps-floor_pickup.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_crouch_max_cm=62;pose_chain_no_self_collision=1;pose_chain_damping=1

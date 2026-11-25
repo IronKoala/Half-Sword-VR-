@@ -1,0 +1,14 @@
+# auto: a mouse/keyboard press with the controllers idle hands the arms over; a controller button gives them back.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.player_immortal
+2.0:hsvr.expect input_kbm = 0 starts on the controllers
+2.0:hsvr.expect hand_valid_r = 1 right arm follows the (fake) controller
+3.5:hsvr.kbm_use
+3.6:hsvr.wait input_kbm = 1 1 0 switched to mouse and keyboard
+4.5:hsvr.expect hand_valid_r = 0 right arm is the game's own
+4.5:hsvr.expect hand_valid_l = 0 left arm is the game's own
+4.5:hsvr.expect posed = 0 plain game: the mod does not pose him
+5.0:hsvr.controller_use
+5.1:hsvr.wait input_kbm = 0 1 0 back on the controllers
+5.2:hsvr.wait posed = 1 3 0 posed again from the headset
+6.0:hsvr.expect hand_valid_r = 1 right arm follows the controller again

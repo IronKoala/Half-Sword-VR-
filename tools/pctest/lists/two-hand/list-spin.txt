@@ -1,0 +1,12 @@
+spin_warhammer_long|steps-spin_warhammer_long.txt
+spin_polehammer|steps-spin_polehammer.txt
+spin_longsword|steps-spin_longsword.txt
+ctl_spin_warhammer_long|steps-spin_warhammer_long.txt|pose_hold_spin_brake_from=0
+ctl_spin_polehammer|steps-spin_polehammer.txt|pose_hold_spin_brake_from=0
+ctl_spin_longsword|steps-spin_longsword.txt|pose_hold_spin_brake_from=0
+old_spin_warhammer_long|steps-spin_warhammer_long.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0
+old_spin_polehammer|steps-spin_polehammer.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0
+old_spin_longsword|steps-spin_longsword.txt|pose_hold_spin_brake_from=0;pose_hold_joint_pull_once=0
+pull2_spin_warhammer_long|steps-spin_warhammer_long.txt|pose_hold_joint_pull_once=0
+pull2_spin_polehammer|steps-spin_polehammer.txt|pose_hold_joint_pull_once=0
+pull2_spin_longsword|steps-spin_longsword.txt|pose_hold_joint_pull_once=0

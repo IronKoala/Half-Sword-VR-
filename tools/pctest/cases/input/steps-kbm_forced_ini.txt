@@ -1,0 +1,7 @@
+# input_mode=keyboard: mouse and keyboard from the start; a controller button does not take over.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.player_immortal
+2.0:hsvr.expect input_kbm = 1 forced by the ini
+2.0:hsvr.expect hand_valid_r = 0 game's own right arm
+2.5:hsvr.controller_use
+3.5:hsvr.expect input_kbm = 1 still mouse and keyboard

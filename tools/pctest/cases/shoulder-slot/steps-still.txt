@@ -1,0 +1,15 @@
+# Pavise slung on his shoulder (Sheath_Slot_Shoulder_L, upperarm_l) while he stands still with tracking-like arm noise and a slow arm move.
+# Matthew 11-24 12:02: it jittered on his back standing still. Pass = the pavise moves under 3 cm and stays slow.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.8:hsvr.player_immortal
+0.9:hsvr.fake_head_drop 0
+1.0:hsvr.squeeze 1 1
+1.5:hsvr.squeeze 1 0
+3.0:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Shield_Pavise_Light.Shield_Pavise_Light_C
+4.5:hsvr.sheathe_spawn 2
+6.0:hsvr.arm_move 1
+6.5:hsvr.fake_jitter 2.0
+7.0:hsvr.fake_jitter 1.5
+9.0:hsvr.mark
+14.0:hsvr.expect slot_back_moved < 3 slung on his shoulder: moved under 3 cm while he stood still
+14.0:hsvr.expect slot_back_speed < 0.3 slung on his shoulder: never faster than 0.3 m/s

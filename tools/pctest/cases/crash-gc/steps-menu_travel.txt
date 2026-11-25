@@ -1,0 +1,12 @@
+# 1:16 PM 11-24 crash: IoDispatcher thread, 0.4 s after a pause-menu click (quit to menu). Travel to the main menu and back, twice.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.8:hsvr.player_immortal
+1.0:hsvr.arm_move 1
+2.0:hsvr.squeeze 1 1
+2.4:hsvr.squeeze 1 0
+3.0:open /Game/Maps/Menus/Map_Menu_Startup
+9.0:open /Game/Maps/Arenas/Map_Arena_Cellar
+16.0:open /Game/Maps/Menus/Map_Menu_Startup
+22.0:open /Game/Maps/Arenas/Map_Arena_Cellar
+29.0:hsvr.mark
+29.2:hsvr.expect room_ready = 1 back in the room after two trips to the menu

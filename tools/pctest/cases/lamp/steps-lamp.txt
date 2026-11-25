@@ -1,0 +1,18 @@
+# Held chain lantern: what the lamp does (Matthew 11-24: it feels like zero gravity). Look at the Lamp: lines.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.8:hsvr.player_immortal
+0.9:hsvr.fake_head_drop 0
+1.0:hsvr.squeeze 0 1
+1.0:hsvr.squeeze 1 1
+1.4:hsvr.squeeze 0 0
+1.4:hsvr.squeeze 1 0
+2.0:hsvr.arm_move 1
+2.2:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Improvized/BP_Weapon_Improv_Lantern_Chain.BP_Weapon_Improv_Lantern_Chain_C
+2.4:hsvr.wait held_r = 1 3 0 the lantern is in the right hand
+6.0:hsvr.mark
+8.0:hsvr.expect lamp_drop > 8 held still: the lamp hangs below the handle
+8.0:hsvr.fake_jitter 4
+8.6:hsvr.fake_jitter 0
+9.3:hsvr.mark
+12.0:hsvr.expect lamp_swing > 3 0.7-3.4 s after a shake the lamp still swings
+12.0:hsvr.expect lamp_speed > 0.2 0.7-3.4 s after a shake the lamp still moves against the handle

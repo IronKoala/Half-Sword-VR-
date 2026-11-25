@@ -1,0 +1,18 @@
+# A kick over loose items with no floor found under him (traces forced to miss for 1.2 s, as when 5 loose things
+# used up the middle trace and both feet were off the floor): he must stay standing, no jump needed.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.player_immortal
+1.0:hsvr.squeeze 1 1
+1.5:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C
+2.5:hsvr.squeeze 1 0
+3.0:hsvr.squeeze 1 1
+3.5:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Ranged/Weapon/BP_Weapon_Ranged_Weapon_Crossbow_Light.BP_Weapon_Ranged_Weapon_Crossbow_Light_C
+4.5:hsvr.squeeze 1 0
+6.0:hsvr.expect held_r = 0 items dropped at his feet
+6.0:hsvr.expect actor_z > 80 standing before the kick
+6.1:hsvr.floor_miss 1.2
+6.1:hsvr.press_a 1
+6.25:hsvr.press_a 0
+7.0:hsvr.expect actor_z > 75 held up mid-kick with no floor found
+9.5:hsvr.expect actor_z > 80 standing after the kick
+12.0:hsvr.expect actor_z > 80 still standing 2.5 s later
