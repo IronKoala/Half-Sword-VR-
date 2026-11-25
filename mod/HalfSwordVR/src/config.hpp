@@ -251,61 +251,12 @@ namespace hsvr
         // playing; switching back restarts nothing, so restart the fight afterwards.
         bool pose_body = false;
         bool pose_head = true;
-        // His head bone is put where your headset says it is (not only turned), so the helmet keeps
-        // still in front of your eyes: the animation's breathing and crouch lean no longer move it in
-        // and out of view (Matthew 2026-11-19). At most pose_head_lock_max_cm from where the animation
-        // has his neck reach (beyond that the neck would stretch visibly).
+        // His head bone is put where your headset says it is (the body solver hangs his neck and spine
+        // from it), so the helmet keeps still in front of your eyes (Matthew 2026-11-19).
         bool pose_head_lock = true;
-        double pose_head_lock_max_cm = 12.0;
-        // ---- Torso lean (Matthew 2026-11-19: armour blocked a third of the view looking down) ----
-        // The torso hangs from your neck and bends like Half Sword's own lean (LeftAlt + mouse,
-        // Anim_Add_Bob_AO): spine_02..spine_05 take equal shares, neck_01/neck_02 bend back 3/8 each
-        // (torso_lean_and_helmet.md). Your hips go back by as much as the bend carries the head
-        // forward, so your head stays at the headset and the chest moves in, out of view.
-        // Forward bend = (head pitch below the horizon - pose_lean_pitch_dead_deg) x pose_lean_pitch_gain,
-        // at most pose_lean_max_deg (the game's own lean reaches 60). Sideways = head roll likewise.
-        bool pose_lean = true;
-        // 1 = also bend him from your head's pitch and roll (the bend above); 0 = his torso only leans to
-        // where your neck actually is, as closed PR #8/#10 did (Matthew 2026-11-21: that leaning was
-        // "basically perfect"; with the head-angle bend his spine was never in line with his own).
-        bool pose_lean_head_angle = false;
-        // Looking down, his chest leans back out of the view by up to this many cm (reached at 60 degrees
-        // down, from 5), from closed PR #8/#10. 0 = off.
-        double pose_lean_look_down_back_cm = 16.0;
-        double pose_lean_pitch_dead_deg = 10.0;
-        double pose_lean_pitch_gain = 0.7;
-        double pose_lean_max_deg = 60.0;
-        double pose_lean_roll_dead_deg = 5.0;
-        double pose_lean_roll_gain = 0.8;
-        double pose_lean_side_max_deg = 25.0;
-        double pose_lean_smooth_s = 0.08;
-        // A bend lowers his head; his hips can't rise above standing, so the bend is held to what your
-        // headset's drop (plus this much neck slack) allows.
-        double pose_lean_slack_cm = 4.0;
-        // Lean first, step after (Matthew 2026-11-20): when your neck moves away from where his hips
-        // stand, his torso leans to put his head there; only once it is more than pose_lean_step_radius_cm
-        // away does he step: his capsule (and so his feet) comes back under your neck over
-        // pose_lean_walk_catchup_s and stays with you while you walk, until it is under your neck again.
-        // 0 = the old way (his hips always under your neck).
-        double pose_lean_step_radius_cm = 8.0;
-        // Your lean and room steps are measured this far (cm) below your head joint, turning with your head
-        // (about the base of your neck), so a nod or head tilt is neither a lean nor a step. 0 = at the head joint.
+        // Your room steps are measured this far (cm) below your head joint, turning with your head
+        // (about the base of your neck), so a nod or head tilt is not a step. 0 = at the head joint.
         double pose_room_neck_base_cm = 12.0;
-        double pose_lean_walk_catchup_s = 0.15;
-        // 1 = past the radius his hips follow your neck at once (at most pose_lean_follow_speed_cms), so
-        // your neck is never more than the radius from over his hips (closed PR #8/#10: 8 cm, 400 cm/s).
-        // 0 = past the radius he steps all the way under you (pose_lean_walk_catchup_s).
-        bool pose_lean_follow_past_radius = true;
-        double pose_lean_follow_speed_cms = 400.0;
-        // A lean you hold still is a new stance: once your neck has moved less than
-        // pose_lean_settle_speed_cms for pose_lean_settle_s, he steps under you (0 = never; stays leaned).
-        double pose_lean_settle_s = 0.8;
-        // Behind his hips he leans back at most this far (cm); further back, his hips follow at once.
-        double pose_lean_back_radius_cm = 6.0;
-        double pose_lean_settle_speed_cms = 10.0;
-        // 1 = the game's own forward bend from crouching (Root Height) and reaching for grabs (Lean
-        // Forward (Grabbing)) is taken out of his animation, so only your lean bends him.
-        bool pose_lean_cancel_game_bend = true;
         // 1 = his body, head and worn armour animate every frame (no update-rate skipping).
         bool pose_no_uro = true;
         // 1 = your helmet (and his head) are moved to this frame's headset pose right when the view takes
@@ -1074,27 +1025,9 @@ namespace hsvr
         // smoothly; jumps over pose_teleport_above_cm per frame still teleport.
         bool pose_move_bodies = true;
         double pose_teleport_above_cm = 30.0;
-        // 1 = he crouches as low as you do (your headset below where you stood when you recentred,
-        // less pose_crouch_dead_zone_cm).
+        // 1 = he crouches as low as you do (the body solver hangs him from your head) and the left stick
+        // click crouch below works.
         bool pose_crouch = true;
-        double pose_crouch_dead_zone_cm = 3.0;
-        // 1 = the crouch is measured at the base of your neck (pose_room_neck_base_cm below the head joint),
-        // so looking down at your feet is not a crouch; 0 = at the head joint (looking 60 deg down read as
-        // a 7-10 cm crouch).
-        bool pose_crouch_at_neck_base = true;
-        // How far his legs crouch him (cm, times his size). Deeper than that (your view lower still), he
-        // bends forward until his head is down with your view, so his hands reach as low as yours
-        // (pose_crouch_bend_for_depth; playtest 2026-11-21: he could not reach the ground).
-        // 85 (2026-11-24): hips nearly down on the heels, as you are kneeling to the floor; at 62 his head stayed
-        // 16-18 cm above a kneeling view even bent 85 deg, his hand 15-24 cm off the floor (test 04e802e).
-        double pose_crouch_max_cm = 85.0; // was a fixed 55, then 62; playtest 2026-11-21: view 114 cm down, his head bone 35 cm above it
-        bool pose_crouch_bend_for_depth = true;
-        // That bend for depth: at most this many degrees, and this share of it (0..1) takes his head down
-        // with it instead of his neck bending back to keep the head up (0 = old: the neck bends back
-        // 0.375 x the bend twice, so at 85 deg his head stayed 17 cm above a kneeling view). Also, while he
-        // bends for depth, looking down no longer pushes his chest back (pose_lean_look_down_back_cm).
-        double pose_crouch_bend_max_deg = 85.0;
-        double pose_crouch_bend_neck_follow = 1.0;
         // Left stick click toggles a button crouch this deep (cm, eased at _cms); 0 = off.
         double pose_crouch_button_cm = 40.0;
         double pose_crouch_button_cms = 120.0;
@@ -1141,37 +1074,24 @@ namespace hsvr
         // How much of the hand's turn about the forearm the forearm bone takes (0 to 1); the rest
         // shows at the wrist. Willie's forearm has no twist bones.
         double pose_forearm_twist_share = 0.5;
-        // How much of your head's turn away from the hips the spine and neck take together (0 to 1;
-        // the head is always exactly the headset).
-        double pose_torso_twist = 0.7;
-        // Feet stay where they were put down and step (lift and place) when the hips have moved or
-        // turned away from them: 1 = on, 0 = the game's own feet.
-        bool pose_feet = true;
-        // 1 = while the game's kick has a leg (Kicking L/R), the mod stops planting that foot and holding
-        // it flat; it is planted again where the kick put it down (playtest 2026-11-21: foot turned backwards).
+        // 1 = while the game's kick has a leg (Kicking L/R), the body solver leaves that leg to the game's
+        // kick (playtest 2026-11-21: a planted foot turned backwards mid-kick).
         bool pose_feet_free_on_kick = true;
         double pose_feet_kick_free_s = 1.0; // and this long after right A / the left-X tap fires a kick (kicks rise 0.2-0.3 s after the press and last ~0.5 s)
-        double pose_step_distance_cm = 10.0, pose_step_angle_deg = 30.0; // when a foot steps
-        double pose_step_time_s = 0.3;  // how long a step takes standing (shorter when moving)
-        double pose_step_lift_cm = 10.0; // how high the foot lifts
-        double pose_step_lead_s = 0.2;   // how far ahead (in seconds of movement) a foot lands when walking
-        // Crouched: step distance, lead and time x up to pose_step_crouch_scale, reached at
-        // pose_step_crouch_full_cm of crouch (the game: crouched steps twice the standing size). 1 = off.
-        double pose_step_crouch_scale = 2.0;
-        double pose_step_crouch_full_cm = 15.0;
-        // Crouched, his legs play Blade & Sorcery's own crouch animations (Crouch_Walk* in 8 directions,
-        // CrouchLoop and the 90 degree crouch turns), baked onto his skeleton with Unity 2021.3.38f1's
-        // humanoid retargeting (tools/bs-crouch), blended like B&S's blend trees by where you move and
-        // how fast you turn, and played at the speed you move so the planted foot stays put. The feet
-        // are put on the floor under them (the clip's own lift above it) and the knees bend toward the
-        // clip's knee. The baked files are read from the bs-crouch folder next to the dll (made from your own
-        // B&S install; not shipped). It plays while your head is at most pose_crouch_anim_on_ratio of
-        // standing height (B&S: crouchHeightRatio 0.8) and stops above pose_crouch_anim_off_ratio.
-        bool pose_crouch_anim = true;
-        double pose_crouch_anim_on_ratio = 0.8, pose_crouch_anim_off_ratio = 0.85;
-        double pose_crouch_anim_fade_s = 0.25;  // in and out (and between standing still and moving)
-        double pose_crouch_anim_hips = 1.0;     // share of the clips' hip turn shown (B&S's crouch stands side-on); his chest keeps facing where it did
-        double pose_crouch_anim_still_cms = 10.0; // slower than this he stands (CrouchLoop / crouch turns)
+        // The body solver (body_solver.cpp; Matthew 2026-11-24, design "VR body rebuild: our own body
+        // solver"): one solver poses the hips, spine, neck, head and legs from the headset and controllers
+        // (Chasm's VR Framework's IK, Blade & Sorcery's standing/moving split). 0 = those bones are the
+        // game's own animation.
+        bool body_solver = true;
+        double body_knee_max_deg = 150.0;      // the knees fold no further; past that the spine bends instead
+        double body_hips_pull_max_cm = 12.0;   // hips come down at most this far to keep a foot on the floor
+        double body_step_height_cm = 8.0;
+        double body_foot_spacing_cm = 24.0;
+        double body_moving_cms = 100.0;        // B&S: at this speed the legs are all gait, none balance steps
+        // Torso lean (Matthew 2026-11-25: "keep the torso leaning, it's immersive"): standing, his feet stay and
+        // his spine bends to put his head at yours, up to this far (cm) of hip offset; further, he steps. 0 = off.
+        double body_lean_max_cm = 35.0;
+        double body_floor_cms = 200.0;         // the floor under a foot changes at most this fast (a step's edge)
         // How quickly the elbow's swing around the arm follows (seconds; the hand is never smoothed).
         double pose_swivel_smooth_s = 0.06;
         // TEST ONLY: the head and hands follow a slow made-up path instead of the headset and

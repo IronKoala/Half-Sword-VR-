@@ -1,0 +1,14 @@
+# His own head from the 11-24 marker replay (crouch_lookdown_1938), played back on the pretend headset.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.head_replay C:/Users/matth/Documents/Codex/HalfSwordDecomp/private/body-tracks/crouch_lookdown_1938.csv
+1.5:hsvr.mark
+15.5:hsvr.expect body_active = 1 the body solver poses him
+15.5:hsvr.expect body_err <= 1.5 drawn vs sent, cm mean
+15.5:hsvr.expect body_err_worst <= 6 drawn vs sent, cm worst
+15.5:hsvr.expect body_flips = 0 a knee never swaps sides
+15.5:hsvr.expect body_knee_max <= 151 knees never past the fold limit
+15.5:hsvr.expect body_twitches <= 3 knee twitches
+15.5:hsvr.expect body_kneepos_worst <= 15 knee moved a tick, cm (his head jumps with the capsule)
+15.5:hsvr.expect body_pitch_max >= 0 (record)
+15.5:hsvr.expect body_steps >= 0 (record)
+15.6:hsvr.head_replay off
