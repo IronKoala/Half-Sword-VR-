@@ -165,6 +165,9 @@ The grip settings in the ini (pose_grip_*) are re-read every second during a run
 | `hsvr.trigger <0/1> <value>` | Fakes the left (0) or right (1) trigger (0..1); -1 gives it back to the controller |
 | `hsvr.squeeze <0/1> <value>` | Fakes the left (0) or right (1) grip squeeze (0..1); -1 gives it back to the controller |
 | `hsvr.press_a 0/1` | 1 holds right A for the menu buttons (continue after a win) |
+| `hsvr.floor_miss <s>` | The capsule's floor traces (under his middle and his feet) find nothing for that long, as when a kick lifts both feet over loose items |
+| `hsvr.capsule_drop <cm>` | Puts his capsule that far straight down at once; the game then lifts it back (the climb undo must let that through below standing height) |
+| `hsvr.punch_sim <impulse>` | One right-fist blow on the nearest other Willie's head (800 cm/s, rigidity 0.6, cut 0.3), made as the fist's own Deal Complex Damage call, so the punch watch and the game's damage run as for a real punch. Needs a fist in the right hand |
 | `hsvr.ghost_show 0/1` | 1 shows the ghost hand at your hand all the time (for fitting it) |
 | `hsvr.hold_reach 0/1` | 0 lets the hold aim past his reach (to push a held weapon into the floor with arm_move 5); 1 (default) clamps it to his reach |
 | `hsvr.grip_hold 0/1` | Turns the framework hold off or on for the test, whatever the ini says |

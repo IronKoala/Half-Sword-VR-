@@ -23,6 +23,7 @@ namespace hsvr
         bool primary = false;   // A on the right hand, X on the left (or the Index A buttons)
         bool secondary = false; // B / Y
         bool menu = false;
+        bool marker = false;    // the bug-marker button (Steam Frame left D-pad Left; no other layout has one)
         bool trigger_touch = false; // index finger on the trigger (touch sensor)
         bool thumb_touch = false;   // thumb on the stick, a face button or the thumb rest (touch sensors)
         // Finger curls, thumb .. little, 0 open .. 1 closed.
@@ -42,6 +43,7 @@ namespace hsvr
         bool head_valid = false;
         XrPoseRaw head; // point between the eyes at the same time, for relative positions
         HandState hand[2]; // 0 = left, 1 = right
+        bool frame_layout = false; // the left hand runs on the native Steam Frame layout (own bug-marker button)
     };
 
     // After the instance exists: makes the action set and suggests bindings for the common
@@ -70,4 +72,7 @@ namespace hsvr
     // 0..1 -> amplitude 0..1) played over `seconds` at `volume`. Every frame each hand gets the sum
     // of its envelopes playing (clamped to 1), sent as a 1/30 s pulse.
     void controllers_hit(int hand, const float* key_t, const float* key_v, int keys, double seconds, float volume);
+    // Like controllers_hit, but exclusive: while it plays, every other buzz and hit on that hand is
+    // dropped (the bug-marker pattern must not blur into a fight's buzzes).
+    void controllers_signature(int hand, const float* key_t, const float* key_v, int keys, double seconds, float volume);
 } // namespace hsvr
