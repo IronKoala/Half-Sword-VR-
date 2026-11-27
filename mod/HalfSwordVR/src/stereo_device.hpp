@@ -16,9 +16,20 @@ namespace hsvr
         // Where the player is aiming (the controller's heading, set by the mouse), in degrees.
         bool has_heading = false;
         double heading_yaw = 0.0;
+        // Mouse up and down on mouse and keyboard (input_kbm_mouse_pitch): the view tilts by it, degrees
+        // (Unreal pitch: + = up). 0 with controllers.
+        double view_pitch = 0.0;
+        // Part of head_position - actor_position that is exact and must not be smoothed: the room
+        // walking already handed to the capsule (the capsule moved by it this same frame, so smoothing it
+        // swung the view, and the hands placed before the smoothing stepped, by the step itself).
+        Vec3 exact_offset;
     };
     using AnchorProvider = bool (*)(PlayerAnchor& out);
     void stereo_set_anchor_provider(AnchorProvider provider);
+    // Called on the game thread right after this frame's headset pose is latched for the views (once
+    // per frame, before the frame is drawn): the game glue can still move things to match it.
+    using LatchCallback = void (*)();
+    void stereo_set_latch_callback(LatchCallback callback);
 
     // Called once per engine tick on the game thread, before the frame is drawn.
     void stereo_begin_game_frame(double delta_seconds);
@@ -29,6 +40,8 @@ namespace hsvr
     // Where the view is anchored this frame (the point between the eyes at the recenter pose) and
     // the heading "straight ahead" maps to. Game thread. False until a frame has been placed.
     bool stereo_view_anchor(Vec3& anchor, double& base_yaw);
+    // Where the engine last drew eye 0 or 1 (world location and rotation). Game thread.
+    bool stereo_last_eye(int index, Vec3& location, Quat& rotation);
 
     // True while the engine draws the eyes into their own full-size target (settings key
     // separate_render_target) rather than side by side into the game window.

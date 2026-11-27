@@ -1,0 +1,53 @@
+0.5:hsvr.fake_head_drop 0
+0.7:hsvr.watch_vars all
+1:hsvr.squeeze 1 1
+1.5:hsvr.squeeze 1 0
+2.5:hsvr.clear_belt
+3:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Shield_Pavise_Heavy.Shield_Pavise_Heavy_C
+4.5:hsvr.sheathe_spawn 2
+6:hsvr.arm_move 1
+7:hsvr.slot_state
+7.2:hsvr.hand_at 0 strap 0
+10.7:hsvr.squeeze 0 1
+10.8:hsvr.wait strap_l = 1 2 0 in the hand by the strap
+10.9:hsvr.expect strap_l = 1 B1: in the hand by the strap
+10.9:hsvr.expect mount_l = 0 B1: not on the forearm
+10.9:hsvr.hand_at 0 off 0
+13.4:hsvr.slot_state
+13.6:hsvr.hand_at 1 strap 0
+17.1:hsvr.squeeze 1 1
+17.2:hsvr.wait strap_r = 1 2 0 in the hand by the strap
+17.3:hsvr.expect strap_r = 1 B2: passed, by the strap
+17.3:hsvr.expect item_l = 0 B2: the first hand has it no more
+17.3:hsvr.squeeze 0 0
+18.8:hsvr.expect strap_r = 1 B2: the first hand opening takes nothing away
+18.8:hsvr.hand_at 1 off 0
+21.3:hsvr.slot_state
+21.5:hsvr.hand_at 1 forearm 6
+25.5:hsvr.slot_state
+25.7:hsvr.squeeze 1 0
+27.2:hsvr.hand_at 1 off 0
+29.2:hsvr.expect mount_l = 1 B3: on the other forearm
+29.2:hsvr.expect item_r = 0 B3: let go
+29.2:hsvr.expect item_l = 0 B3: Weapon of that side stays None
+29.7:hsvr.slot_state
+30.7:hsvr.slot_state
+32.7:hsvr.slot_state
+33.0:hsvr.arm_move 1
+34.0:hsvr.slot_state
+34.2:hsvr.squeeze 0 1
+34.8:hsvr.expect mount_handle_l = 1 grip: fist on its handle
+34.8:hsvr.expect mount_l = 1 grip: still strapped on the forearm
+34.8:hsvr.expect held_l = 0 grip: not taken into the hand
+35.5:hsvr.expect mount_off_l < 4 grip: not moved off its place on the forearm
+35.6:hsvr.slot_state
+37.0:hsvr.expect mount_l = 1 held: still strapped after 3 s
+37.0:hsvr.expect mount_handle_l = 1 held: fist still on the handle
+37.0:hsvr.expect mount_off_l < 4 held: on its place
+37.2:hsvr.squeeze 0 0
+37.8:hsvr.expect mount_l = 1 open: still strapped
+37.8:hsvr.expect mount_handle_l = 0 open: hand off the handle
+37.8:hsvr.expect held_l = 0 open: that hand free
+39.0:hsvr.slot_state
+39.2:hsvr.expect mount_l = 1 open: still mounted, not dropped
+40.0:quit

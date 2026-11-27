@@ -1,0 +1,7 @@
+# Lantern roll: spawned on the floor away from him, watched. Guard on and off (it should be out of the guard's reach either way).
+lantern_settle_a|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_settle_b|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_settle_c|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_settle_d|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lantern_settle_off_a|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_legs_pass_loose=0
+lantern_settle_off_b|steps-lantern_settle.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_legs_pass_loose=0

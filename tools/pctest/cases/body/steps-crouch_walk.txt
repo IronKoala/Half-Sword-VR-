@@ -1,0 +1,55 @@
+# Crouched 40 cm, stick walk forward 3 s.
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.fake_head_pose 1
+1.05:hsvr.fake_head_tilt 0.0 0.0 0.3
+1.10:hsvr.fake_head_tilt 0.0 0.0 1.1
+1.15:hsvr.fake_head_tilt 0.0 0.0 2.4
+1.20:hsvr.fake_head_tilt 0.0 0.0 4.2
+1.25:hsvr.fake_head_tilt 0.0 0.0 6.2
+1.30:hsvr.fake_head_tilt 0.0 0.0 8.6
+1.35:hsvr.fake_head_tilt 0.0 0.0 11.3
+1.40:hsvr.fake_head_tilt 0.0 0.0 14.1
+1.45:hsvr.fake_head_tilt 0.0 0.0 17.0
+1.50:hsvr.fake_head_tilt 0.0 0.0 20.0
+1.55:hsvr.fake_head_tilt 0.0 0.0 23.0
+1.60:hsvr.fake_head_tilt 0.0 0.0 25.9
+1.65:hsvr.fake_head_tilt 0.0 0.0 28.7
+1.70:hsvr.fake_head_tilt 0.0 0.0 31.4
+1.75:hsvr.fake_head_tilt 0.0 0.0 33.8
+1.80:hsvr.fake_head_tilt 0.0 0.0 35.8
+1.85:hsvr.fake_head_tilt 0.0 0.0 37.6
+1.90:hsvr.fake_head_tilt 0.0 0.0 38.9
+1.95:hsvr.fake_head_tilt 0.0 0.0 39.7
+2.00:hsvr.fake_head_tilt 0.0 0.0 40.0
+2.5:hsvr.mark
+2.6:hsvr.stick 0 1
+4.5:hsvr.expect body_on_clips = 1 walking on Blade & Sorcery's own clips
+5.6:hsvr.stick 0 0
+7.0:hsvr.expect body_active = 1 the body solver poses him
+7.0:hsvr.expect body_err <= 1.5 drawn vs sent, cm mean
+7.0:hsvr.expect body_err_worst <= 6 drawn vs sent, cm worst
+7.0:hsvr.expect body_flips = 0 a knee never swaps sides
+7.0:hsvr.expect body_knee_max <= 151 knees never past the fold limit
+7.0:hsvr.expect body_twitches <= 2 knee twitches
+7.0:hsvr.expect body_kneepos_worst <= 16 knee moved a tick, cm (crouched gait at the game's 360 cm/s)
+7.0:hsvr.expect walk_speed >= 0 (record)
+7.05:hsvr.fake_head_tilt 0.0 0.0 39.7
+7.10:hsvr.fake_head_tilt 0.0 0.0 38.9
+7.15:hsvr.fake_head_tilt 0.0 0.0 37.6
+7.20:hsvr.fake_head_tilt 0.0 0.0 35.8
+7.25:hsvr.fake_head_tilt 0.0 0.0 33.8
+7.30:hsvr.fake_head_tilt 0.0 0.0 31.4
+7.35:hsvr.fake_head_tilt 0.0 0.0 28.7
+7.40:hsvr.fake_head_tilt 0.0 0.0 25.9
+7.45:hsvr.fake_head_tilt 0.0 0.0 23.0
+7.50:hsvr.fake_head_tilt 0.0 0.0 20.0
+7.55:hsvr.fake_head_tilt 0.0 0.0 17.0
+7.60:hsvr.fake_head_tilt 0.0 0.0 14.1
+7.65:hsvr.fake_head_tilt 0.0 0.0 11.3
+7.70:hsvr.fake_head_tilt 0.0 0.0 8.6
+7.75:hsvr.fake_head_tilt 0.0 0.0 6.2
+7.80:hsvr.fake_head_tilt 0.0 0.0 4.2
+7.85:hsvr.fake_head_tilt 0.0 0.0 2.4
+7.90:hsvr.fake_head_tilt 0.0 0.0 1.1
+7.95:hsvr.fake_head_tilt 0.0 0.0 0.3
+8.00:hsvr.fake_head_tilt 0.0 0.0 0.0

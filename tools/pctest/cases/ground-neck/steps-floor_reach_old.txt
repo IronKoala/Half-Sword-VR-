@@ -1,0 +1,16 @@
+# Record how far his hand stays off the floor (control: old bend pose_crouch_bend_neck_follow=0; also deeper legs/bend variants).
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.6:hsvr.expect room_foes = 1 the one passive foe
+0.8:hsvr.player_immortal
+1.0:hsvr.squeeze 0 1
+1.0:hsvr.squeeze 1 1
+1.4:hsvr.squeeze 0 0
+1.4:hsvr.squeeze 1 0
+1.9:hsvr.expect held_r = 0 right hand empty (the test room starts him with a crossbow)
+1.9:hsvr.expect held_l = 0 left hand empty
+2.0:hsvr.fake_head_drop 95
+# The controller 5 cm up: your fist around it is that thick when your knuckles touch the floor (it was at 0, inside the floor).
+2.1:hsvr.arm_floor 45 15 5
+6.5:hsvr.expect hand_floor_r >= 0 how high his hand stays (record only)
+6.5:hsvr.expect reach_short_r >= 0 how far the hand stays from where the controller asks (record only)
+6.6:hsvr.fake_head_drop -1

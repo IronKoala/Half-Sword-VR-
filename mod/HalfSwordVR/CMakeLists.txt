@@ -1,6 +1,8 @@
 set(TARGET HalfSwordVR)
 add_library(${TARGET} SHARED
     src/dllmain.cpp
+    src/body_solver.cpp
+    src/body_clips.cpp
     src/config.cpp
     src/controllers.cpp
     src/engine_slot.cpp src/engine_texture.cpp

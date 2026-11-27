@@ -1,0 +1,12 @@
+# The body solver (body_solver.cpp, design "VR body rebuild: our own body solver"). Pretend headset.
+stand|steps-stand.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+crouch_lookdown|steps-crouch_lookdown.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+deep_squat|steps-deep_squat.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lean|steps-lean.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+walk|steps-walk.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+crouch_walk|steps-crouch_walk.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+button_crouch|steps-button_crouch.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+his_1938_crouch_lookdown|steps-his_1938.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+his_1939_crouch_stand|steps-his_1939.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+his_1933_tongs_crouch|steps-his_1933.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+his_1919_stand|steps-his_1919.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar

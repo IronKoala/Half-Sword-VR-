@@ -1,0 +1,10 @@
+# Playtest 2026-11-23 17:23 local: his crouch walk was "way too rapid". Crouch 40 cm, full stick forward for
+# 2 s: count his steps (record; the run report compares this with the old steps, crouch_walk_old).
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.fake_head_drop 40
+2.5:hsvr.stick 0 1
+3.0:hsvr.mark
+5.0:hsvr.expect steps >= 0 steps in 2 s crouched at full stick (record)
+5.0:hsvr.expect walk_speed >= 0 walk speed, cm/s (record)
+5.1:hsvr.stick -9 0
+5.2:hsvr.fake_head_drop -1

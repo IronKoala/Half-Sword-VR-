@@ -1,0 +1,3 @@
+# Crash fix a308577: leg guard after the game's cleanup
+gc_freed_a|steps-gc_freed.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+gc_freed_b|steps-gc_freed.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar

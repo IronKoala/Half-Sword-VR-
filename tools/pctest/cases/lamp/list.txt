@@ -1,0 +1,4 @@
+# Lamp probe
+lamp_a|steps-lamp.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lamp_b|steps-lamp.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+lamp_old|steps-lamp.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar;pose_hanging_damping_held=-1
