@@ -218,6 +218,7 @@ LAYOUT = [
         ('pose_shoulder_reach_cm', 'Shoulder comes forward this much at full reach (0 = off).'),
         ('pose_shoulder_reach_start_cm', "Shoulder reach starts in the last this many cm of his arm's reach."),
         ('pose_shoulder_reach_max_deg', 'Most collarbone turn for shoulder reach (degrees).'),
+        ('pose_arm_stretch_max', 'Past full reach his arm stretches (B&S) so his hand stays on what it holds, up to this many times its length (1 = off).'),
         ('hand_bone_left', "His left hand bone's name."),
         ('hand_bone_right', "His right hand bone's name."),
     ]),

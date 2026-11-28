@@ -1237,6 +1237,19 @@ namespace
         if (n.translation_mode) *(n.node + n.translation_mode->GetOffset_Internal()) = 0;
     }
 
+    // Arm stretch (pose_arm_stretch_max): the elbow and wrist bones placed by the arm solve while stretched;
+    // released back to the animation's bone lengths when it is not.
+    bool g_arm_stretched[2] = {false, false};
+    ModifyBoneNode* chain_node(const std::string& bone);
+    void arm_stretch_release(int side)
+    {
+        if (!g_arm_stretched[side]) return;
+        g_arm_stretched[side] = false;
+        std::string sx = side == 0 ? "_l" : "_r";
+        for (const char* b : {"lowerarm", "hand"})
+            if (ModifyBoneNode* n = chain_node(std::string(b) + sx)) node_release_translation(*n);
+    }
+
     struct ArmCalibration
     {
         bool valid = false;
@@ -1355,6 +1368,7 @@ namespace
             node_release(n);
             node_release_translation(n);
         }
+        g_arm_stretched[0] = g_arm_stretched[1] = false;
         if (g_pose.mesh && g_pose.calibrated)
         {
             set_simulate(g_pose.mesh, true, true);
@@ -2539,7 +2553,7 @@ namespace
             {
                 g_inj.down_now = true;
                 for (auto& [bone, n] : g_pose.chain) node_release(n);
-                for (int side = 0; side < 2; ++side) ghost_hand(side, cfg, false, hsvr::Vec3{}, hsvr::Quat{});
+                for (int side = 0; side < 2; ++side) arm_stretch_release(side), ghost_hand(side, cfg, false, hsvr::Vec3{}, hsvr::Quat{});
                 set_simulate(mesh, true, true);
                 g_pose_anchor_fixed = false; // the view sits on his head bone
                 g_turn_valid = false;
@@ -2816,6 +2830,7 @@ namespace
                 // No controller (playing with mouse and keyboard, or tracking lost): the game's own arms.
                 for (const char* b : {"clavicle", "upperarm", "lowerarm", "hand"})
                     if (ModifyBoneNode* n = chain_node(std::string(b) + sx)) node_release(*n);
+                arm_stretch_release(side);
                 g_pose.hand_valid[side] = false;
                 ghost_hand(side, cfg, false, Vec3{}, Quat{});
                 return;
@@ -3317,9 +3332,14 @@ namespace
         double D = length(to);
         double L1 = a.upper_length, L2 = a.lower_length;
         double lo = std::fabs(L1 - L2) + 0.5, hi = L1 + L2 - 0.5;
-        if (D < 1e-3) return;
+        if (D < 1e-3) { arm_stretch_release(side); return; }
         Vec3 dir = to * (1.0 / D);
-        D = (std::min)((std::max)(D, lo), hi);
+        // B&S's arm stretch (VRIK stretchArmsCurve, IKControllerFIK.cs): measured in its logs 2026-11-27, no stretch
+        // inside his reach; past it the arm is straight and as long as the reach, length / rest = distance / reach
+        // (to 0.01), up to 2.00x, and past that the hand stops (it slid 7 cm back along the spear at 2.00x).
+        double stretch_max = (std::max)(1.0, cfg.pose_arm_stretch_max);
+        double stretch = D > hi ? (std::min)(D, hi * stretch_max) / hi : 1.0;
+        D = (std::min)((std::max)(D, lo), hi * stretch);
         // A held weapon goes where his hand can be: past his reach, as far as his arm goes (the test
         // switch hsvr.hold_reach 0 leaves the target unclamped, to push a weapon into the floor).
         if (g_hold_reach_clamp.load()) g_pose.target[side] = S + dir * D;
@@ -3482,10 +3502,13 @@ namespace
         {
             to = target - S;
             double d = length(to);
-            if (d < 1e-3) return;
+            if (d < 1e-3) { arm_stretch_release(side); return; }
             dir = to * (1.0 / d);
-            D = (std::min)((std::max)(d, lo), hi);
+            stretch = d > hi ? (std::min)(d, hi * stretch_max) / hi : 1.0;
+            D = (std::min)((std::max)(d, lo), hi * stretch);
         }
+        // His bones as long as the stretch makes them (B&S: upper arm and forearm by the same factor).
+        L1 *= stretch, L2 *= stretch;
 
         // Where the elbow points around the shoulder-to-wrist line (the swivel): ported from the
         // arm solver in Matthew's Chasms VR Framework (crates/ik/src/arm.rs, MIT, Copyright (c) 2026
@@ -3546,7 +3569,7 @@ namespace
         // 1. The position model, from the wrist relative to the shoulder in arm lengths.
         Vec3 rel = local(target) - local(S);
         // The framework's lengths are metres for a reference body whose arm is 56.5 cm.
-        double scale = (L1 + L2) / 56.5;
+        double scale = (a.upper_length + a.lower_length) / 56.5;
         Vec3 hn = rel * (1.0 / (L1 + L2));
         double alpha = 135.0 - 60.0 * hn.y;
         alpha += hn.y > 0.0 ? 260.0 * (std::max)(0.0, 0.6 - hn.z) * hn.y : -100.0 * (std::max)(0.0, 0.6 - hn.z) * -hn.y;
@@ -3689,6 +3712,24 @@ namespace
         node_set_rotation(*chain_node("upperarm" + sx), component_inv * Wu);
         node_set_rotation(*chain_node("lowerarm" + sx), component_inv * Wl);
         node_set_rotation(*chain_node("hand" + sx), component_inv * Wh);
+        // Stretched: the elbow and the wrist are placed where the longer bones put them (B&S's VRIK moves the
+        // forearm and hand bones out along the arm); at rest length the animation's own bone lengths stay.
+        if (stretch > 1.0001)
+        {
+            double sc = component_scale_z(g_pose.driver);
+            if (!(sc > 1e-3)) sc = 1.0;
+            Vec3 Lc = component_location(g_pose.driver);
+            ModifyBoneNode* nl = chain_node("lowerarm" + sx);
+            ModifyBoneNode* nh = chain_node("hand" + sx);
+            bool ok = nl && nh && node_set_translation(*nl, component_inv.rotate(E - Lc) * (1.0 / sc)) &&
+                      node_set_translation(*nh, component_inv.rotate(H - Lc) * (1.0 / sc));
+            if (ok) g_arm_stretched[side] = true;
+            else arm_stretch_release(side);
+            HSVR_LOG_EVERY(1.0, "Pose: %s arm stretched x%.2f (B&S): hand %.1f cm past his reach%s", side == 0 ? "left" : "right", stretch,
+                           (stretch - 1.0) * hi, ok ? "" : " (bone nodes take no translation: not drawn)");
+        }
+        else
+            arm_stretch_release(side);
     }
 
     // pose_post_physics: his posed skeleton (the driver, where the pose is written in its animation

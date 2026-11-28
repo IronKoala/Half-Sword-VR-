@@ -769,6 +769,7 @@ namespace hsvr
         num("pose_shoulder_reach_cm", c.pose_shoulder_reach_cm);
         num("pose_shoulder_reach_start_cm", c.pose_shoulder_reach_start_cm);
         num("pose_shoulder_reach_max_deg", c.pose_shoulder_reach_max_deg);
+        num("pose_arm_stretch_max", c.pose_arm_stretch_max);
         num("pose_grip_strength_kg", c.pose_grip_strength_kg);
         num("pose_grip_hz", c.pose_grip_hz);
         num("pose_grip_damping", c.pose_grip_damping);
