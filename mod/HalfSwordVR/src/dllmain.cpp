@@ -1155,6 +1155,30 @@ namespace
         return !r || *(v.buffer.data() + r->GetOffset_Internal()) != 0;
     }
 
+    // The weapon's own scabbard, as the game decides it has one: ModularWeaponBP "Set Up Module" (@4096-@4836) makes the
+    // Scabbard component only when the grip part's scabbard has a StaticMesh, and otherwise destroys any Scabbard it had,
+    // which leaves the variable pointing at a destroyed component until garbage collection. So a weapon has a scabbard only
+    // when that component is alive and has a mesh (playtest 2026-11-27 11:07 PM: the Baurnwehr, which has none, was refused
+    // the holster "it has its own scabbard"). Cached per scabbard pointer; each weapon's first answer is logged.
+    UObject* own_scabbard(UObject* weapon)
+    {
+        UObject* s = weapon ? object_property(weapon, STR("Scabbard")) : nullptr;
+        if (!s) return nullptr;
+        static std::unordered_map<UObject*, bool> real;
+        static bool tr = on_freed([] { erase_gone_keys(real); });
+        (void)tr;
+        auto it = real.find(s);
+        if (it == real.end())
+        {
+            bool alive = object_alive(s);
+            UObject* mesh = alive ? object_property(s, STR("StaticMesh")) : nullptr;
+            it = real.emplace(s, alive && mesh != nullptr).first;
+            HSVR_LOG("Scabbard: %ls %s (its Scabbard component %ls: %s)", weapon->GetName().c_str(), it->second ? "has its own scabbard" : "has NO scabbard",
+                     s->GetName().c_str(), !alive ? "destroyed" : mesh ? "alive, with a mesh" : "alive, no mesh");
+        }
+        return it->second ? s : nullptr;
+    }
+
     hsvr::Vec3 component_location(UObject* component)
     {
         Call c(component, STR("K2_GetComponentLocation"));
@@ -5838,7 +5862,7 @@ namespace
         UClass* cls = UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, STR("/Script/Engine.PhysicsConstraintComponent"));
         if (!base || !cls) return;
         std::vector<UObject*> parts;
-        attached_meshes(base, object_property(item, STR("Scabbard")), parts, 0);
+        attached_meshes(base, own_scabbard(item), parts, 0);
         int n = 0;
         // And his capsule: a let-go item sliding down it was pushed aside (PC run 55b88f3: light pavise, a
         // steady ~1.6 m/s^2 sideways while its pairs with his bones held).
@@ -5900,7 +5924,7 @@ namespace
         {
             std::vector<UObject*> tree, scab;
             attached_meshes(base, nullptr, tree, 0);
-            attached_meshes(object_property(weapon, STR("Scabbard")), nullptr, scab, 0);
+            attached_meshes(own_scabbard(weapon), nullptr, scab, 0);
             for (UObject* c : static_parts_of(weapon))
                 if (std::find(tree.begin(), tree.end(), c) == tree.end() && std::find(scab.begin(), scab.end(), c) == scab.end() && physics_collides(c))
                     hanging.push_back(c);
@@ -6852,7 +6876,7 @@ namespace
         {
             std::vector<UObject*> tree, scab;
             attached_meshes(r.base, nullptr, tree, 0);
-            attached_meshes(object_property(item, STR("Scabbard")), nullptr, scab, 0);
+            attached_meshes(own_scabbard(item), nullptr, scab, 0);
             for (UObject* c : static_parts_of(item))
                 if (std::find(tree.begin(), tree.end(), c) == tree.end() && std::find(scab.begin(), scab.end(), c) == scab.end())
                 {
@@ -7670,7 +7694,7 @@ namespace
             if (!base) continue;
             std::vector<UObject*> tree, scab;
             attached_meshes(base, nullptr, tree, 0);
-            attached_meshes(object_property(a.weapon, STR("Scabbard")), nullptr, scab, 0);
+            attached_meshes(own_scabbard(a.weapon), nullptr, scab, 0);
             int added = 0;
             for (UObject* c : static_parts_of(a.weapon))
             {
@@ -7718,7 +7742,7 @@ namespace
             if (!base) continue;
             std::vector<UObject*> tree, scab, hanging;
             attached_meshes(base, nullptr, tree, 0);
-            attached_meshes(object_property(w, STR("Scabbard")), nullptr, scab, 0);
+            attached_meshes(own_scabbard(w), nullptr, scab, 0);
             for (UObject* c : static_parts_of(w))
                 if (std::find(tree.begin(), tree.end(), c) == tree.end() && std::find(scab.begin(), scab.end(), c) == scab.end() && physics_collides(c))
                     hanging.push_back(c);
@@ -7900,7 +7924,7 @@ namespace
                 // PhysicsConstraint6 as a body of its own outside BaseMesh's attach tree; every kick hit came from it, never paired).
                 // Its own scabbard and what hangs under it are left out (a component of the weapon that stays on a belt).
                 std::vector<UObject*> parts, gear_parts, scab_tree;
-                attached_meshes(object_property(w, STR("Scabbard")), nullptr, scab_tree, 0);
+                attached_meshes(own_scabbard(w), nullptr, scab_tree, 0);
                 std::wstring part_names;
                 for (UObject* c : static_parts_of(w))
                     if (std::find(scab_tree.begin(), scab_tree.end(), c) == scab_tree.end() && physics_collides(c))
@@ -10287,7 +10311,7 @@ namespace
         // The weapon's scabbard is one of its own components too (NODE_AddStaticMeshComponent-N, its
         // "Scabbard"), and stays on the belt after a draw: it is not the weapon (playtest 09:38: the
         // off hand on the belt scabbard took the drawn sword "by its spot" 55-92 cm away from it).
-        UObject* scab = object_property(weapon, STR("Scabbard"));
+        UObject* scab = own_scabbard(weapon);
         auto under_scabbard = [&](UObject* c) {
             if (!scab) return false;
             UObject* p = c;
@@ -16868,18 +16892,12 @@ namespace
             // A pull that the yank will answer is not a let-go (flip-test3: the past-reach let-go fired
             // after 0.15 s and dropped the weapon before the 0.25 s yank could pull it out).
             if (in_body && cfg.stab_yank_cm > 0.0 && out_along > cfg.stab_yank_cm) out = false;
-            // B&S's stuck rule (PlayerHand.cs:279-304, StuckBehaviour.Drop): the item is touching something, and the grip is past
-            // his arm's length from the shoulder: the hand lets go at once. No timer, no grace, no own-body check (the held item
-            // ignores his own body, as B&S's), and it keeps its speed (B&S: the joint just goes).
-            bool touching = now_seconds() - h.last_contact < 0.15;
-            if (out && touching && !(g_two.active && g_two.second == side))
-            {
-                HSVR_LOG("Hold: %s hand lets go of %ls (B&S stuck rule): touching, its grip %.0f cm from the shoulder (arm %.0f), your hand %.0f cm from it",
-                         side == 0 ? "left" : "right", h.weapon->GetName().c_str(), from_shoulder, reach, from_hand);
-                g_count_letgo.fetch_add(1);
-                drop_weapon(side, g_pose.pawn);
-                return false;
-            }
+            // No let-go for reach or contact here. B&S's stuck rule (PlayerHand.cs:279-304: touching something with the grip past
+            // arm's length -> drop) is gone: flat Half Sword never knocks a seated weapon out of the hand (its grip-slip
+            // threshold, UF @360300-364099, drops only a weapon still seating; strength_stamina.md section 1), and the rule
+            // dropped weapons on ordinary hits (playtest 2026-11-27: 10 drops, 2026-11-25: the pillar). Matthew 2026-11-28:
+            // "get rid of the blade and sorcery let go ... Willie will let go based off of his grip strength".
+            (void)out;
         }
         else
             h.stuck_since = -1.0;
@@ -21588,7 +21606,7 @@ namespace
             UObject* w = object_property(pawn, k_slots[i].var);
             UObject* base = w ? object_property(w, STR("BaseMesh")) : nullptr;
             if (!base) continue;
-            bool scab = object_property(w, STR("Scabbard")) != nullptr;
+            bool scab = own_scabbard(w) != nullptr;
             Vec3 bp = component_location(base);
             Quat bq = component_rotation(base);
             Vec3 local = bq.inverse().rotate(at - bp);
@@ -21681,7 +21699,7 @@ namespace
         draw.byte(STR("Side"), (uint8_t)sd.side);
         draw.byte(STR("Slot"), (uint8_t)sd.slot);
         draw.run();
-        UObject* scab = object_property(w, STR("Scabbard"));
+        UObject* scab = own_scabbard(w);
         if (!scab)
         {
             // No scabbard (an axe or mace hung on the belt): just taken, as any grab (Matthew 2026-11-19:
@@ -21996,7 +22014,7 @@ namespace
             HSVR_LOG("Holster: %s hand let go of %ls: no holster (%s)", hand, w->GetName().c_str(), why);
             return false;
         };
-        if (object_property(w, STR("Scabbard"))) return no("it has its own scabbard: the physical sheathe");
+        if (own_scabbard(w)) return no("it has its own scabbard: the physical sheathe");
         if (g_two.active && g_two.weapon == w) return no("held in two hands");
         if (g_draw[side].active) return no("mid draw or sheathe");
         if (g_hand_world_v[side] > cfg.pose_holster_max_speed) return no("hand too fast: a throw");
@@ -22147,7 +22165,7 @@ namespace
         const char* hand = side == 0 ? "left" : "right";
         const char* hip = ts == 0 ? "left" : "right";
         double kind = read_number_variable(w, STR("SheathSlot"));
-        UObject* own = object_property(w, STR("Scabbard"));
+        UObject* own = own_scabbard(w);
         if (kind != 0.0 || !object_alive(own) || bool_property(w, STR("Is Ammo")))
         {
             HSVR_LOG_EVERY(2.0, "Sheathe: %ls has sheath slot type %.0f, scabbard %s: not one that goes in a belt scabbard; not sheathed", w->GetName().c_str(), kind,
@@ -22215,7 +22233,7 @@ namespace
         {
             bool in_use = false;
             for (const SlotDef& sd : k_slots)
-                if (UObject* in = object_property(pawn, sd.var); in && object_property(in, STR("Scabbard")) == stale) in_use = true;
+                if (UObject* in = object_property(pawn, sd.var); in && own_scabbard(in) == stale) in_use = true;
             if (UObject* pin = in_use ? nullptr : scabbard_pin(stale))
             {
                 // As Assign removes a pin (@4086): K2_DestroyComponent takes the pin's owner, the character.
@@ -22254,7 +22272,7 @@ namespace
             std::swprintf(buf, 96, fmt, S);
             return std::wstring(buf);
         };
-        if (!object_property(w, STR("Scabbard")))
+        if (!own_scabbard(w))
         {
             HSVR_LOG("Sheathe: %ls has no scabbard of its own; not sheathed (only scabbarded weapons for now)", w->GetName().c_str());
             return false;
@@ -22265,7 +22283,7 @@ namespace
             return false;
         int slot = assign_scabbard_slot(side, side, pawn, w);
         if (slot < 0) return false;
-        UObject* scab = object_property(w, STR("Scabbard"));
+        UObject* scab = own_scabbard(w);
         set_bool_property(pawn, nm(L"Block %ls Weapon From Sheathing").c_str(), true);
         set_bool_property(pawn, nm(L"%ls Weapon Sheathing").c_str(), true);
         Call make(pawn, nm(L"Create Sheath Constraint %ls").c_str());
@@ -22479,7 +22497,7 @@ namespace
         if (!cfg.pose_sheathe || g_draw[side].active || g_two.active) return;
         UObject* w = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
         if (!w || is_fist(w) || g_hold[side].weapon != w) return;
-        UObject* scab = object_property(w, STR("Scabbard"));
+        UObject* scab = own_scabbard(w);
         if (!scab) return;
         UObject* base = object_property(w, STR("BaseMesh"));
         if (!base) return;
@@ -22636,7 +22654,7 @@ namespace
             if (!locked && !late) continue;
             double out = 999.0, off = 999.0;
             UObject* base = object_property(sw.weapon, STR("BaseMesh"));
-            UObject* scab = object_property(sw.weapon, STR("Scabbard"));
+            UObject* scab = own_scabbard(sw.weapon);
             UObject* mesh = object_property(pawn, STR("Mesh"));
             if (base && scab && mesh)
             {
@@ -22998,7 +23016,7 @@ namespace
         add(object_property(pawn, STR("Current Scabbard R")));
         add(object_property(pawn, STR("Current Scabbard L")));
         for (const SlotDef& sd : k_slots)
-            if (UObject* w = object_property(pawn, sd.var)) add(object_property(w, STR("Scabbard")));
+            if (UObject* w = object_property(pawn, sd.var)) add(own_scabbard(w));
         return out;
     }
 
@@ -25878,7 +25896,7 @@ namespace
                 continue;
             }
             std::vector<UObject*> wp, hp;
-            attached_meshes(base, object_property(weapon, STR("Scabbard")), wp);
+            attached_meshes(base, own_scabbard(weapon), wp);
             attached_meshes(helmet, nullptr, hp);
             if (wp == g.weapon_parts && hp == g.helmet_parts) continue;
             clear_helmet_ignore(side);
@@ -25915,7 +25933,7 @@ namespace
             if (!base || !pommel || !tip) continue;
             last = now;
             std::vector<UObject*> parts, found_all;
-            attached_meshes(base, object_property(weapon, STR("Scabbard")), parts);
+            attached_meshes(base, own_scabbard(weapon), parts);
             std::vector<int> channels;
             for (UObject* p : parts)
             {
@@ -30166,8 +30184,14 @@ namespace
         {
             // the held weapon's own scabbard is pinned on his belt (1), not (0), or it has none (-1)
             UObject* held = object_property(pawn, w.back() == 'l' ? STR("Weapon L") : STR("Weapon R"));
-            UObject* sc = held ? object_property(held, STR("Scabbard")) : nullptr;
+            UObject* sc = held ? own_scabbard(held) : nullptr;
             value = !sc ? -1.0 : scabbard_pin(sc) ? 1.0 : 0.0;
+        }
+        else if (w == "own_scab_l" || w == "own_scab_r")
+        {
+            // the held weapon has its own scabbard as the game decides it (own_scabbard): 1, none: 0, nothing held: -1
+            UObject* held = object_property(pawn, w.back() == 'l' ? STR("Weapon L") : STR("Weapon R"));
+            value = !held || is_fist(held) ? -1.0 : own_scabbard(held) ? 1.0 : 0.0;
         }
         else if (w == "drop_xy_l" || w == "drop_xy_r") value = g_drop_trace[w.back() == 'l' ? 0 : 1].max_xy; // cm sideways, last drop's first 0.3 s
         else if (w == "drop_xy05_l" || w == "drop_xy05_r") value = g_drop_trace[w.back() == 'l' ? 0 : 1].max_xy_all; // the same over 0.5 s
@@ -30972,7 +30996,7 @@ namespace
                 find_pawn_mesh(&player);
                 UObject* wr = player ? object_property(player, STR("Weapon R")) : nullptr;
                 UObject* b = wr ? object_property(wr, STR("BaseMesh")) : nullptr;
-                UObject* scab = wr ? object_property(wr, STR("Scabbard")) : nullptr;
+                UObject* scab = wr ? own_scabbard(wr) : nullptr;
                 UObject* mesh = player ? object_property(player, STR("Mesh")) : nullptr;
                 int slot = entry.command.back() == '2' ? 1 : 0;
                 const char* sock = slot == 0 ? "Sheath_Slot_L_1" : "Sheath_Slot_L_2";

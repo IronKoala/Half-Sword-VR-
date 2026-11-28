@@ -1,0 +1,5 @@
+# Which weapons have their own scabbard, by the game's rule (own_scabbard: alive Scabbard component with a mesh).
+# Playtest 2026-11-27 11:07 PM: the Baurnwehr (no scabbard) was refused the holster as "it has its own scabbard".
+# Look for the "Scabbard: <weapon> has ..." lines.
+scab_baurnwehr|steps-scab_baurnwehr.txt
+scab_knight_sword|steps-scab_knight_sword.txt
