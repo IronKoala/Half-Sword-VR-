@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <string>
 #include <vector>
@@ -1352,6 +1353,62 @@ namespace
         return (uint64_t(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
     }
 
+    // Push dagger (Matthew 2026-11-27: "a punching weapon, not a normal dagger"; the game has none, its fists are
+    // Weapon_Fists_C). The converter writes it like a sword: blade up +z, its crossbar (the handle) along x at the
+    // bottom (push_cx/cy/cz = the bar's centre, push_len = its length, push_angle = its turn about z). Here it is
+    // turned so the bar lies along the game's grip axis (+z) and the blade points out of the fist: in the hand
+    // socket's frame (weapon_rSocket, Willie_Skeleton.sockets.csv with the bone transforms) the knuckles sit at
+    // x -1..-3 and the wrist at x +5.6, so the punch goes along -x (the forearm runs (-0.86, 0.07, 0.49)). The
+    // bar's centre ends at z -len/2 with the bar from -len to 0 (0 = the top of the grip, as on every model), the
+    // main hand on its centre.
+    void push_frame(ModelData& d)
+    {
+        auto& n = d.numbers;
+        const double PI = 3.14159265358979323846;
+        double cx = n["push_cx"], cy = n["push_cy"], cz = n["push_cz"], W = (std::max)(1.0, n["push_len"]);
+        double a = n["push_angle"] * PI / 180.0, ca = std::cos(a), sa = std::sin(a);
+        double tip = n["tip"], blade_from = n["guard_top"];
+        auto rot = [&](V3 v) {
+            double x = ca * v.x + sa * v.y, y = -sa * v.x + ca * v.y;
+            return V3{-v.z, y, x};
+        };
+        auto pos = [&](V3 p) {
+            V3 q = rot(V3{p.x - cx, p.y - cy, p.z - cz});
+            q.z -= 0.5 * W;
+            return q;
+        };
+        Model& m = d.model;
+        m.min = {1e30, 1e30, 1e30};
+        m.max = {-1e30, -1e30, -1e30};
+        for (V3& p : m.positions)
+        {
+            p = pos(p);
+            m.min = {(std::min)(m.min.x, p.x), (std::min)(m.min.y, p.y), (std::min)(m.min.z, p.z)};
+            m.max = {(std::max)(m.max.x, p.x), (std::max)(m.max.y, p.y), (std::max)(m.max.z, p.z)};
+        }
+        for (V3& v : m.normals) v = rot(v);
+        for (Hull& h : d.hulls)
+            for (V3& p : h.points) p = pos(p);
+        for (DPoint& pt : d.points)
+        {
+            pt.p = pos(pt.p);
+            pt.f = rot(pt.f);
+            pt.u = rot(pt.u);
+        }
+        // Along the new z there is only the bar: it is the whole handle, no guard, no blade along the axis.
+        for (auto it = n.begin(); it != n.end();)
+            it = it->first.rfind("spot_", 0) == 0 ? n.erase(it) : std::next(it);
+        n["push_blade_from"] = blade_from - cz; // the blade along -x: from -push_blade_from to -push_blade_to
+        n["push_blade_to"] = tip - cz;
+        n["pommel_end"] = n["handle_bottom"] = -W;
+        n["handle_top"] = n["guard_bottom"] = n["guard_top"] = n["tip"] = 0.0;
+        n["balance"] = n["balance_model"] = -0.5 * W;
+        n["spot_main"] = -0.5 * W;
+        n["hand_slide"] = 0;
+        log("  push dagger: bar %.1f cm turned onto the grip axis (centre %.1f %.1f %.1f, turn %.0f deg), blade out of the "
+            "fist along -x from %.1f to %.1f cm", W, cx, cy, cz, n["push_angle"], n["push_blade_from"], n["push_blade_to"]);
+    }
+
     const ModelData* model_data(const std::wstring& base)
     {
         uint64_t stamp = file_stamp(base + L".obj") ^ (file_stamp(base + L"_collision.obj") * 3) ^ (file_stamp(base + L".txt") * 7) ^
@@ -1368,6 +1425,7 @@ namespace
             log("  ! could not read %s.obj", narrow(base).c_str());
             return nullptr;
         }
+        if (d.numbers.count("push") && d.numbers["push"] > 0.5) push_frame(d);
         return &(g_models[base] = std::move(d));
     }
 
@@ -2328,6 +2386,32 @@ namespace
             if (!rp || from_hi - from_lo < 1.0) continue;
             V3 r = read_three(reinterpret_cast<uint8_t*>(c) + rp->GetOffset_Internal(), rp);
             double z = to_lo + (r.z - from_lo) * (to_hi - to_lo) / (from_hi - from_lo);
+            bool push = numbers.count("push") && numbers["push"] > 0.5;
+            if (push)
+            {
+                // Push dagger: the carrier's hit box and points go onto the blade, which points along -x.
+                double b0 = numbers["push_blade_from"], b1 = numbers["push_blade_to"];
+                double half_w = (std::max)(0.5, numbers["push_blade_half_w"]);
+                V3 at = to_head_local(V3{cls.find(STR("BoxComponent")) != std::wstring::npos ? -0.5 * (b0 + b1) : -b1, 0.0,
+                                         -0.5 * (numbers["push_len"]) + shift});
+                if (cls.find(STR("BoxComponent")) != std::wstring::npos)
+                {
+                    FProperty* ep = c->GetPropertyByNameInChain(STR("BoxExtent"));
+                    if (ep)
+                    {
+                        V3 e = read_three(reinterpret_cast<uint8_t*>(c) + ep->GetOffset_Internal(), ep);
+                        Call ext(c, STR("SetBoxExtent"));
+                        ext.three(STR("InBoxExtent"), 0.5 * (b1 - b0) / hs.x, e.y, half_w / hs.z).flag(STR("bUpdateOverlaps"), false);
+                        ext.run();
+                    }
+                }
+                Call move(c, STR("K2_SetRelativeLocation"));
+                move.three(STR("NewLocation"), at.x, at.y, at.z).flag(STR("bTeleport"), true);
+                move.run();
+                log("  push dagger: %s (%s) onto the blade at (%.1f %.1f %.1f) head units", narrow(c->GetName()).c_str(),
+                    narrow(cls).c_str(), at.x, at.y, at.z);
+                continue;
+            }
             if (cls.find(STR("BoxComponent")) != std::wstring::npos)
             {
                 // The hit box (dismembering cuts gather their markers with it) stretches with the head.
@@ -2483,6 +2567,7 @@ namespace
             for (int k = 0; k < K_COUNT; ++k)
                 if (c->second == kind_names[k]) return k;
         auto num = [&](const char* k) { auto i = nums.find(k); return i == nums.end() ? 0.0 : i->second; };
+        if (num("push") > 0.5) return K_DAGGER; // a push dagger rides on the one-piece knife
         if (num("shield") > 0.5) return K_BUCKLER;
         if (num("flail") > 0.5) return K_FLAIL;
         if (num("crossbow") > 0.5) return K_CROSSBOW;
@@ -2551,6 +2636,8 @@ namespace
                 continue;
             }
             pk.kind = kind_for(kv, d->numbers);
+            // A push dagger's blade sticks out of the fist: no game scabbard fits it (it goes on the belt).
+            if (d->numbers.count("push") && d->numbers.at("push") > 0.5 && pk.scabbard == "fit") pk.scabbard = "none";
             bool sword = pk.kind <= K_LONGSWORD;
             uint32_t hsh = 2166136261u;
             for (wchar_t ch : pk.id) hsh = (hsh ^ (uint32_t)towlower(ch)) * 16777619u;

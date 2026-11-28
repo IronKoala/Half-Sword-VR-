@@ -40,7 +40,8 @@ MODEL_TYPES = "*.glb *.gltf *.fbx *.obj *.nif *.stl *.ply *.dae *.off"
 MODEL_EXTS = tuple(e[1:] for e in MODEL_TYPES.split())
 TYPES = [("Detect", None), ("Sword or dagger", "sword"), ("Axe, mace, hammer or spear", "hafted"),
          ("Double-ended (head or blade at both ends)", "double"), ("Shield", "shield"),
-         ("Flail (staff, chain and head)", "flail"), ("Crossbow", "crossbow")]
+         ("Flail (staff, chain and head)", "flail"), ("Crossbow", "crossbow"),
+         ("Push dagger (blade out of the fist)", "push")]
 # How a shield is held: which of the game's shields carries it (its grip is that shield's own).
 SHIELD_GRIPS = [("Fist grip (buckler)", "shield_buckler"), ("Arm straps (targe)", "shield_targe"),
                 ("Arm straps, big (pavise)", "shield_pavise")]
@@ -140,6 +141,10 @@ def write_pack(mod_dir, it):
     kind = it["result"][1].get("type")
     if kind == "shield":
         lines.append("carrier=" + it.get("shield_grip", "shield_buckler"))
+    elif kind == "push":
+        # Rides on the game's one-piece knife; the mod turns it so the crossbar lies in the fist.
+        lines.append("carrier=dagger")
+        lines.append("scabbard=none")
     elif kind not in ("hafted", "double", "flail", "crossbow"):
         if it.get("sword_class"):
             lines.append("carrier=" + it["sword_class"])
@@ -1560,6 +1565,14 @@ class App:
                                      f"chain {L(zn['guard_top'])}, head {L(zn['tip'] - zn['guard_top'])} (laid out "
                                      "straight; in the game the chain swings at the staff and at the head)."
                                      + self.damage_text(info))
+            return
+        if info["type"] == "push":
+            self.summary.config(text=f"Push dagger, {mass}: crossbar {L(zn.get('push_len', 0))} long (the grip, held in "
+                                     f"the fist), blade {L(zn['tip'] - zn['guard_top'])} out of the fist between the "
+                                     "knuckles. In the game it rides on the knife, turned so the blade points where "
+                                     "you punch; no scabbard (it goes on the belt)."
+                                     + self.damage_text(info) + "\nThe picture shows it blade up, crossbar at the "
+                                     "bottom. If the blade is at the bottom, press \"Blade is on the wrong end\".")
             return
         if info["type"] == "shield":
             self.summary.config(text=f"Shield, {L(zn['width'])} wide, {L(zn['height'])} high, {mass}."

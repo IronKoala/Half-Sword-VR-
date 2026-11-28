@@ -586,7 +586,7 @@ def main(argv=None):
     ap.add_argument("--flip", action="store_true")
     ap.add_argument("--hand-slide", action="store_true",
                     help="long handle held by guard + pommel, the guard hand slides down it in swings (e.g. the Spit)")
-    ap.add_argument("--type", choices=["sword", "hafted", "double", "shield", "flail", "crossbow"],
+    ap.add_argument("--type", choices=["sword", "hafted", "double", "shield", "flail", "crossbow", "push"],
                     help="sword: guard between grip and blade; hafted: head on the end of a haft (axe, mace, "
                          "hammer, spear); double: a blade or head on both ends of a haft. Default: detected "
                          "(sword or hafted)")
@@ -741,9 +741,38 @@ def main(argv=None):
         print(f"flail: staff {-end:.1f} cm, chain {chain_len:.1f} cm, head "
               f"{float(z[flail_label == 'Head'].max()) - chain_len:.1f} cm (laid out straight)")
     else:
+        push_bar_top = None
+        if args.type == "push":
+            # ---- a push dagger: a T, the blade out of a crossbar held in the fist ---------------------------
+            # The T lies in the plane of the two longest axes (the blade is flat in it, its edges along the bar).
+            # The blade's axis is the one whose widest cross-section (the bar) is at an end; along the bar the
+            # widest one is in the middle, where the blade stands on it.
+            best = None
+            for a_, b_ in ((vt[0], vt[1]), (vt[1], vt[0])):
+                ta = (positions - centre) @ a_
+                tmp = np.column_stack([(positions - centre) @ b_, (positions - centre) @ np.cross(a_, b_), ta])
+                step_ = max(0.1, float(np.ptp(ta)) / 300.0)
+                ws = wp.section_widths(tmp, tris, ta.min() + step_ / 2, ta.max(), step_)
+                k = max(range(len(ws)), key=lambda i: ws[i][1])
+                at_ = (ws[k][0] - ta.min()) / max(float(np.ptp(ta)), 1e-9)
+                if best is None or abs(at_ - 0.5) > best[0]:
+                    best = (abs(at_ - 0.5), a_, b_, ws, k, at_)
+            _, axis, side_a, ws, k, at_ = best
+            side_b = np.cross(axis, side_a)
+            t = (positions - centre) @ axis
+            # The bar: from the end up to where the width falls to under half the bar's (the blade's base).
+            w_bar = ws[k][1]
+            idx = range(k, len(ws)) if at_ < 0.5 else range(k, -1, -1)
+            push_bar_top = ws[idx[-1]][0]
+            for i in idx:
+                if ws[i][1] < 0.5 * w_bar:
+                    push_bar_top = ws[i][0]
+                    break
+            print(f"push dagger: crossbar {w_bar:.1f} cm across at the {'-' if at_ < 0.5 else '+'} end, blade starts "
+                  f"{push_bar_top:.1f} cm along the axis")
         # ---- named parts ----------------------------------------------------------------------------------
         mesh_part = [part_of(names) for names, _ in meshes]
-        named = "Head" in mesh_part and ("Grip" in mesh_part or ("Guard" in mesh_part and "Pommel" in mesh_part))
+        named = args.type != "push" and "Head" in mesh_part and ("Grip" in mesh_part or ("Guard" in mesh_part and "Pommel" in mesh_part))
         if named:
             # Names are only trusted when they make sense: a "blade" mesh that also runs the length of the
             # handle (a full tang modelled as one piece with the blade) does not mark where the blade starts.
@@ -762,7 +791,7 @@ def main(argv=None):
             hilt = vertex_part != "Head"
             blade_up = blade_t.mean() > t[hilt].mean() if hilt.any() else True
             hafted = args.type in ("hafted", "double") or (args.type is None and "Guard" not in mesh_part)
-        else:
+        elif push_bar_top is None:
             # ---- the guard from the shape --------------------------------------------------------------
             # Widths of cross-sections (where the mesh's edges cross each plane), so models whose vertices
             # are far apart (a plain cylinder has them only at its ends) still measure right.
@@ -847,6 +876,10 @@ def main(argv=None):
                           f"head starts {head_start:.1f} cm along the axis")
             else:
                 print(f"guard found {g_lo:.1f}..{g_hi:.1f} cm along the axis (widest {w_max:.1f} cm)")
+        if push_bar_top is not None:
+            hafted, named, vertex_part = False, False, None
+            g_lo = g_hi = push_bar_top
+            blade_up = at_ < 0.5
         if args.flip:
             blade_up = not blade_up
         print(f"{'head' if hafted else 'blade'} on the {'+' if blade_up else '-'} side{' (flipped by --flip)' if args.flip else ''}")
@@ -899,6 +932,9 @@ def main(argv=None):
         if args.handle_bottom_cm is not None:
             handle_bottom = -abs(args.handle_bottom_cm)
             print(f"handle bottom {handle_bottom:.1f} cm (given)")
+        elif push_bar_top is not None:
+            handle_bottom = end  # the whole crossbar is the grip
+            print(f"crossbar {-end:.1f} cm thick (all grip)")
         elif named and (vertex_part == "Grip").any():
             handle_bottom = float(z[vertex_part == "Grip"].min())
             print(f"handle bottom {handle_bottom:.1f} cm (bottom of the grip mesh), pommel end {end:.1f} cm")
@@ -1207,6 +1243,25 @@ def main(argv=None):
                "tip": round(top, 2), "hafted": 1 if hafted else 0, "double": 1 if args.type == "double" else 0,
                "hand_slide": 1 if args.hand_slide else 0, "shield": 1 if shield else 0,
                "flail": 1 if args.type == "flail" else 0, "crossbow": 1 if args.type == "crossbow" else 0}
+    if args.type == "push":
+        # The crossbar (everything below the blade): its centre, length and turn about z, for the mod, which
+        # turns it onto the game's grip axis with the blade out of the fist (main.cpp push_frame).
+        bar = frame_pos[frame_pos[:, 2] <= guard_top]
+        bxy = bar[:, :2] - bar[:, :2].mean(axis=0)
+        _, _, bv = np.linalg.svd(bxy, full_matrices=False)
+        d_ = bv[0] if bv[0][0] >= 0 else -bv[0]
+        along = bar[:, :2] @ d_
+        mid_ = 0.5 * (along.min() + along.max())
+        across_ = bar[:, :2] @ np.array([-d_[1], d_[0]])
+        c_xy = d_ * mid_ + np.array([-d_[1], d_[0]]) * 0.5 * (across_.min() + across_.max())
+        base_ = frame_pos[(frame_pos[:, 2] > guard_top) & (frame_pos[:, 2] <= guard_top + max(1.0, 0.25 * (top - guard_top)))]
+        numbers.update(push=1, push_cx=round(float(c_xy[0]), 2), push_cy=round(float(c_xy[1]), 2),
+                       push_cz=round(0.5 * float(bar[:, 2].min() + bar[:, 2].max()), 2),
+                       push_len=round(float(np.ptp(along)), 2),
+                       push_angle=round(math.degrees(math.atan2(d_[1], d_[0])), 2),
+                       push_blade_half_w=round(0.5 * float(np.ptp(base_[:, 0])) if len(base_) else 1.0, 2))
+        print(f"push dagger: crossbar {numbers['push_len']:.1f} cm long (turned {numbers['push_angle']:.0f} deg), "
+              f"blade {top - guard_top:.1f} cm, {2 * numbers['push_blade_half_w']:.1f} cm wide at the base")
     if mass_note != "given":
         numbers["mass_estimated"] = 1  # the mod pulls an estimated weight toward its carrier game weapon's
     if args.held:
@@ -1258,7 +1313,7 @@ def main(argv=None):
     json.dump({"source": os.path.basename(args.model), "scale": scale_note, "mass_kg": mass, "mass_note": mass_note,
                "zones_cm": numbers, "volumes_cm3": {s: round(v, 1) for s, v in volume.items()},
                "parts_by_name": named, "lengths_before_stretch_cm": lens_before, "preview": bool(args.preview),
-               "type": "shield" if shield else args.type if args.type in ("flail", "crossbow") else "hafted" if hafted else "sword", "damage": dinfo, "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
+               "type": "shield" if shield else args.type if args.type in ("flail", "crossbow", "push") else "hafted" if hafted else "sword", "damage": dinfo, "pieces": [{"slot": s, "points": len(p)} for s, p, _ in pieces]},
               open(os.path.join(args.out, name + ".json"), "w"), indent=2)
     if shield:
         print(f"shield {numbers['width']:.1f} x {numbers['height']:.1f} cm; {len(pieces)} collision pieces")
