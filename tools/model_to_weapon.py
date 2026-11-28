@@ -760,6 +760,14 @@ def main(argv=None):
             _, axis, side_a, ws, k, at_ = best
             side_b = np.cross(axis, side_a)
             t = (positions - centre) @ axis
+            if args.length_cm:
+                # A typed length is the overall length along the blade (the first guess measured the longest
+                # axis, which on a push dagger can be the crossbar).
+                k_ = args.length_cm / max(float(np.ptp(t)), 1e-9)
+                positions, centre, t = positions * k_, centre * k_, t * k_
+                scale *= k_
+                ws = [(c_ * k_, w_ * k_) for c_, w_ in ws]
+                print(f"push dagger: length {args.length_cm:g} cm measured along the blade (scale x{k_:.3f})")
             # The bar: from the end up to where the width falls to under half the bar's (the blade's base).
             w_bar = ws[k][1]
             idx = range(k, len(ws)) if at_ < 0.5 else range(k, -1, -1)
@@ -1254,12 +1262,15 @@ def main(argv=None):
         mid_ = 0.5 * (along.min() + along.max())
         across_ = bar[:, :2] @ np.array([-d_[1], d_[0]])
         c_xy = d_ * mid_ + np.array([-d_[1], d_[0]]) * 0.5 * (across_.min() + across_.max())
-        base_ = frame_pos[(frame_pos[:, 2] > guard_top) & (frame_pos[:, 2] <= guard_top + max(1.0, 0.25 * (top - guard_top)))]
+        # The blade's width at its base from cross-sections (low-poly blades have vertices only at their ends).
+        blen_ = max(top - guard_top, 0.2)
+        base_w = [w_ for _, w_ in wp.section_widths(frame_pos, tris, guard_top + 0.05 * blen_, guard_top + 0.3 * blen_,
+                                                     max(0.05, 0.05 * blen_))]
         numbers.update(push=1, push_cx=round(float(c_xy[0]), 2), push_cy=round(float(c_xy[1]), 2),
                        push_cz=round(0.5 * float(bar[:, 2].min() + bar[:, 2].max()), 2),
                        push_len=round(float(np.ptp(along)), 2),
                        push_angle=round(math.degrees(math.atan2(d_[1], d_[0])), 2),
-                       push_blade_half_w=round(0.5 * float(np.ptp(base_[:, 0])) if len(base_) else 1.0, 2))
+                       push_blade_half_w=round(0.5 * max(base_w) if base_w and max(base_w) > 0 else 1.0, 2))
         print(f"push dagger: crossbar {numbers['push_len']:.1f} cm long (turned {numbers['push_angle']:.0f} deg), "
               f"blade {top - guard_top:.1f} cm, {2 * numbers['push_blade_half_w']:.1f} cm wide at the base")
     if mass_note != "given":
