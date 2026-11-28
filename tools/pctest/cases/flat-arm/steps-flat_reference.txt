@@ -1,6 +1,9 @@
 # Flat Half Sword itself as the reference (mouse and keyboard: the game's own arm physics, no mod hold). A knight sword in
 # the right hand: how far the game's simulated hand, forearm and upper arm sit off their animated targets, idle and while
 # swinging with the mouse (LMB held). The flat-arm hold should trail like this. See the "ArmTrace:" lines (every 0.05 s).
+# Here the sword is taken in VR, then the switch to mouse and keyboard must give the game back its locked hand joint
+# ("re-seated by the game's own seating"): the weapon's turn off the hand stays near 0. steps-flat_reference_game.txt
+# gives the sword on mouse and keyboard from the start.
 0.5:hsvr.wait room_ready = 1 6 0 room revealed
 1.0:hsvr.player_immortal
 1.0:hsvr.squeeze 1 1
@@ -15,6 +18,7 @@
 10.0:hsvr.expect arm_trace_fore_deg >= 0 (record) idle: forearm, deg
 10.0:hsvr.expect arm_trace_upper_deg >= 0 (record) idle: upper arm, deg
 10.0:hsvr.expect arm_trace_hand_cm >= 0 (record) idle: hand place off its target, cm
+10.0:hsvr.expect arm_trace_weapon_deg < 10 idle: the weapon stays locked in the hand (it turned 23-37 deg with the joint left free)
 10.1:hsvr.arm_trace 0.05
 10.2:hsvr.input Right_Guard_Axis 1 6
 10.5:hsvr.input Left_Mouse 8 0.3
@@ -30,3 +34,4 @@
 13.0:hsvr.expect arm_trace_upper_deg >= 0 (record) swinging: upper arm, deg
 13.0:hsvr.expect arm_trace_hand_cm >= 0 (record) swinging: hand place off its target, cm
 13.0:hsvr.expect stamina >= 0 (record) the bar after the mouse swings
+13.0:hsvr.expect arm_trace_weapon_deg < 20 swinging: the weapon stays locked in the hand (it turned up to 157 deg with the joint left free)

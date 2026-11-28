@@ -8,3 +8,4 @@ flat_fist_punches|steps-fist_punches.txt|test_room_map=/Game/Maps/Arenas/Map_Are
 bs_sword_still|steps-sword_still.txt|pose_hold_flat_arm=0
 bs_sword_waggle|steps-sword_waggle.txt|pose_hold_flat_arm=0
 flat_reference|steps-flat_reference.txt
+flat_reference_game|steps-flat_reference_game.txt

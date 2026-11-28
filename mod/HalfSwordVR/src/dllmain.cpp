@@ -5323,6 +5323,7 @@ namespace
     double g_arm_trace_s = 0.0, g_arm_trace_last = -1e9;
     double g_arm_trace_max[3] = {0, 0, 0}; // worst hand / forearm / upper arm turn off its target since hsvr.arm_trace (deg)
     double g_arm_trace_hand_cm = 0.0;      // worst hand place off its target (cm)
+    double g_arm_trace_weapon = 0.0;       // worst weapon turn against the hand bone since its first trace tick (deg)
     void arm_trace(UObject* pawn)
     {
         using namespace hsvr;
@@ -5355,6 +5356,7 @@ namespace
             Quat rel = (qh.inverse() * qw).normalized();
             if (seat_w != w) seat_w = w, seat = rel;
             w_hand = length(scaled_axis((rel * seat.inverse()).normalized())) * 57.2958;
+            g_arm_trace_weapon = (std::max)(g_arm_trace_weapon, w_hand);
             Call av(base, STR("GetPhysicsAngularVelocityInRadians"));
             av.run();
             spin = length(av.vec()) * 57.2958;
@@ -25186,6 +25188,25 @@ namespace
             disarm_end(side);
             g_world[side] = WorldGrab{};
         }
+        // The game's hand joints back as the game keeps them. The VR hold frees them (free_joint: no limits, no drives), and the
+        // game sets their limits only while a weapon is seating (UF @452925-455843): left free, a held sword turned 23 deg in
+        // the hand at rest and up to 157 deg in mouse swings (flat_reference 2026-11-28). So each weapon is put back through
+        // the game's own seating: soft attach not done, distance 1 cm, firmly attached; the next tick's ramp reaches 0 and
+        // locks the joint's linear and angular axes (@454950-455764), as after any grab.
+        for (int side = 0; side < 2; ++side)
+        {
+            UObject* w = object_property(pawn, side == 0 ? STR("Weapon L") : STR("Weapon R"));
+            UObject* joint = object_property(pawn, side == 0 ? STR("PhysicsConstraint L Hand") : STR("PhysicsConstraint R Hand"));
+            if (!w || !joint) continue;
+            const TCHAR* firm = side == 0 ? STR("L Hand Firmly Attached") : STR("R Hand Firmly Attached");
+            const TCHAR* dist = side == 0 ? STR("L Hand Soft Attach Distance") : STR("R Hand Soft Attach Distance");
+            const TCHAR* not_att = side == 0 ? STR("L Hand Soft Not Attached") : STR("R Hand Soft Not Attached");
+            bool a = set_bool_property(pawn, firm, true);
+            bool b = set_variable(pawn, dist, 1.0, nullptr, nullptr);
+            bool c = set_bool_property(pawn, not_att, false);
+            HSVR_LOG("Input: mouse and keyboard: %s hand's %ls re-seated by the game's own seating (firmly attached %s, soft attach distance %s, soft not attached %s)",
+                     side == 0 ? "left" : "right", w->GetName().c_str(), a ? "set" : "NOT FOUND", b ? "set" : "NOT FOUND", c ? "set" : "NOT FOUND");
+        }
         // The leg guard's no-collide pairs and channel changes between his legs and loose items: the game's own again.
         for (auto& [item, g] : g_leg_guard) leg_guard_drop(item, g, "mouse and keyboard");
         g_leg_guard.clear();
@@ -30549,6 +30570,7 @@ namespace
         else if (w == "arm_trace_fore_deg") value = g_arm_trace_max[1];
         else if (w == "arm_trace_upper_deg") value = g_arm_trace_max[2];
         else if (w == "arm_trace_hand_cm") value = g_arm_trace_hand_cm;
+        else if (w == "arm_trace_weapon_deg") value = g_arm_trace_weapon;
         else if (w == "flat_k_l" || w == "flat_k_r") value = g_flat_k[w.back() == 'l' ? 0 : 1];       // flat-arm hold: K (1/s^2), -1 = not run
         else if (w == "flat_arm_kg_l" || w == "flat_arm_kg_r") value = g_flat_m[w.back() == 'l' ? 0 : 1]; // its arm mass at the hand (kg)
         else if (w == "hold_n_l" || w == "hold_n_r") value = g_hold_load[w.back() == 'l' ? 0 : 1].force_n; // what that hand's joint carried (N)
@@ -31203,7 +31225,7 @@ namespace
             if (entry.command.rfind("hsvr.arm_trace", 0) == 0)
             {
                 g_arm_trace_s = entry.command.size() > 15 ? atof(entry.command.c_str() + 15) : 0.0;
-                g_arm_trace_max[0] = g_arm_trace_max[1] = g_arm_trace_max[2] = g_arm_trace_hand_cm = 0.0;
+                g_arm_trace_max[0] = g_arm_trace_max[1] = g_arm_trace_max[2] = g_arm_trace_hand_cm = g_arm_trace_weapon = 0.0;
                 HSVR_LOG("Script: hsvr.arm_trace every %.3f s", g_arm_trace_s);
                 continue;
             }
