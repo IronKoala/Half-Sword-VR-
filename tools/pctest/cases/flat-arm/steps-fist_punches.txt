@@ -1,0 +1,24 @@
+# Six right-fist head blows (as punch/steps-punch_repeat.txt) on the passive foe: a punch must not empty the bar
+# (playtest 2026-11-25: one punch 100 -> 57.6, the next to 1.2; 2026-11-27: fist burn 3914 -> 0).
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+0.6:hsvr.expect room_foes = 1 the one passive foe
+0.8:hsvr.player_immortal
+1.0:hsvr.squeeze 0 1
+1.0:hsvr.squeeze 1 1
+1.4:hsvr.squeeze 0 0
+1.4:hsvr.squeeze 1 0
+1.9:hsvr.expect held_r = 0 right hand empty (the test room starts him with a crossbow)
+2.0:hsvr.arm_move 1
+2.5:hsvr.squeeze 1 1
+2.5:hsvr.trigger 1 1
+3.1:hsvr.expect fist_r = 1 right hand is a fist
+3.5:hsvr.punch_sim 600
+3.8:hsvr.punch_sim 560
+4.1:hsvr.punch_sim 520
+4.4:hsvr.punch_sim 480
+4.7:hsvr.punch_sim 440
+5.0:hsvr.punch_sim 400
+5.3:hsvr.expect punches = 6 six punches
+5.4:hsvr.expect punches_counted = 6 every punch took consciousness or health
+5.6:hsvr.expect stamina > 50 six punches leave most of the bar
+5.7:hsvr.expect hold_n_r >= 0 (record) what the fist's joint carried, N

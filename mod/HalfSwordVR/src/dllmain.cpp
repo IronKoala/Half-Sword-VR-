@@ -6439,7 +6439,6 @@ namespace
         // His hand on the weapon this frame: how far the weapon is from where the hold sent it (cm),
         // and how much of that the hand took (0 follows the controller, 1 sits on the weapon).
         double blocked_cm = 0.0, on_weapon = 0.0;
-        double stuck_since = -1.0;
         double started = -1.0;        // when this hand began holding this weapon
         // Contact, from the physics' answer: where the hold sent the weapon's centre of mass last tick
         // against where it got to. Free, it gets there (within gravity's share of a step); something in
@@ -16820,9 +16819,14 @@ namespace
         if (follows) t = 1.0; // B&S: the drawn hand is always on the item
         h.on_weapon = t;
         if (t <= 0.0) return false;
-        // The stuck rule, B&S's (below). A blade stuck in someone by a thrust keeps the mod's drag / yank-out rules.
+        // No let-go for reach or contact. B&S's stuck rule (PlayerHand.cs:279-304: the grip touching something past arm's
+        // length -> drop) is gone: flat Half Sword never knocks a seated weapon out of the hand (its grip-slip threshold, UF
+        // @360300-364099, drops only a weapon still seating; strength_stamina.md section 1), and the rule dropped weapons on
+        // ordinary hits (playtests 2026-11-25 and 2026-11-27). Matthew 2026-11-28: "get rid of the blade and sorcery let go
+        // ... Willie will let go based off of his grip strength". A blade stuck in someone by a thrust keeps the drag /
+        // yank-out rules below.
         bool in_body = bool_property(h.weapon, STR("Stuck In Body"));
-        if (cfg.pose_hold_let_go && t >= 0.99 && g_pose.driver && !g_draw[side].active)
+        if (in_body && t >= 0.99 && g_pose.driver && !g_draw[side].active)
         {
             const ArmCalibration& a = g_pose.arm[side];
             double reach = a.upper_length + a.lower_length;
@@ -16831,17 +16835,11 @@ namespace
             Vec3 hand_point = target + hand_rot.rotate(h.in_hand);
             double from_shoulder = length(grip_at - shoulder) - length(h.in_hand);
             double from_hand = length(grip_at - hand_point);
-            // B&S (PlayerHand.cs:279-304): out of reach = the grip farther from the shoulder than his arm's length to the fingertips.
-            // How far your controller is plays no part (the drawn hand is on the item; the controller is a ghost).
-            // Arm length to the fingertips (GetArmCenterToFingerTipLenght): upper + lower arm + the hand bone to the fingertips (~18 cm).
-            bool out = length(grip_at - shoulder) > reach + 18.0;
-            if (in_body && !stuck_is_thrust(h.weapon)) out = false; // a lodged cut: cut_through_tick decides
-            if (in_body && cfg.stab_drag && stuck_is_thrust(h.weapon))
+            if (cfg.stab_drag && stuck_is_thrust(h.weapon))
             {
                 // Dragging a body: the weapon stays in the hand; it slips out only when the hand has
                 // pulled with all its strength, the grip still past arm's length, for longer than the
                 // grip holds (stab_drag_grip_s x his strength: tired, hurt or weak hands let go sooner).
-                out = false;
                 double tn = now_seconds();
                 // Past what his arm can follow: the blade comes out of the body and stays in the hand
                 // (Matthew 2026-11-20: a stuck weapon must never fly off away from his hand).
@@ -16863,7 +16861,7 @@ namespace
             // How far the hand is out along the wound (pommel side), for the yank: a pull sideways
             // drags him instead.
             double out_along = from_hand;
-            if (in_body && cfg.stab_drag)
+            if (cfg.stab_drag)
                 if (UObject* jt = object_property(h.weapon, STR("Jammed Tip")))
                 {
                     Call f(jt, STR("GetForwardVector"));
@@ -16875,7 +16873,7 @@ namespace
             // stab_yank_s tears the blade out (the game's own Release All Jammed Bones) and the hand
             // keeps it (flip-test1: the hand was 74 cm away while the blade stayed in him).
             static double yank_since[2] = {-1.0, -1.0};
-            if (in_body && cfg.stab_yank_cm > 0.0 && out_along > cfg.stab_yank_cm)
+            if (cfg.stab_yank_cm > 0.0 && out_along > cfg.stab_yank_cm)
             {
                 double tn = now_seconds();
                 if (yank_since[side] < 0.0) yank_since[side] = tn;
@@ -16889,18 +16887,7 @@ namespace
             }
             else
                 yank_since[side] = -1.0;
-            // A pull that the yank will answer is not a let-go (flip-test3: the past-reach let-go fired
-            // after 0.15 s and dropped the weapon before the 0.25 s yank could pull it out).
-            if (in_body && cfg.stab_yank_cm > 0.0 && out_along > cfg.stab_yank_cm) out = false;
-            // No let-go for reach or contact here. B&S's stuck rule (PlayerHand.cs:279-304: touching something with the grip past
-            // arm's length -> drop) is gone: flat Half Sword never knocks a seated weapon out of the hand (its grip-slip
-            // threshold, UF @360300-364099, drops only a weapon still seating; strength_stamina.md section 1), and the rule
-            // dropped weapons on ordinary hits (playtest 2026-11-27: 10 drops, 2026-11-25: the pillar). Matthew 2026-11-28:
-            // "get rid of the blade and sorcery let go ... Willie will let go based off of his grip strength".
-            (void)out;
         }
-        else
-            h.stuck_since = -1.0;
         if (follows)
         {
             // Where the item will be once this frame's physics has moved it (its velocity now, about its
@@ -18425,6 +18412,205 @@ namespace
         return hand_to_item.inverse().rotate(thumb_hand);
     }
 
+    // FLAT HALF SWORD'S ARM ON THE HELD ITEM (pose_hold_flat_arm; Matthew 2026-11-28 chose "Flat Half Sword's arm, whole").
+    // Read from the game (HalfSwordDecomp defaults: flat_hs_weight_vs_hold.md, arm_speed_muscle.md, hand_body_physics.md,
+    // willie_physics_assets.md, chaos_joint_drive.md):
+    //  - The item is locked to the hand body (template -77 joint). The arm bones are bodies that physical animation turns
+    //    toward the animated pose every tick (Control Physical Animation Str): orientation 1000 k, angular velocity 100 k,
+    //    max 5000, world space, all x the component's StrengthMultiplier M; Chaos runs them as acceleration drives x1.5
+    //    (AngularDriveStiffnessScale / DampingScale). So per unit of the bone's own inertia: K = 1500 k M (1/s^2),
+    //    C = 150 k M (1/s), at most 5000 M rad/s^2 (that StrengthMultiplier scales the cap too is engine, unverified).
+    //    k = Arm Tonus x Upper Body Tonus x Arm Extra Tonus x (Arm Dislocated ? 0 : 1)
+    //    M = clamp(All Body Tonus / 100 x S, 0, 1) + MRC(All Body Tonus, 25..0 -> 1..0) x S, S = MRC(Stamina, 100..0 -> 1..0.5)
+    //    (CPA @5-2576 without its free-fall / fallen / kicking terms, which belong to his flat body: 2 fresh, 1 exhausted).
+    //  - An acceleration drive moves its own body only (Chaos scales it by that joint's own effective mass), so the item
+    //    locked to the hand takes a share: the item gets K x mu, C x mu, a_max x mu with mu = part x item / (parts + item).
+    //    Here the item hangs on the joint itself, so each hand's joint gets that drive:
+    //    pull: the arm's mass at the hand (its inertia about the shoulder over the reach^2; upper arm 1.39 kg, forearm 1.22 kg,
+    //      both x Character Scale^3, hand 1 kg, all x Mass Scale, which Muscle Rate raises 1..1.25 (Set Character Height));
+    //    turn: the hand bone's own drive (hand_r: a 1 kg x Mass Scale box 15 x 7.5 x 5 cm, principal 6.8 / 20.8 / 23.4 kg cm^2,
+    //      taken as their mean 17: which box axis a turn is about isn't known here) until the wrist's limit (UserConstraint_12,
+    //      Motor profile: swing 45 deg, twist 85, about the forearm); past it the forearm, turning at the elbow, adds its own
+    //      (forearm and hand about the elbow). The wrist's own motor (250, toward the bind pose, ~0.5 N m/rad) is left out.
+    //    The wrist is taken straight at the hand's pose (the item's turn off your hand counts as the wrist's bend from there).
+    //  - Muscle Rate acts only through Mass Scale here, as in flat (the drive is per unit of mass); his grip's slip threshold
+    //    (Muscle Rate x1..1.5) only drops an item still seating, which the hold never forces out.
+    struct FlatArm
+    {
+        double K = 3000.0, C = 300.0, a_max = 10000.0; // 1/s^2, 1/s, rad/s^2
+        double m_arm = 1.9;                            // kg, the arm's mass at the hand
+        double I_hand = 17e-4, I_fore = 0.11;          // kg m^2: the hand about its centre, forearm + hand about the elbow
+        double reach_m = 0.55;
+        double k = 1.0, M = 2.0;
+        double tonus = -1.0, upper = -1.0, extra = -1.0, all = -1.0, stamina = -1.0; // -1 = not found (then 1 / 100)
+        bool dislocated = false;
+    };
+    FlatArm flat_arm(UObject* pawn, int side, const hsvr::Config& cfg)
+    {
+        FlatArm f;
+        if (!pawn) return f;
+        f.tonus = read_number_variable(pawn, side == 0 ? STR("Arm L Tonus") : STR("Arm R Tonus"));
+        f.upper = read_number_variable(pawn, STR("Upper Body Tonus"));
+        f.extra = read_number_variable(pawn, side == 0 ? STR("L Arm Extra Tonus") : STR("R Arm Extra Tonus"));
+        f.all = read_number_variable(pawn, STR("All Body Tonus"));
+        f.stamina = read_number_variable(pawn, STR("Stamina"));
+        f.dislocated = bool_property(pawn, side == 0 ? STR("Arm L Dislocated") : STR("Arm R Dislocated"));
+        f.k = (f.tonus >= 0.0 ? f.tonus : 1.0) * (f.upper >= 0.0 ? f.upper : 1.0) * (f.extra >= 0.0 ? f.extra : 1.0) * (f.dislocated ? 0.0 : 1.0);
+        // A limp arm in flat still hangs from his shoulder with the item locked in its hand; here the item hangs on the joint
+        // alone, so a dead arm keeps pose_body_strength_min of a fresh one's drive rather than letting the item fall away.
+        f.k = (std::max)(f.k, cfg.pose_body_strength_min);
+        double S = f.stamina >= 0.0 ? map_range(f.stamina, 100.0, 0.0, 1.0, 0.5) : 1.0;
+        double abt = f.all >= 0.0 ? f.all : 100.0;
+        f.M = (std::min)(1.0, (std::max)(0.0, abt / 100.0 * S)) + map_range(abt, 25.0, 0.0, 1.0, 0.0) * S;
+        f.K = 1500.0 * f.k * f.M;
+        f.C = 150.0 * f.k * f.M;
+        f.a_max = 5000.0 * f.M;
+        body_size_factor(pawn); // reads Character Scale and Mass Scale into g_body_dims
+        double sc = g_body_dims.scale, ms = g_body_dims.mass_scale, s3 = sc * sc * sc;
+        double mu = 1.39 * s3 * ms, mf = 1.22 * s3 * ms, mh = 1.0 * ms;
+        const ArmCalibration& a = g_pose.arm[side];
+        double L1 = a.valid ? a.upper_length / 100.0 : 0.28 * sc / 0.9375, L2 = a.valid ? a.lower_length / 100.0 : 0.27 * sc / 0.9375;
+        double R = L1 + L2;
+        double I_sh = mu * L1 * L1 / 3.0 + mf * (L1 * L1 + L1 * L2 + L2 * L2 / 3.0) + mh * R * R;
+        f.reach_m = R;
+        f.m_arm = I_sh / (R * R);
+        f.I_fore = mf * L2 * L2 / 3.0 + mh * L2 * L2;
+        f.I_hand = 17e-4 * ms;
+        return f;
+    }
+    // One hand's share of the flat arm's drive on the item. arms_m / arms_I: the sum over every arm holding it (one or two).
+    // ang: the item's turn still to make (rad, world axis e_w); fa: his forearm's axis (world, unit; zero = unknown).
+    struct FlatDrive
+    {
+        double pos_k = 0, pos_c = 0, pos_max = 0, rot_k = 0, rot_c = 0, rot_max = 0;
+        double mu_m = 0, mu_h = 0, mu_f = 0, over_deg = 0;
+    };
+    FlatDrive flat_drive(const FlatArm& f, double item_mass, double item_I, double arms_m, double arms_h, double arms_f, const hsvr::Vec3& e_w,
+                         const hsvr::Vec3& fa)
+    {
+        using namespace hsvr;
+        FlatDrive d;
+        double mw = (std::max)(0.01, item_mass), Iw = (std::max)(1e-5, item_I);
+        d.mu_m = f.m_arm * mw / (arms_m + mw);
+        d.mu_h = f.I_hand * Iw / (arms_h + Iw);
+        d.mu_f = f.I_fore * Iw / (arms_f + Iw);
+        d.pos_k = f.K * d.mu_m;
+        d.pos_c = f.C * d.mu_m;
+        d.pos_max = f.a_max * f.reach_m * d.mu_m;
+        double ang = length(e_w);
+        double over = 0.0;
+        if (ang > 1e-4)
+        {
+            double tw = length(fa) > 0.5 ? dot(e_w, fa) : 0.0;
+            double sw = length(e_w - fa * tw);
+            double tw_over = (std::max)(0.0, std::fabs(tw) - 85.0 / 57.2958), sw_over = (std::max)(0.0, sw - 45.0 / 57.2958);
+            over = std::sqrt(tw_over * tw_over + sw_over * sw_over);
+        }
+        d.over_deg = over * 57.2958;
+        double torque = f.K * (d.mu_h * ang + d.mu_f * over);
+        d.rot_k = ang > 1e-4 ? torque / ang : f.K * d.mu_h;
+        d.rot_c = f.C * (d.mu_h + (over > 0.0 ? d.mu_f : 0.0));
+        d.rot_max = f.a_max * (d.mu_h + (over > 0.0 ? d.mu_f : 0.0));
+        return d;
+    }
+    // The item's inertia (kg m^2) about its centre for a turn about err_l (item frame), from the joint's view of it (kg cm^2).
+    double item_inertia_about(const hsvr::Vec3& I, const hsvr::Vec3& err_l)
+    {
+        using namespace hsvr;
+        Vec3 e = length(err_l) > 1e-4 ? normalized(err_l) : Vec3{1, 0, 0};
+        double ii = e.x * e.x / I.x + e.y * e.y / I.y + e.z * e.z / I.z;
+        return 1.0 / (std::max)(1e-9, ii) * 1e-4;
+    }
+    // His forearm's axis (world), from the hand's pose: the hand bone's fingers direction, as the wrist's twist axis.
+    hsvr::Vec3 forearm_axis(int side)
+    {
+        using namespace hsvr;
+        const ArmCalibration& a = g_pose.arm[side];
+        if (!a.valid || !g_pose.hand_valid[side] || length(a.fingers_local) < 0.5) return Vec3{0, 0, 0};
+        return normalized(g_pose.hand_rot[side].rotate(a.fingers_local));
+    }
+    // What one of the hold's joints carries, as GetConstraintForce gives it (the game's own unit: an impulse per physics step,
+    // kg cm/s and kg cm^2/s; stamina_calibration.md 1.2), and in N / N m over this frame's step for the log.
+    struct JointLoad
+    {
+        double lin = 0.0, ang = 0.0; // game units
+        double force_n = 0.0, torque_nm = 0.0;
+        bool ok = false;
+    };
+    JointLoad joint_load(UObject* con, double dt)
+    {
+        JointLoad l;
+        if (!con) return l;
+        Call f(con, STR("GetConstraintForce"));
+        if (!f.run()) return l;
+        l.ok = true;
+        l.lin = hsvr::length(f.vec(STR("OutLinearForce")));
+        l.ang = hsvr::length(f.vec(STR("OutAngularForce")));
+        double step = (std::max)(1.0 / 240.0, dt);
+        l.force_n = l.lin / 100.0 / step;
+        l.torque_nm = l.ang / 1e4 / step;
+        return l;
+    }
+
+    // What each hand's hold joint(s) carried last physics step, for that hand's stamina (flat-arm hold).
+    JointLoad g_hold_load[2];
+    double g_flat_k[2] = {-1.0, -1.0}, g_flat_m[2] = {-1.0, -1.0}; // test measures: the last flat-arm K (1/s^2), arm mass at the hand (kg)
+    bool g_hold_load_two = false; // the hand's load came from a two-hand hold
+
+    // The hand's stamina burn with the flat-arm hold: the game's own (R Hand Stamina Burn Rate, UG @441248-442576), read off
+    // the hold's joint as the game reads its hand joint (the item is on the mod's joint, the game's is left free):
+    //   s = (|lin| + |ang| of GetConstraintForce) x (fist ? Hands Rigidity (Gauntlets) x MRC(Fisting Rate, 0.1..1 -> 0..1) : 0.01)
+    //       x MRC(Muscle Rate, 0..3 -> 1..0.1) x MRC(Hand + Elbow Twist Dot, 2..1 -> 1..(R Two Handed Grip ? 0.5 : 1)),
+    //   kept from pose_stamina_gate up (the game's is 10), then x pose_stamina_scale (Matthew's 4, 2026-11-21).
+    // Written after his tick, so the next tick's swing burn (R Hand Stamina Burn Rate f: x MRC(Aim Swing Speed 35..70 -> 10..85)
+    // x 0.0125 ...) reads it as the game would. No caps and no still-hand rule: those answered the B&S springs' forces, which
+    // dragged the item with hundreds of N; the flat arm's joint carries what the arm would carry.
+    void drain_stamina_flat(int side, UObject* pawn, UObject* weapon, const hsvr::Config& cfg)
+    {
+        if (!pawn || cfg.pose_stamina_scale <= 0.0) return;
+        const JointLoad& l = g_hold_load[side];
+        bool has_mr = false;
+        double mr = number_var(pawn, STR("Muscle Rate"), has_mr);
+        double strength = has_mr ? map_range(mr, 0.0, 3.0, 1.0, 0.1) : 1.0;
+        bool fist = is_fist(weapon);
+        double sel = 0.01, rigidity = -1.0, rate = -1.0;
+        if (fist)
+        {
+            bool has_rig = false;
+            rigidity = number_var(pawn, STR("Hands Rigidity (Gauntlets)"), has_rig); // 0.4 bare-handed
+            if (!has_rig) rigidity = -1.0;
+            // The game's Fisting Rate rises with a mouse thrust (R Thrust Alpha), which VR never makes, so the punching hand's
+            // speed counts too, over the B&S punch range 2..9 m/s (as before; fist_flags_after_tick keeps the rate).
+            rate = (std::max)(map_range(g_fisting_rate[side], 0.1, 1.0, 0.0, 1.0), map_range(g_hand_rel_v[side], 2.0, 9.0, 0.0, 1.0));
+            sel = (has_rig ? rigidity : 0.0) * rate * cfg.pose_stamina_fist_scale;
+        }
+        bool two = bool_property(pawn, STR("R Two Handed Grip"));
+        double hd = read_number_variable(pawn, side == 0 ? STR("Hand_L Twist Dot") : STR("Hand_R Twist Dot"));
+        double ed = read_number_variable(pawn, side == 0 ? STR("Elbow_L Twist Dot") : STR("Elbow_R Twist Dot"));
+        bool has_tw = hd != -1.0 && ed != -1.0;
+        double tw = has_tw ? map_range(hd + ed, 2.0, 1.0, 1.0, two ? 0.5 : 1.0) : 1.0;
+        double game = (l.lin + l.ang) * sel * strength * tw;
+        double burn = game >= cfg.pose_stamina_gate ? game * cfg.pose_stamina_scale : 0.0;
+        const TCHAR* name = side == 0 ? STR("L Hand Stamina Burn Rate") : STR("R Hand Stamina Burn Rate");
+        bool ok = set_variable(pawn, name, burn, nullptr, nullptr);
+        static double last_line[2] = {0.0, 0.0};
+        double now = hsvr::now_seconds();
+        if (now - last_line[side] >= 1.0)
+        {
+            last_line[side] = now;
+            bool has_swing = false;
+            double swing = number_var(pawn, side == 0 ? STR("Stamina Burn Swing L") : STR("Stamina Burn Swing R"), has_swing);
+            HSVR_LOG("Stamina: %s hand (flat arm%s%s): bar %.1f, burn %.2f%s = joint %.0f + %.0f (%s; %.0f N, %.1f N m) x %.3g%s x Muscle Rate %s%.2f -> %.2f x twist %.2f%s "
+                     "(gate %.0f) x %.1f; game's swing burn %.2f a second, Stamina Burn %.2f, Aim Swing Speed %.0f",
+                     side == 0 ? "left" : "right", fist ? ", fist" : "", g_hold_load_two ? ", two hands" : "", read_number_variable(pawn, STR("Stamina")), burn,
+                     ok ? "" : " (NOT WRITTEN: variable not found)", l.lin, l.ang, l.ok ? "read" : "NOT READ", l.force_n, l.torque_nm, sel,
+                     fist ? (rigidity < 0.0 ? " (Hands Rigidity (Gauntlets) NOT FOUND)" : " (rigidity x fisting)") : "", has_mr ? "" : "(not found) ", mr, strength, tw,
+                     has_tw ? "" : " (twist dots not found)", cfg.pose_stamina_gate, cfg.pose_stamina_scale, has_swing ? swing : -1.0,
+                     read_number_variable(pawn, STR("Stamina Burn")), read_number_variable(pawn, STR("Aim Swing Speed")));
+        }
+    }
+
+
     // One tick of the hold for the hand `side` (the main hand when both hold). target_*: where the item would be exactly
     // in that hand; pos/rot/com: where it is now. Second hand: g_two. Returns what the drives do (for the log, stamina).
     BsDrive bs_hold_joint(int side, UObject* pawn, UObject* base, UObject* weapon, double mass, const hsvr::Vec3& pivot, const hsvr::Quat& hand_to_item,
@@ -18463,6 +18649,32 @@ namespace
         out.two = two;
         Vec3 target_pivot = target_pos + target_rot.rotate(pivot);
         Vec3 stretch = target_pivot - pivot_world;
+        bool flat = cfg.pose_hold_flat_arm;
+        if (!two && flat)
+        {
+            FlatArm fa = flat_arm(pawn, side, cfg);
+            FlatDrive fd = flat_drive(fa, mass, item_inertia_about(I, err_l), fa.m_arm, fa.I_hand, fa.I_fore, rot.rotate(err_l), forearm_axis(side));
+            g_flat_k[side] = fa.K;
+            g_flat_m[side] = fa.m_arm;
+            bs_drive_joint(m, mass, I, com_l, m.made_at, m.joint_in_item, fd.pos_k, fd.pos_c, fd.pos_max, fd.rot_k, fd.rot_c, fd.rot_max, slide_c, err_l);
+            JointLoad jl = joint_load(m.con, h.dt);
+            g_hold_load[side] = jl;
+            g_hold_load_two = false;
+            out.turns = true;
+            out.force_n = jl.force_n;
+            out.torque_nm = jl.torque_nm;
+            out.force_capped = jl.force_n >= fd.pos_max * 0.999;
+            out.torque_capped = jl.torque_nm >= fd.rot_max * 0.999;
+            HSVR_LOG_EVERY(0.5, "Hold: %s %ls (flat arm, one hand on its %s): grip %.1f cm / %.0f deg off (%.0f past the wrist's limit); pull %.0f N/m, %.0f N s/m (cap %.0f N), "
+                                "turn %.1f N m/rad, %.2f N m s/rad (cap %.0f N m); carried %.0f N, %.1f N m | arm: K %.0f, C %.0f (tonus %.2f x upper body %.2f x extra %.2f%s = %.2f; x %.2f "
+                                "from All Body Tonus %.0f, stamina %.0f), arm mass at the hand %.2f kg, hand %.0f kg cm^2, forearm %.0f kg cm^2 (Mass Scale %.3f, scale %.4f); "
+                                "item %.2f kg, %.0f kg cm^2 about this turn",
+                           side == 0 ? "left" : "right", weapon->GetName().c_str(), h.free.handle.empty() ? "grip" : h.free.handle.c_str(), length(stretch),
+                           length(err_l) * 57.2958, fd.over_deg, fd.pos_k, fd.pos_c, fd.pos_max, fd.rot_k, fd.rot_c, fd.rot_max, jl.force_n, jl.torque_nm, fa.K, fa.C,
+                           fa.tonus, fa.upper, fa.extra, fa.dislocated ? " x dislocated" : "", fa.k, fa.M, fa.all, fa.stamina, fa.m_arm, fa.I_hand * 1e4, fa.I_fore * 1e4,
+                           g_body_dims.mass_scale, g_body_dims.scale, mass, item_inertia_about(I, err_l) * 1e4);
+            return out;
+        }
         if (!two)
         {
             bs_drive_joint(m, mass, I, com_l, m.made_at, m.joint_in_item, 5000.0 * mk, 100.0 * mc, 3000.0 * mk, 1000.0 * hk * mk, 50.0 * hc * mc, 250.0 * mk, slide_c, err_l);
@@ -18509,7 +18721,7 @@ namespace
                 why = "same handle, grips face opposite ways: the dominant (right) hand turns it at x0.1";
             }
         }
-        if (h.two_turner != turner || h.two_why != why)
+        if (!flat && (h.two_turner != turner || h.two_why != why))
         {
             h.two_turner = turner;
             h.two_why = why;
@@ -18519,8 +18731,24 @@ namespace
         // The main hand's joint.
         bool main_turns = turner == side;
         Vec3 err2_l = rot.inverse().rotate(scaled_axis((rot2 * rot.inverse()).normalized()));
-        bs_drive_joint(m, mass, I, com_l, m.made_at, m.joint_in_item, 10000.0 * mk, pc * mc, 6000.0 * mk, main_turns ? 2200.0 * rot_scale * mk : 0.0,
-                       main_turns ? 90.0 * rot_scale * mc : 0.0, main_turns ? 500.0 * rot_scale * mk : 0.0, slide_c, err_l);
+        // Flat Half Sword: both hands' joints are locked to the item, so each arm pulls its grip and each hand turns it toward
+        // its own pose (no dominant hand); each arm's share is its part of both arms' with the item.
+        FlatArm fa1, fa2;
+        FlatDrive fd1, fd2;
+        if (flat)
+        {
+            fa1 = flat_arm(pawn, side, cfg);
+            fa2 = flat_arm(pawn, s2, cfg);
+            g_flat_k[side] = fa1.K, g_flat_m[side] = fa1.m_arm;
+            g_flat_k[s2] = fa2.K, g_flat_m[s2] = fa2.m_arm;
+            double sm = fa1.m_arm + fa2.m_arm, sh = fa1.I_hand + fa2.I_hand, sf = fa1.I_fore + fa2.I_fore;
+            fd1 = flat_drive(fa1, mass, item_inertia_about(I, err_l), sm, sh, sf, rot.rotate(err_l), forearm_axis(side));
+            fd2 = flat_drive(fa2, mass, item_inertia_about(I, err2_l), sm, sh, sf, rot.rotate(err2_l), forearm_axis(s2));
+            bs_drive_joint(m, mass, I, com_l, m.made_at, m.joint_in_item, fd1.pos_k, fd1.pos_c, fd1.pos_max, fd1.rot_k, fd1.rot_c, fd1.rot_max, slide_c, err_l);
+        }
+        else
+            bs_drive_joint(m, mass, I, com_l, m.made_at, m.joint_in_item, 10000.0 * mk, pc * mc, 6000.0 * mk, main_turns ? 2200.0 * rot_scale * mk : 0.0,
+                           main_turns ? 90.0 * rot_scale * mc : 0.0, main_turns ? 500.0 * rot_scale * mk : 0.0, slide_c, err_l);
         // The second hand's joint (its own, on its spot).
         JointHand& o = g_jh[s2][1];
         Vec3 at_world = pos + rot.rotate(g_two.bs_local);
@@ -18540,8 +18768,11 @@ namespace
             o.touched = true;
             set_component_transform(o.sphere, pos2, rot2, false);
             double slide2 = g_two.sliding && g_two.has_handle ? g_two.slide_c : -1.0;
-            bs_drive_joint(o, mass, I, com_l, o.made_at, o.joint_in_item, 10000.0 * mk2, pc * mc2, 6000.0 * mk2, !main_turns ? 2200.0 * rot_scale * mk2 : 0.0,
-                           !main_turns ? 90.0 * rot_scale * mc2 : 0.0, !main_turns ? 500.0 * rot_scale * mk2 : 0.0, slide2, err2_l);
+            if (flat)
+                bs_drive_joint(o, mass, I, com_l, o.made_at, o.joint_in_item, fd2.pos_k, fd2.pos_c, fd2.pos_max, fd2.rot_k, fd2.rot_c, fd2.rot_max, slide2, err2_l);
+            else
+                bs_drive_joint(o, mass, I, com_l, o.made_at, o.joint_in_item, 10000.0 * mk2, pc * mc2, 6000.0 * mk2, !main_turns ? 2200.0 * rot_scale * mk2 : 0.0,
+                               !main_turns ? 90.0 * rot_scale * mc2 : 0.0, !main_turns ? 500.0 * rot_scale * mk2 : 0.0, slide2, err2_l);
         }
         Vec3 stretch2 = g_two.bs_p2 - at_world;
         {
@@ -18598,6 +18829,24 @@ namespace
             }
         }
         out.turns = true;
+        if (flat)
+        {
+            JointLoad l1 = joint_load(m.con, h.dt), l2 = joint_load(o.con, h.dt);
+            g_hold_load[side] = l1;
+            g_hold_load[s2] = l2;
+            g_hold_load_two = true;
+            out.force_n = l1.force_n;
+            out.torque_nm = l1.torque_nm;
+            out.force_capped = l1.force_n >= fd1.pos_max * 0.999;
+            out.torque_capped = l1.torque_nm >= fd1.rot_max * 0.999;
+            HSVR_LOG_EVERY(0.5, "Hold: %ls (flat arms, two hands%s): %s grip %.1f cm / %.0f deg off (%.0f past the wrist), pull %.0f N/m, turn %.1f N m/rad, carried %.0f N, %.1f N m; "
+                                "%s grip %.1f cm / %.0f deg off (%.0f past the wrist), pull %.0f N/m, turn %.1f N m/rad, carried %.0f N, %.1f N m; arms K %.0f / %.0f, "
+                                "mass at the hand %.2f / %.2f kg",
+                           weapon->GetName().c_str(), same ? ", one handle" : ", two handles", side == 0 ? "left" : "right", length(stretch), length(err_l) * 57.2958,
+                           fd1.over_deg, fd1.pos_k, fd1.rot_k, l1.force_n, l1.torque_nm, s2 == 0 ? "left" : "right", length(stretch2), length(err2_l) * 57.2958, fd2.over_deg,
+                           fd2.pos_k, fd2.rot_k, l2.force_n, l2.torque_nm, fa1.K, fa2.K, fa1.m_arm, fa2.m_arm);
+            return out;
+        }
         out.force_n = (std::min)(10000.0 * mk * length(stretch) * 0.01, 6000.0 * mk);
         out.force_capped = out.force_n >= 6000.0 * mk * 0.999;
         double ang = length(main_turns ? err_l : err2_l);
@@ -19002,7 +19251,13 @@ namespace
         h.force_capped = d.force_capped;
         h.torque_nm = d.torque_nm;
         h.torque_capped = d.torque_capped;
-        drain_stamina(side, pawn, weapon, h.force_n, h.torque_nm, cfg);
+        if (cfg.pose_hold_flat_arm)
+        {
+            drain_stamina_flat(side, pawn, weapon, cfg);
+            if (d.two) drain_stamina_flat(g_two.second, pawn, weapon, cfg);
+        }
+        else
+            drain_stamina(side, pawn, weapon, h.force_n, h.torque_nm, cfg);
         // Wake it: a body the solver has put to sleep (a weapon lying still) doesn't answer its joint at once.
         Call wake(base, STR("WakeRigidBody"));
         wake.run();
@@ -30187,6 +30442,9 @@ namespace
             UObject* sc = held ? own_scabbard(held) : nullptr;
             value = !sc ? -1.0 : scabbard_pin(sc) ? 1.0 : 0.0;
         }
+        else if (w == "flat_k_l" || w == "flat_k_r") value = g_flat_k[w.back() == 'l' ? 0 : 1];       // flat-arm hold: K (1/s^2), -1 = not run
+        else if (w == "flat_arm_kg_l" || w == "flat_arm_kg_r") value = g_flat_m[w.back() == 'l' ? 0 : 1]; // its arm mass at the hand (kg)
+        else if (w == "hold_n_l" || w == "hold_n_r") value = g_hold_load[w.back() == 'l' ? 0 : 1].force_n; // what that hand's joint carried (N)
         else if (w == "own_scab_l" || w == "own_scab_r")
         {
             // the held weapon has its own scabbard as the game decides it (own_scabbard): 1, none: 0, nothing held: -1
