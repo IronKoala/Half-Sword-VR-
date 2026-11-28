@@ -1,0 +1,22 @@
+# B&S arm stretch (pose_arm_stretch_max=2): bare right hand reaching 54-70 cm out from his shoulder (hsvr.arm_move 6,
+# past his ~53 cm arm). His arm must stretch and his drawn hand must stay on the controller's wrist point (before:
+# clamped at full reach, the hand stopped short). Look for "arm stretched x" lines.
+0.5:hsvr.fake_head_drop 0
+0.6:hsvr.fake_look 0
+1:hsvr.squeeze 0 1
+1:hsvr.squeeze 1 1
+1.5:hsvr.squeeze 0 0
+1.5:hsvr.squeeze 1 0
+2.4:hsvr.expect held_r = 0 right hand empty
+2.5:hsvr.arm_move 1
+4:hsvr.expect arm_stretch_r = 1 inside his reach: no stretch
+4:hsvr.expect hand_gap_r < 2 inside his reach: hand on its target
+4.5:hsvr.arm_move 6
+4.6:hsvr.wait arm_stretch_r > 1.03 8 0 reaching past his arm: it stretches
+4.7:hsvr.expect hand_gap_r < 2 stretched: hand still on its target
+6:hsvr.expect hand_gap_r < 2 stretched: hand still on its target
+8:hsvr.expect hand_gap_r < 2 stretched: hand still on its target
+8.5:hsvr.arm_move 1
+10:hsvr.expect arm_stretch_r = 1 back inside his reach: stretch released
+10:hsvr.expect hand_gap_r < 2 back inside his reach: hand on its target
+10.5:quit

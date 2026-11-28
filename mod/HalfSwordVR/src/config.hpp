@@ -1000,6 +1000,10 @@ namespace hsvr
         double pose_shoulder_reach_cm = 12.0;
         double pose_shoulder_reach_start_cm = 6.0;
         double pose_shoulder_reach_max_deg = 35.0;
+        // B&S's arm stretch (IKControllerFIK.cs: VRIK stretchArmsCurve; measured 2026-11-27 in its logs): past
+        // full reach his arm bones lengthen so the drawn hand reaches its target (on a held item: its grip),
+        // the arm straight, up to this many times their length; past that the hand stops. 1 = no stretch.
+        double pose_arm_stretch_max = 2.0;
         double pose_grip_strength_kg = 20.0;
         double pose_grip_hz = 20.0;
         double pose_grip_damping = 0.3;

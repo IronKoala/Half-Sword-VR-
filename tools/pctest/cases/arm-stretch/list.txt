@@ -1,0 +1,5 @@
+# B&S arm stretch (PR #51). Look for "Pose: ... arm stretched x" lines.
+as_reach_bare|steps-as_reach_bare.txt
+as_wide_staff|steps-as_wide_staff.txt
+# Baseline (stretch off = the old clamp): its hand_gap checks are expected to FAIL; it shows the gap the fix removes.
+as_wide_staff_off|steps-as_wide_staff.txt|pose_arm_stretch_max=1
