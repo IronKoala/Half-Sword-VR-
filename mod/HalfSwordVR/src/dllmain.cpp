@@ -1160,6 +1160,22 @@ namespace
     // which leaves the variable pointing at a destroyed component until garbage collection. So a weapon has a scabbard only
     // when that component is alive and has a mesh (playtest 2026-11-27 11:07 PM: the Baurnwehr, which has none, was refused
     // the holster "it has its own scabbard"). Cached per scabbard pointer; each weapon's first answer is logged.
+    double number_property(UObject* owner, FProperty* p);
+    // The game's own test for a weapon's scabbard. ModularWeaponBP Set Up Module (@4150-@4846) destroys the Scabbard
+    // component when the part has no "Set Scabbard", and otherwise makes one with the part's scabbard mesh and the part's own
+    // material. Built weapons with no scabbard to see (Reforged Baurnwehr A-F, the knives, chisels, key, scissors) add a
+    // dummy instead at BeginPlay: a real sword-scabbard mesh (Equipment_Scabbard_A_SS25_001) with material 0 set to
+    // /Game/Character/Material/Invisible_Mat, placed 100 km below the weapon (BP_Weapon_Reforged_Baurnwehr_D ubergraph
+    // @10-@232). So: a scabbard of its own = the component alive, with a mesh, and not painted Invisible_Mat.
+    bool invisible_material(UObject* m)
+    {
+        for (int i = 0; m && i < 4; ++i)
+        {
+            if (m->GetName() == STR("Invisible_Mat")) return true;
+            m = object_property(m, STR("Parent")); // a material instance: what it was made from
+        }
+        return false;
+    }
     UObject* own_scabbard(UObject* weapon)
     {
         UObject* s = weapon ? object_property(weapon, STR("Scabbard")) : nullptr;
@@ -1172,9 +1188,17 @@ namespace
         {
             bool alive = object_alive(s);
             UObject* mesh = alive ? object_property(s, STR("StaticMesh")) : nullptr;
-            it = real.emplace(s, alive && mesh != nullptr).first;
+            UObject* mat = nullptr;
+            if (mesh)
+            {
+                Call gm(s, STR("GetMaterial")); // ElementIndex 0 (the parameter block starts zeroed)
+                gm.run();
+                mat = gm.object_result();
+            }
+            bool dummy = invisible_material(mat);
+            it = real.emplace(s, alive && mesh != nullptr && !dummy).first;
             HSVR_LOG("Scabbard: %ls %s (its Scabbard component %ls: %s)", weapon->GetName().c_str(), it->second ? "has its own scabbard" : "has NO scabbard",
-                     s->GetName().c_str(), !alive ? "destroyed" : mesh ? "alive, with a mesh" : "alive, no mesh");
+                     s->GetName().c_str(), !alive ? "destroyed" : !mesh ? "alive, no mesh" : dummy ? "a dummy painted Invisible_Mat" : "alive, with a mesh");
             if (alive)
             {
                 // What that component is (2026-11-28: the Baurnwehr, which has no scabbard to see, has one alive with a mesh).
@@ -1185,8 +1209,9 @@ namespace
                 sc.run();
                 hsvr::Vec3 scl = sc.vec();
                 UObject* parent = object_property(s, STR("AttachParent"));
-                HSVR_LOG("Scabbard:   %ls: mesh %ls, visible %d, hidden in game %d, scale (%.2f, %.2f, %.2f), attached to %ls, owner %ls",
-                         s->GetName().c_str(), mesh ? mesh->GetFullName().c_str() : STR("none"), vp ? (int)*(vis.buffer.data() + vp->GetOffset_Internal()) : -1,
+                HSVR_LOG("Scabbard:   %ls: mesh %ls, material 0 %ls, visible %d, hidden in game %d, scale (%.2f, %.2f, %.2f), attached to %ls, owner %ls",
+                         s->GetName().c_str(), mesh ? mesh->GetFullName().c_str() : STR("none"), mat ? mat->GetFullName().c_str() : STR("none"),
+                         vp ? (int)*(vis.buffer.data() + vp->GetOffset_Internal()) : -1,
                          (int)bool_property(s, STR("bHiddenInGame")), scl.x, scl.y, scl.z, parent ? parent->GetName().c_str() : STR("nothing"),
                          s->GetOuterPrivate() ? s->GetOuterPrivate()->GetName().c_str() : STR("?"));
                 for (const TCHAR* var : {STR("Has Scabbard"), STR("Scabbard Length"), STR("Sheath Length"), STR("Is Sheathed"), STR("Length to Scabbard"), STR("No Scabbard")})
@@ -5290,6 +5315,7 @@ namespace
         HSVR_LOG("StaminaTrace: %.3f (%.2f s) weaponR %ls; %s", now, frame, wr ? wr->GetName().c_str() : STR("none"), line.c_str());
     }
 
+    hsvr::Vec3 scaled_axis(hsvr::Quat q);
     // ---- Flat arm trace (hsvr.arm_trace <seconds>, 0 = off) --------------------------------------
     // For checking the flat-arm hold against flat Half Sword itself (run in flat mode, a weapon in the right hand): every
     // <seconds>, how far each simulated right-arm bone (Mesh) is from its animated target (DriverSkeleton): turn in deg and
