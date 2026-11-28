@@ -745,19 +745,22 @@ def main(argv=None):
         if args.type == "push":
             # ---- a push dagger: a T, the blade out of a crossbar held in the fist ---------------------------
             # The T lies in the plane of the two longest axes (the blade is flat in it, its edges along the bar).
-            # The blade's axis is the one whose widest cross-section (the bar) is at an end; along the bar the
-            # widest one is in the middle, where the blade stands on it.
+            # Along the blade's axis one end (the crossbar, or a frame round the fist) is much wider than the
+            # other (the point); along the bar both ends are alike. So the blade's axis is the one whose end
+            # widths (widest section in each end fifth) differ most.
             best = None
             for a_, b_ in ((vt[0], vt[1]), (vt[1], vt[0])):
                 ta = (positions - centre) @ a_
                 tmp = np.column_stack([(positions - centre) @ b_, (positions - centre) @ np.cross(a_, b_), ta])
                 step_ = max(0.1, float(np.ptp(ta)) / 300.0)
                 ws = wp.section_widths(tmp, tris, ta.min() + step_ / 2, ta.max(), step_)
-                k = max(range(len(ws)), key=lambda i: ws[i][1])
-                at_ = (ws[k][0] - ta.min()) / max(float(np.ptp(ta)), 1e-9)
-                if best is None or abs(at_ - 0.5) > best[0]:
-                    best = (abs(at_ - 0.5), a_, b_, ws, k, at_)
-            _, axis, side_a, ws, k, at_ = best
+                n5 = max(1, len(ws) // 5)
+                w_lo, w_hi = max(w for _, w in ws[:n5]), max(w for _, w in ws[-n5:])
+                score = abs(math.log(max(w_lo, 1e-3) / max(w_hi, 1e-3)))
+                if best is None or score > best[0]:
+                    best = (score, a_, b_, ws, w_lo >= w_hi, max(w_lo, w_hi))
+            _, axis, side_a, ws, low_end, w_bar = best
+            at_ = 0.0 if low_end else 1.0
             side_b = np.cross(axis, side_a)
             t = (positions - centre) @ axis
             if args.length_cm:
@@ -767,13 +770,13 @@ def main(argv=None):
                 positions, centre, t = positions * k_, centre * k_, t * k_
                 scale *= k_
                 ws = [(c_ * k_, w_ * k_) for c_, w_ in ws]
+                w_bar *= k_
                 print(f"push dagger: length {args.length_cm:g} cm measured along the blade (scale x{k_:.3f})")
-            # The bar: from the end up to where the width falls to under half the bar's (the blade's base).
-            w_bar = ws[k][1]
-            idx = range(k, len(ws)) if at_ < 0.5 else range(k, -1, -1)
+            # The handle end: from the wide end up to where the width falls under half of it (the blade's base).
+            idx = range(len(ws)) if low_end else range(len(ws) - 1, -1, -1)
             push_bar_top = ws[idx[-1]][0]
             for i in idx:
-                if ws[i][1] < 0.5 * w_bar:
+                if 0 < ws[i][1] < 0.5 * w_bar:
                     push_bar_top = ws[i][0]
                     break
             print(f"push dagger: crossbar {w_bar:.1f} cm across at the {'-' if at_ < 0.5 else '+'} end, blade starts "
@@ -1258,10 +1261,55 @@ def main(argv=None):
         bxy = bar[:, :2] - bar[:, :2].mean(axis=0)
         _, _, bv = np.linalg.svd(bxy, full_matrices=False)
         d_ = bv[0] if bv[0][0] >= 0 else -bv[0]
-        along = bar[:, :2] @ d_
+        n_ = np.array([-d_[1], d_[0]])
+        # Where the hand closes: the solid bar, not the whole frame below the blade (the Bad Rabbit has two
+        # prongs running back from its wrapped bar; Matthew's PC conversion 2026-11-28 put the fist between
+        # them). Surface samples in slabs along z; a slab's filled length is its extent along the bar minus
+        # the gaps over 1 cm. The grip is the run of slabs filled to at least 60 % of the fullest one, the
+        # run with the most filled length.
+        tvb = frame_pos[tris]
+        tri_in = tvb[:, :, 2].min(axis=1) <= guard_top
+        arb = 0.5 * np.linalg.norm(np.cross(tvb[:, 1] - tvb[:, 0], tvb[:, 2] - tvb[:, 0]), axis=1) * tri_in
+        bar_pts = bar
+        if arb.sum() > 0:
+            rngb = np.random.default_rng(2)
+            pkb = rngb.choice(len(tris), size=60000, p=arb / arb.sum())
+            abb = rngb.random((len(pkb), 2))
+            abb[abb.sum(axis=1) > 1] = 1 - abb[abb.sum(axis=1) > 1]
+            smb = tvb[pkb, 0] + abb[:, :1] * (tvb[pkb, 1] - tvb[pkb, 0]) + abb[:, 1:] * (tvb[pkb, 2] - tvb[pkb, 0])
+            smb = np.vstack([bar, smb[smb[:, 2] <= guard_top]])
+            zlo_, zhi_ = float(smb[:, 2].min()), guard_top
+            nsl = max(1, int(math.ceil((zhi_ - zlo_) / 0.25)))
+            edges_ = np.linspace(zlo_, zhi_, nsl + 1)
+            slab = np.clip(np.searchsorted(edges_, smb[:, 2], side="right") - 1, 0, nsl - 1)
+            fill = np.zeros(nsl)
+            for i in range(nsl):
+                a_ = np.sort(smb[slab == i, :2] @ d_)
+                if len(a_) > 1:
+                    g_ = np.diff(a_)
+                    fill[i] = float(g_[g_ <= 1.0].sum())
+            if fill.max() > 0:
+                good = fill >= 0.6 * fill.max()
+                runs, i = [], 0
+                while i < nsl:
+                    if good[i]:
+                        j = i
+                        while j + 1 < nsl and good[j + 1]:
+                            j += 1
+                        runs.append((float(fill[i:j + 1].sum()), i, j))
+                        i = j + 1
+                    else:
+                        i += 1
+                _, i0_, i1_ = max(runs)
+                bar_pts = smb[(slab >= i0_) & (slab <= i1_)]
+                if i1_ - i0_ + 1 < nsl:
+                    print(f"push dagger: the hand's bar is {edges_[i0_]:.1f}..{edges_[i1_ + 1]:.1f} cm of the "
+                          f"{zlo_:.1f}..{zhi_:.1f} cm below the blade (the rest is open frame)")
+        along = bar_pts[:, :2] @ d_
         mid_ = 0.5 * (along.min() + along.max())
-        across_ = bar[:, :2] @ np.array([-d_[1], d_[0]])
-        c_xy = d_ * mid_ + np.array([-d_[1], d_[0]]) * 0.5 * (across_.min() + across_.max())
+        across_ = bar_pts[:, :2] @ n_
+        c_xy = d_ * mid_ + n_ * 0.5 * (across_.min() + across_.max())
+        bar = bar_pts
         # The blade's width at its base from cross-sections (low-poly blades have vertices only at their ends).
         blen_ = max(top - guard_top, 0.2)
         base_w = [w_ for _, w_ in wp.section_widths(frame_pos, tris, guard_top + 0.05 * blen_, guard_top + 0.3 * blen_,
