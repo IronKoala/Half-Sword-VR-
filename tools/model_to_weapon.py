@@ -515,57 +515,6 @@ def drop_scenery(meshes):
     return meshes
 
 
-def reduce_meshes(meshes, target):
-    """The meshes simplified (quadric edge collapse, fast_simplification) to about target triangles in all,
-    each mesh keeping its share. Border edges stay: a model's meshes are split at their UV seams (separate
-    vertices), so seams and open edges keep their place and the texture still lines up. Each vertex left
-    keeps its own UV and normal (the collapses say which original vertex it is)."""
-    import trimesh
-    total = sum(len(g.faces) for _, g in meshes)
-    if total <= target:
-        print(f"reduce detail: the model has {total:,} triangles, at most {target:,}: kept as it is")
-        return meshes
-    try:
-        import fast_simplification
-    except ImportError:
-        print("reduce detail: fast_simplification is not installed: the model is kept as it is")
-        return meshes
-    out, after = [], 0
-    for names, g in meshes:
-        f = np.asarray(g.faces, dtype=np.int64)
-        want = int(round(target * len(f) / total))
-        if len(f) < 200 or want >= len(f):
-            out.append((names, g))
-            after += len(f)
-            continue
-        v = np.asarray(g.vertices, dtype=np.float64)
-        p2, f2, col = fast_simplification.simplify(v, f, target_count=max(want, 100), return_collapses=True,
-                                                   preserve_border=True)
-        # The simplified mesh's vertices are the originals not collapsed away, in their order (moved to
-        # the best place for the shape).
-        kept = np.setdiff1d(np.arange(len(v)), col[:, 1]) if len(col) else np.arange(len(v))
-        if len(kept) != len(p2):
-            print(f"reduce detail: {names[0]} could not be matched up, kept as it is")
-            out.append((names, g))
-            after += len(f)
-            continue
-        nrm = np.asarray(g.vertex_normals, dtype=np.float64)[kept]
-        uv = getattr(g.visual, "uv", None)
-        if uv is not None and len(uv) == len(v):
-            visual = trimesh.visual.TextureVisuals(uv=np.asarray(uv)[kept], material=g.visual.material)
-        else:
-            visual = None
-        h = trimesh.Trimesh(vertices=p2, faces=np.asarray(f2, dtype=np.int64), vertex_normals=nrm, process=False)
-        if visual is not None:
-            h.visual = visual
-        elif getattr(g.visual, "material", None) is not None:
-            h.visual = trimesh.visual.TextureVisuals(material=g.visual.material)
-        out.append((names, h))
-        after += len(f2)
-    print(f"reduce detail: {total:,} triangles -> {after:,}")
-    return out
-
-
 def model_length(path):
     meshes = load_model(path)
     pts = np.vstack([np.asarray(g.vertices) for _, g in meshes])
@@ -644,9 +593,6 @@ def main(argv=None):
     ap.add_argument("--handle-bottom-cm", type=float)
     ap.add_argument("--preview", action="store_true", help="quick: parts, collision and numbers only (no textures, "
                     "no damage points, mass from the convex pieces); the converter's picture before Install")
-    ap.add_argument("--reduce", type=int, metavar="TRIANGLES",
-                    help="simplify a denser model to about this many triangles (UVs and normals kept, UV seams and "
-                         "open edges left in place)")
     ap.add_argument("--turn", action="store_true", help="hafted: the head faces the other way (front and back swapped)")
     ap.add_argument("--held", choices=["one", "two", "spear"], help="hafted: the game weapon that carries it (one hand: "
                     "mace, two hands: great axe, spear); default from the length")
@@ -677,8 +623,6 @@ def main(argv=None):
     meshes = load_model(args.model)
     if not meshes:
         sys.exit("no triangle meshes in the model")
-    if args.reduce:
-        meshes = reduce_meshes(meshes, args.reduce)
     positions, normals, uvs, tris, mesh_of_vertex = [], [], [], [], []
     for k, (_, g) in enumerate(meshes):
         base = sum(len(p) for p in positions)

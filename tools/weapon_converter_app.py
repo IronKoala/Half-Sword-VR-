@@ -67,7 +67,6 @@ SCABBARDS = [("Game scabbard, best fit", "fit"), ("Game: short sword 25", "SS25"
              ("Game: arming sword 60", "AS60"), ("Game: arming sword 70", "AS70"), ("Game: long sword 75", "LS75"),
              ("Game: bastard sword 85", "BS85"), ("Game: bastard sword 100", "BS100"), ("Game: long sword 110", "LS110"),
              ("Own model...", "own"), ("None (on the belt)", "none")]
-REDUCE_TO = 150000  # "Reduce detail": triangles a very dense model is simplified to (model_to_weapon --reduce)
 RANKS = ["Beggar", "Peasant", "Commoner", "Militia", "Soldier", "Veteran", "Man-at-arms", "Knight"]
 STAT_FIELDS = (("edge_sharp", "Edge sharpness"), ("tip_sharp", "Point sharpness"), ("rigidity", "Rigidity"))
 ZONE_COLOURS = {"Pommel": "#b07a3c", "Grip": "#7a4a2a", "Guard": "#c9a227", "Head": "#8fa3b8"}
@@ -447,11 +446,6 @@ class App:
         type_row.grid(row=2, column=1, columnspan=2, sticky="w", **pad)
         ttk.Combobox(type_row, textvariable=self.type_var, values=[t for t, _ in TYPES], state="readonly",
                      width=28).pack(side="left")
-        # Very dense models (millions of triangles) simplified to REDUCE_TO triangles: same look at arm's
-        # length (the textures carry the surface detail), much faster to convert, spawn and draw in VR.
-        self.reduce_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(type_row, text=f"Reduce detail (models over {REDUCE_TO // 1000}k triangles)",
-                        variable=self.reduce_var).pack(side="left", padx=(12, 0))
         self.slide_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(form, text="Hand slides down the handle in swings", variable=self.slide_var).grid(
             row=4, column=1, columnspan=2, sticky="w", **pad)
@@ -577,7 +571,7 @@ class App:
                      width=28).grid(row=3, column=1, columnspan=2, sticky="w", **pad)
         self.units_var.trace_add("write", lambda *_: self.units_changed())
         self.show_unit_labels()
-        for var in (self.length_var, self.mass_var, self.type_var, self.slide_var, self.edges_var, self.head_var, self.held_var, self.turn_var, self.reduce_var,
+        for var in (self.length_var, self.mass_var, self.type_var, self.slide_var, self.edges_var, self.head_var, self.held_var, self.turn_var,
                     self.balance_var, *self.stat_vars.values()):
             var.trace_add("write", lambda *_: self.inputs_changed())
 
@@ -663,8 +657,7 @@ class App:
             item = {"path": f, "name": name, "raw": None, "length_cm": None, "mass_kg": None,
                     "type": TYPES[0][0], "flip": False, "slide": False, "spots": {}, "splits": None, "part_len": {},
                     "title": base.replace("_", " ").strip() or "Weapon",
-                    # Reduce detail ticked before a model is added (or on the model shown) carries to new models.
-                    "stats": {"reduce": True} if self.reduce_var.get() else {}, "free_play": True, "progression": False, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
+                    "stats": {}, "free_play": True, "progression": False, "work": tempfile.mkdtemp(prefix="w_", dir=self.work_root),
                     "result": None, "result_inputs": None, "views": None, "status": "reading the model...",
                     "iid": f"item{id(f)}_{len(self.items)}"}
             self.items.append(item)
@@ -775,7 +768,6 @@ class App:
         self.head_var.set(next(t for t, v in HEADS if v == st.get("head")))
         self.held_var.set(next((t for t, v in HELD if v == st.get("held")), HELD[0][0]))
         self.turn_var.set(bool(st.get("turn")))
-        self.reduce_var.set(bool(st.get("reduce")))
         for key, v in self.stat_vars.items():
             v.set("" if st.get(key) is None else f"{st[key]:g}")
         self.balance_var.set("" if st.get("balance_cm") is None else
@@ -937,8 +929,7 @@ class App:
         """The damage settings typed in the editor: ({key: value or None}, problem)."""
         lu, lk, _, _ = self.units()
         st = {"edges": dict(EDGES)[self.edges_var.get()], "head": dict(HEADS)[self.head_var.get()],
-              "held": dict(HELD)[self.held_var.get()], "turn": bool(self.turn_var.get()),
-              "reduce": bool(self.reduce_var.get())}  # noqa
+              "held": dict(HELD)[self.held_var.get()], "turn": bool(self.turn_var.get())}
         for key, label in STAT_FIELDS:
             t = self.stat_vars[key].get().strip().replace(",", ".")
             if not t:
@@ -964,7 +955,7 @@ class App:
     def stats_key(st):
         st = st or {}
         return tuple(st.get(k) for k in ("edges", "head", "edge_sharp", "tip_sharp", "rigidity", "balance_cm", "held")) + \
-            (bool(st.get("turn")), bool(st.get("reduce")))
+            (bool(st.get("turn")),)
 
     def inputs(self):
         """(length cm, mass kg text or "", type, flip): always metric inside, whatever is shown."""
@@ -1071,8 +1062,6 @@ class App:
             argv += ["--part-lengths", ",".join(f"{v:.2f}" if v else "" for v in lens)]
         edges, head, edge_sharp, tip_sharp, rig, balance = stats[:6]
         held, turn = (stats[6], stats[7]) if len(stats) >= 8 else (None, False)
-        if len(stats) >= 9 and stats[8]:
-            argv += ["--reduce", str(REDUCE_TO)]
         if held:
             argv += ["--held", held]
         if turn:
