@@ -1240,9 +1240,15 @@ namespace
     // Arm stretch (pose_arm_stretch_max): the elbow and wrist bones placed by the arm solve while stretched;
     // released back to the animation's bone lengths when it is not.
     bool g_arm_stretched[2] = {false, false};
+    // For tests (hsvr.expect arm_stretch_l/r, hand_gap_l/r): this frame's stretch, and where the solve wanted his
+    // wrist (on a held weapon: its grip), against which the drawn hand bone is measured.
+    std::atomic<double> g_arm_stretch_now[2] = {1.0, 1.0};
+    hsvr::Vec3 g_arm_wanted_wrist[2];
+    bool g_arm_solved_valid[2] = {false, false};
     ModifyBoneNode* chain_node(const std::string& bone);
     void arm_stretch_release(int side)
     {
+        g_arm_stretch_now[side].store(1.0);
         if (!g_arm_stretched[side]) return;
         g_arm_stretched[side] = false;
         std::string sx = side == 0 ? "_l" : "_r";
@@ -3509,6 +3515,7 @@ namespace
         }
         // His bones as long as the stretch makes them (B&S: upper arm and forearm by the same factor).
         L1 *= stretch, L2 *= stretch;
+        g_arm_wanted_wrist[side] = target, g_arm_solved_valid[side] = true;
 
         // Where the elbow points around the shoulder-to-wrist line (the swivel): ported from the
         // arm solver in Matthew's Chasms VR Framework (crates/ik/src/arm.rs, MIT, Copyright (c) 2026
@@ -3723,7 +3730,7 @@ namespace
             ModifyBoneNode* nh = chain_node("hand" + sx);
             bool ok = nl && nh && node_set_translation(*nl, component_inv.rotate(E - Lc) * (1.0 / sc)) &&
                       node_set_translation(*nh, component_inv.rotate(H - Lc) * (1.0 / sc));
-            if (ok) g_arm_stretched[side] = true;
+            if (ok) g_arm_stretched[side] = true, g_arm_stretch_now[side].store(stretch);
             else arm_stretch_release(side);
             HSVR_LOG_EVERY(1.0, "Pose: %s arm stretched x%.2f (B&S): hand %.1f cm past his reach%s", side == 0 ? "left" : "right", stretch,
                            (stretch - 1.0) * hi, ok ? "" : " (bone nodes take no translation: not drawn)");
@@ -30085,6 +30092,13 @@ namespace
             last[side] = at;
             last_t[side] = t;
             if (!hm) known = false;
+        }
+        else if (w == "arm_stretch_l" || w == "arm_stretch_r") value = g_arm_stretch_now[w.back() == 'l' ? 0 : 1].load();
+        else if (w == "hand_gap_l" || w == "hand_gap_r")
+        {
+            // How far his drawn hand bone is from where the arm solve wanted it (cm; -1 = no solve yet).
+            int sd = w.back() == 'l' ? 0 : 1;
+            value = g_arm_solved_valid[sd] && g_pose.driver ? length(socket_location(g_pose.driver, bone_fname(sd == 0 ? "hand_l" : "hand_r")) - g_arm_wanted_wrist[sd]) : -1.0;
         }
         else if (w == "held_l") value = object_property(pawn, STR("Weapon L")) ? 1.0 : 0.0;
         else if (w.rfind("room_", 0) == 0) known = room_value(w, value);
