@@ -1,0 +1,32 @@
+# Flat Half Sword itself as the reference (mouse and keyboard: the game's own arm physics, no mod hold). A knight sword in
+# the right hand: how far the game's simulated hand, forearm and upper arm sit off their animated targets, idle and while
+# swinging with the mouse (LMB held). The flat-arm hold should trail like this. See the "ArmTrace:" lines (every 0.05 s).
+0.5:hsvr.wait room_ready = 1 6 0 room revealed
+1.0:hsvr.player_immortal
+1.0:hsvr.squeeze 1 1
+1.5:hsvr.give_weapon passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight 2
+3.0:hsvr.wait held_r = 1 3 0 the sword is in the right hand
+3.1:hsvr.input_mode keyboard
+3.5:hsvr.squeeze 1 0
+7.0:hsvr.expect input_kbm = 1 on mouse and keyboard
+7.0:hsvr.expect held_r = 1 sword kept
+7.0:hsvr.arm_trace 0.05
+10.0:hsvr.expect arm_trace_hand_deg >= 0 (record) idle 3 s: worst hand turn off its target, deg
+10.0:hsvr.expect arm_trace_fore_deg >= 0 (record) idle: forearm, deg
+10.0:hsvr.expect arm_trace_upper_deg >= 0 (record) idle: upper arm, deg
+10.0:hsvr.expect arm_trace_hand_cm >= 0 (record) idle: hand place off its target, cm
+10.1:hsvr.arm_trace 0.05
+10.2:hsvr.input Right_Guard_Axis 1 6
+10.5:hsvr.input Left_Mouse 8 0.3
+10.8:hsvr.input Left_Mouse -8 0.3
+11.1:hsvr.input Left_Mouse 8 0.3
+11.4:hsvr.input Left_Mouse -8 0.3
+11.7:hsvr.input Left_Mouse 8 0.3
+12.0:hsvr.input Left_Mouse -8 0.3
+12.3:hsvr.input Left_Mouse 8 0.3
+12.6:hsvr.input Left_Mouse -8 0.3
+13.0:hsvr.expect arm_trace_hand_deg >= 0 (record) swinging: worst hand turn off its target, deg
+13.0:hsvr.expect arm_trace_fore_deg >= 0 (record) swinging: forearm, deg
+13.0:hsvr.expect arm_trace_upper_deg >= 0 (record) swinging: upper arm, deg
+13.0:hsvr.expect arm_trace_hand_cm >= 0 (record) swinging: hand place off its target, cm
+13.0:hsvr.expect stamina >= 0 (record) the bar after the mouse swings

@@ -12,6 +12,6 @@
 11.0:hsvr.expect held_r = 1 still in the hand after 8 s
 11.1:hsvr.expect stamina > 95 holding a sword still costs (almost) nothing, as in flat
 11.2:hsvr.expect lag_r >= 0 (record) worst grip lag, cm
-11.3:hsvr.expect flat_k_r >= 0 (record) the flat arm's K, 1/s^2 (-1 = flat arm off)
+11.3:hsvr.expect flat_k_r >= -1 (record) the flat arm's K, 1/s^2 (-1 = flat arm off)
 11.4:hsvr.expect flat_arm_kg_r >= -1 (record) arm mass at the hand, kg
 11.5:hsvr.expect hold_n_r >= 0 (record) what the right hand's joint carried, N

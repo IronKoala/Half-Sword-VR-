@@ -1175,6 +1175,26 @@ namespace
             it = real.emplace(s, alive && mesh != nullptr).first;
             HSVR_LOG("Scabbard: %ls %s (its Scabbard component %ls: %s)", weapon->GetName().c_str(), it->second ? "has its own scabbard" : "has NO scabbard",
                      s->GetName().c_str(), !alive ? "destroyed" : mesh ? "alive, with a mesh" : "alive, no mesh");
+            if (alive)
+            {
+                // What that component is (2026-11-28: the Baurnwehr, which has no scabbard to see, has one alive with a mesh).
+                Call vis(s, STR("IsVisible"));
+                vis.run();
+                FProperty* vp = vis.param(STR("ReturnValue"));
+                Call sc(s, STR("K2_GetComponentScale"));
+                sc.run();
+                hsvr::Vec3 scl = sc.vec();
+                UObject* parent = object_property(s, STR("AttachParent"));
+                HSVR_LOG("Scabbard:   %ls: mesh %ls, visible %d, hidden in game %d, scale (%.2f, %.2f, %.2f), attached to %ls, owner %ls",
+                         s->GetName().c_str(), mesh ? mesh->GetFullName().c_str() : STR("none"), vp ? (int)*(vis.buffer.data() + vp->GetOffset_Internal()) : -1,
+                         (int)bool_property(s, STR("bHiddenInGame")), scl.x, scl.y, scl.z, parent ? parent->GetName().c_str() : STR("nothing"),
+                         s->GetOuterPrivate() ? s->GetOuterPrivate()->GetName().c_str() : STR("?"));
+                for (const TCHAR* var : {STR("Has Scabbard"), STR("Scabbard Length"), STR("Sheath Length"), STR("Is Sheathed"), STR("Length to Scabbard"), STR("No Scabbard")})
+                {
+                    FProperty* p = prop_chain(weapon, var);
+                    if (p) HSVR_LOG("Scabbard:   %ls.%ls = %.3f", weapon->GetName().c_str(), var, p->GetClass().GetName() == STR("BoolProperty") ? (double)bool_property(weapon, var) : number_property(weapon, p));
+                }
+            }
         }
         return it->second ? s : nullptr;
     }
@@ -5270,18 +5290,74 @@ namespace
         HSVR_LOG("StaminaTrace: %.3f (%.2f s) weaponR %ls; %s", now, frame, wr ? wr->GetName().c_str() : STR("none"), line.c_str());
     }
 
+    // ---- Flat arm trace (hsvr.arm_trace <seconds>, 0 = off) --------------------------------------
+    // For checking the flat-arm hold against flat Half Sword itself (run in flat mode, a weapon in the right hand): every
+    // <seconds>, how far each simulated right-arm bone (Mesh) is from its animated target (DriverSkeleton): turn in deg and
+    // place in cm, the held weapon's turn against the hand bone (0 when locked), its spin, and the inputs of the arm's drive.
+    double g_arm_trace_s = 0.0, g_arm_trace_last = -1e9;
+    double g_arm_trace_max[3] = {0, 0, 0}; // worst hand / forearm / upper arm turn off its target since hsvr.arm_trace (deg)
+    double g_arm_trace_hand_cm = 0.0;      // worst hand place off its target (cm)
+    void arm_trace(UObject* pawn)
+    {
+        using namespace hsvr;
+        if (g_arm_trace_s <= 0.0 || !pawn) return;
+        double now = now_seconds();
+        if (now - g_arm_trace_last < g_arm_trace_s) return;
+        g_arm_trace_last = now;
+        UObject* mesh = object_property(pawn, STR("Mesh"));
+        UObject* drv = object_property(pawn, STR("DriverSkeleton"));
+        if (!mesh || !drv) return;
+        const char* bones[3] = {"hand_r", "lowerarm_r", "upperarm_r"};
+        double deg[3], cm[3];
+        for (int i = 0; i < 3; ++i)
+        {
+            FName b = bone_fname(bones[i]);
+            Quat qm = socket_rotation(mesh, b), qd = socket_rotation(drv, b);
+            deg[i] = length(scaled_axis((qm * qd.inverse()).normalized())) * 57.2958;
+            cm[i] = length(socket_location(mesh, b) - socket_location(drv, b));
+            g_arm_trace_max[i] = (std::max)(g_arm_trace_max[i], deg[i]);
+        }
+        g_arm_trace_hand_cm = (std::max)(g_arm_trace_hand_cm, cm[0]);
+        UObject* w = object_property(pawn, STR("Weapon R"));
+        UObject* base = w ? object_property(w, STR("BaseMesh")) : nullptr;
+        double w_hand = -1.0, spin = -1.0, mass = -1.0;
+        if (base)
+        {
+            static UObject* seat_w = nullptr;
+            static Quat seat;
+            Quat qh = socket_rotation(mesh, bone_fname("hand_r")), qw = component_rotation(base);
+            Quat rel = (qh.inverse() * qw).normalized();
+            if (seat_w != w) seat_w = w, seat = rel;
+            w_hand = length(scaled_axis((rel * seat.inverse()).normalized())) * 57.2958;
+            Call av(base, STR("GetPhysicsAngularVelocityInRadians"));
+            av.run();
+            spin = length(av.vec()) * 57.2958;
+            Call gm(base, STR("GetMass"));
+            gm.run();
+            mass = gm.number();
+        }
+        HSVR_LOG("ArmTrace: hand %.1f deg / %.1f cm off its target, forearm %.1f deg / %.1f cm, upper arm %.1f deg / %.1f cm | weapon %ls %.2f kg: %.1f deg off the hand "
+                 "since seated, spin %.0f deg/s | Arm R Tonus %.3f, Upper Body Tonus %.3f, R Arm Extra Tonus %.3f, All Body Tonus %.1f, Stamina %.1f, PA Base Strength "
+                 "Multiplier %.3f, R_GripType_Current %.0f, Aim Swing Speed %.1f",
+                 deg[0], cm[0], deg[1], cm[1], deg[2], cm[2], w ? w->GetName().c_str() : STR("none"), mass, w_hand, spin,
+                 read_number_variable(pawn, STR("Arm R Tonus")), read_number_variable(pawn, STR("Upper Body Tonus")), read_number_variable(pawn, STR("R Arm Extra Tonus")),
+                 read_number_variable(pawn, STR("All Body Tonus")), read_number_variable(pawn, STR("Stamina")), read_number_variable(pawn, STR("PA Base Strength Multiplier")),
+                 read_number_variable(pawn, STR("R_GripType_Current")), read_number_variable(pawn, STR("Aim Swing Speed")));
+    }
+
     void capsule_before_tick(Hook::TCallbackIterationData<void>&, UObject* context, UFunction* function, void*)
     {
         gc_sync();
         HSVR_PROF(PerfCapsuleBefore);
         // Test input runs in flat mode too (no posed body): the player's pawn's own tick.
-        if ((!g_test_inputs.empty() || g_input_list_now || g_stamina_trace_s > 0.0) && context && function && function->GetName() == STR("ReceiveTick"))
+        if ((!g_test_inputs.empty() || g_input_list_now || g_stamina_trace_s > 0.0 || g_arm_trace_s > 0.0) && context && function && function->GetName() == STR("ReceiveTick"))
         {
             UObject* pc = find_player_controller();
             if (pc && object_property(pc, STR("Pawn")) == context)
             {
                 input_before_tick(context);
                 stamina_trace(context);
+                arm_trace(context);
             }
         }
         if (!is_receive_tick(context, function)) return;
@@ -30051,6 +30127,7 @@ namespace
     // ("# fresh" in its steps file) or add it here.
     void case_reset_inputs()
     {
+        g_arm_trace_s = 0.0;
         g_fake_tilt_pitch.store(0.0);
         g_fake_tilt_roll.store(0.0);
         g_fake_tilt_drop.store(0.0);
@@ -30442,6 +30519,10 @@ namespace
             UObject* sc = held ? own_scabbard(held) : nullptr;
             value = !sc ? -1.0 : scabbard_pin(sc) ? 1.0 : 0.0;
         }
+        else if (w == "arm_trace_hand_deg") value = g_arm_trace_max[0]; // hsvr.arm_trace: worst right hand turn off its animated target
+        else if (w == "arm_trace_fore_deg") value = g_arm_trace_max[1];
+        else if (w == "arm_trace_upper_deg") value = g_arm_trace_max[2];
+        else if (w == "arm_trace_hand_cm") value = g_arm_trace_hand_cm;
         else if (w == "flat_k_l" || w == "flat_k_r") value = g_flat_k[w.back() == 'l' ? 0 : 1];       // flat-arm hold: K (1/s^2), -1 = not run
         else if (w == "flat_arm_kg_l" || w == "flat_arm_kg_r") value = g_flat_m[w.back() == 'l' ? 0 : 1]; // its arm mass at the hand (kg)
         else if (w == "hold_n_l" || w == "hold_n_r") value = g_hold_load[w.back() == 'l' ? 0 : 1].force_n; // what that hand's joint carried (N)
@@ -31091,6 +31172,13 @@ namespace
                     }
                 if (!replaced) g_pawn_pins.push_back({name, value});
                 HSVR_LOG("Script: hsvr.pawn_pin %ls = %g", name.c_str(), value);
+                continue;
+            }
+            if (entry.command.rfind("hsvr.arm_trace", 0) == 0)
+            {
+                g_arm_trace_s = entry.command.size() > 15 ? atof(entry.command.c_str() + 15) : 0.0;
+                g_arm_trace_max[0] = g_arm_trace_max[1] = g_arm_trace_max[2] = g_arm_trace_hand_cm = 0.0;
+                HSVR_LOG("Script: hsvr.arm_trace every %.3f s", g_arm_trace_s);
                 continue;
             }
             if (entry.command.rfind("hsvr.stamina_trace", 0) == 0)
