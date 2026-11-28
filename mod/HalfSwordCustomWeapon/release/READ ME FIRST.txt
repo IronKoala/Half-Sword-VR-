@@ -1,0 +1,48 @@
+Half Sword Custom Weapon (test build)
+=====================================
+
+Puts your own 3D weapon model into Half Sword. You supply the model; none ship with this download.
+
+What you need
+- Half Sword (Steam).
+- UE4SS 3.0.1 installed in Half Sword (https://github.com/UE4SS-RE/RE-UE4SS). Its files go in
+  Half Sword\HalfswordUE5\Binaries\Win64 and it makes a "ue4ss\Mods" folder there.
+
+Install the mod
+1. Close Half Sword.
+2. Copy the "HalfSwordCustomWeapon" folder from this zip into
+   Half Sword\HalfswordUE5\Binaries\Win64\ue4ss\Mods\
+   (it holds dlls\main.dll, CustomWeapon.ini, enabled.txt).
+
+Add a weapon
+1. Get a weapon model as GLB/glTF or FBX (best: they keep their textures), OBJ, or a Skyrim Special Edition
+   weapon mod (.nif with its textures folder: pick the .nif, or drop the whole mod folder).
+   Swords, daggers, axes, maces, hammers, spears, double-ended weapons, shields and flails (pick Flail as
+   the weapon type; staff, chain and head must be separate pieces or named meshes) and crossbows (pick
+   Crossbow: your model is the look, the game's crossbow does the shooting).
+2. Start WeaponConverter.exe and press Browse (or drop the model on the window, or on the exe).
+3. Type the real length in cm (downloaded models often have odd scales) and the weight in kg if you
+   know it (leave it empty and it is estimated). Weapon type can stay on Detect.
+4. Press Convert and look at the picture: handle on the left, blade or head on the right, and the
+   coloured bar under it marks pommel, grip, guard and blade. If the blade is on the left, press
+   "Blade is on the wrong end".
+5. Under "In the game", give it a name and tick Free play and/or Progression (progression: the
+   merchant sells it from the rank you pick, at your price or one by rank). Swords: pick a scabbard,
+   one of the game's (best fit picks the shortest that covers the blade), your own model (any model
+   file; it is fitted to the blade's length at Install, mouth at the wider end unless you tick
+   "mouth is the narrow end"), or none (worn on the belt).
+6. Optional, under "Damage": which edges cut, the head type, edge and point sharpness, rigidity and the
+   balance point. Left empty they come from the model's shape (the summary under the picture shows
+   what was found).
+7. Press "Install into Half Sword". It copies the weapon into the mod folder (weapons\<name>\).
+   Nothing is written there before you press Install. "Install all" does every converted weapon.
+
+In the game
+- Your weapons are NEW weapons: in free mode they are in the weapon list of the inventory screen,
+  next to the game's own. No game weapon is changed.
+- The game saves them like its own weapons. Each one is saved as a game weapon of the same kind with
+  a special name, so if you remove this mod, saved converted weapons turn into that game weapon
+  instead of disappearing, and come back when you reinstall.
+- Problems: see HalfSwordCustomWeapon\CustomWeapon.log.
+
+Remove: delete the HalfSwordCustomWeapon folder from ue4ss\Mods.
