@@ -443,6 +443,7 @@ LAYOUT = [
         ('pose_body_stamina_floor', 'At 0 stamina, this share of his strength is left.'),
         ('pose_body_strength_min', 'His hold strength never drops below this share.'),
         ('pose_body_size_strength', '1 = bigger Willies hold stronger (arm mass vs a default body).'),
+        ('pose_hold_flat_arm', "1 = held items follow your hand the way flat Half Sword's arm moves them (his tonus, stamina and Muscle Rate), and holding tires him by the game's own rule; 0 = the B&S hold."),
         ('pose_stamina_gate', 'Hand burn smaller than this per tick is ignored (the game uses 10; 0 = all counts).'),
         ('pose_stamina_still_m_s', 'Stamina: below this hand speed against his body (m/s) only the held weight tires him; from 3x it the whole hold force counts (0 = off).'),
         ('pose_stamina_fist_scale', 'Fist stamina burn x this.'),

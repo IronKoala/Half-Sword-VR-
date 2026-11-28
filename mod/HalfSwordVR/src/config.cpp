@@ -475,7 +475,6 @@ namespace hsvr
         num("pose_hold_follow_predict_max_cm", c.pose_hold_follow_predict_max_cm);
         num("pose_hold_follow_predict_smooth_s", c.pose_hold_follow_predict_smooth_s);
         flag("pose_hold_hand_follows_draw", c.pose_hold_hand_follows_draw);
-        flag("pose_hold_let_go", c.pose_hold_let_go);
         flag("pose_hold_joint", c.pose_hold_joint);
         flag("pose_hold_free_hand_collides", c.pose_hold_free_hand_collides);
         flag("pose_hold_free_arm_collides", c.pose_hold_free_arm_collides);
@@ -493,6 +492,7 @@ namespace hsvr
         flag("pose_scabbard_handle", c.pose_scabbard_handle);
         flag("pose_grab_weapon_handles_only", c.pose_grab_weapon_handles_only);
         flag("pose_body_size_strength", c.pose_body_size_strength);
+        flag("pose_hold_flat_arm", c.pose_hold_flat_arm);
         num("pose_hold_hanging_damping", c.pose_hold_hanging_damping);
         num("pose_slide_ring_max_len_cm", c.pose_slide_ring_max_len_cm);
         num("pose_slide_ring_max_width_cm", c.pose_slide_ring_max_width_cm);

@@ -1,0 +1,6 @@
+0.5:hsvr.fake_head_drop 0
+0.6:hsvr.fake_look 0
+1:hsvr.clear_belt
+2:hsvr.give_weapon /Game/Assets/Weapons/Blueprints/Built_Weapons/Reforged/BP_Weapon_Reforged_Baurnwehr_D.BP_Weapon_Reforged_Baurnwehr_D_C
+4:hsvr.expect own_scab_r = 0 the Baurnwehr has no scabbard of its own
+5:quit

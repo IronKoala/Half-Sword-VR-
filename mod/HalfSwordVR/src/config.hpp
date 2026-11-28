@@ -429,7 +429,6 @@ namespace hsvr
         int pose_hold_hand_follows_predict = 1;
         double pose_hold_follow_predict_max_cm = 12.0;
         double pose_hold_follow_predict_smooth_s = 0.03; // smoothing of that measured velocity (0 = none)
-        bool pose_hold_let_go = true;
         // THE HOLD (2026-11-24, design doc "B&S hold port"): Blade & Sorcery's model, whole, with no settings of its own.
         // Each holding hand has one engine joint (a hidden kinematic body on your controller, a Chaos joint to the item at
         // the point held, all motions free, drives only) with B&S's drive values: one hand 5000 N/m, 100 N s/m, 3000 N and
@@ -479,6 +478,11 @@ namespace hsvr
         // The hold's force and torque caps x his arm mass against a default creator body's (height and
         // weight/muscle; 0.78 smallest .. 1.27 biggest), as flat Half Sword's weapon-to-arm mass ratio.
         bool pose_body_size_strength = true;
+        // 1 = the held item follows the hand as flat Half Sword's arm moves it (Matthew 2026-11-28, "Flat Half Sword's arm,
+        // whole"): each hand joint gets the drive the game's physical animation puts on his arm (1500 x tonus x
+        // StrengthMultiplier per unit of the arm's own mass, from tonus, stamina and Muscle Rate through Mass Scale), shared
+        // with the item, and the hand's stamina burn is the game's own formula on that joint's force. 0 = the B&S hold.
+        bool pose_hold_flat_arm = true;
         // Test switch: linear and angular damping set on those hanging parts once held (0 = the game's own).
         double pose_hold_hanging_damping = 0.0;
         // Thin bits on a haft the hand slides over: a wide stretch no longer than ring_max_len_cm along the

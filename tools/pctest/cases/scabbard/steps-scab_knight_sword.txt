@@ -1,0 +1,12 @@
+0.5:hsvr.fake_head_drop 0
+0.6:hsvr.fake_look 0
+1:hsvr.squeeze 1 1
+1.5:hsvr.squeeze 1 0
+2.5:hsvr.clear_belt
+3:hsvr.give_weapon passport /Game/Blueprints/DataAssets/Equipment/FreeMode/DA_FreeMode_Inventory_Tier_Knight.DA_FreeMode_Inventory_Tier_Knight 3
+4.5:hsvr.sheathe_spawn 0
+6:hsvr.arm_move 11
+7.2:hsvr.squeeze 1 1
+10.8:hsvr.expect held_r = 1 drawn from the right hip
+10.9:hsvr.expect own_scab_r = 1 the knight's sword keeps its own scabbard
+11:quit

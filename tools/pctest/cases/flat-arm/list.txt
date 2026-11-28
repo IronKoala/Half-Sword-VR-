@@ -1,0 +1,11 @@
+# Flat Half Sword's arm on the held item (pose_hold_flat_arm, Matthew 2026-11-28) and the game's own stamina burn on the
+# hold joint's force. Look for the "Hold: ... (flat arm" and "Stamina: ... (flat arm" lines: K, arm mass, what the joint carried.
+# The stamina-walk cases (../stamina-walk) were the reason for the old still-hand rule, which the flat path drops: run them too.
+# _bs = the same with the B&S hold, to compare.
+flat_sword_still|steps-sword_still.txt
+flat_sword_waggle|steps-sword_waggle.txt
+flat_fist_punches|steps-fist_punches.txt|test_room_map=/Game/Maps/Arenas/Map_Arena_Cellar
+bs_sword_still|steps-sword_still.txt|pose_hold_flat_arm=0
+bs_sword_waggle|steps-sword_waggle.txt|pose_hold_flat_arm=0
+flat_reference|steps-flat_reference.txt
+flat_reference_game|steps-flat_reference_game.txt
